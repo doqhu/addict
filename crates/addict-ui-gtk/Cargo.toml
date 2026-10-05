@@ -1,0 +1,16 @@
+[package]
+name = "addict-ui-gtk"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+addict-exp4 = { path = "../addict-exp4" }
+clap = { version = "=4.6.7", features = ["derive"] }
+futures-channel = "=0.3.34"
+futures-util = "=0.3.34"
+gtk = { package = "gtk4", version = "=0.11.5", features = ["v4_20"] }
+gdk4-wayland = { version = "=0.11.5", features = ["wayland_crate"] }
+wayland-client = "=0.31.15"
+wayland-protocols = { version = "=0.32.13", features = ["client"] }

@@ -2,3 +2,6 @@
 /_bmad-output/
 /_bmad-output-bak/
 /_bmad/render/
+/experiments/exp4/upstream/
+/crates/addict-ui-gpui/target/
+__pycache__/

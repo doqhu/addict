@@ -1,0 +1,30 @@
+[package]
+name = "addict-exp4"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+addict-probe = { path = "../addict-probe", optional = true }
+ashpd = { version = "=0.13.13", default-features = false, features = ["tokio", "global_shortcuts"], optional = true }
+clap = { version = "=4.6.7", features = ["derive"] }
+futures-util = { version = "=0.3.34", optional = true }
+libc = "=0.2.190"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+tokio = { version = "=1.53.2", features = ["macros", "rt", "time", "process", "io-util", "net", "sync", "signal"] }
+
+[features]
+default = ["broker"]
+broker = ["dep:addict-probe", "dep:ashpd", "dep:futures-util"]
+
+[[bin]]
+name = "addict-exp4"
+path = "src/main.rs"
+required-features = ["broker"]
+
+[dev-dependencies]
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+tokio = { version = "=1.53.2", features = ["rt-multi-thread"] }

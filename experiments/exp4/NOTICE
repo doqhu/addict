@@ -1,0 +1,12 @@
+GPUI experiment source: https://github.com/zed-industries/zed
+Pinned revision: a84689073d296dfd39987bc7dd478e43ef76d83a
+
+crates/addict-ui-gpui/src/input.rs is adapted from crates/gpui/examples/input.rs
+at that revision. Copyright Zed Industries and contributors. Apache License 2.0.
+The upstream LICENSE-APACHE and per-crate license declarations remain in the prepared checkout. A copy of LICENSE-APACHE is included here.
+
+gpui-exp4.patch adds experiment-only external-token activation and correlated
+Wayland wp_presentation feedback. It is maintained locally for EXP-4 and is not
+an upstream-supported API. The checkout is ignored; reproduce it with
+experiments/exp4/prepare-gpui.sh. SHA-256 is printed by that command and recorded
+in the experiment report. Do not modify or reset an unrelated checkout.

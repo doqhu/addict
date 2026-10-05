@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/addict-probe", "crates/addict-exp4", "crates/addict-ui-gtk"]
+exclude = ["experiments/exp4/upstream", "crates/addict-ui-gpui"]
+default-members = ["crates/addict-probe", "crates/addict-exp4"]
 
 [workspace.package]
 edition = "2024"
