@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # One live EXP-4 session: cold activation, 30 warm hotkey activations, optional
 # memory cycle and manual checks. Run it in a terminal of an unlocked session.
-#   run-trial.sh <gtk4|gpui> <resident|on-demand> <foliate|intelli-j> [--memory] [--vulkan-drivers=GLOB]
+#   run-trial.sh <gtk4|gpui> <resident|on-demand> <foliate|intelli-j|android-studio> [--memory] [--vulkan-drivers=GLOB] [--uncertified]
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 backend=${1:-} mode=${2:-} origin=${3:-}
-memory= vulkan=()
+memory= vulkan=() uncertified=
 for option in "${@:4}"; do
   case $option in
     --memory) memory=--memory ;;
     # Hides other Vulkan drivers from the frontend, e.g. --vulkan-drivers='intel_icd*'.
     --vulkan-drivers=*) vulkan=(--vulkan-drivers "${option#*=}") ;;
+    # Runs without the clock certificate: activation, token, focus and raw timestamps are
+    # recorded, the broker reports no acceptance latency.
+    --uncertified) uncertified=1 ;;
     *) echo "unknown option $option" >&2; exit 2 ;;
   esac
 done
@@ -22,15 +25,19 @@ socket=/tmp/addict-exp4-session/broker.sock
 case $backend in
   gtk4) frontend="$root/target/release/addict-ui-gtk" ;;
   gpui) frontend="$root/crates/addict-ui-gpui/target/release/addict-ui-gpui" ;;
-  *) echo 'usage: run-trial.sh <gtk4|gpui> <resident|on-demand> <foliate|intelli-j> [--memory]' >&2; exit 2 ;;
+  *) echo 'usage: run-trial.sh <gtk4|gpui> <resident|on-demand> <foliate|intelli-j|android-studio> [--memory] [--uncertified]' >&2; exit 2 ;;
 esac
 [[ $mode == resident || $mode == on-demand ]] || { echo 'mode: resident or on-demand' >&2; exit 2; }
-[[ $origin == foliate || $origin == intelli-j ]] || { echo 'origin: foliate or intelli-j' >&2; exit 2; }
+[[ $origin == foliate || $origin == intelli-j || $origin == android-studio ]] || { echo 'origin: foliate, intelli-j or android-studio' >&2; exit 2; }
 [[ -x $exp && -x $frontend ]] || { echo 'Release binaries missing; build them first' >&2; exit 1; }
-[[ -f $certificate ]] || { echo 'Clock certificate missing' >&2; exit 1; }
+clock=()
+if [[ -z $uncertified ]]; then
+  [[ -f $certificate ]] || { echo 'Clock certificate missing' >&2; exit 1; }
+  # The certificate is bound to the boot it was measured on.
+  grep -q "\"$(cat /proc/sys/kernel/random/boot_id)\"" "$certificate" || { echo 'Clock certificate is from another boot; recalibrate or pass --uncertified' >&2; exit 1; }
+  clock=(--clock-mapping "$certificate")
+fi
 [[ ! -e $socket ]] || { echo "Another session owns $socket" >&2; exit 1; }
-# The certificate is bound to the boot it was measured on.
-grep -q "\"$(cat /proc/sys/kernel/random/boot_id)\"" "$certificate" || { echo 'Clock certificate is from another boot; recalibrate' >&2; exit 1; }
 
 broker=
 cleanup() {
@@ -90,7 +97,7 @@ sample() { # <phase> <idle seconds>
 rejected_before=$(grep -c '"clock-certificate-invalid"' "$results" || true)
 "$exp" broker --backend "$backend" --mode "$mode" --origin "$origin" --frontend "$frontend" \
   --socket "$socket" --results "$results" --fixture "$root/experiments/exp4/ocr-fixture.png" \
-  --clock-mapping "$certificate" --binding-timeout-seconds 60 --timeout-seconds 1800 "${vulkan[@]}" &
+  "${clock[@]}" --binding-timeout-seconds 60 --timeout-seconds 1800 "${vulkan[@]}" &
 broker=$!
 echo "== $backend / $mode / $origin ${vulkan[*]} (broker $broker) =="
 echo 'Confirm the shortcut in the system dialog.'

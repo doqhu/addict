@@ -37,6 +37,7 @@ pub enum Mode {
 pub enum Origin {
     Foliate,
     IntelliJ,
+    AndroidStudio,
     Local,
 }
 
