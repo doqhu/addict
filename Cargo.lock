@@ -3,6 +3,19 @@
 version = 4
 
 [[package]]
+name = "addict-context"
+version = "0.1.0"
+dependencies = [
+ "addict-probe",
+ "clap",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zbus",
+]
+
+[[package]]
 name = "addict-exp4"
 version = "0.1.0"
 dependencies = [
