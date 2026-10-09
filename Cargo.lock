@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "addict-app"
+version = "0.1.0"
+dependencies = [
+ "addict-core",
+ "gio",
+]
+
+[[package]]
 name = "addict-context"
 version = "0.1.0"
 dependencies = [
@@ -14,6 +22,10 @@ dependencies = [
  "tokio",
  "zbus",
 ]
+
+[[package]]
+name = "addict-core"
+version = "0.1.0"
 
 [[package]]
 name = "addict-exp4"
@@ -30,6 +42,10 @@ dependencies = [
  "tokio",
  "zbus",
 ]
+
+[[package]]
+name = "addict-platform"
+version = "0.1.0"
 
 [[package]]
 name = "addict-probe"

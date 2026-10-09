@@ -1,0 +1,11 @@
+[package]
+name = "addict-core"
+version = "0.1.0"
+description = "Addict core: product identity and GTK-free domain types"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "addict_core"
+path = "src/lib.rs"
