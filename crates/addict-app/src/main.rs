@@ -4,14 +4,22 @@
 //! arguments the process is the resident application: one hidden window, shown
 //! each time the global shortcut is pressed.
 
-use std::{cell::RefCell, path::PathBuf, process::ExitCode, rc::Rc};
+use std::{
+    cell::RefCell,
+    path::PathBuf,
+    process::ExitCode,
+    rc::{Rc, Weak},
+    time::Duration,
+};
 
 use addict_core::APP_ID;
 use addict_platform::{
     desktop,
     shortcut::{self, ShortcutEvent, ShortcutHandle},
+    work::{Job, Outcome, Work},
 };
 use clap::{Parser, Subcommand};
+use futures_channel::mpsc::UnboundedSender;
 use futures_util::StreamExt;
 use gtk::{gio, glib, prelude::*};
 
@@ -23,6 +31,9 @@ const TRIGGER: &str = "LOGO+q";
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Add a test job to the window: slow work with a deadline and a cancel
+    #[arg(long, hide = true)]
+    work_demo: bool,
 }
 
 #[derive(Subcommand)]
@@ -32,9 +43,10 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    match cli.command {
         Some(Command::Install) => install(),
-        None => run(),
+        None => run(cli.work_demo),
     }
 }
 
@@ -65,9 +77,120 @@ fn install_entry() -> Result<PathBuf, String> {
 struct Resident {
     _hold: gio::ApplicationHoldGuard,
     _shortcut: ShortcutHandle,
+    /// Present only with `--work-demo`.
+    _work: Option<Rc<Work>>,
 }
 
-fn run() -> ExitCode {
+/// Everything the worker threads tell the UI thread, over one channel.
+enum Event {
+    Shortcut(ShortcutEvent),
+    /// The outcome of the demo job number `run`.
+    Demo {
+        run: u64,
+        outcome: Outcome<()>,
+    },
+}
+
+/// The test job of `--work-demo`.
+struct Demo {
+    work: Rc<Work>,
+    panel: gtk::Box,
+    status: gtk::Label,
+    running: Rc<RefCell<Running>>,
+}
+
+/// The demo job in flight. A job replaced by a newer one still reports its
+/// cancellation; `last` tells that outcome from the current one.
+#[derive(Default)]
+struct Running {
+    last: u64,
+    job: Option<Job>,
+}
+
+impl Demo {
+    fn build(work: Work, sender: &UnboundedSender<Event>) -> Self {
+        let work = Rc::new(work);
+        let status = gtk::Label::new(Some("idle"));
+        let running: Rc<RefCell<Running>> = Rc::default();
+
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        // (label, how long the job sleeps, its deadline), in seconds.
+        for (name, sleep, deadline) in [("Finish", 2, 10), ("Deadline", 30, 3)] {
+            let button = gtk::Button::with_label(name);
+            // Weak: the runner must go when the resident state is dropped.
+            let work = Rc::downgrade(&work);
+            let (status, running, sender) = (status.clone(), running.clone(), sender.clone());
+            button.connect_clicked(move |_| {
+                start_demo_job(
+                    &work,
+                    &running,
+                    &sender,
+                    Duration::from_secs(sleep),
+                    Duration::from_secs(deadline),
+                );
+                status.set_text(&format!("running: {name}"));
+            });
+            buttons.append(&button);
+        }
+        let cancel = gtk::Button::with_label("Cancel");
+        let job = running.clone();
+        cancel.connect_clicked(move |_| {
+            // The status changes when the outcome arrives.
+            if let Some(job) = &job.borrow().job {
+                job.cancel();
+            }
+        });
+        buttons.append(&cancel);
+
+        let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        panel.append(&gtk::Entry::new());
+        panel.append(&status);
+        panel.append(&buttons);
+        Self {
+            work,
+            panel,
+            status,
+            running,
+        }
+    }
+}
+
+/// Starts a demo job that only sleeps; the one in flight, if any, is replaced.
+fn start_demo_job(
+    work: &Weak<Work>,
+    running: &RefCell<Running>,
+    sender: &UnboundedSender<Event>,
+    sleep: Duration,
+    deadline: Duration,
+) {
+    let Some(work) = work.upgrade() else {
+        return;
+    };
+    let mut running = running.borrow_mut();
+    running.last += 1;
+    let run = running.last;
+    let sender = sender.clone();
+    // Dropping the previous handle cancels the job it stood for.
+    running.job = Some(work.run(
+        deadline,
+        // The timer needs the runtime, so it is created on the worker.
+        async move { tokio::time::sleep(sleep).await },
+        move |outcome| {
+            let _ = sender.unbounded_send(Event::Demo { run, outcome });
+        },
+    ));
+}
+
+fn outcome_text(outcome: Outcome<()>) -> &'static str {
+    match outcome {
+        Outcome::Finished(()) => "finished",
+        Outcome::Cancelled => "cancelled",
+        Outcome::TimedOut => "timed out",
+        Outcome::Panicked => "panicked",
+    }
+}
+
+fn run(work_demo: bool) -> ExitCode {
     // Without a display there is nothing to be resident for: leave before the
     // application or the portal worker exist.
     if let Err(e) = gtk::init() {
@@ -79,13 +202,30 @@ fn run() -> ExitCode {
 
     let slot = resident.clone();
     application.connect_startup(move |application| {
-        let label = gtk::Label::new(Some("Addict"));
+        // The worker threads push; the main context wakes only for an event.
+        let (sender, mut receiver) = futures_channel::mpsc::unbounded();
+
+        let demo = if work_demo {
+            match Work::start() {
+                Ok(work) => Some(Demo::build(work, &sender)),
+                Err(e) => {
+                    eprintln!("addict: work demo unavailable: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let child: gtk::Widget = match &demo {
+            Some(demo) => demo.panel.clone().upcast(),
+            None => gtk::Label::new(Some("Addict")).upcast(),
+        };
         let window = gtk::ApplicationWindow::builder()
             .application(application)
             .title("Addict")
             .default_width(480)
             .default_height(240)
-            .child(&label)
+            .child(&child)
             .build();
         // Closing hides; the process and this window stay.
         window.connect_close_request(|window| {
@@ -93,20 +233,20 @@ fn run() -> ExitCode {
             glib::Propagation::Stop
         });
 
-        // The worker thread pushes; the main context wakes only for an event.
-        let (sender, mut receiver) = futures_channel::mpsc::unbounded();
         let handle = shortcut::start(APP_ID, TRIGGER, move |event| {
-            let _ = sender.unbounded_send(event);
+            let _ = sender.unbounded_send(Event::Shortcut(event));
         });
+        let work = demo.as_ref().map(|demo| demo.work.clone());
+        let demo = demo.map(|demo| (demo.status, demo.running));
         glib::spawn_future_local(async move {
             while let Some(event) = receiver.next().await {
                 match event {
-                    ShortcutEvent::Bound { trigger } => {
+                    Event::Shortcut(ShortcutEvent::Bound { trigger }) => {
                         eprintln!("addict: shortcut bound to {trigger}");
                     }
-                    ShortcutEvent::Activated {
+                    Event::Shortcut(ShortcutEvent::Activated {
                         activation_token, ..
-                    } => {
+                    }) => {
                         // A fresh token per press is what lets the window
                         // take focus from the application in front.
                         if let Some(token) = activation_token.as_deref() {
@@ -114,8 +254,18 @@ fn run() -> ExitCode {
                         }
                         window.present();
                     }
-                    ShortcutEvent::Failed { message } => {
+                    Event::Shortcut(ShortcutEvent::Failed { message }) => {
                         eprintln!("addict: shortcut unavailable: {message}");
+                    }
+                    Event::Demo { run, outcome } => {
+                        if let Some((status, running)) = &demo {
+                            let mut running = running.borrow_mut();
+                            // Otherwise it is the job that was replaced.
+                            if run == running.last {
+                                running.job = None;
+                                status.set_text(outcome_text(outcome));
+                            }
+                        }
                     }
                 }
             }
@@ -123,12 +273,13 @@ fn run() -> ExitCode {
         *slot.borrow_mut() = Some(Resident {
             _hold: application.hold(),
             _shortcut: handle,
+            _work: work,
         });
     });
     // A launch, the first or a repeated one, shows nothing.
     application.connect_activate(|_| {});
     application.connect_shutdown(move |_| {
-        // Stops the worker, which closes the portal session.
+        // Stops the workers; the shortcut one closes the portal session.
         resident.borrow_mut().take();
     });
 

@@ -12,6 +12,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "gtk4",
+ "tokio",
 ]
 
 [[package]]
