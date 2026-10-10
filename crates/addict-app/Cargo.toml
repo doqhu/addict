@@ -12,4 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 addict-core = { path = "../addict-core" }
-gio = "=0.22.10"
+addict-platform = { path = "../addict-platform" }
+clap = { version = "=4.6.7", features = ["derive"] }
+futures-channel = "=0.3.34"
+futures-util = "=0.3.34"
+gtk = { package = "gtk4", version = "=0.11.5", features = ["v4_20"] }

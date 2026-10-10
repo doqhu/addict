@@ -7,7 +7,11 @@ name = "addict-app"
 version = "0.1.0"
 dependencies = [
  "addict-core",
- "gio",
+ "addict-platform",
+ "clap",
+ "futures-channel",
+ "futures-util",
+ "gtk4",
 ]
 
 [[package]]
@@ -46,6 +50,12 @@ dependencies = [
 [[package]]
 name = "addict-platform"
 version = "0.1.0"
+dependencies = [
+ "ashpd",
+ "futures-util",
+ "libc",
+ "tokio",
+]
 
 [[package]]
 name = "addict-probe"
