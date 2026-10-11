@@ -25,7 +25,9 @@ fn help_does_not_mention_the_work_demo() {
     assert!(output.status.success(), "{}", text(&output.stderr));
     let help = text(&output.stdout);
     // Guards against an empty help that would pass the check below.
-    assert!(help.contains("install"), "{help}");
+    for command in ["  install", "  uninstall"] {
+        assert!(help.contains(command), "{help}");
+    }
     assert!(!help.contains("work-demo"), "{help}");
 }
 

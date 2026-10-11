@@ -1,10 +1,15 @@
 //! Addict application entry point.
 //!
-//! `addict install` writes the desktop entry the portal needs. With no
-//! arguments the process is the resident application: one hidden window, shown
-//! each time the global shortcut is pressed. On each press the window shows
-//! the source of the input and the state derived from the input contract;
-//! Esc hides it, as the title-bar close does.
+//! `addict install` writes the desktop entry twice: into the applications
+//! directory, where the portal needs it, and into the autostart directory,
+//! which starts the application at login. `addict uninstall` removes both.
+//! With no arguments the process is the resident application: one hidden
+//! window, shown each time the global shortcut is pressed. On each press the
+//! window shows the source of the input and the state derived from the input
+//! contract; Esc hides it, as the title-bar close does.
+//!
+//! The application is unique: a second launch exits at once and makes the
+//! resident instance show its window, as a press of the shortcut does.
 //!
 //! An attempt to bind the shortcut that ends without one, for any reason or
 //! for none within [`BIND_LIMIT`], shows the window by itself with a line
@@ -14,7 +19,7 @@
 mod view;
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::PathBuf,
     process::ExitCode,
     rc::{Rc, Weak},
@@ -51,22 +56,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Write the desktop entry that lets the portal recognise the application
+    /// Write the desktop entries: the portal recognises the application and
+    /// the session starts it at login
     Install,
+    /// Remove the desktop entries that install wrote
+    Uninstall,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Install) => install(),
+        Some(Command::Install) => report(install_entries()),
+        Some(Command::Uninstall) => report(uninstall_entries()),
         None => run(cli.work_demo),
     }
 }
 
-fn install() -> ExitCode {
-    match install_entry() {
-        Ok(path) => {
-            println!("{}", path.display());
+/// Prints the paths a command wrote or removed, one per line, or its error.
+fn report(result: Result<Vec<PathBuf>, String>) -> ExitCode {
+    match result {
+        Ok(paths) => {
+            for path in paths {
+                println!("{}", path.display());
+            }
             ExitCode::SUCCESS
         }
         Err(message) => {
@@ -76,14 +88,39 @@ fn install() -> ExitCode {
     }
 }
 
-fn install_entry() -> Result<PathBuf, String> {
+/// The applications and the autostart directory, in the order the commands
+/// act on them. Both targets are checked here, before either is written or
+/// removed, so a refusal leaves both as they were.
+fn checked_dirs() -> Result<[PathBuf; 2], String> {
+    let dirs = [
+        desktop::applications_dir()
+            .ok_or("cannot find the applications directory: HOME is not set")?,
+        desktop::autostart_dir().ok_or("cannot find the autostart directory: HOME is not set")?,
+    ];
+    for dir in &dirs {
+        // The error text names the path.
+        desktop::check(dir, APP_ID).map_err(|e| e.to_string())?;
+    }
+    Ok(dirs)
+}
+
+fn install_entries() -> Result<Vec<PathBuf>, String> {
     let exec = std::env::current_exe()
         .and_then(|path| path.canonicalize())
         .map_err(|e| format!("cannot resolve the path of this binary: {e}"))?;
-    let dir = desktop::applications_dir()
-        .ok_or("cannot find the applications directory: HOME is not set")?;
-    // The error text of `install` names the path.
-    desktop::install(&dir, APP_ID, &exec).map_err(|e| e.to_string())
+    checked_dirs()?
+        .iter()
+        .map(|dir| desktop::install(dir, APP_ID, &exec).map_err(|e| e.to_string()))
+        .collect()
+}
+
+/// The paths that were removed: an entry that was not there is not listed.
+fn uninstall_entries() -> Result<Vec<PathBuf>, String> {
+    let mut removed = Vec::new();
+    for dir in &checked_dirs()? {
+        removed.extend(desktop::uninstall(dir, APP_ID).map_err(|e| e.to_string())?);
+    }
+    Ok(removed)
 }
 
 /// What lives as long as the resident application.
@@ -93,6 +130,8 @@ struct Resident {
     _shortcut: Rc<RefCell<Option<ShortcutHandle>>>,
     /// Present only with `--work-demo`.
     _work: Option<Rc<Work>>,
+    /// Where a repeated launch reports itself.
+    events: UnboundedSender<Event>,
 }
 
 /// Everything the worker threads tell the UI thread, over one channel.
@@ -100,6 +139,8 @@ enum Event {
     Shortcut(ShortcutEvent),
     /// Retry was pressed.
     Retry,
+    /// The application was launched again while this instance is resident.
+    Launched,
     /// The outcome of the demo job number `run`.
     Demo {
         run: u64,
@@ -284,6 +325,7 @@ fn run(work_demo: bool) -> ExitCode {
         window.add_controller(key);
 
         let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender))));
+        let events = sender.clone();
         // Weak: the worker must go when the resident state is dropped.
         let current = Rc::downgrade(&handle);
         let work = demo.as_ref().map(|demo| demo.work.clone());
@@ -313,6 +355,12 @@ fn run(work_demo: bool) -> ExitCode {
                         binding = Binding::NotBound { detail: message };
                         view.render_binding(&binding);
                         // No press stands behind this, so there is no token.
+                        window.present();
+                    }
+                    Event::Launched => {
+                        view.render(current_state());
+                        // No `set_startup_id`: GTK has already applied the
+                        // token of the launcher, when there was one.
                         window.present();
                     }
                     Event::Retry => {
@@ -349,10 +397,23 @@ fn run(work_demo: bool) -> ExitCode {
             _hold: application.hold(),
             _shortcut: handle,
             _work: work,
+            events,
         });
     });
-    // A launch, the first or a repeated one, shows nothing.
-    application.connect_activate(|_| {});
+    // `activate` fires here for the launch of this instance and for every
+    // later launch, which exits and leaves its activation to this one. The
+    // first is the launch at login and shows nothing; a later one shows the
+    // window.
+    let launched = Cell::new(false);
+    let slot = resident.clone();
+    application.connect_activate(move |_| {
+        if !launched.replace(true) {
+            return;
+        }
+        if let Some(resident) = slot.borrow().as_ref() {
+            let _ = resident.events.unbounded_send(Event::Launched);
+        }
+    });
     application.connect_shutdown(move |_| {
         // Stops the workers; the shortcut one closes the portal session.
         resident.borrow_mut().take();

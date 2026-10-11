@@ -1,5 +1,6 @@
-//! Shared helpers of the binary tests: a private temporary directory and a
-//! bounded run of a child process.
+//! Shared helpers of the binary tests: a private temporary directory, a
+//! bounded run of a child process and the private directories of the entry
+//! commands.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -58,4 +59,57 @@ pub fn run_with_timeout(mut command: Command) -> Option<Output> {
 
 pub fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+pub const ENTRY: &str = "dev.addict.Addict.desktop";
+
+/// The private directories an entry command runs against. All three are set
+/// on every run: a variable left to the caller's environment would let the
+/// command write under the real home directory.
+pub struct Homes {
+    pub home: PathBuf,
+    pub data_home: PathBuf,
+    pub config_home: PathBuf,
+}
+
+impl Homes {
+    /// `data` and `config` inside `root`, which is `HOME`.
+    pub fn inside(root: &Path) -> Self {
+        Self {
+            home: root.to_path_buf(),
+            data_home: root.join("data"),
+            config_home: root.join("config"),
+        }
+    }
+
+    pub fn applications_entry(&self) -> PathBuf {
+        self.data_home.join("applications").join(ENTRY)
+    }
+
+    pub fn autostart_entry(&self) -> PathBuf {
+        self.config_home.join("autostart").join(ENTRY)
+    }
+
+    /// Runs `addict <subcommand>` with no display and no session bus.
+    pub fn run(&self, subcommand: &str) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_addict"));
+        command
+            .arg(subcommand)
+            .env("HOME", &self.home)
+            .env("XDG_DATA_HOME", &self.data_home)
+            .env("XDG_CONFIG_HOME", &self.config_home)
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("DISPLAY")
+            .env_remove("DBUS_SESSION_BUS_ADDRESS");
+        run_with_timeout(command).expect("addict did not exit within the timeout")
+    }
+}
+
+/// The lines of a captured stdout.
+pub fn lines(bytes: &[u8]) -> Vec<String> {
+    text(bytes).lines().map(str::to_owned).collect()
+}
+
+pub fn shown(path: &Path) -> String {
+    path.display().to_string()
 }
