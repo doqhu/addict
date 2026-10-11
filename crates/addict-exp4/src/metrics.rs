@@ -291,7 +291,9 @@ pub struct Summary {
     pub memory_status: String,
     pub acceptance: String,
 }
-pub fn summarize(records: &[Evidence]) -> Vec<Summary> {
+/// With a certificate, a presentation that carries no `acceptance_latency_ns`
+/// gets one computed from its raw values; without one nothing is computed.
+pub fn summarize(records: &[Evidence], mapping: Option<&ClockMapping>) -> Vec<Summary> {
     let mut result = Vec::new();
     for backend in [Backend::Gpui, Backend::Gtk4] {
         for mode in [Mode::Resident, Mode::OnDemand] {
@@ -310,20 +312,30 @@ pub fn summarize(records: &[Evidence]) -> Vec<Summary> {
                     }
                 }
                 for variant in variants {
-                    let rows: Vec<_> = latest_session(records, |started, _| {
+                    let session = latest_session(records, |started, _| {
                         started.backend == backend
                             && started.mode == mode
                             && started.origin == origin
                             && started.details["vulkan_drivers"].as_str() == variant
-                    })
-                    .iter()
-                    .filter(|r| {
-                        r.schema == crate::SCHEMA
-                            && r.backend == backend
-                            && r.mode == mode
-                            && r.origin == origin
-                    })
-                    .collect();
+                    });
+                    // A certificate speaks for one boot: a session whose start names no
+                    // boot id, or another one, gets no computed latency.
+                    let certificate = mapping.filter(|mapping| {
+                        session
+                            .first()
+                            .filter(|started| started.event == "broker-started")
+                            .and_then(|started| started.details["boot_id"].as_str())
+                            == Some(mapping.boot_id.as_str())
+                    });
+                    let rows: Vec<_> = session
+                        .iter()
+                        .filter(|r| {
+                            r.schema == crate::SCHEMA
+                                && r.backend == backend
+                                && r.mode == mode
+                                && r.origin == origin
+                        })
+                        .collect();
                     let mut attempts = Vec::new();
                     for id in rows
                         .iter()
@@ -350,9 +362,15 @@ pub fn summarize(records: &[Evidence]) -> Vec<Summary> {
                             duplicate |= samples.len() > 1 && index < WARM_TRIALS;
                             continue;
                         }
+                        // A latency already in the record is never recomputed, even a null one.
+                        let latency = match samples[0].details.get("acceptance_latency_ns") {
+                            Some(recorded) => recorded.as_u64(),
+                            None => certificate.and_then(|mapping| {
+                                computed_latency(mapping, &rows, id, samples[0])
+                            }),
+                        };
                         if samples[0].details["usable"] == true
-                            && let Some(value) =
-                                samples[0].details["acceptance_latency_ns"].as_u64()
+                            && let Some(value) = latency
                         {
                             if index < WARM_TRIALS {
                                 values.push(value);
@@ -466,6 +484,38 @@ pub fn summarize(records: &[Evidence]) -> Vec<Summary> {
     }
     result
 }
+/// The broker's acceptance rule applied to raw records: the token was present
+/// and consumed, the frame has a `wp_presentation` time with no limitation, and
+/// the certificate maps the portal timestamp. Anything missing gives no latency.
+fn computed_latency(
+    mapping: &ClockMapping,
+    rows: &[&Evidence],
+    id: &str,
+    presentation: &Evidence,
+) -> Option<u64> {
+    let of_invocation = |event: &'static str| {
+        rows.iter()
+            .filter(move |r| r.event == event && r.invocation_id.as_deref() == Some(id))
+    };
+    let invocation = &of_invocation("invocation").next()?.details;
+    let consumed = of_invocation("frontend-event")
+        .any(|r| r.details["event"] == "activated" && r.details["token_consumed"] == true);
+    if invocation["activation_token_present"] != true || !consumed {
+        return None;
+    }
+    let frame = &presentation.details;
+    if !frame["limitation"].is_null() {
+        return None;
+    }
+    mapping
+        .latency(
+            invocation["portal_timestamp_ms"].as_u64()?,
+            frame["time_ns"].as_u64()?,
+            i32::try_from(frame["clock_id"].as_i64()?).ok()?,
+            invocation["receipt_monotonic_ns"].as_u64()?,
+        )
+        .ok()
+}
 // A repeated session supersedes earlier ones for the same cell; evidence stays append-only.
 // Records without any `broker-started` are treated as one session.
 fn latest_session(
@@ -520,4 +570,107 @@ fn ocr_precedes(rows: &[&Evidence], sample_index: usize) -> bool {
                         && started.details["child_pid"].as_u64().is_some()
                 })
         })
+}
+
+#[cfg(test)]
+mod certificate_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn mapping() -> ClockMapping {
+        serde_json::from_value(json!({"portal_backend":"gnome","backend_version":"50","evidence_path":"proof","evidence_sha256":"a".repeat(64),"verified":true,"portal_clock_id":1,"presentation_clock_id":1,"portal_to_presentation_offset_ns":0,"uncertainty_ns":0,"boot_id":"boot","session_type":"wayland","shell_version":"50","portal_version":"1","portal_timestamp_bits":64})).unwrap()
+    }
+    fn row(event: &str, id: Option<&str>, details: Value) -> Evidence {
+        Evidence::new(
+            Backend::Gtk4,
+            Mode::Resident,
+            Origin::Foliate,
+            id.map(str::to_owned),
+            event,
+            details,
+        )
+    }
+    /// One session with one warm activation as the product records it: raw
+    /// values only, no latency in the presentation.
+    fn session(boot_id: Value, token: bool) -> Vec<Evidence> {
+        vec![
+            row("broker-started", None, json!({"pid":1,"boot_id":boot_id})),
+            row(
+                "invocation",
+                Some("a"),
+                json!({"cold":false,"portal_timestamp_ms":1000,"receipt_monotonic_ns":1_000_000_000u64,"activation_token_present":token}),
+            ),
+            row(
+                "frontend-event",
+                Some("a"),
+                json!({"event":"activated","id":"a","token_consumed":token}),
+            ),
+            row(
+                "presentation",
+                Some("a"),
+                json!({"event":"presented","id":"a","time_ns":1_100_000_000u64,"clock_id":1,"usable":true,"limitation":null}),
+            ),
+        ]
+    }
+    fn foliate(rows: &[Evidence], mapping: Option<&ClockMapping>) -> Summary {
+        summarize(rows, mapping)
+            .into_iter()
+            .find(|s| {
+                s.backend == Backend::Gtk4
+                    && s.mode == Mode::Resident
+                    && s.origin == Origin::Foliate
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_certificate_of_the_same_boot_computes_the_latency() {
+        let rows = session(json!("boot"), true);
+        let s = foliate(&rows, Some(&mapping()));
+        assert_eq!((s.warm_attempts, s.valid_latency_samples), (1, 1));
+        // 100 ms between activation and frame, plus 1 ms of quantization.
+        assert_eq!(s.max_ms, Some(101.0));
+        assert_eq!(foliate(&rows, None).valid_latency_samples, 0);
+    }
+
+    #[test]
+    fn a_recorded_latency_is_never_recomputed() {
+        let mut rows = session(json!("boot"), true);
+        rows[3].details["acceptance_latency_ns"] = json!(7_000_000);
+        assert_eq!(foliate(&rows, Some(&mapping())).max_ms, Some(7.0));
+        // The broker records its refusal as null: it stays a refusal.
+        rows[3].details["acceptance_latency_ns"] = Value::Null;
+        assert_eq!(foliate(&rows, Some(&mapping())).valid_latency_samples, 0);
+    }
+
+    #[test]
+    fn another_or_unknown_boot_gets_no_latency() {
+        for boot_id in [json!("other"), Value::Null] {
+            let s = foliate(&session(boot_id, true), Some(&mapping()));
+            assert_eq!((s.warm_attempts, s.valid_latency_samples), (1, 0));
+            assert_eq!(s.latency_status, "incomplete");
+        }
+        // Records with no session start at all name no boot either.
+        let rows = &session(json!("boot"), true)[1..];
+        assert_eq!(foliate(rows, Some(&mapping())).valid_latency_samples, 0);
+    }
+
+    #[test]
+    fn a_token_that_is_absent_or_not_consumed_gets_no_latency() {
+        let s = foliate(&session(json!("boot"), false), Some(&mapping()));
+        assert_eq!((s.warm_attempts, s.valid_latency_samples), (1, 0));
+        let mut rows = session(json!("boot"), true);
+        rows[2].details["token_consumed"] = json!(false);
+        assert_eq!(foliate(&rows, Some(&mapping())).valid_latency_samples, 0);
+    }
+
+    #[test]
+    fn a_frame_without_a_time_or_with_a_limitation_gets_no_latency() {
+        let mut rows = session(json!("boot"), true);
+        rows[3].details["limitation"] = json!("wp_presentation frame discarded");
+        assert_eq!(foliate(&rows, Some(&mapping())).valid_latency_samples, 0);
+        let mut rows = session(json!("boot"), true);
+        rows[3].details["time_ns"] = Value::Null;
+        assert_eq!(foliate(&rows, Some(&mapping())).valid_latency_samples, 0);
+    }
 }

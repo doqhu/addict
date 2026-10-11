@@ -86,6 +86,9 @@ enum Action {
     Summarize {
         #[arg(long)]
         results: PathBuf,
+        /// Compute the latency of presentations that carry none, by this certificate.
+        #[arg(long)]
+        clock_mapping: Option<PathBuf>,
     },
     HumanScenarios {
         #[arg(long, value_enum)]
@@ -209,12 +212,30 @@ async fn run(cli: Cli) -> io::Result<()> {
                 ),
             )
         }
-        Action::Summarize { results } => {
+        Action::Summarize {
+            results,
+            clock_mapping,
+        } => {
+            let mapping: Option<metrics::ClockMapping> = clock_mapping
+                .map(|p| {
+                    std::fs::read_to_string(p)
+                        .and_then(|s| serde_json::from_str(&s).map_err(io::Error::from))
+                })
+                .transpose()?;
+            // A certificate the broker would reject at start gives no summary.
+            if let Some(mapping) = mapping.as_ref() {
+                let environment =
+                    addict_probe::record::capture_environment(Duration::from_secs(2)).await;
+                mapping
+                    .validate_environment(&environment)
+                    .map_err(io::Error::other)?;
+            }
             println!(
                 "{}",
-                serde_json::to_string_pretty(&metrics::summarize(&metrics::read_evidence(
-                    &results
-                )?))?
+                serde_json::to_string_pretty(&metrics::summarize(
+                    &metrics::read_evidence(&results)?,
+                    mapping.as_ref()
+                ))?
             );
             Ok(())
         }

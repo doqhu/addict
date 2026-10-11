@@ -16,5 +16,14 @@ addict-platform = { path = "../addict-platform" }
 clap = { version = "=4.6.7", features = ["derive"] }
 futures-channel = "=0.3.34"
 futures-util = "=0.3.34"
+gdk4-wayland = { version = "=0.11.5", features = ["wayland_crate"] }
 gtk = { package = "gtk4", version = "=0.11.5", features = ["v4_20"] }
+libc = "=0.2.190"
+serde_json = "=1.0.151"
 tokio = { version = "=1.53.2", features = ["time"] }
+wayland-client = "=0.31.15"
+wayland-protocols = { version = "=0.32.13", features = ["client"] }
+
+[dev-dependencies]
+# The harness is the format oracle of the evidence tests; no broker, no probe.
+addict-exp4 = { path = "../addict-exp4", default-features = false }

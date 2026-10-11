@@ -75,7 +75,7 @@ fn complete() -> Vec<Evidence> {
     rows
 }
 fn summary(rows: &[Evidence]) -> metrics::Summary {
-    metrics::summarize(rows)
+    metrics::summarize(rows, None)
         .into_iter()
         .find(|s| {
             s.backend == Backend::Gtk4 && s.mode == Mode::Resident && s.origin == Origin::Foliate
@@ -638,7 +638,7 @@ fn restricted_vulkan_sessions_are_summarized_separately() {
         None,
         json!({"vulkan_drivers":"intel_icd*"}),
     ));
-    let summaries: Vec<_> = metrics::summarize(&rows)
+    let summaries: Vec<_> = metrics::summarize(&rows, None)
         .into_iter()
         .filter(|s| s.backend == Backend::Gtk4 && s.mode == Mode::Resident)
         .filter(|s| s.origin == Origin::Foliate)

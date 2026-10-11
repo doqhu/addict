@@ -15,7 +15,14 @@
 //! for none within [`BIND_LIMIT`], shows the window by itself with a line
 //! saying so and Retry. Retry starts a new attempt; a bound shortcut removes
 //! the line.
+//!
+//! With the hidden `--evidence <FILE> --origin <APPLICATION>` the application
+//! appends measurement evidence to the file: the start of the session and, for
+//! each press, the activation, the presentation of the frame that follows it
+//! and the focus. Without the flag none of that exists.
 
+mod evidence;
+mod presentation;
 mod view;
 
 use std::{
@@ -52,6 +59,12 @@ struct Cli {
     /// Add a test job to the window: slow work with a deadline and a cancel
     #[arg(long, hide = true)]
     work_demo: bool,
+    /// Append measurement evidence of each activation to this file
+    #[arg(long, hide = true, value_name = "FILE", requires = "origin")]
+    evidence: Option<PathBuf>,
+    /// The application the shortcut is pressed from, for the evidence
+    #[arg(long, hide = true, value_enum, requires = "evidence")]
+    origin: Option<evidence::Origin>,
 }
 
 #[derive(Subcommand)]
@@ -68,8 +81,27 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Install) => report(install_entries()),
         Some(Command::Uninstall) => report(uninstall_entries()),
-        None => run(cli.work_demo),
+        None => match open_evidence(cli.evidence.zip(cli.origin)) {
+            Ok(writer) => run(cli.work_demo, writer),
+            Err(message) => {
+                eprintln!("addict: {message}");
+                ExitCode::FAILURE
+            }
+        },
     }
+}
+
+/// The evidence file of `--evidence`, opened before anything else starts: a
+/// path that cannot be written ends the launch.
+fn open_evidence(
+    flags: Option<(PathBuf, evidence::Origin)>,
+) -> Result<Option<Rc<RefCell<evidence::Writer>>>, String> {
+    let Some((path, origin)) = flags else {
+        return Ok(None);
+    };
+    evidence::Writer::open(&path, origin)
+        .map(|writer| Some(Rc::new(RefCell::new(writer))))
+        .map_err(|e| format!("cannot open the evidence file {}: {e}", path.display()))
 }
 
 /// Prints the paths a command wrote or removed, one per line, or its error.
@@ -136,16 +168,15 @@ struct Resident {
 
 /// Everything the worker threads tell the UI thread, over one channel.
 enum Event {
-    Shortcut(ShortcutEvent),
+    /// With the event, the `CLOCK_MONOTONIC` time at which the worker got an
+    /// activation; taken only when evidence is recorded.
+    Shortcut(ShortcutEvent, Option<u64>),
     /// Retry was pressed.
     Retry,
     /// The application was launched again while this instance is resident.
     Launched,
     /// The outcome of the demo job number `run`.
-    Demo {
-        run: u64,
-        outcome: Outcome<()>,
-    },
+    Demo { run: u64, outcome: Outcome<()> },
 }
 
 /// The test job of `--work-demo`.
@@ -253,15 +284,105 @@ fn current_state() -> addict_core::input::WindowState {
     window_state(None, None)
 }
 
-/// Starts one attempt to bind the shortcut; its events go to `sender`.
-fn start_shortcut(sender: &UnboundedSender<Event>) -> ShortcutHandle {
+/// Starts one attempt to bind the shortcut; its events go to `sender`. With
+/// `timed`, an activation carries the time the worker thread received it.
+fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandle {
     let sender = sender.clone();
     shortcut::start(APP_ID, TRIGGER, BIND_LIMIT, move |event| {
-        let _ = sender.unbounded_send(Event::Shortcut(event));
+        // Here, on the worker: the UI thread may be busy when it arrives.
+        let receipt_ns = (timed && matches!(event, ShortcutEvent::Activated { .. }))
+            .then(evidence::monotonic_ns);
+        let _ = sender.unbounded_send(Event::Shortcut(event, receipt_ns));
     })
 }
 
-fn run(work_demo: bool) -> ExitCode {
+/// The recording of `--evidence`, on the UI thread.
+struct Recording {
+    writer: Rc<RefCell<evidence::Writer>>,
+    watch: presentation::Watch,
+    /// The activation the window is shown for; focus changes belong to it.
+    current: Rc<RefCell<Option<String>>>,
+    /// Activations of this process.
+    count: Cell<u64>,
+    /// Whether the window has been shown, by a press or otherwise.
+    shown: Cell<bool>,
+}
+
+impl Recording {
+    /// Writes the session start and attaches to the hidden `window`.
+    fn start(writer: Rc<RefCell<evidence::Writer>>, window: &gtk::ApplicationWindow) -> Self {
+        writer.borrow_mut().write(&evidence::session_start(
+            std::process::id(),
+            evidence::boot_id().as_deref(),
+        ));
+        let presented = writer.clone();
+        let watch = presentation::Watch::new(window, move |id, frame| {
+            presented.borrow_mut().write(&evidence::presentation(
+                id,
+                frame.time_ns,
+                frame.clock_id,
+                frame.limitation.as_deref(),
+            ));
+        });
+        let current: Rc<RefCell<Option<String>>> = Rc::default();
+        let (focus, focused) = (writer.clone(), current.clone());
+        window.connect_is_active_notify(move |window| {
+            // A window that is not visible belongs to no press.
+            if window.is_visible()
+                && let Some(id) = focused.borrow().as_deref()
+            {
+                focus
+                    .borrow_mut()
+                    .write(&evidence::focus(id, window.is_active()));
+            }
+        });
+        // Hiding ends the activation: losing the focus to it is not recorded.
+        let closed = current.clone();
+        window.connect_hide(move |_| {
+            closed.borrow_mut().take();
+        });
+        Self {
+            writer,
+            watch,
+            current,
+            count: Cell::new(0),
+            shown: Cell::new(false),
+        }
+    }
+
+    /// Records a press and arms the feedback of its frame; call before
+    /// `present()`. Returns the id of the activation.
+    fn activated(&self, portal_timestamp_ms: u64, receipt_ns: u64, token: bool) -> String {
+        let count = self.count.get() + 1;
+        self.count.set(count);
+        let id = evidence::invocation_id(std::process::id(), receipt_ns, count);
+        let cold = !self.shown.replace(true);
+        self.writer.borrow_mut().write(&evidence::activation(
+            &id,
+            cold,
+            portal_timestamp_ms,
+            receipt_ns,
+            token,
+        ));
+        *self.current.borrow_mut() = Some(id.clone());
+        self.watch.arm(id.clone());
+        id
+    }
+
+    /// Call after the `present()` of the activation `id`.
+    fn presented(&self, id: &str, token_consumed: bool) {
+        self.writer
+            .borrow_mut()
+            .write(&evidence::token_consumption(id, token_consumed));
+    }
+
+    /// The window was shown with no press behind it.
+    fn shown_without_press(&self) {
+        self.shown.set(true);
+    }
+}
+
+fn run(work_demo: bool, evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
     // Without a display there is nothing to be resident for: leave before the
     // application or the portal worker exist.
     if let Err(e) = gtk::init() {
@@ -270,9 +391,11 @@ fn run(work_demo: bool) -> ExitCode {
     }
     let application = gtk::Application::builder().application_id(APP_ID).build();
     let resident: Rc<RefCell<Option<Resident>>> = Rc::default();
+    let recording = evidence.is_some();
 
     let slot = resident.clone();
     application.connect_startup(move |application| {
+        let evidence = &evidence;
         // The worker threads push; the main context wakes only for an event.
         let (sender, mut receiver) = futures_channel::mpsc::unbounded();
 
@@ -324,7 +447,13 @@ fn run(work_demo: bool) -> ExitCode {
         });
         window.add_controller(key);
 
-        let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender))));
+        // Only the primary instance gets here, so a second launch records no
+        // session.
+        let recording = evidence
+            .clone()
+            .map(|writer| Recording::start(writer, &window));
+        let timed = recording.is_some();
+        let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed))));
         let events = sender.clone();
         // Weak: the worker must go when the resident state is dropped.
         let current = Rc::downgrade(&handle);
@@ -333,34 +462,55 @@ fn run(work_demo: bool) -> ExitCode {
         glib::spawn_future_local(async move {
             while let Some(event) = receiver.next().await {
                 match event {
-                    Event::Shortcut(ShortcutEvent::Bound { trigger }) => {
+                    Event::Shortcut(ShortcutEvent::Bound { trigger }, _) => {
                         eprintln!("addict: shortcut bound to {trigger}");
                         binding = Binding::Bound;
                         view.render_binding(&binding);
                     }
-                    Event::Shortcut(ShortcutEvent::Activated {
-                        activation_token, ..
-                    }) => {
+                    Event::Shortcut(
+                        ShortcutEvent::Activated {
+                            activation_token,
+                            timestamp_ms,
+                        },
+                        receipt_ns,
+                    ) => {
                         // Before `present()`: the first frame has the labels.
                         view.render(current_state());
+                        // Also before it: the feedback is for the next commit.
+                        let recorded = recording.as_ref().zip(receipt_ns).map(|(r, receipt)| {
+                            let token = activation_token.is_some();
+                            (r, r.activated(timestamp_ms, receipt, token))
+                        });
                         // A fresh token per press is what lets the window
                         // take focus from the application in front.
                         if let Some(token) = activation_token.as_deref() {
                             window.set_startup_id(token);
                         }
                         window.present();
+                        if let Some((recording, id)) = recorded {
+                            // A window that is already visible commits no
+                            // frame by itself.
+                            window.queue_draw();
+                            recording.presented(&id, activation_token.is_some());
+                        }
                     }
-                    Event::Shortcut(ShortcutEvent::Failed { message }) => {
+                    Event::Shortcut(ShortcutEvent::Failed { message }, _) => {
                         eprintln!("addict: shortcut unavailable: {message}");
                         binding = Binding::NotBound { detail: message };
                         view.render_binding(&binding);
                         // No press stands behind this, so there is no token.
+                        if let Some(recording) = &recording {
+                            recording.shown_without_press();
+                        }
                         window.present();
                     }
                     Event::Launched => {
                         view.render(current_state());
                         // No `set_startup_id`: GTK has already applied the
                         // token of the launcher, when there was one.
+                        if let Some(recording) = &recording {
+                            recording.shown_without_press();
+                        }
                         window.present();
                     }
                     Event::Retry => {
@@ -378,7 +528,7 @@ fn run(work_demo: bool) -> ExitCode {
                         // after its session was closed: joining it does not
                         // wait.
                         current.borrow_mut().take();
-                        *current.borrow_mut() = Some(start_shortcut(&sender));
+                        *current.borrow_mut() = Some(start_shortcut(&sender, timed));
                     }
                     Event::Demo { run, outcome } => {
                         if let Some((status, running)) = &demo {
@@ -419,6 +569,21 @@ fn run(work_demo: bool) -> ExitCode {
         resident.borrow_mut().take();
     });
 
+    // With the flag only: registering here tells whether this launch is the
+    // primary instance before it would activate the resident one.
+    if recording {
+        if let Err(e) = application.register(gio::Cancellable::NONE) {
+            eprintln!("addict: {e}");
+            return ExitCode::FAILURE;
+        }
+        if application.is_remote() {
+            eprintln!("addict: another instance is running; nothing is recorded");
+            // GLib warns on stderr when a registered application that never
+            // ran is destroyed; the process ends here anyway.
+            std::mem::forget(application);
+            return ExitCode::FAILURE;
+        }
+    }
     let status = application.run_with_args::<&str>(&[]);
     if status == glib::ExitCode::SUCCESS {
         ExitCode::SUCCESS

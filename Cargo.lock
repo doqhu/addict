@@ -7,12 +7,18 @@ name = "addict-app"
 version = "0.1.0"
 dependencies = [
  "addict-core",
+ "addict-exp4",
  "addict-platform",
  "clap",
  "futures-channel",
  "futures-util",
+ "gdk4-wayland",
  "gtk4",
+ "libc",
+ "serde_json",
  "tokio",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]
