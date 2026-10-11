@@ -89,6 +89,25 @@ enum Action {
         /// Compute the latency of presentations that carry none, by this certificate.
         #[arg(long)]
         clock_mapping: Option<PathBuf>,
+        /// Judge the product instead of the EXP-4 matrix: Foliate and Android Studio,
+        /// one process, the idle states before a call and after closing, idle CPU.
+        #[arg(long)]
+        product: bool,
+    },
+    /// Write the clock certificate of this boot from the presses of the latest session.
+    Calibrate {
+        #[arg(long)]
+        results: PathBuf,
+        /// Receives clock-evidence.txt and clock-certificate.json.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Append the GPU memory of a recorded session's process and the power state of each card.
+    Gpu {
+        #[arg(long)]
+        results: PathBuf,
+        #[arg(long, value_delimiter = ',', required = true)]
+        roots: Vec<u32>,
     },
     HumanScenarios {
         #[arg(long, value_enum)]
@@ -215,6 +234,7 @@ async fn run(cli: Cli) -> io::Result<()> {
         Action::Summarize {
             results,
             clock_mapping,
+            product,
         } => {
             let mapping: Option<metrics::ClockMapping> = clock_mapping
                 .map(|p| {
@@ -230,14 +250,85 @@ async fn run(cli: Cli) -> io::Result<()> {
                     .validate_environment(&environment)
                     .map_err(io::Error::other)?;
             }
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&metrics::summarize(
-                    &metrics::read_evidence(&results)?,
-                    mapping.as_ref()
+            let records = metrics::read_evidence(&results)?;
+            let summary = if product {
+                serde_json::to_string_pretty(&metrics::summarize_product(
+                    &records,
+                    mapping.as_ref(),
                 ))?
-            );
+            } else {
+                serde_json::to_string_pretty(&metrics::summarize(&records, mapping.as_ref()))?
+            };
+            println!("{summary}");
             Ok(())
+        }
+        Action::Calibrate { results, out } => {
+            let environment =
+                addict_probe::record::capture_environment(Duration::from_secs(2)).await;
+            // A version that cannot be read is not guessed: no certificate.
+            let known = |value: &Option<String>, name: &str| {
+                value.clone().ok_or_else(|| {
+                    io::Error::other(format!("no certificate written: {name} is unknown"))
+                })
+            };
+            std::fs::create_dir_all(&out)?;
+            let out = out.canonicalize()?;
+            let evidence_path = out.join("clock-evidence.txt");
+            let certificate_path = out.join("clock-certificate.json");
+            let host = metrics::CalibrationHost {
+                boot_id: std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?
+                    .trim()
+                    .to_owned(),
+                session_type: known(&environment.session_type, "the session type")?,
+                backend_version: known(
+                    &environment.xdg_desktop_portal_gnome,
+                    "the xdg-desktop-portal-gnome version",
+                )?,
+                shell_version: known(&environment.gnome_shell, "the GNOME Shell version")?,
+                portal_version: known(
+                    &environment.xdg_desktop_portal,
+                    "the xdg-desktop-portal version",
+                )?,
+                environment: serde_json::to_string(&environment)?,
+                monotonic_ns: metrics::clock_ns(libc::CLOCK_MONOTONIC),
+                boottime_ns: metrics::clock_ns(libc::CLOCK_BOOTTIME),
+                realtime_ns: metrics::clock_ns(libc::CLOCK_REALTIME),
+                evidence_path: evidence_path.to_string_lossy().into_owned(),
+            };
+            let calibration = metrics::calibrate(&metrics::read_evidence(&results)?, &host)
+                .map_err(|e| io::Error::other(format!("no certificate written: {e}")))?;
+            std::fs::write(&evidence_path, &calibration.evidence)?;
+            let mut certificate = serde_json::to_string_pretty(&calibration.mapping)?;
+            certificate.push('\n');
+            std::fs::write(&certificate_path, certificate)?;
+            println!("{}", evidence_path.display());
+            println!("{}", certificate_path.display());
+            Ok(())
+        }
+        Action::Gpu { results, roots } => {
+            // The record carries the labels of the session whose process is measured.
+            let records = metrics::read_evidence(&results)?;
+            let session = records
+                .iter()
+                .rev()
+                .find(|r| {
+                    r.event == "broker-started"
+                        && r.details["pid"]
+                            .as_u64()
+                            .is_some_and(|pid| roots.iter().any(|&root| u64::from(root) == pid))
+                })
+                .ok_or_else(|| io::Error::other("no recorded session of these roots"))?;
+            append(
+                &results,
+                &Evidence::new(
+                    session.backend,
+                    session.mode,
+                    session.origin,
+                    None,
+                    "gpu",
+                    serde_json::to_value(metrics::gpu(&roots)?)?,
+                ),
+            )
         }
         Action::HumanScenarios {
             backend,
