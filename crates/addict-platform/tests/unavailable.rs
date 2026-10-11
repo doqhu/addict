@@ -18,6 +18,8 @@ const BUS_ADDRESS: &str = "unix:path=/nonexistent/addict-test-bus";
 
 /// Limit for each wait inside the child.
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
+/// The limit of the attempt; this failure arrives long before it.
+const BIND_LIMIT: Duration = Duration::from_secs(30);
 /// Limit for the whole child run.
 const CHILD_TIMEOUT: Duration = Duration::from_secs(40);
 
@@ -67,7 +69,7 @@ fn run_child() {
 
 fn child_body() {
     let (sender, receiver) = mpsc::channel();
-    let handle = shortcut::start("dev.addict.Test", "LOGO+q", move |event| {
+    let handle = shortcut::start("dev.addict.Test", "LOGO+q", BIND_LIMIT, move |event| {
         let _ = sender.send(event);
     });
 

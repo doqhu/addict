@@ -4,8 +4,11 @@
 //! registers the host app id, holds a GlobalShortcuts session and binds one
 //! shortcut. Everything it learns is handed to a plain `Send` callback, so the
 //! caller decides how to wake its own thread; nothing here polls.
+//!
+//! The attempt, from the bus connection to the bound shortcut, has a limit
+//! given by the caller: a portal that never answers ends it as a failure.
 
-use std::{collections::HashMap, thread::JoinHandle, time::Duration};
+use std::{cell::Cell, collections::HashMap, thread::JoinHandle, time::Duration};
 
 use ashpd::{
     AppID,
@@ -40,8 +43,9 @@ pub enum ShortcutEvent {
         activation_token: Option<String>,
         timestamp_ms: u64,
     },
-    /// The shortcut is not available. `message` is one line naming the step
-    /// and carrying the portal's own error text; it does not say why.
+    /// The shortcut is not available. `message` is one line: either the step
+    /// that failed with the portal's own error text, or, when the attempt ran
+    /// out of time, the limit alone with no portal text. It does not say why.
     Failed { message: String },
 }
 
@@ -66,11 +70,14 @@ impl Drop for ShortcutHandle {
 }
 
 /// Starts the worker for `app_id` with the preferred `trigger` in the XDG
-/// shortcuts syntax (for example `LOGO+q`). `on_event` runs on the worker
-/// thread and must not block.
+/// shortcuts syntax (for example `LOGO+q`). `limit` is how long the attempt
+/// may take up to `Bound`; when it runs out the worker reports `Failed` like
+/// for any other failure. `on_event` runs on the worker thread and must not
+/// block.
 pub fn start(
     app_id: &str,
     trigger: &str,
+    limit: Duration,
     on_event: impl Fn(ShortcutEvent) + Send + 'static,
 ) -> ShortcutHandle {
     let (stop, stopped) = oneshot::channel();
@@ -88,7 +95,7 @@ pub fn start(
                 .enable_all()
                 .build()
             {
-                Ok(runtime) => runtime.block_on(run(&app_id, &trigger, &*on_event, stopped)),
+                Ok(runtime) => runtime.block_on(run(&app_id, &trigger, limit, &*on_event, stopped)),
                 Err(e) => on_event(failed("shortcut worker runtime", &e)),
             }
         });
@@ -116,26 +123,50 @@ type Callback = Box<dyn Fn(ShortcutEvent) + Send>;
 
 type ShortcutSession = Session<GlobalShortcuts>;
 
-/// Serves until a failure or the stop signal, then closes the session if one
-/// was created.
+/// Serves until a failure, the limit of the attempt or the stop signal, then
+/// closes the session if one was created. `Failed` is sent after the close,
+/// as the last act of the worker; the stop signal sends nothing.
 async fn run(
     app_id: &str,
     trigger: &str,
+    limit: Duration,
     on_event: &(dyn Fn(ShortcutEvent) + Send),
     stopped: oneshot::Receiver<()>,
 ) {
     let mut session = None;
-    tokio::select! {
-        // Resolves on the signal and when the handle is gone without one.
-        _ = stopped => {}
-        result = serve(app_id, trigger, on_event, &mut session) => {
-            let Err(event) = result;
-            on_event(event);
+    // The limit covers the attempt only: once bound, presses are awaited
+    // without one.
+    let bound = Cell::new(false);
+    let report = |event: ShortcutEvent| {
+        if matches!(event, ShortcutEvent::Bound { .. }) {
+            bound.set(true);
         }
-    }
+        on_event(event);
+    };
+    let failure = tokio::select! {
+        // Resolves on the signal and when the handle is gone without one.
+        _ = stopped => None,
+        result = serve(app_id, trigger, &report, &mut session) => {
+            let Err(event) = result;
+            Some(event)
+        }
+        () = unbound_after(limit, &bound) => Some(limit_reached(limit)),
+    };
     if let Some(session) = session {
         // Best effort: the portal also drops the session with the connection.
         let _ = tokio::time::timeout(CLOSE_LIMIT, session.close()).await;
+    }
+    if let Some(event) = failure {
+        on_event(event);
+    }
+}
+
+/// Resolves after `limit` if the shortcut is still not bound, and never
+/// otherwise.
+async fn unbound_after(limit: Duration, bound: &Cell<bool>) {
+    tokio::time::sleep(limit).await;
+    if bound.get() {
+        std::future::pending::<()>().await;
     }
 }
 
@@ -144,7 +175,7 @@ async fn run(
 async fn serve(
     app_id: &str,
     trigger: &str,
-    on_event: &(dyn Fn(ShortcutEvent) + Send),
+    on_event: &dyn Fn(ShortcutEvent),
     session_slot: &mut Option<ShortcutSession>,
 ) -> Result<std::convert::Infallible, ShortcutEvent> {
     let connection = zbus::Connection::session()
@@ -238,6 +269,14 @@ fn failed(step: &str, error: &dyn std::fmt::Display) -> ShortcutEvent {
     }
 }
 
+/// The failure of an attempt that ran out of time: it names the limit and
+/// nothing else, because nothing is known about the reason.
+fn limit_reached(limit: Duration) -> ShortcutEvent {
+    ShortcutEvent::Failed {
+        message: format!("binding the shortcut: no result within {limit:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +317,42 @@ mod tests {
     fn token_of_another_type_is_absent() {
         let options = options(&[("activation_token", OwnedValue::from(7u32))]);
         assert_eq!(activation_token(&options), None);
+    }
+
+    #[test]
+    fn limit_message_names_the_limit_and_no_cause() {
+        let ShortcutEvent::Failed { message } = limit_reached(Duration::from_secs(60)) else {
+            panic!("the limit must be a failure");
+        };
+        assert_eq!(message, "binding the shortcut: no result within 60s");
+        let lowered = message.to_lowercase();
+        for cause in ["cancel", "denied", "refus", "dismiss", "portal", "error"] {
+            assert!(!lowered.contains(cause), "{message}");
+        }
+    }
+
+    #[test]
+    fn limit_fires_only_while_unbound() {
+        let limit = Duration::from_millis(20);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let bound = Cell::new(false);
+            let far = Duration::from_secs(10);
+            assert!(
+                tokio::time::timeout(far, unbound_after(limit, &bound))
+                    .await
+                    .is_ok()
+            );
+            bound.set(true);
+            assert!(
+                tokio::time::timeout(limit * 10, unbound_after(limit, &bound))
+                    .await
+                    .is_err()
+            );
+        });
     }
 
     #[test]

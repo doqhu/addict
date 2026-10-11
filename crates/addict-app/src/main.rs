@@ -5,6 +5,11 @@
 //! each time the global shortcut is pressed. On each press the window shows
 //! the source of the input and the state derived from the input contract;
 //! Esc hides it, as the title-bar close does.
+//!
+//! An attempt to bind the shortcut that ends without one, for any reason or
+//! for none within [`BIND_LIMIT`], shows the window by itself with a line
+//! saying so and Retry. Retry starts a new attempt; a bound shortcut removes
+//! the line.
 
 mod view;
 
@@ -26,10 +31,13 @@ use clap::{Parser, Subcommand};
 use futures_channel::mpsc::UnboundedSender;
 use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
-use view::View;
+use view::{Binding, View};
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
 const TRIGGER: &str = "LOGO+q";
+
+/// How long one attempt to bind the shortcut may take.
+const BIND_LIMIT: Duration = Duration::from_secs(60);
 
 #[derive(Parser)]
 #[command(name = "addict", version, about = "Addict translator")]
@@ -81,7 +89,8 @@ fn install_entry() -> Result<PathBuf, String> {
 /// What lives as long as the resident application.
 struct Resident {
     _hold: gio::ApplicationHoldGuard,
-    _shortcut: ShortcutHandle,
+    /// The worker of the current attempt; Retry replaces it.
+    _shortcut: Rc<RefCell<Option<ShortcutHandle>>>,
     /// Present only with `--work-demo`.
     _work: Option<Rc<Work>>,
 }
@@ -89,6 +98,8 @@ struct Resident {
 /// Everything the worker threads tell the UI thread, over one channel.
 enum Event {
     Shortcut(ShortcutEvent),
+    /// Retry was pressed.
+    Retry,
     /// The outcome of the demo job number `run`.
     Demo {
         run: u64,
@@ -201,6 +212,14 @@ fn current_state() -> addict_core::input::WindowState {
     window_state(None, None)
 }
 
+/// Starts one attempt to bind the shortcut; its events go to `sender`.
+fn start_shortcut(sender: &UnboundedSender<Event>) -> ShortcutHandle {
+    let sender = sender.clone();
+    shortcut::start(APP_ID, TRIGGER, BIND_LIMIT, move |event| {
+        let _ = sender.unbounded_send(Event::Shortcut(event));
+    })
+}
+
 fn run(work_demo: bool) -> ExitCode {
     // Without a display there is nothing to be resident for: leave before the
     // application or the portal worker exist.
@@ -227,7 +246,13 @@ fn run(work_demo: bool) -> ExitCode {
         } else {
             None
         };
-        let view = View::new(current_state());
+        // The first attempt starts below, with the window still hidden.
+        let mut binding = Binding::Attempting;
+        let view = View::new(current_state(), &binding);
+        let retry = sender.clone();
+        view.connect_retry(move || {
+            let _ = retry.unbounded_send(Event::Retry);
+        });
         if let Some(demo) = &demo {
             view.root().append(&demo.panel);
         }
@@ -258,9 +283,9 @@ fn run(work_demo: bool) -> ExitCode {
         });
         window.add_controller(key);
 
-        let handle = shortcut::start(APP_ID, TRIGGER, move |event| {
-            let _ = sender.unbounded_send(Event::Shortcut(event));
-        });
+        let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender))));
+        // Weak: the worker must go when the resident state is dropped.
+        let current = Rc::downgrade(&handle);
         let work = demo.as_ref().map(|demo| demo.work.clone());
         let demo = demo.map(|demo| (demo.status, demo.running));
         glib::spawn_future_local(async move {
@@ -268,6 +293,8 @@ fn run(work_demo: bool) -> ExitCode {
                 match event {
                     Event::Shortcut(ShortcutEvent::Bound { trigger }) => {
                         eprintln!("addict: shortcut bound to {trigger}");
+                        binding = Binding::Bound;
+                        view.render_binding(&binding);
                     }
                     Event::Shortcut(ShortcutEvent::Activated {
                         activation_token, ..
@@ -283,6 +310,27 @@ fn run(work_demo: bool) -> ExitCode {
                     }
                     Event::Shortcut(ShortcutEvent::Failed { message }) => {
                         eprintln!("addict: shortcut unavailable: {message}");
+                        binding = Binding::NotBound { detail: message };
+                        view.render_binding(&binding);
+                        // No press stands behind this, so there is no token.
+                        window.present();
+                    }
+                    Event::Retry => {
+                        // One attempt at a time: a press that was queued
+                        // behind another one starts nothing.
+                        if !matches!(binding, Binding::NotBound { .. }) {
+                            continue;
+                        }
+                        let Some(current) = current.upgrade() else {
+                            continue;
+                        };
+                        binding = Binding::Attempting;
+                        view.render_binding(&binding);
+                        // `Failed` is the last act of the old worker, sent
+                        // after its session was closed: joining it does not
+                        // wait.
+                        current.borrow_mut().take();
+                        *current.borrow_mut() = Some(start_shortcut(&sender));
                     }
                     Event::Demo { run, outcome } => {
                         if let Some((status, running)) = &demo {
