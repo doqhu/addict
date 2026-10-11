@@ -2,7 +2,11 @@
 //!
 //! `addict install` writes the desktop entry the portal needs. With no
 //! arguments the process is the resident application: one hidden window, shown
-//! each time the global shortcut is pressed.
+//! each time the global shortcut is pressed. On each press the window shows
+//! the source of the input and the state derived from the input contract;
+//! Esc hides it, as the title-bar close does.
+
+mod view;
 
 use std::{
     cell::RefCell,
@@ -12,7 +16,7 @@ use std::{
     time::Duration,
 };
 
-use addict_core::APP_ID;
+use addict_core::{APP_ID, input::window_state};
 use addict_platform::{
     desktop,
     shortcut::{self, ShortcutEvent, ShortcutHandle},
@@ -21,7 +25,8 @@ use addict_platform::{
 use clap::{Parser, Subcommand};
 use futures_channel::mpsc::UnboundedSender;
 use futures_util::StreamExt;
-use gtk::{gio, glib, prelude::*};
+use gtk::{gdk, gio, glib, prelude::*};
+use view::View;
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
 const TRIGGER: &str = "LOGO+q";
@@ -190,6 +195,12 @@ fn outcome_text(outcome: Outcome<()>) -> &'static str {
     }
 }
 
+/// The window state of this moment. Nothing acquires input yet, so nothing is
+/// pending and nothing has arrived.
+fn current_state() -> addict_core::input::WindowState {
+    window_state(None, None)
+}
+
 fn run(work_demo: bool) -> ExitCode {
     // Without a display there is nothing to be resident for: leave before the
     // application or the portal worker exist.
@@ -216,22 +227,36 @@ fn run(work_demo: bool) -> ExitCode {
         } else {
             None
         };
-        let child: gtk::Widget = match &demo {
-            Some(demo) => demo.panel.clone().upcast(),
-            None => gtk::Label::new(Some("Addict")).upcast(),
-        };
+        let view = View::new(current_state());
+        if let Some(demo) = &demo {
+            view.root().append(&demo.panel);
+        }
         let window = gtk::ApplicationWindow::builder()
             .application(application)
             .title("Addict")
             .default_width(480)
             .default_height(240)
-            .child(&child)
+            .child(view.root())
             .build();
         // Closing hides; the process and this window stay.
         window.connect_close_request(|window| {
             window.set_visible(false);
             glib::Propagation::Stop
         });
+        // Bubble phase: a focused child that uses Esc itself keeps it.
+        let key = gtk::EventControllerKey::new();
+        let key_window = window.downgrade();
+        key.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                if let Some(window) = key_window.upgrade() {
+                    window.close();
+                }
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        window.add_controller(key);
 
         let handle = shortcut::start(APP_ID, TRIGGER, move |event| {
             let _ = sender.unbounded_send(Event::Shortcut(event));
@@ -247,6 +272,8 @@ fn run(work_demo: bool) -> ExitCode {
                     Event::Shortcut(ShortcutEvent::Activated {
                         activation_token, ..
                     }) => {
+                        // Before `present()`: the first frame has the labels.
+                        view.render(current_state());
                         // A fresh token per press is what lets the window
                         // take focus from the application in front.
                         if let Some(token) = activation_token.as_deref() {
