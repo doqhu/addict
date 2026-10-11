@@ -8,6 +8,14 @@
 //! window shows the source of the input and the state derived from the input
 //! contract; Esc hides it, as the title-bar close does.
 //!
+//! The window has a field for a sentence. A pasted sentence is shown with its
+//! words as links; a click on a word makes it the input, with the sentence
+//! and the source "manual input", and looks it up in the built-in sample
+//! dictionary of a few words. The lookup runs off the UI thread with a
+//! deadline, and the window shows its outcome as plain text: the article, a
+//! line saying the dictionary has no entry, or a line saying the lookup did
+//! not finish. Editing the field drops the input and the result.
+//!
 //! The application is unique: a second launch exits at once and makes the
 //! resident instance show its window, as a press of the shortcut does.
 //!
@@ -27,6 +35,7 @@
 
 mod entries;
 mod evidence;
+mod manual;
 mod presentation;
 mod recording;
 mod resident;

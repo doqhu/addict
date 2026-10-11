@@ -3,27 +3,38 @@
 //!
 //! This module owns the GTK application, its uniqueness, the window with its
 //! close and Esc handling, and the order of what happens on each event of the
-//! shortcut worker, of Retry and of a repeated launch. What the window says is
-//! [`view`](crate::view)'s; what is recorded with `--evidence` is
-//! [`recording`](crate::recording)'s.
+//! shortcut worker, of Retry, of a repeated launch, of the field and of a
+//! lookup, which runs on the work runner and comes back as an event. What the
+//! window says is [`view`](crate::view)'s; what an edit or a click does to
+//! the manual input is [`manual`](crate::manual)'s; what is recorded with
+//! `--evidence` is [`recording`](crate::recording)'s.
 
 use std::{
     cell::{Cell, RefCell},
     process::ExitCode,
     rc::{Rc, Weak},
+    sync::Arc,
     time::Duration,
 };
 
-use addict_core::{APP_ID, input::window_state};
-use addict_platform::shortcut::{self, ShortcutEvent, ShortcutHandle};
+use addict_core::{
+    APP_ID,
+    dictionary::{Article, Dictionary, Sample},
+    input::window_state,
+};
+use addict_platform::{
+    shortcut::{self, ShortcutEvent, ShortcutHandle},
+    work::{Job, Outcome, Work},
+};
 use futures_channel::mpsc::UnboundedSender;
 use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     evidence,
+    manual::{self, Manual},
     recording::Recording,
-    view::{Binding, View},
+    view::{Binding, Lookup, View},
 };
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
@@ -39,6 +50,10 @@ struct Resident {
     _shortcut: Rc<RefCell<Option<ShortcutHandle>>>,
     /// Where a repeated launch reports itself.
     events: UnboundedSender<Event>,
+    /// The runner of the lookups; `None` when it could not be started.
+    _work: Option<Rc<Work>>,
+    /// What the lookups ask.
+    _dictionary: Arc<dyn Dictionary>,
 }
 
 /// Everything the worker threads tell the UI thread, over one channel.
@@ -50,12 +65,15 @@ enum Event {
     Retry,
     /// The application was launched again while this instance is resident.
     Launched,
-}
-
-/// The window state of this moment. Nothing acquires input yet, so nothing is
-/// pending and nothing has arrived.
-fn current_state() -> addict_core::input::WindowState {
-    window_state(None, None)
+    /// The text of the field changed; this is the new text.
+    Sentence(String),
+    /// The word with this index in the shown sentence was clicked.
+    Word(usize),
+    /// The lookup started as number `run` ended.
+    Lookup {
+        run: u64,
+        outcome: Outcome<Option<Article>>,
+    },
 }
 
 /// Starts one attempt to bind the shortcut; its events go to `sender`. With
@@ -114,6 +132,14 @@ struct Session {
     sender: UnboundedSender<Event>,
     /// Weak: the worker must go when the resident state is dropped.
     current: Weak<RefCell<Option<ShortcutHandle>>>,
+    /// The sentence of the field and what was chosen in it.
+    manual: Manual,
+    /// The lookup whose outcome is awaited; dropping it cancels the lookup.
+    pending: Option<Job>,
+    /// Weak: the runner must go when the resident state is dropped. Never
+    /// upgrades when the runner could not be started.
+    work: Weak<Work>,
+    dictionary: Arc<dyn Dictionary>,
 }
 
 impl Session {
@@ -130,7 +156,89 @@ impl Session {
             Event::Shortcut(ShortcutEvent::Failed { message }, _) => self.failed(message),
             Event::Launched => self.launched(),
             Event::Retry => self.retry(),
+            Event::Sentence(text) => self.sentence_changed(text),
+            Event::Word(index) => self.word_chosen(index),
+            Event::Lookup { run, outcome } => self.looked_up(run, outcome),
         }
+    }
+
+    /// The field takes the keyboard focus, unless Retry is offered: then the
+    /// focus is Retry's.
+    fn focus(&self) {
+        if !matches!(self.binding, Binding::NotBound { .. }) {
+            self.view.focus_field();
+        }
+    }
+
+    /// The field holds another text: what was chosen in the old one is gone.
+    fn sentence_changed(&mut self, text: String) {
+        if !self.manual.edit(text) {
+            return;
+        }
+        // Cancels the lookup; whatever it still reports has an old number.
+        self.pending = None;
+        self.render_manual();
+        self.view.render_result(None);
+    }
+
+    /// A word was clicked: it becomes the input, with its sentence, and is
+    /// looked up.
+    fn word_chosen(&mut self, index: usize) {
+        // A click that came before the field's newer text was handled here
+        // names a word of a sentence that is no longer shown.
+        if self.view.field_text() != self.manual.sentence() {
+            return;
+        }
+        let Some(run) = self.manual.choose(index) else {
+            return;
+        };
+        let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
+            return;
+        };
+        // The lookup of another word, if one runs, is replaced.
+        self.pending = None;
+        self.render_manual();
+        let sender = self.sender.clone();
+        let started = manual::look_up(
+            self.work.upgrade().as_deref(),
+            self.dictionary.clone(),
+            word,
+            move |outcome| {
+                // On the worker: the UI thread wakes for the event.
+                let _ = sender.unbounded_send(Event::Lookup { run, outcome });
+            },
+        );
+        match started {
+            Ok(job) => {
+                self.pending = Some(job);
+                self.view.render_result(Some(&Lookup::Pending));
+            }
+            Err(lookup) => self.view.render_result(Some(&lookup)),
+        }
+    }
+
+    /// A lookup ended. Only the last started one is shown.
+    fn looked_up(&mut self, run: u64, outcome: Outcome<Option<Article>>) {
+        if !self.manual.awaits(run) {
+            return;
+        }
+        self.pending = None;
+        let Some(input) = self.manual.input() else {
+            return;
+        };
+        if let Some(lookup) = manual::lookup_result(outcome, input.word()) {
+            self.view.render_result(Some(&lookup));
+        }
+    }
+
+    /// Shows the state, the sentence and the chosen word as they are now.
+    fn render_manual(&self) {
+        self.view.render(self.manual.state());
+        self.view.render_sentence(
+            self.manual.sentence(),
+            self.manual.words(),
+            self.manual.chosen(),
+        );
     }
 
     fn bound(&mut self, trigger: &str) {
@@ -147,7 +255,8 @@ impl Session {
         receipt_ns: Option<u64>,
     ) {
         // Before `present()`: the first frame has the labels.
-        self.view.render(current_state());
+        self.view.render(self.manual.state());
+        self.focus();
         // Also before it: the feedback is for the next commit.
         let recorded = self.recording.as_ref().zip(receipt_ns).map(|(r, receipt)| {
             let token = activation_token.is_some();
@@ -180,7 +289,8 @@ impl Session {
     }
 
     fn launched(&self) {
-        self.view.render(current_state());
+        self.view.render(self.manual.state());
+        self.focus();
         // No `set_startup_id`: GTK has already applied the
         // token of the launcher, when there was one.
         if let Some(recording) = &self.recording {
@@ -219,10 +329,18 @@ fn start(
 
     // The first attempt starts below, with the window still hidden.
     let binding = Binding::Attempting;
-    let view = View::new(current_state(), &binding);
+    let view = View::new(window_state(None, None), &binding);
     let retry = sender.clone();
     view.connect_retry(move || {
         let _ = retry.unbounded_send(Event::Retry);
+    });
+    let changed = sender.clone();
+    view.connect_sentence_changed(move |text| {
+        let _ = changed.unbounded_send(Event::Sentence(text.to_owned()));
+    });
+    let chosen = sender.clone();
+    view.connect_word_chosen(move |index| {
+        let _ = chosen.unbounded_send(Event::Word(index));
     });
     let window = build_window(application, &view);
 
@@ -232,6 +350,16 @@ fn start(
     let timed = recording.is_some();
     let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed))));
     let events = sender.clone();
+    // Without the runner the window still works; a click says that the lookup
+    // did not finish.
+    let work = match Work::start() {
+        Ok(work) => Some(Rc::new(work)),
+        Err(e) => {
+            eprintln!("addict: lookups cannot run: {e}");
+            None
+        }
+    };
+    let dictionary: Arc<dyn Dictionary> = Arc::new(Sample);
     let mut session = Session {
         binding,
         view,
@@ -240,6 +368,10 @@ fn start(
         timed,
         sender,
         current: Rc::downgrade(&handle),
+        manual: Manual::default(),
+        pending: None,
+        work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),
+        dictionary: dictionary.clone(),
     };
     glib::spawn_future_local(async move {
         while let Some(event) = receiver.next().await {
@@ -250,6 +382,8 @@ fn start(
         _hold: application.hold(),
         _shortcut: handle,
         events,
+        _work: work,
+        _dictionary: dictionary,
     }
 }
 

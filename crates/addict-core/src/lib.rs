@@ -1,6 +1,8 @@
 //! Addict core: GTK-free product types (word, context, dictionaries, providers).
 
+pub mod dictionary;
 pub mod input;
+pub mod sentence;
 
 /// Application id of the product; the single source of product identity.
 pub const APP_ID: &str = "dev.addict.Addict";

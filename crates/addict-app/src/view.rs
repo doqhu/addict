@@ -1,12 +1,20 @@
 //! What the window says about its state: the source label and the status,
-//! and below them the binding row when the shortcut is not bound.
+//! below them the binding row when the shortcut is not bound, then the field
+//! for a sentence, the sentence with its words as links and the result of the
+//! lookup of the chosen word.
 //!
-//! The texts live here and nowhere else; `addict-core` has none. [`texts`] and
-//! [`binding_texts`] are pure, so they are tested without a display; [`View`]
-//! puts their results into its widgets.
+//! The texts live here and nowhere else; `addict-core` has none. [`texts`],
+//! [`binding_texts`], [`sentence_markup`] and [`result_text`] are pure, so
+//! they are tested without a display; [`View`] puts their results into its
+//! widgets.
 
-use addict_core::input::{Source, WindowState};
-use gtk::prelude::*;
+use std::{fmt::Write as _, ops::Range};
+
+use addict_core::{
+    dictionary::Article,
+    input::{Source, WindowState},
+};
+use gtk::{glib, prelude::*};
 
 /// The two texts of one window state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,8 +100,99 @@ pub fn binding_texts(binding: &Binding) -> Option<BindingTexts<'_>> {
 
 const RETRY_LABEL: &str = "Retry";
 
+/// What the empty field says.
+const FIELD_PLACEHOLDER: &str = "Paste a sentence, then click a word";
+
+/// How wide the wrapping texts ask to be, in characters.
+const TEXT_WIDTH_CHARS: i32 = 56;
+
+/// The sentence as Pango markup: the text as given, with each of `words` (byte
+/// ranges of `sentence`, in order) as a link whose target is the index of the
+/// word, and the `selected` word bold. `&`, `<` and `>` of the text are
+/// escaped. A range that does not fit the text makes no link.
+pub fn sentence_markup(sentence: &str, words: &[Range<usize>], selected: Option<usize>) -> String {
+    let mut markup = String::with_capacity(sentence.len() + words.len() * 24);
+    let mut at = 0;
+    for (index, word) in words.iter().enumerate() {
+        let (Some(between), Some(text)) = (
+            sentence.get(at..word.start),
+            sentence.get(word.start..word.end),
+        ) else {
+            continue;
+        };
+        push_escaped(&mut markup, between);
+        // Writing to a `String` does not fail.
+        let _ = write!(markup, "<a href=\"{index}\">");
+        if selected == Some(index) {
+            markup.push_str("<b>");
+            push_escaped(&mut markup, text);
+            markup.push_str("</b>");
+        } else {
+            push_escaped(&mut markup, text);
+        }
+        markup.push_str("</a>");
+        at = word.end;
+    }
+    push_escaped(&mut markup, sentence.get(at..).unwrap_or_default());
+    markup
+}
+
+/// Appends `text` with the characters that open markup replaced.
+fn push_escaped(markup: &mut String, text: &str) {
+    for character in text.chars() {
+        match character {
+            '&' => markup.push_str("&amp;"),
+            '<' => markup.push_str("&lt;"),
+            '>' => markup.push_str("&gt;"),
+            other => markup.push(other),
+        }
+    }
+}
+
+/// Where the lookup of the chosen word stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup {
+    /// The lookup runs; its end is not known yet.
+    Pending,
+    /// The dictionary has this article of the word.
+    Article(Article),
+    /// The dictionary has no entry for `word`.
+    NoEntry { word: String },
+    /// The lookup ended without an answer.
+    Unfinished,
+}
+
+/// The result as plain text. No wildcard arm: a new variant does not compile
+/// until it is given its text. The line of an unfinished lookup names no
+/// cause.
+pub fn result_text(lookup: &Lookup) -> String {
+    match lookup {
+        Lookup::Pending => "Looking up…".to_owned(),
+        Lookup::Article(article) => article_text(article),
+        Lookup::NoEntry { word } => format!("The dictionary has no entry for “{word}”."),
+        Lookup::Unfinished => "The lookup did not finish.".to_owned(),
+    }
+}
+
+/// The numbered senses, each with its synonyms when it has any, then the
+/// translations.
+fn article_text(article: &Article) -> String {
+    let mut lines = Vec::new();
+    for (index, sense) in article.senses.iter().enumerate() {
+        lines.push(format!("{}. {}", index + 1, sense.definition));
+        if !sense.synonyms.is_empty() {
+            lines.push(format!("    synonyms: {}", sense.synonyms.join(", ")));
+        }
+    }
+    if !article.translations.is_empty() {
+        lines.push(format!("Russian: {}", article.translations.join(", ")));
+    }
+    lines.join("\n")
+}
+
 /// The source label and the status, one above the other, then the binding
-/// row: its line, the detail and Retry.
+/// row: its line, the detail and Retry; then the field for a sentence, the
+/// sentence with its words as links and the result.
 pub struct View {
     root: gtk::Box,
     source: gtk::Label,
@@ -102,6 +201,9 @@ pub struct View {
     binding_text: gtk::Label,
     binding_detail: gtk::Label,
     retry: gtk::Button,
+    field: gtk::Entry,
+    sentence: gtk::Label,
+    result: gtk::Label,
 }
 
 impl View {
@@ -136,6 +238,29 @@ impl View {
         row.append(&retry);
         root.append(&row);
 
+        let field = gtk::Entry::builder()
+            .placeholder_text(FIELD_PLACEHOLDER)
+            .build();
+        let sentence = gtk::Label::builder()
+            .use_markup(true)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .max_width_chars(TEXT_WIDTH_CHARS)
+            .xalign(0.0)
+            .visible(false)
+            .build();
+        let result = gtk::Label::builder()
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .max_width_chars(TEXT_WIDTH_CHARS)
+            .xalign(0.0)
+            .selectable(true)
+            .visible(false)
+            .build();
+        root.append(&field);
+        root.append(&sentence);
+        root.append(&result);
+
         let view = Self {
             root,
             source,
@@ -144,14 +269,16 @@ impl View {
             binding_text,
             binding_detail,
             retry,
+            field,
+            sentence,
+            result,
         };
         view.render(state);
         view.render_binding(binding);
         view
     }
 
-    /// The box holding the labels and the binding row; more content goes
-    /// below them.
+    /// The box holding everything the window shows.
     pub fn root(&self) -> &gtk::Box {
         &self.root
     }
@@ -186,13 +313,270 @@ impl View {
     pub fn connect_retry(&self, retry: impl Fn() + 'static) {
         self.retry.connect_clicked(move |_| retry());
     }
+
+    /// Runs `changed` with the text of the field each time it changes.
+    pub fn connect_sentence_changed(&self, changed: impl Fn(&str) + 'static) {
+        self.field
+            .connect_changed(move |field| changed(field.text().as_str()));
+    }
+
+    /// Runs `chosen` with the index of a word each time its link is clicked.
+    pub fn connect_word_chosen(&self, chosen: impl Fn(usize) + 'static) {
+        self.sentence.connect_activate_link(move |_, target| {
+            if let Ok(index) = target.parse() {
+                chosen(index);
+            }
+            // The target is an index: GTK must not open it as a URI.
+            glib::Propagation::Stop
+        });
+    }
+
+    /// The text the field holds now.
+    pub fn field_text(&self) -> String {
+        self.field.text().into()
+    }
+
+    /// Shows `sentence` with its `words` as links and the `selected` one
+    /// bold; a blank sentence hides the line.
+    pub fn render_sentence(&self, sentence: &str, words: &[Range<usize>], selected: Option<usize>) {
+        if sentence.trim().is_empty() {
+            self.sentence.set_visible(false);
+            self.sentence.set_markup("");
+            return;
+        }
+        // Empty first: GTK carries the visited flag of a clicked link over to
+        // a link with the same target in the next markup, and the targets are
+        // indices, so another word would be shown as visited.
+        self.sentence.set_markup("");
+        self.sentence
+            .set_markup(&sentence_markup(sentence, words, selected));
+        self.sentence.set_visible(true);
+    }
+
+    /// Shows the text of `lookup`, or hides the result when there is none.
+    pub fn render_result(&self, lookup: Option<&Lookup>) {
+        let Some(lookup) = lookup else {
+            self.result.set_visible(false);
+            self.result.set_text("");
+            return;
+        };
+        self.result.set_text(&result_text(lookup));
+        self.result.set_visible(true);
+    }
+
+    /// Puts the keyboard focus into the field, so a paste lands there. The
+    /// text is not selected: a selection would become the primary selection.
+    pub fn focus_field(&self) {
+        self.field.grab_focus_without_selecting();
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use addict_core::input::{Source, WindowState};
+    use addict_core::{
+        dictionary::{Article, Dictionary, Sample, Sense},
+        input::{Source, WindowState},
+        sentence::words,
+    };
 
-    use super::{Binding, binding_texts, texts};
+    use super::{Binding, Lookup, binding_texts, result_text, sentence_markup, texts};
+
+    const SENTENCE: &str = "I sat on the bank.";
+
+    #[test]
+    fn every_word_of_the_sentence_is_a_link_to_its_index() {
+        assert_eq!(
+            sentence_markup(SENTENCE, &words(SENTENCE), None),
+            "<a href=\"0\">I</a> <a href=\"1\">sat</a> <a href=\"2\">on</a> \
+             <a href=\"3\">the</a> <a href=\"4\">bank</a>."
+        );
+    }
+
+    #[test]
+    fn only_the_selected_word_is_bold() {
+        let ranges = words(SENTENCE);
+        for selected in 0..ranges.len() {
+            let markup = sentence_markup(SENTENCE, &ranges, Some(selected));
+            assert_eq!(markup.matches("<b>").count(), 1, "{markup}");
+            let word = &SENTENCE[ranges[selected].clone()];
+            assert!(
+                markup.contains(&format!("<a href=\"{selected}\"><b>{word}</b></a>")),
+                "{markup}"
+            );
+        }
+        // An index that names no word marks nothing.
+        let markup = sentence_markup(SENTENCE, &ranges, Some(ranges.len()));
+        assert_eq!(markup, sentence_markup(SENTENCE, &ranges, None));
+    }
+
+    #[test]
+    fn the_markup_escapes_what_would_open_markup() {
+        let sentence = "a<b & c>d \"e\"";
+        assert_eq!(
+            sentence_markup(sentence, &words(sentence), Some(1)),
+            "<a href=\"0\">a</a>&lt;<a href=\"1\"><b>b</b></a> &amp; \
+             <a href=\"2\">c</a>&gt;<a href=\"3\">d</a> \"<a href=\"4\">e</a>\""
+        );
+        // Without words too: the text alone is escaped.
+        assert_eq!(sentence_markup("<&>", &[], None), "&lt;&amp;&gt;");
+        assert_eq!(sentence_markup("&amp;", &[], None), "&amp;amp;");
+    }
+
+    #[test]
+    fn the_markup_keeps_the_text_between_the_words() {
+        for sentence in ["", "  ", "…", " (Café) — über!\t", "Я сидел на берегу."]
+        {
+            let markup = sentence_markup(sentence, &words(sentence), None);
+            let mut plain = String::new();
+            let mut inside = false;
+            for character in markup.chars() {
+                match character {
+                    '<' => inside = true,
+                    '>' => inside = false,
+                    other if !inside => plain.push(other),
+                    _ => {}
+                }
+            }
+            assert_eq!(plain, sentence, "{markup}");
+        }
+    }
+
+    #[test]
+    fn a_range_that_does_not_fit_the_text_makes_no_link() {
+        // Past the end, inside a character, and out of order.
+        let cases: [&[(usize, usize)]; 3] = [&[(2, 9)], &[(1, 2)], &[(2, 3), (0, 1)]];
+        for bounds in cases {
+            let ranges: Vec<_> = bounds.iter().map(|&(start, end)| start..end).collect();
+            let markup = sentence_markup("né", &ranges, None);
+            assert!(markup.matches("<a ").count() <= 1, "{ranges:?}: {markup}");
+            assert!(
+                markup.ends_with('é') || markup.ends_with("</a>"),
+                "{markup}"
+            );
+        }
+    }
+
+    fn article() -> Article {
+        Article {
+            senses: vec![
+                Sense {
+                    definition: "first".to_owned(),
+                    synonyms: vec!["one".to_owned(), "uno".to_owned()],
+                },
+                Sense {
+                    definition: "second".to_owned(),
+                    synonyms: Vec::new(),
+                },
+            ],
+            translations: vec!["раз".to_owned(), "два".to_owned()],
+        }
+    }
+
+    /// One lookup of each kind. No wildcard arm: a new variant does not
+    /// compile here until it is listed.
+    fn every_lookup() -> Vec<Lookup> {
+        let all = vec![
+            Lookup::Pending,
+            Lookup::Article(article()),
+            Lookup::NoEntry {
+                word: "sat".to_owned(),
+            },
+            Lookup::Unfinished,
+        ];
+        for lookup in &all {
+            match lookup {
+                Lookup::Pending
+                | Lookup::Article(_)
+                | Lookup::NoEntry { .. }
+                | Lookup::Unfinished => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn every_result_has_its_own_text() {
+        let texts: Vec<_> = every_lookup().iter().map(result_text).collect();
+        for (index, text) in texts.iter().enumerate() {
+            assert!(!text.trim().is_empty());
+            assert!(!texts[..index].contains(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn every_result_but_an_article_is_one_line() {
+        for lookup in every_lookup() {
+            let lines = result_text(&lookup).lines().count();
+            assert_eq!(
+                lines == 1,
+                !matches!(lookup, Lookup::Article(_)),
+                "{lookup:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_article_lists_senses_synonyms_and_translations() {
+        assert_eq!(
+            result_text(&Lookup::Article(article())),
+            "1. first\n    synonyms: one, uno\n2. second\nRussian: раз, два"
+        );
+    }
+
+    #[test]
+    fn an_article_without_translations_has_no_line_for_them() {
+        let mut bare = article();
+        bare.translations.clear();
+        assert_eq!(
+            result_text(&Lookup::Article(bare)),
+            "1. first\n    synonyms: one, uno\n2. second"
+        );
+    }
+
+    #[test]
+    fn the_sample_article_of_bank_is_shown_in_full() {
+        let article = Sample.lookup("bank").expect("bank");
+        let text = result_text(&Lookup::Article(article.clone()));
+        for sense in &article.senses {
+            assert!(text.contains(&sense.definition), "{text}");
+            for synonym in &sense.synonyms {
+                assert!(text.contains(synonym), "{text}");
+            }
+        }
+        for translation in &article.translations {
+            assert!(text.contains(translation), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_no_entry_line_names_the_word() {
+        let line = result_text(&Lookup::NoEntry {
+            word: "sat".to_owned(),
+        });
+        assert!(line.contains("sat"), "{line}");
+        assert!(line.contains("no entry"), "{line}");
+    }
+
+    #[test]
+    fn the_unfinished_line_names_no_cause() {
+        let line = result_text(&Lookup::Unfinished).to_lowercase();
+        for cause in [
+            "time",
+            "deadline",
+            "limit",
+            "slow",
+            "panic",
+            "crash",
+            "error",
+            "fail",
+            "cancel",
+            "unavailable",
+            "because",
+        ] {
+            assert!(!line.contains(cause), "{cause:?} in {line:?}");
+        }
+        assert!(line.contains("did not finish"));
+    }
 
     fn not_bound(detail: &str) -> Binding {
         Binding::NotBound {
