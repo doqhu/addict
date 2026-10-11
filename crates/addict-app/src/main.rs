@@ -3,6 +3,14 @@
 //! `addict install` writes the desktop entry twice: into the applications
 //! directory, where the portal needs it, and into the autostart directory,
 //! which starts the application at login. `addict uninstall` removes both.
+//!
+//! `addict import <FILE>` turns a dictionary file the user has downloaded
+//! into an index in the data directory, `$XDG_DATA_HOME/addict` or
+//! `$HOME/.local/share/addict`. Only the chosen files are accepted, by size
+//! and SHA-256; the index replaces the previous one of the same source. The
+//! command prints the path of the index and the counts of its headwords and
+//! exception forms. The resident application does not read the index yet.
+//!
 //! With no arguments the process is the resident application: one hidden
 //! window, shown each time the global shortcut is pressed. On each press the
 //! window shows the source of the input and the state derived from the input
@@ -30,8 +38,8 @@
 //! and the focus. Without the flag none of that exists.
 //!
 //! This module owns the command line and what each form of it starts; the
-//! entry commands are [`entries`]'s and the resident application is
-//! [`resident`]'s.
+//! entry commands are [`entries`]'s, the import is `addict_dictionary`'s and
+//! the resident application is [`resident`]'s.
 
 mod entries;
 mod evidence;
@@ -41,7 +49,14 @@ mod recording;
 mod resident;
 mod view;
 
-use std::{cell::RefCell, path::PathBuf, process::ExitCode, rc::Rc};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    rc::Rc,
+};
+
+use addict_dictionary::import;
 
 use clap::{Parser, Subcommand};
 
@@ -65,6 +80,11 @@ enum Command {
     Install,
     /// Remove the desktop entries that install wrote
     Uninstall,
+    /// Build the dictionary index from a downloaded dictionary file
+    Import {
+        /// The dictionary file, as downloaded
+        file: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -72,6 +92,7 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Install) => report(entries::install_entries()),
         Some(Command::Uninstall) => report(entries::uninstall_entries()),
+        Some(Command::Import { file }) => import_file(&file),
         None => match open_evidence(cli.evidence.zip(cli.origin)) {
             Ok(writer) => resident::run(writer),
             Err(message) => fail(&message),
@@ -83,6 +104,25 @@ fn main() -> ExitCode {
 fn fail(message: &str) -> ExitCode {
     eprintln!("addict: {message}");
     ExitCode::FAILURE
+}
+
+/// Imports the dictionary file and prints the path of its index and what the
+/// index holds.
+fn import_file(file: &Path) -> ExitCode {
+    let Some(dir) = import::data_dir() else {
+        return fail(
+            "cannot find the data directory: XDG_DATA_HOME is not set to an absolute path and HOME is unset or empty",
+        );
+    };
+    match import::import(file, &dir) {
+        Ok(imported) => {
+            println!("{}", imported.path.display());
+            println!("headwords: {}", imported.headwords);
+            println!("exception forms: {}", imported.exception_forms);
+            ExitCode::SUCCESS
+        }
+        Err(error) => fail(&error.to_string()),
+    }
 }
 
 /// The evidence file of `--evidence`, opened before anything else starts: a
