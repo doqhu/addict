@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 addict-core = { path = "../addict-core" }
+addict-dictionary = { path = "../addict-dictionary" }
 addict-platform = { path = "../addict-platform" }
 clap = { version = "=4.6.7", features = ["derive"] }
 futures-channel = "=0.3.34"

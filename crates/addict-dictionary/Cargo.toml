@@ -1,0 +1,17 @@
+[package]
+name = "addict-dictionary"
+version = "0.1.0"
+description = "Addict dictionary index: the file format, its reader and the importers, GTK-free"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "addict_dictionary"
+path = "src/lib.rs"
+
+[dependencies]
+addict-core = { path = "../addict-core" }
+flate2 = "=1.1.10"
+quick-xml = "=0.41.0"
+sha2 = "=0.10.9"

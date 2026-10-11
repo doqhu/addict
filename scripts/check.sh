@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # One command that proves the product crates are healthy: format, lint, tests
-# and a guard that keeps GTK out of addict-core and addict-platform.
+# and a guard that keeps GTK out of addict-core, addict-platform and
+# addict-dictionary.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PRODUCT=(addict-core addict-platform addict-app)
-GUARDED=(addict-core addict-platform)
+PRODUCT=(addict-core addict-platform addict-dictionary addict-app)
+GUARDED=(addict-core addict-platform addict-dictionary)
 PKG_ARGS=()
 for crate in "${PRODUCT[@]}"; do
     PKG_ARGS+=(-p "$crate")
