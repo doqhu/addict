@@ -16,7 +16,6 @@ dependencies = [
  "gtk4",
  "libc",
  "serde_json",
- "tokio",
  "wayland-client",
  "wayland-protocols",
 ]
