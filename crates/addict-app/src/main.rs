@@ -20,13 +20,28 @@
 //! window shows the source of the input and the state derived from the input
 //! contract; Esc hides it, as the title-bar close does.
 //!
-//! The window has a field for a sentence. A pasted sentence is shown with its
-//! words as links; a click on a word makes it the input, with the sentence
-//! and the source "manual input", and looks it up in the built-in sample
-//! dictionary of a few words. The lookup runs off the UI thread with a
-//! deadline, and the window shows its outcome as plain text: the article, a
-//! line saying the dictionary has no entry, or a line saying the lookup did
-//! not finish. Editing the field drops the input and the result.
+//! The window has a field for a word or a sentence; the source of what is
+//! entered there is "manual input". A text of exactly one word is that word
+//! without context: it is the input as soon as the field holds it, with no
+//! click, and each further keystroke replaces it. A longer text is shown with
+//! its words as links, and a click on a word makes it the input together with
+//! the sentence. A word is a run of letters; an apostrophe between two
+//! letters and a combining mark after a letter belong to it, a hyphen
+//! separates two words. The field is empty when it holds no word: then there
+//! is no input and the window waits for one.
+//!
+//! The input word is looked up in the built-in sample dictionary of a few
+//! words. The lookup runs off the UI thread with a deadline, and the window
+//! shows its outcome as plain text: the article, a line saying the dictionary
+//! has no entry, or a line saying the lookup did not finish. Another word, a
+//! second click on the same one or an edit of the field replaces the lookup,
+//! and the outcome of a replaced lookup is never shown.
+//!
+//! A paste into the field with Ctrl+V, Shift+Insert or the menu replaces the
+//! whole field with the clipboard text as one line, and with it the input and
+//! the result. This is the only time the clipboard is read: once per paste,
+//! without blocking the window. A clipboard that holds no text changes
+//! nothing.
 //!
 //! The application is unique: a second launch exits at once and makes the
 //! resident instance show its window, as a press of the shortcut does.

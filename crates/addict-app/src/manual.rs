@@ -1,5 +1,9 @@
-//! The manual path without its widgets: the sentence of the field, the word
-//! chosen in it, the [`Input`] built from both and the lookup of the word.
+//! The manual path without its widgets: the text of the field, the word
+//! chosen in it, the [`Input`] built from them and the lookup of the word.
+//!
+//! A text of exactly one word is that word without context: it is chosen at
+//! once, with no click, and its input has no sentence. A text of more words is
+//! a sentence, and the clicked word is the input together with it.
 //!
 //! [`Manual`] is the state and holds no widget, so what an edit or a click
 //! does to it is tested without a display. [`look_up`] starts a lookup on the
@@ -21,16 +25,29 @@ use crate::view::Lookup;
 /// How long the lookup of one word may take.
 const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
 
-/// The sentence, its words and what was chosen in it.
+/// What an edit of the field did to the manual input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edit {
+    /// The text is the one already held: nothing changed.
+    Same,
+    /// The text is new and no word of it is chosen: there is no input.
+    Cleared,
+    /// The text is new and holds exactly one word, which is now the input.
+    /// The lookup to start has this number.
+    Lone(u64),
+}
+
+/// The text of the field, its words and what was chosen in it.
 #[derive(Debug, Default)]
 pub struct Manual {
     /// The text of the field, as it is shown with its words.
     sentence: String,
     /// The words of `sentence`, as byte ranges of it.
     words: Vec<Range<usize>>,
-    /// The index of the chosen word; `None` until a word is clicked.
+    /// The index of the chosen word; `None` until a word is clicked, unless
+    /// the text has only one.
     chosen: Option<usize>,
-    /// The chosen word in its sentence.
+    /// The chosen word, with the sentence when the text has another word.
     input: Option<Input>,
     /// The number of the last started lookup. An outcome that carries another
     /// number belongs to a lookup that was replaced.
@@ -61,29 +78,37 @@ impl Manual {
     }
 
     /// The field holds `text`: its words are rebuilt, and what was chosen in
-    /// the old text is gone, with the outcome of its lookup. `false` when the
-    /// text is the one already held, and then nothing changes.
-    pub fn edit(&mut self, text: String) -> bool {
+    /// the old text is gone, with the outcome of its lookup. A text of exactly
+    /// one word has that word chosen at once.
+    pub fn edit(&mut self, text: String) -> Edit {
         if text == self.sentence {
-            return false;
+            return Edit::Same;
         }
         self.words = sentence::words(&text);
         self.sentence = text;
         self.chosen = None;
         self.input = None;
+        // Whatever the lookup of the old text still reports is not awaited.
         self.run += 1;
-        true
+        if self.words.len() != 1 {
+            return Edit::Cleared;
+        }
+        self.choose(0).map_or(Edit::Cleared, Edit::Lone)
     }
 
-    /// The word with `index` was clicked: it becomes the input, with its
-    /// sentence. Gives the number of the lookup to start, which replaces any
-    /// earlier one, or `None` when there is no such word.
+    /// The word with `index` is chosen, by a click or as the only word of the
+    /// text: it becomes the input, written as it is looked up, with the text
+    /// as its sentence when the text has another word. Gives the number of
+    /// the lookup to start, which replaces any earlier one, or `None` when
+    /// there is no such word.
     pub fn choose(&mut self, index: usize) -> Option<u64> {
         let word = self
             .words
             .get(index)
             .and_then(|range| self.sentence.get(range.clone()))?;
-        let input = Input::new(word, Some(&self.sentence), Source::Manual).ok()?;
+        // One word is a word without context, whatever stands around it.
+        let context = (self.words.len() > 1).then_some(self.sentence.as_str());
+        let input = Input::new(&sentence::lookup_word(word), context, Source::Manual).ok()?;
         self.chosen = Some(index);
         self.input = Some(input);
         self.run += 1;
@@ -138,7 +163,7 @@ mod tests {
     };
     use addict_platform::work::{Outcome, Work};
 
-    use super::{LOOKUP_LIMIT, Manual, look_up, lookup_result};
+    use super::{Edit, LOOKUP_LIMIT, Manual, look_up, lookup_result};
     use crate::view::Lookup;
 
     const SENTENCE: &str = "I sat on the bank.";
@@ -148,9 +173,25 @@ mod tests {
 
     fn with_sentence(sentence: &str) -> Manual {
         let mut manual = Manual::default();
-        assert!(manual.edit(sentence.to_owned()));
+        assert_ne!(manual.edit(sentence.to_owned()), Edit::Same);
         manual
     }
+
+    /// The number of the lookup that an edit to the lone word `text` starts.
+    fn lone(manual: &mut Manual, text: &str) -> u64 {
+        match manual.edit(text.to_owned()) {
+            Edit::Lone(run) => run,
+            other => panic!("{text:?}: {other:?}"),
+        }
+    }
+
+    const DICTIONARY: WindowState = WindowState::Dictionary {
+        source: Source::Manual,
+    };
+
+    const CONTEXTUAL: WindowState = WindowState::Contextual {
+        source: Source::Manual,
+    };
 
     /// The outcome of a lookup of `word` that ran on a real runner, and
     /// whether its callback ran on another thread than this one.
@@ -215,12 +256,7 @@ mod tests {
         assert_eq!(input.sentence(), Some(SENTENCE));
         assert_eq!(input.source(), Source::Manual);
         assert_eq!(manual.chosen(), Some(4));
-        assert_eq!(
-            manual.state(),
-            WindowState::Contextual {
-                source: Source::Manual
-            }
-        );
+        assert_eq!(manual.state(), CONTEXTUAL);
         assert!(manual.awaits(run));
     }
 
@@ -251,7 +287,7 @@ mod tests {
     fn an_edit_drops_the_input_and_the_awaited_lookup() {
         let mut manual = with_sentence(SENTENCE);
         let run = manual.choose(4).expect("run");
-        assert!(manual.edit("I sat on the bank".to_owned()));
+        assert_eq!(manual.edit("I sat on the bank".to_owned()), Edit::Cleared);
         assert_eq!(manual.input(), None);
         assert_eq!(manual.chosen(), None);
         assert_eq!(manual.state(), WindowState::Empty);
@@ -267,9 +303,192 @@ mod tests {
     fn the_same_text_again_is_not_an_edit() {
         let mut manual = with_sentence(SENTENCE);
         let run = manual.choose(4).expect("run");
-        assert!(!manual.edit(SENTENCE.to_owned()));
+        assert_eq!(manual.edit(SENTENCE.to_owned()), Edit::Same);
         assert!(manual.awaits(run));
         assert_eq!(manual.chosen(), Some(4));
+    }
+
+    #[test]
+    fn a_lone_word_is_the_input_at_once_and_has_no_sentence() {
+        for text in [
+            "bank",
+            " Bank. ",
+            "(bank)",
+            "\u{201c}bank\u{201d}\n",
+            "12 bank",
+        ] {
+            let mut manual = Manual::default();
+            let run = lone(&mut manual, text);
+            let input = manual.input().expect("input");
+            assert!(input.word().eq_ignore_ascii_case("bank"), "{text:?}");
+            assert_eq!(input.sentence(), None, "{text:?}");
+            assert_eq!(input.source(), Source::Manual, "{text:?}");
+            assert_eq!(manual.chosen(), Some(0), "{text:?}");
+            assert_eq!(manual.state(), DICTIONARY, "{text:?}");
+            assert!(manual.awaits(run), "{text:?}");
+            // The field's text is kept as it is, for the shown word.
+            assert_eq!(manual.sentence(), text);
+        }
+    }
+
+    #[test]
+    fn a_lone_word_keeps_its_case() {
+        let mut manual = Manual::default();
+        lone(&mut manual, " Bank. ");
+        assert_eq!(manual.input().expect("input").word(), "Bank");
+    }
+
+    #[test]
+    fn each_typed_prefix_replaces_the_lookup_of_the_one_before() {
+        let mut manual = Manual::default();
+        let mut runs = Vec::new();
+        for text in ["b", "ba", "ban", "bank"] {
+            let run = lone(&mut manual, text);
+            assert_eq!(manual.input().expect("input").word(), text);
+            assert!(!runs.contains(&run), "{text:?}");
+            runs.push(run);
+        }
+        // Only the outcome for `bank` is awaited.
+        let (last, earlier) = runs.split_last().expect("runs");
+        assert!(manual.awaits(*last));
+        for run in earlier {
+            assert!(!manual.awaits(*run), "{run}");
+        }
+    }
+
+    #[test]
+    fn a_lone_word_clicked_again_starts_a_new_lookup() {
+        let mut manual = Manual::default();
+        let first = lone(&mut manual, "bank");
+        let second = manual.choose(0).expect("run");
+        assert_ne!(first, second);
+        assert!(!manual.awaits(first));
+        assert!(manual.awaits(second));
+        assert_eq!(manual.input().expect("input").sentence(), None);
+        assert_eq!(manual.state(), DICTIONARY);
+    }
+
+    #[test]
+    fn the_same_word_of_a_sentence_clicked_again_starts_a_new_lookup() {
+        let mut manual = with_sentence(SENTENCE);
+        let first = manual.choose(4).expect("run");
+        let second = manual.choose(4).expect("run");
+        assert_ne!(first, second);
+        assert!(!manual.awaits(first));
+        assert!(manual.awaits(second));
+        assert_eq!(manual.input().expect("input").word(), "bank");
+        assert_eq!(manual.state(), CONTEXTUAL);
+    }
+
+    #[test]
+    fn a_sentence_shortened_to_one_word_is_a_lone_word() {
+        let mut manual = with_sentence(SENTENCE);
+        let old = manual.choose(2).expect("run");
+        let run = lone(&mut manual, "bank");
+        let input = manual.input().expect("input");
+        assert_eq!(input.word(), "bank");
+        assert_eq!(input.sentence(), None);
+        assert_eq!(manual.chosen(), Some(0));
+        assert_eq!(manual.state(), DICTIONARY);
+        assert!(!manual.awaits(old));
+        assert!(manual.awaits(run));
+    }
+
+    #[test]
+    fn a_lone_word_grown_into_a_sentence_has_no_input_until_a_click() {
+        let mut manual = Manual::default();
+        let old = lone(&mut manual, "bank");
+        assert_eq!(manual.edit("bank holiday".to_owned()), Edit::Cleared);
+        assert_eq!(manual.input(), None);
+        assert_eq!(manual.chosen(), None);
+        assert_eq!(manual.state(), WindowState::Empty);
+        assert!(!manual.awaits(old));
+        manual.choose(0).expect("run");
+        assert_eq!(
+            manual.input().expect("input").sentence(),
+            Some("bank holiday")
+        );
+        assert_eq!(manual.state(), CONTEXTUAL);
+    }
+
+    #[test]
+    fn an_emptied_field_has_no_words_and_no_input() {
+        for text in ["", " ", "\t", "12 \u{2026}", "\u{2014} ?!", "'"] {
+            // From a sentence with a chosen word, and from a lone word.
+            let mut from_sentence = with_sentence(SENTENCE);
+            let chosen = from_sentence.choose(4).expect("run");
+            let mut from_word = Manual::default();
+            let alone = lone(&mut from_word, "bank");
+            for (mut manual, run) in [(from_sentence, chosen), (from_word, alone)] {
+                assert_eq!(manual.edit(text.to_owned()), Edit::Cleared, "{text:?}");
+                assert!(manual.words().is_empty(), "{text:?}");
+                assert_eq!(manual.input(), None, "{text:?}");
+                assert_eq!(manual.chosen(), None, "{text:?}");
+                assert_eq!(manual.state(), WindowState::Empty, "{text:?}");
+                assert!(!manual.awaits(run), "{text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_hyphenated_compound_is_two_words_and_not_a_lone_word() {
+        let mut manual = Manual::default();
+        assert_eq!(manual.edit("well-known".to_owned()), Edit::Cleared);
+        assert_eq!(manual.words().len(), 2);
+        manual.choose(1).expect("run");
+        let input = manual.input().expect("input");
+        assert_eq!(input.word(), "known");
+        assert_eq!(input.sentence(), Some("well-known"));
+    }
+
+    #[test]
+    fn a_typographic_apostrophe_is_looked_up_as_the_plain_one() {
+        let sentence = "I don\u{2019}t sit on the bank.";
+        let mut manual = with_sentence(sentence);
+        manual.choose(1).expect("run");
+        let input = manual.input().expect("input");
+        assert_eq!(input.word(), "don't");
+        // The sentence is kept as written, in the input and for the window.
+        assert_eq!(input.sentence(), Some(sentence));
+        assert_eq!(manual.sentence(), sentence);
+        assert_eq!(
+            &manual.sentence()[manual.words()[1].clone()],
+            "don\u{2019}t"
+        );
+        // Alone too.
+        let mut manual = Manual::default();
+        lone(&mut manual, "don\u{2019}t");
+        assert_eq!(manual.input().expect("input").word(), "don't");
+    }
+
+    #[test]
+    fn a_new_text_over_a_chosen_word_drops_the_old_input() {
+        // What a paste does: the whole text is another one.
+        let mut manual = with_sentence(SENTENCE);
+        let old = manual.choose(4).expect("run");
+        assert_eq!(
+            manual.edit("The charge was dropped.".to_owned()),
+            Edit::Cleared
+        );
+        assert_eq!(manual.input(), None);
+        assert_eq!(manual.chosen(), None);
+        assert!(!manual.awaits(old));
+        assert_eq!(manual.words().len(), 4);
+    }
+
+    #[test]
+    fn the_last_lone_word_is_the_one_looked_up_and_its_article_is_the_result() {
+        let mut manual = Manual::default();
+        lone(&mut manual, "ban");
+        let run = lone(&mut manual, "bank");
+        let word = manual.input().expect("input").word().to_owned();
+        assert_eq!(word, "bank");
+        let (outcome, _) = looked_up(Sample, &word);
+        assert!(manual.awaits(run));
+        assert_eq!(
+            lookup_result(outcome, &word),
+            Some(Lookup::Article(Sample.lookup("bank").expect("bank")))
+        );
     }
 
     #[test]
