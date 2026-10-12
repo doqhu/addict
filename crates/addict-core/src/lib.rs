@@ -2,6 +2,7 @@
 
 pub mod dictionary;
 pub mod input;
+pub mod reduction;
 pub mod sentence;
 
 /// Application id of the product; the single source of product identity.

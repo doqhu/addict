@@ -1,13 +1,14 @@
 //! The imported FreeDict eng-rus index against the target word list of
-//! EXP-7, the one article the two imported indexes give together, and the
-//! memory of a process that holds both open.
+//! EXP-7, the one article the two imported indexes give together, as
+//! written and with the reduction to the dictionary form, the time of the
+//! reduced lookups and the memory of a process that holds both open.
 //!
 //! Ignored by default: it needs the indexes, which are not in the
 //! repository. `ADDICT_INDEX_DIR` is the data directory `addict import`
 //! wrote `oewn.index` and `freedict.index` into and `ADDICT_TARGET_WORDS` is
 //! the list, one word per line, `#` for comments.
 
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{collections::BTreeSet, path::PathBuf, time::Instant};
 
 use addict_core::dictionary::Dictionary;
 use addict_dictionary::{Combined, Index};
@@ -71,14 +72,13 @@ fn the_two_indexes_give_one_article_for_the_target_list() {
         );
     }
 
-    // Both through the contract.
-    let dictionary: &dyn Dictionary = &combined;
+    // Both, as written.
     let (mut both_found, mut both_definitions, mut both_synonyms, mut both_russian) = (0, 0, 0, 0);
     let mut freedict_senses = 0;
     for word in &words {
         let from_oewn = oewn.find(word).expect("lookup");
         let from_freedict = freedict.find(word).expect("lookup");
-        let article = dictionary.lookup(word);
+        let article = combined.find(word).expect("lookup");
         assert_eq!(
             article.is_some(),
             from_oewn.is_some() || from_freedict.is_some(),
@@ -120,12 +120,80 @@ fn the_two_indexes_give_one_article_for_the_target_list() {
             both_russian += 1;
         }
     }
+
+    // Both through the contract: the word and its dictionary forms.
+    let dictionary: &dyn Dictionary = &combined;
+    let (mut reduced_found, mut reduced_definitions) = (0, 0);
+    let (mut reduced_synonyms, mut reduced_russian, mut reduced_all) = (0, 0, 0);
+    for word in &words {
+        let found = combined.find_reduced(word).expect("lookup");
+        let article = dictionary.lookup(word);
+        assert_eq!(article.is_some(), !found.is_empty(), "{word}");
+        // The word as written, when a headword, is the first.
+        let exact = combined.find(word).expect("lookup");
+        assert_eq!(
+            found
+                .first()
+                .filter(|first| first.headword == **word)
+                .map(|first| &first.article),
+            exact.as_ref(),
+            "{word}"
+        );
+        let Some(article) = article else {
+            continue;
+        };
+        reduced_found += 1;
+        // Nothing of any headword is lost and nothing is added; a sense
+        // reached through two headwords is there once.
+        for part in &found {
+            for sense in &part.article.senses {
+                assert!(
+                    article
+                        .senses
+                        .iter()
+                        .any(|kept| kept.definition == sense.definition),
+                    "{word}"
+                );
+            }
+            for translation in &part.article.translations {
+                assert!(article.translations.contains(translation), "{word}");
+            }
+        }
+        for sense in &article.senses {
+            assert!(
+                found.iter().any(|part| part.article.senses.contains(sense)),
+                "{word}"
+            );
+        }
+        let mut seen = BTreeSet::new();
+        assert!(
+            article.translations.iter().all(|t| seen.insert(t)),
+            "{word}: a repeated translation"
+        );
+        let mut seen = BTreeSet::new();
+        assert!(
+            article.senses.iter().all(|s| seen.insert(&s.definition)),
+            "{word}: a repeated definition"
+        );
+        let has_definition = article.senses.iter().any(|s| !s.definition.is_empty());
+        let has_synonyms = article.senses.iter().any(|s| !s.synonyms.is_empty());
+        let has_russian = !article.translations.is_empty();
+        reduced_definitions += usize::from(has_definition);
+        reduced_synonyms += usize::from(has_synonyms);
+        reduced_russian += usize::from(has_russian);
+        reduced_all += usize::from(has_definition && has_synonyms && has_russian);
+    }
     let after_lookups = pss_kb();
 
     // The same lookups again: the memory must not follow the use.
-    for _ in 0..20 {
+    let started = Instant::now();
+    for word in &words {
+        let _ = dictionary.lookup(word);
+    }
+    let reduced_time = started.elapsed();
+    for _ in 0..19 {
         for word in &words {
-            let _ = combined.find(word).expect("lookup");
+            let _ = dictionary.lookup(word);
         }
     }
     let after_repeats = pss_kb();
@@ -143,10 +211,26 @@ fn the_two_indexes_give_one_article_for_the_target_list() {
         "both: found {both_found}, with definitions {both_definitions}, with synonyms \
          {both_synonyms}, with Russian {both_russian}; senses from FreeDict for {freedict_senses}"
     );
+    println!(
+        "both, reduced: found {reduced_found}, with definitions {reduced_definitions}, with \
+         synonyms {reduced_synonyms}, with Russian {reduced_russian}, with all three {reduced_all}"
+    );
+    println!(
+        "time of {} reduced lookups: {reduced_time:?}, {:?} a lookup",
+        words.len(),
+        reduced_time / words.len() as u32
+    );
     println!("Pss before open: {before_open} kB");
     println!("Pss with both indexes open: {after_open} kB");
-    println!("Pss after {} lookups: {after_lookups} kB", words.len());
-    println!("Pss after {} lookups: {after_repeats} kB", words.len() * 21);
+    println!(
+        "Pss after {} exact and {} reduced lookups: {after_lookups} kB",
+        words.len(),
+        words.len()
+    );
+    println!(
+        "Pss after {} more reduced lookups: {after_repeats} kB",
+        words.len() * 20
+    );
 
     assert_eq!(freedict.source(), "freedict-eng-rus-2025.11.23");
     assert_eq!(freedict.headwords(), 57_491);
@@ -159,8 +243,52 @@ fn the_two_indexes_give_one_article_for_the_target_list() {
         (384, 383, 337, 344)
     );
     assert_eq!(freedict_senses, 15);
+    // Set A with reduction, as EXP-7 measured it.
+    assert_eq!(
+        (
+            reduced_found,
+            reduced_definitions,
+            reduced_synonyms,
+            reduced_russian
+        ),
+        (487, 487, 447, 481)
+    );
+    assert_eq!(reduced_all, 442);
 
-    for absent in ["boolean", "mutex", ""] {
+    let headwords = |word: &str| -> Vec<String> {
+        let found = combined.find_reduced(word).expect("lookup");
+        found.into_iter().map(|part| part.headword).collect()
+    };
+    for (word, form) in [
+        ("banks", "bank"),
+        ("running", "run"),
+        ("went", "go"),
+        ("Bank", "bank"),
+    ] {
+        assert!(headwords(word).contains(&form.to_owned()), "{word}");
+        let article = dictionary.lookup(word).expect(word);
+        let of_form = combined.find(form).expect("lookup").expect(form);
+        assert!(!of_form.senses.is_empty(), "{form}");
+        for sense in &of_form.senses {
+            assert!(
+                article
+                    .senses
+                    .iter()
+                    .any(|kept| kept.definition == sense.definition),
+                "{word}"
+            );
+        }
+        assert!(!article.translations.is_empty(), "{word}");
+    }
+    // Neither index has these as written; `running` is a headword itself.
+    for word in ["banks", "went", "Bank"] {
+        assert_eq!(combined.find(word).expect("lookup"), None, "{word}");
+    }
+    assert_eq!(headwords("running")[0], "running");
+    assert_eq!(dictionary.lookup("banks"), dictionary.lookup("bank"));
+    assert_eq!(dictionary.lookup("\"went,\""), dictionary.lookup("went"));
+
+    for absent in ["boolean", "mutex", "", "..."] {
         assert_eq!(dictionary.lookup(absent), None, "{absent:?}");
     }
     let bank = dictionary.lookup("bank").expect("bank");

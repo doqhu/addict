@@ -11,12 +11,33 @@
 //!   list is empty when it lacks the word;
 //! - a word neither has is `None`.
 //!
+//! That is the exact lookup, [`Combined::find`]. The reduced lookup,
+//! [`Combined::find_reduced`], is what the dictionary contract answers with:
+//! it tries the word as written, its lowercase and then the dictionary forms
+//! of `addict_core::reduction`, each through the exact lookup, and keeps
+//! every one that is a headword of either index. The exception list of the
+//! definitions index serves both. The contract merges what was found into
+//! one article. Nothing is kept between lookups.
+//!
 //! Opening the two files, and what to do when one was never imported, is the
 //! caller's.
 
-use addict_core::dictionary::{Article, Dictionary};
+use addict_core::{
+    dictionary::{Article, Dictionary},
+    reduction,
+};
 
 use crate::index::{Error, Index};
+
+/// One headword the reduced lookup found, and its article.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    /// The headword as the indexes have it: the word as written, its
+    /// lowercase or one of its dictionary forms.
+    pub headword: String,
+    /// What [`Combined::find`] gives for the headword.
+    pub article: Article,
+}
 
 /// Two open indexes answering as one dictionary.
 #[derive(Debug)]
@@ -61,12 +82,79 @@ impl Combined {
             }),
         })
     }
+
+    /// The headwords `word` leads to and their articles, in the order tried:
+    /// the word without the punctuation around it, its lowercase, then the
+    /// dictionary forms of the lowercase word, the lemmas of the exception
+    /// list of the definitions index first. Every one that is a headword of
+    /// either index is there, once; empty when none is, or when nothing of
+    /// the word is left. An error of either index is the error of the lookup.
+    pub fn find_reduced(&self, word: &str) -> Result<Vec<Found>, Error> {
+        let written = reduction::stripped(word);
+        if written.is_empty() {
+            return Ok(Vec::new());
+        }
+        let lowercase = reduction::lowercase(written);
+        let lemmas = self.definitions.exception_lemmas(&lowercase)?;
+        let forms = reduction::forms(&lowercase, &lemmas);
+        let mut candidates = vec![written.to_owned()];
+        for candidate in std::iter::once(lowercase).chain(forms) {
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+        let mut found = Vec::new();
+        for headword in candidates {
+            if let Some(article) = self.find(&headword)? {
+                found.push(Found { headword, article });
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// One article of what the reduced lookup found: the senses in the order
+/// found, a sense whose definition is already there skipped, and the translations joined in the same
+/// order, each once. `None` when nothing was found.
+fn merged(found: Vec<Found>) -> Option<Article> {
+    if found.is_empty() {
+        return None;
+    }
+    let mut article = Article {
+        senses: Vec::new(),
+        translations: Vec::new(),
+    };
+    for Found { article: next, .. } in found {
+        for sense in next.senses {
+            // By the definition: the synonyms of one sense differ with the
+            // headword it was reached through, and the first found stays.
+            if !article
+                .senses
+                .iter()
+                .any(|kept| kept.definition == sense.definition)
+            {
+                article.senses.push(sense);
+            }
+        }
+        for translation in next.translations {
+            if !article.translations.contains(&translation) {
+                article.translations.push(translation);
+            }
+        }
+    }
+    Some(article)
 }
 
 impl Dictionary for Combined {
-    /// Panics when an index cannot be read, as [`Index`] does.
+    /// The reduced lookup as one article: the senses of the word as written,
+    /// then of each dictionary form in the order tried, and the translations
+    /// joined in the same order. Panics when an index cannot be read, as
+    /// [`Index`] does.
     fn lookup(&self, word: &str) -> Option<Article> {
-        self.find(word).unwrap_or_else(|error| panic!("{error}"))
+        merged(
+            self.find_reduced(word)
+                .unwrap_or_else(|error| panic!("{error}")),
+        )
     }
 }
 
@@ -78,12 +166,79 @@ mod tests {
 
     use super::*;
     use crate::{
-        format::{Contents, HEADER_LEN, Headword, SenseRecord, encode, tests::sample},
+        format::{
+            Contents, ExceptionForm, HEADER_LEN, Headword, SenseRecord, encode, tests::sample,
+        },
         testdir::TempDir,
     };
 
     fn texts(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    /// The sample index with what an Open English WordNet import adds for
+    /// the reduced lookup: words alone in their senses, a capitalised
+    /// headword and exception forms, one with its lemmas out of order.
+    fn english() -> Contents {
+        let mut contents = sample();
+        for (word, definition) in [
+            ("English", "the language of England"),
+            ("be", "have the quality of being"),
+            ("bet", "stake on the outcome of an issue"),
+            ("go", "change location"),
+            ("good", "having desirable qualities"),
+            ("leave", "go away from a place"),
+            ("left", "on the side to the north when facing east"),
+            ("let", "make it possible for something to happen"),
+            ("letter", "a written message addressed to a person"),
+            ("run", "move fast by using one's feet"),
+            ("saw", "a hand tool having a toothed blade"),
+            ("see", "perceive by sight"),
+            ("stop", "come to a halt"),
+            ("well", "in a good or proper manner"),
+        ] {
+            contents.headwords.push(Headword {
+                word: word.to_owned(),
+                senses: vec![contents.senses.len() as u32],
+                translations: Vec::new(),
+            });
+            contents.senses.push(SenseRecord {
+                definition: definition.to_owned(),
+                members: texts(&[word]),
+            });
+        }
+        // One sense the word and its dictionary form share.
+        let shared = contents.senses.len() as u32;
+        contents.senses.push(SenseRecord {
+            definition: "the trees in a large wooded area".to_owned(),
+            members: texts(&["forest", "wood", "woods"]),
+        });
+        contents.senses.push(SenseRecord {
+            definition: "the hard fibrous substance under the bark of trees".to_owned(),
+            members: texts(&["wood"]),
+        });
+        for (word, senses) in [("wood", vec![shared + 1, shared]), ("woods", vec![shared])] {
+            contents.headwords.push(Headword {
+                word: word.to_owned(),
+                senses,
+                translations: Vec::new(),
+            });
+        }
+        contents.headwords.sort_by(|a, b| a.word.cmp(&b.word));
+        for (form, lemmas) in [
+            ("better", &["well", "good"][..]),
+            ("is", &["be"]),
+            ("left", &["leave"]),
+            ("saw", &["see"]),
+            ("went", &["go"]),
+        ] {
+            contents.forms.push(ExceptionForm {
+                form: form.to_owned(),
+                lemmas: texts(lemmas),
+            });
+        }
+        contents.forms.sort_by(|a, b| a.form.cmp(&b.form));
+        contents
     }
 
     /// What a FreeDict import writes: definitions without members.
@@ -111,19 +266,77 @@ mod tests {
                     translations: texts(&["несмотря на"]),
                 },
                 Headword {
+                    word: "go".to_owned(),
+                    senses: vec![],
+                    translations: texts(&["идти́"]),
+                },
+                Headword {
+                    word: "leave".to_owned(),
+                    senses: vec![],
+                    translations: texts(&["оставля́ть", "оста́вил"]),
+                },
+                Headword {
+                    word: "left".to_owned(),
+                    senses: vec![],
+                    translations: texts(&["ле́вый", "оста́вил"]),
+                },
+                Headword {
+                    word: "saw".to_owned(),
+                    senses: vec![],
+                    translations: texts(&["пила́"]),
+                },
+                Headword {
+                    word: "see".to_owned(),
+                    senses: vec![],
+                    translations: texts(&["ви́деть"]),
+                },
+                Headword {
+                    word: "the".to_owned(),
+                    senses: vec![],
+                    translations: texts(&["э́тот"]),
+                },
+                Headword {
                     word: "webhook".to_owned(),
                     senses: vec![1, 2],
                     translations: texts(&["вебхук"]),
+                },
+                Headword {
+                    word: "webhooks".to_owned(),
+                    senses: vec![2],
+                    translations: texts(&["вебхуки", "вебхук"]),
+                },
+                Headword {
+                    word: "well-known".to_owned(),
+                    senses: vec![],
+                    translations: texts(&["изве́стный"]),
                 },
             ],
             forms: Vec::new(),
         }
     }
 
+    /// The headwords the reduced lookup finds for `word`, in order.
+    fn headwords(combined: &Combined, word: &str) -> Vec<String> {
+        combined
+            .find_reduced(word)
+            .expect("find")
+            .into_iter()
+            .map(|found| found.headword)
+            .collect()
+    }
+
+    fn definitions(article: &Article) -> Vec<&str> {
+        article
+            .senses
+            .iter()
+            .map(|sense| sense.definition.as_str())
+            .collect()
+    }
+
     fn paths(dir: &TempDir) -> (PathBuf, PathBuf) {
         let definitions = dir.path().join("oewn.index");
         let translations = dir.path().join("freedict.index");
-        std::fs::write(&definitions, encode(&sample()).expect("encode")).expect("write");
+        std::fs::write(&definitions, encode(&english()).expect("encode")).expect("write");
         std::fs::write(&translations, encode(&russian()).expect("encode")).expect("write");
         (definitions, translations)
     }
@@ -254,6 +467,18 @@ mod tests {
                         "{error}"
                     );
                 }
+                // The reduced lookup reads both for a word, whatever its form.
+                for word in ["bank", "banks", "went", "Bank", "(bank)", "boolean"] {
+                    let error = combined.find_reduced(word).expect_err("truncated");
+                    assert!(
+                        matches!(error, Error::Damaged { .. }),
+                        "{len} {word}: {error}"
+                    );
+                    assert!(
+                        error.to_string().contains(&damaged.display().to_string()),
+                        "{error}"
+                    );
+                }
             }
         }
     }
@@ -269,5 +494,243 @@ mod tests {
         );
         std::fs::write(&translations, b"").expect("truncate");
         let _ = combined.lookup("bank");
+    }
+
+    #[test]
+    #[should_panic(expected = "is damaged")]
+    fn the_contract_panics_on_a_definitions_index_it_cannot_read() {
+        let dir = TempDir::new("combined-panic-definitions");
+        let (definitions, translations) = paths(&dir);
+        let combined = Combined::new(
+            Index::open(&definitions).expect("open"),
+            Index::open(&translations).expect("open"),
+        );
+        std::fs::write(&definitions, b"").expect("truncate");
+        let _ = combined.lookup("banks");
+    }
+
+    #[test]
+    fn a_regular_form_has_the_article_of_its_dictionary_form() {
+        let dir = TempDir::new("combined-regular");
+        let combined = opened(&dir);
+        let bank = combined.find("bank").expect("find").expect("bank");
+        assert_eq!(combined.find("banks").expect("find"), None);
+        assert_eq!(
+            combined.find_reduced("banks").expect("find"),
+            vec![Found {
+                headword: "bank".to_owned(),
+                article: bank.clone(),
+            }]
+        );
+        assert_eq!(combined.lookup("banks"), Some(bank));
+    }
+
+    #[test]
+    fn a_doubled_consonant_leads_to_the_dictionary_form() {
+        let dir = TempDir::new("combined-doubling");
+        let combined = opened(&dir);
+        for (word, form) in [("running", "run"), ("stopped", "stop")] {
+            assert_eq!(headwords(&combined, word), [form], "{word}");
+            assert_eq!(
+                combined.lookup(word),
+                combined.find(form).expect("find"),
+                "{word}"
+            );
+            assert!(combined.lookup(word).is_some(), "{word}");
+        }
+    }
+
+    #[test]
+    fn exception_lemmas_are_tried_first_and_sorted_then_the_suffix_forms() {
+        let dir = TempDir::new("combined-exceptions");
+        let combined = opened(&dir);
+        assert_eq!(headwords(&combined, "went"), ["go"]);
+        let went = combined.lookup("went").expect("went");
+        assert_eq!(definitions(&went), ["change location"]);
+        // The exception list of the definitions index serves the other too.
+        assert_eq!(went.translations, texts(&["идти́"]));
+
+        // The list has `well` before `good`; `bette` and `bett` are no words.
+        assert_eq!(headwords(&combined, "better"), ["good", "well", "bet"]);
+        assert_eq!(
+            definitions(&combined.lookup("better").expect("better")),
+            [
+                "having desirable qualities",
+                "in a good or proper manner",
+                "stake on the outcome of an issue",
+            ]
+        );
+        assert_eq!(headwords(&combined, "is"), ["be"]);
+    }
+
+    #[test]
+    fn a_dictionary_form_has_its_own_article() {
+        let dir = TempDir::new("combined-own");
+        let combined = opened(&dir);
+        for word in ["bank", "go", "advice", "webhook", "despite"] {
+            assert_eq!(headwords(&combined, word), [word], "{word}");
+            assert_eq!(
+                combined.lookup(word),
+                combined.find(word).expect("find"),
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_and_its_form_give_one_article_the_word_first() {
+        let dir = TempDir::new("combined-merged");
+        let combined = opened(&dir);
+        assert_eq!(headwords(&combined, "saw"), ["saw", "see"]);
+        let saw = combined.lookup("saw").expect("saw");
+        assert_eq!(
+            definitions(&saw),
+            ["a hand tool having a toothed blade", "perceive by sight"]
+        );
+        assert_eq!(saw.translations, texts(&["пила́", "ви́деть"]));
+
+        assert_eq!(headwords(&combined, "left"), ["left", "leave"]);
+        let left = combined.lookup("left").expect("left");
+        assert_eq!(
+            definitions(&left),
+            [
+                "on the side to the north when facing east",
+                "go away from a place",
+            ]
+        );
+        // Each translation once, in the order found.
+        assert_eq!(left.translations, texts(&["ле́вый", "оста́вил", "оставля́ть"]));
+
+        // A doubtful form is not sifted out.
+        assert_eq!(headwords(&combined, "letter"), ["letter", "let"]);
+        assert_eq!(
+            definitions(&combined.lookup("letter").expect("letter")),
+            [
+                "a written message addressed to a person",
+                "make it possible for something to happen",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sense_the_word_and_its_form_share_is_given_once() {
+        let dir = TempDir::new("combined-repeated");
+        let combined = opened(&dir);
+        assert_eq!(headwords(&combined, "webhooks"), ["webhooks", "webhook"]);
+        let found = combined.find_reduced("webhooks").expect("find");
+        assert_eq!(definitions(&found[0].article), ["A web hook."]);
+        assert_eq!(
+            definitions(&found[1].article),
+            ["A unit of work for a web server.", "A web hook."]
+        );
+        let article = combined.lookup("webhooks").expect("webhooks");
+        assert_eq!(
+            definitions(&article),
+            ["A web hook.", "A unit of work for a web server."]
+        );
+        assert_eq!(article.translations, texts(&["вебхуки", "вебхук"]));
+    }
+
+    #[test]
+    fn a_synset_of_the_word_and_its_form_is_given_once_as_first_found() {
+        let dir = TempDir::new("combined-synset");
+        let combined = opened(&dir);
+        assert_eq!(headwords(&combined, "woods"), ["woods", "wood"]);
+        let found = combined.find_reduced("woods").expect("find");
+        // The same synset, with other synonyms through the other headword.
+        assert_eq!(
+            found[0].article.senses[0].synonyms,
+            texts(&["forest", "wood"])
+        );
+        assert_eq!(
+            found[1].article.senses[1].synonyms,
+            texts(&["forest", "woods"])
+        );
+        assert_eq!(
+            combined.lookup("woods").expect("woods").senses,
+            vec![
+                Sense {
+                    definition: "the trees in a large wooded area".to_owned(),
+                    synonyms: texts(&["forest", "wood"]),
+                },
+                Sense {
+                    definition: "the hard fibrous substance under the bark of trees".to_owned(),
+                    synonyms: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_word_as_written_is_tried_before_its_lowercase() {
+        let dir = TempDir::new("combined-case");
+        let combined = opened(&dir);
+        for (word, expected) in [
+            ("Bank", "bank"),
+            ("BANK", "bank"),
+            ("The", "the"),
+            ("BANKS", "bank"),
+            ("Banks", "bank"),
+            ("Went", "go"),
+            ("English", "English"),
+        ] {
+            assert_eq!(headwords(&combined, word), [expected], "{word}");
+            assert_eq!(
+                combined.lookup(word),
+                combined.find(expected).expect("find"),
+                "{word}"
+            );
+        }
+        // The forms are those of the lowercase word, not a second spelling.
+        assert_eq!(headwords(&combined, "english"), Vec::<String>::new());
+        assert_eq!(headwords(&combined, "Bánk"), ["Bánk"]);
+    }
+
+    #[test]
+    fn surrounding_punctuation_is_not_part_of_the_word() {
+        let dir = TempDir::new("combined-punctuation");
+        let combined = opened(&dir);
+        for (word, expected) in [
+            ("bank.", "bank"),
+            ("(bank)", "bank"),
+            ("\"went,\"", "go"),
+            (" Banks! ", "bank"),
+            ("«well-known»", "well-known"),
+        ] {
+            assert_eq!(headwords(&combined, word), [expected], "{word:?}");
+            assert_eq!(
+                combined.lookup(word),
+                combined.find(expected).expect("find"),
+                "{word:?}"
+            );
+        }
+        // Nothing is split: the parts of a hyphenated word are not looked up.
+        assert_eq!(headwords(&combined, "bank-well"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_word_with_nothing_left_or_without_a_headword_form_is_none() {
+        let dir = TempDir::new("combined-none");
+        let combined = opened(&dir);
+        for word in ["", " ", "...", "boolean", "xyzzy", "us", "mutexes", "(?)"] {
+            assert_eq!(headwords(&combined, word), Vec::<String>::new(), "{word:?}");
+            assert_eq!(combined.lookup(word), None, "{word:?}");
+        }
+    }
+
+    #[test]
+    fn a_word_with_nothing_left_reads_no_index() {
+        let dir = TempDir::new("combined-unread");
+        let (definitions, translations) = paths(&dir);
+        let combined = Combined::new(
+            Index::open(&definitions).expect("open"),
+            Index::open(&translations).expect("open"),
+        );
+        std::fs::write(&definitions, b"").expect("truncate");
+        std::fs::write(&translations, b"").expect("truncate");
+        for word in ["", " ", "..."] {
+            assert_eq!(combined.find_reduced(word).expect("find"), Vec::new());
+            assert_eq!(combined.lookup(word), None);
+        }
     }
 }
