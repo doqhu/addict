@@ -48,7 +48,9 @@ fn a_file_of_another_size_is_refused_and_nothing_is_written() {
     let line = refusal(&import(&file, Some(temp.path()), Some(&data_home)));
     assert!(line.contains("short.gz"), "{line}");
     assert!(line.contains("18 bytes"), "{line}");
+    // The sizes of both chosen files.
     assert!(line.contains("11363503 bytes"), "{line}");
+    assert!(line.contains("3948540 bytes"), "{line}");
     assert!(!line.contains("SHA-256"), "{line}");
     assert!(!data_home.exists());
 }
