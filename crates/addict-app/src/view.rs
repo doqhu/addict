@@ -1,20 +1,26 @@
 //! What the window says about its state: the source label and the status,
 //! below them the binding row when the shortcut is not bound, then the field
-//! for a sentence, the sentence with its words as links and the result of the
-//! lookup of the chosen word.
+//! for a word or a sentence, the text of the field with its words as links
+//! and the result of the lookup of the chosen word.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
 //! [`binding_texts`], [`sentence_markup`] and [`result_text`] are pure, so
 //! they are tested without a display; [`View`] puts their results into its
 //! widgets.
+//!
+//! The field's paste is taken over here, and it is the only place where the
+//! application reads the clipboard: the user's paste action, and nothing
+//! else, starts one asynchronous read, and the text that comes replaces the
+//! whole field as one line.
 
-use std::{fmt::Write as _, ops::Range};
+use std::{cell::Cell, fmt::Write as _, ops::Range, rc::Rc};
 
 use addict_core::{
     dictionary::Article,
     input::{Source, WindowState},
+    sentence,
 };
-use gtk::{glib, prelude::*};
+use gtk::{gio, glib, prelude::*};
 
 /// The two texts of one window state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +107,7 @@ pub fn binding_texts(binding: &Binding) -> Option<BindingTexts<'_>> {
 const RETRY_LABEL: &str = "Retry";
 
 /// What the empty field says.
-const FIELD_PLACEHOLDER: &str = "Paste a sentence, then click a word";
+const FIELD_PLACEHOLDER: &str = "Type or paste a word, or a sentence to click a word in";
 
 /// How wide the wrapping texts ask to be, in characters.
 const TEXT_WIDTH_CHARS: i32 = 56;
@@ -190,9 +196,63 @@ fn article_text(article: &Article) -> String {
     lines.join("\n")
 }
 
+/// Takes over the paste of `field`: Ctrl+V, Shift+Insert and Paste of the menu
+/// all emit `paste-clipboard` on the text widget inside the entry. GTK's own
+/// paste, which inserts at the cursor and keeps line breaks, is stopped; the
+/// clipboard is read once, off the UI thread's time, and its text replaces
+/// the whole field as one line. The paste of the primary selection with the
+/// middle button does not come through this signal and stays GTK's.
+///
+/// Nothing happens here without that signal, and nothing waits for the read:
+/// the field stays editable, and a read that ends after the field was edited
+/// is dropped. A clipboard that is empty, blank, not text or cannot be read
+/// changes nothing and says nothing.
+fn replace_on_paste(field: &gtk::Entry) {
+    let Some(text) = field
+        .delegate()
+        .and_then(|delegate| delegate.downcast::<gtk::Text>().ok())
+    else {
+        // No text widget to take the paste from: GTK's own paste stays.
+        return;
+    };
+    // Counts the changes of the field, so a read knows whether the field is
+    // still as it was when the paste was asked for.
+    let edits = Rc::new(Cell::new(0_u64));
+    let counted = edits.clone();
+    field.connect_changed(move |_| counted.set(counted.get().wrapping_add(1)));
+    let entry = field.downgrade();
+    text.connect_paste_clipboard(move |text| {
+        // Before the default handler: GTK's own paste does not run.
+        text.stop_signal_emission_by_name("paste-clipboard");
+        let requested = edits.get();
+        let edits = edits.clone();
+        let entry = entry.clone();
+        text.clipboard()
+            .read_text_async(gio::Cancellable::NONE, move |read| {
+                let Some(entry) = entry.upgrade() else {
+                    return;
+                };
+                let Some(line) = read
+                    .ok()
+                    .flatten()
+                    .and_then(|pasted| sentence::pasted(&pasted))
+                else {
+                    return;
+                };
+                if edits.get() != requested {
+                    return;
+                }
+                // Fires `changed` twice, for the removal of the old text and
+                // for the new one, also when the two are the same text.
+                entry.set_text(&line);
+                entry.set_position(-1);
+            });
+    });
+}
+
 /// The source label and the status, one above the other, then the binding
-/// row: its line, the detail and Retry; then the field for a sentence, the
-/// sentence with its words as links and the result.
+/// row: its line, the detail and Retry; then the field for a word or a
+/// sentence, the text of the field with its words as links and the result.
 pub struct View {
     root: gtk::Box,
     source: gtk::Label,
@@ -241,6 +301,7 @@ impl View {
         let field = gtk::Entry::builder()
             .placeholder_text(FIELD_PLACEHOLDER)
             .build();
+        replace_on_paste(&field);
         let sentence = gtk::Label::builder()
             .use_markup(true)
             .wrap(true)
@@ -337,9 +398,9 @@ impl View {
     }
 
     /// Shows `sentence` with its `words` as links and the `selected` one
-    /// bold; a blank sentence hides the line.
+    /// bold; a text without a word hides the line.
     pub fn render_sentence(&self, sentence: &str, words: &[Range<usize>], selected: Option<usize>) {
-        if sentence.trim().is_empty() {
+        if words.is_empty() {
             self.sentence.set_visible(false);
             self.sentence.set_markup("");
             return;
@@ -379,9 +440,38 @@ mod tests {
         sentence::words,
     };
 
-    use super::{Binding, Lookup, binding_texts, result_text, sentence_markup, texts};
+    use super::{
+        Binding, FIELD_PLACEHOLDER, Lookup, binding_texts, result_text, sentence_markup, texts,
+    };
 
     const SENTENCE: &str = "I sat on the bank.";
+
+    #[test]
+    fn the_empty_field_asks_for_a_word_or_a_sentence() {
+        let asked = FIELD_PLACEHOLDER.to_lowercase();
+        assert!(asked.contains("word"), "{asked}");
+        assert!(asked.contains("sentence"), "{asked}");
+        assert_eq!(asked.lines().count(), 1);
+    }
+
+    #[test]
+    fn a_word_with_an_apostrophe_is_one_link() {
+        let sentence = "I don\u{2019}t know.";
+        assert_eq!(
+            sentence_markup(sentence, &words(sentence), Some(1)),
+            "<a href=\"0\">I</a> <a href=\"1\"><b>don\u{2019}t</b></a> \
+             <a href=\"2\">know</a>."
+        );
+    }
+
+    #[test]
+    fn a_lone_word_is_shown_chosen_with_what_stands_around_it() {
+        let text = " Bank. ";
+        assert_eq!(
+            sentence_markup(text, &words(text), Some(0)),
+            " <a href=\"0\"><b>Bank</b></a>. "
+        );
+    }
 
     #[test]
     fn every_word_of_the_sentence_is_a_link_to_its_index() {

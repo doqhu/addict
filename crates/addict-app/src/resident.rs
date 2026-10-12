@@ -5,9 +5,9 @@
 //! close and Esc handling, and the order of what happens on each event of the
 //! shortcut worker, of Retry, of a repeated launch, of the field and of a
 //! lookup, which runs on the work runner and comes back as an event. What the
-//! window says is [`view`](crate::view)'s; what an edit or a click does to
-//! the manual input is [`manual`](crate::manual)'s; what is recorded with
-//! `--evidence` is [`recording`](crate::recording)'s.
+//! window says and the paste into its field are [`view`](crate::view)'s; what
+//! an edit or a click does to the manual input is [`manual`](crate::manual)'s;
+//! what is recorded with `--evidence` is [`recording`](crate::recording)'s.
 
 use std::{
     cell::{Cell, RefCell},
@@ -32,7 +32,7 @@ use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     evidence,
-    manual::{self, Manual},
+    manual::{self, Edit, Manual},
     recording::Recording,
     view::{Binding, Lookup, View},
 };
@@ -132,7 +132,8 @@ struct Session {
     sender: UnboundedSender<Event>,
     /// Weak: the worker must go when the resident state is dropped.
     current: Weak<RefCell<Option<ShortcutHandle>>>,
-    /// The sentence of the field and what was chosen in it.
+    /// The text of the field, a word or a sentence, and what was chosen in
+    /// it.
     manual: Manual,
     /// The lookup whose outcome is awaited; dropping it cancels the lookup.
     pending: Option<Job>,
@@ -171,33 +172,44 @@ impl Session {
     }
 
     /// The field holds another text: what was chosen in the old one is gone.
+    /// A text of one word is that word without context, looked up at once.
     fn sentence_changed(&mut self, text: String) {
-        if !self.manual.edit(text) {
-            return;
+        match self.manual.edit(text) {
+            Edit::Same => {}
+            Edit::Cleared => {
+                // Cancels the lookup; whatever it still reports has an old
+                // number.
+                self.pending = None;
+                self.render_manual();
+                self.view.render_result(None);
+            }
+            Edit::Lone(run) => self.start_lookup(run),
         }
-        // Cancels the lookup; whatever it still reports has an old number.
-        self.pending = None;
-        self.render_manual();
-        self.view.render_result(None);
     }
 
-    /// A word was clicked: it becomes the input, with its sentence, and is
-    /// looked up.
+    /// A word was clicked: it becomes the input, with its sentence when it
+    /// has one, and is looked up.
     fn word_chosen(&mut self, index: usize) {
         // A click that came before the field's newer text was handled here
         // names a word of a sentence that is no longer shown.
         if self.view.field_text() != self.manual.sentence() {
             return;
         }
-        let Some(run) = self.manual.choose(index) else {
-            return;
-        };
-        let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
-            return;
-        };
+        if let Some(run) = self.manual.choose(index) {
+            self.start_lookup(run);
+        }
+    }
+
+    /// Shows the input that was just chosen and starts its lookup, which has
+    /// the number `run`.
+    fn start_lookup(&mut self, run: u64) {
         // The lookup of another word, if one runs, is replaced.
         self.pending = None;
         self.render_manual();
+        let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
+            self.view.render_result(None);
+            return;
+        };
         let sender = self.sender.clone();
         let started = manual::look_up(
             self.work.upgrade().as_deref(),
