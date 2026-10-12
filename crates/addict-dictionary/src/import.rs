@@ -7,6 +7,11 @@
 //! final place and renamed over it: an import that fails leaves the previous
 //! index as it was, and the same file gives the same index bytes.
 //!
+//! Each source has its own index file, and an import touches no other. The
+//! WordNet file is a gzip of its XML. The FreeDict file is an xz of a tar
+//! archive, unpacked in memory; of its members only the dictionary,
+//! [`FREEDICT_MEMBER`], is read.
+//!
 //! There is no download here: the user brings the file.
 
 use std::{
@@ -20,13 +25,15 @@ use std::{
 use flate2::bufread::MultiGzDecoder;
 use sha2::{Digest, Sha256};
 
-use crate::{format, oewn};
+use crate::{format, freedict, oewn};
 
 /// A dictionary source. Each has one index file in the data directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     /// Open English WordNet: gzip of WN-LMF XML.
     Oewn,
+    /// FreeDict: xz of a tar archive with the dictionary in TEI XML.
+    Freedict,
 }
 
 impl Source {
@@ -34,6 +41,7 @@ impl Source {
     pub fn index_name(self) -> &'static str {
         match self {
             Self::Oewn => "oewn.index",
+            Self::Freedict => "freedict.index",
         }
     }
 }
@@ -54,13 +62,25 @@ pub struct KnownFile<'a> {
 }
 
 /// The chosen files of the product (the spec's dictionary data).
-pub const KNOWN: &[KnownFile<'static>] = &[KnownFile {
-    name: "english-wordnet-2025.xml.gz",
-    edition: "oewn-2025",
-    source: Source::Oewn,
-    size: 11_363_503,
-    sha256: "9ca6d1dcb75f822fdd66617f7d9da48142ace38dd544d6ad5e2feca1674ad3fe",
-}];
+pub const KNOWN: &[KnownFile<'static>] = &[
+    KnownFile {
+        name: "english-wordnet-2025.xml.gz",
+        edition: "oewn-2025",
+        source: Source::Oewn,
+        size: 11_363_503,
+        sha256: "9ca6d1dcb75f822fdd66617f7d9da48142ace38dd544d6ad5e2feca1674ad3fe",
+    },
+    KnownFile {
+        name: "freedict-eng-rus-2025.11.23.src.tar.xz",
+        edition: "freedict-eng-rus-2025.11.23",
+        source: Source::Freedict,
+        size: 3_948_540,
+        sha256: "f3dadcc29d7df6e77edb13b98a2ba2c3fac002852eddd8b557637f0b13d39c39",
+    },
+];
+
+/// The member of the FreeDict archive that is the dictionary.
+pub const FREEDICT_MEMBER: &str = "eng-rus/eng-rus.tei";
 
 /// The data directory of the product: `$XDG_DATA_HOME/addict` when the
 /// variable is an absolute path, else `$HOME/.local/share/addict`.
@@ -189,6 +209,7 @@ fn import_known(file: &Path, dir: &Path, known: &[KnownFile<'_>]) -> Result<Impo
             known.edition,
         )
         .map_err(|error| error.to_string()),
+        Source::Freedict => freedict_archive(&bytes, known.edition),
     }
     .and_then(|contents| {
         let index = format::encode(&contents).map_err(|error| error.to_string())?;
@@ -210,6 +231,36 @@ fn import_known(file: &Path, dir: &Path, known: &[KnownFile<'_>]) -> Result<Impo
         headwords: contents.headwords.len(),
         exception_forms: contents.forms.len(),
     })
+}
+
+/// The contents of the index of a FreeDict archive: the xz stream is
+/// unpacked, and the dictionary is read out of the tar archive inside it.
+fn freedict_archive(archive: &[u8], edition: &str) -> Result<format::Contents, String> {
+    let mut packed = archive;
+    let mut unpacked = Vec::new();
+    lzma_rs::xz_decompress(&mut packed, &mut unpacked)
+        .map_err(|error| format!("not an xz archive: {}", one_line(&error)))?;
+    let not_tar = |error: io::Error| format!("not a tar archive: {}", one_line(&error));
+    let mut members = tar::Archive::new(unpacked.as_slice());
+    for member in members.entries().map_err(not_tar)? {
+        let member = member.map_err(not_tar)?;
+        if member.header().entry_type().is_file()
+            && member.path_bytes().as_ref() == FREEDICT_MEMBER.as_bytes()
+        {
+            return freedict::parse(BufReader::new(member), edition)
+                .map_err(|error| error.to_string());
+        }
+    }
+    Err(format!("the archive has no member {FREEDICT_MEMBER}"))
+}
+
+/// The text of a foreign error on one line.
+fn one_line(error: &dyn fmt::Display) -> String {
+    error
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The bytes of `file` and the known file they are: the size is compared
@@ -295,7 +346,9 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
 
     use super::*;
-    use crate::{index::Index, oewn::tests::FIXTURE, testdir::TempDir};
+    use crate::{
+        freedict::tests::FIXTURE as TEI, index::Index, oewn::tests::FIXTURE, testdir::TempDir,
+    };
 
     fn os(text: &str) -> Option<OsString> {
         Some(OsString::from(text))
@@ -328,8 +381,20 @@ mod tests {
     }
 
     #[test]
-    fn the_known_file_is_the_chosen_wordnet() {
-        assert_eq!(KNOWN.len(), 1);
+    fn the_known_files_are_the_chosen_wordnet_and_the_chosen_freedict() {
+        assert_eq!(KNOWN.len(), 2);
+        assert_eq!(KNOWN[1].name, "freedict-eng-rus-2025.11.23.src.tar.xz");
+        assert_eq!(KNOWN[1].edition, "freedict-eng-rus-2025.11.23");
+        assert_eq!(KNOWN[1].size, 3948540);
+        assert_eq!(
+            KNOWN[1].sha256,
+            "f3dadcc29d7df6e77edb13b98a2ba2c3fac002852eddd8b557637f0b13d39c39"
+        );
+        assert_eq!(KNOWN[1].source, Source::Freedict);
+        assert_eq!(
+            index_path(Path::new("/d"), Source::Freedict),
+            Path::new("/d/freedict.index")
+        );
         assert_eq!(KNOWN[0].size, 11363503);
         assert_eq!(
             KNOWN[0].sha256,
@@ -399,6 +464,247 @@ mod tests {
         let text = error.to_string();
         assert!(!text.contains('\n'), "{text}");
         text
+    }
+
+    /// A tar archive of `members`, each a path and its bytes.
+    fn tar_of(members: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, bytes) in members {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            builder
+                .append_data(&mut header, path, *bytes)
+                .expect("append");
+        }
+        builder.into_inner().expect("tar")
+    }
+
+    fn xz_of(bytes: &[u8]) -> Vec<u8> {
+        let mut packed = Vec::new();
+        lzma_rs::xz_compress(&mut &bytes[..], &mut packed).expect("compress");
+        packed
+    }
+
+    /// A file that stands for the FreeDict archive, in the directory of an
+    /// OEWN fixture, and the hash of that file.
+    struct Archive {
+        file: PathBuf,
+        size: u64,
+        sha256: String,
+    }
+
+    impl Archive {
+        fn new(fixture: &Fixture, name: &str, bytes: &[u8]) -> Self {
+            let file = fixture.dir.path().join(name);
+            fs::write(&file, bytes).expect("write archive");
+            Self {
+                file,
+                size: bytes.len() as u64,
+                sha256: hex(bytes),
+            }
+        }
+
+        /// The archive as `freedict-eng-rus` is published: the dictionary
+        /// among other members.
+        fn whole(fixture: &Fixture) -> Self {
+            let tar = tar_of(&[
+                ("eng-rus/COPYING", b"a licence"),
+                ("eng-rus/README", b""),
+                (FREEDICT_MEMBER, TEI.as_bytes()),
+                ("eng-rus/freedict-P5.xml", b"<TEI>not the dictionary</TEI>"),
+            ]);
+            Self::new(fixture, "freedict.tar.xz", &xz_of(&tar))
+        }
+
+        fn known(&self) -> KnownFile<'_> {
+            KnownFile {
+                name: "fixture.src.tar.xz",
+                edition: "fixture-ru-1",
+                source: Source::Freedict,
+                size: self.size,
+                sha256: &self.sha256,
+            }
+        }
+
+        /// Imports the archive where both the WordNet fixture and it are
+        /// known.
+        fn import(&self, fixture: &Fixture) -> Result<Imported, ImportError> {
+            let [wordnet] = fixture.known();
+            import_known(&self.file, &fixture.data(), &[wordnet, self.known()])
+        }
+    }
+
+    #[test]
+    fn the_freedict_archive_is_imported_into_a_readable_index() {
+        let fixture = Fixture::new("freedict");
+        let archive = Archive::whole(&fixture);
+        let imported = archive.import(&fixture).expect("import");
+        assert_eq!(imported.path, fixture.data().join("freedict.index"));
+        assert_eq!(imported.headwords, 4);
+        assert_eq!(imported.exception_forms, 0);
+
+        let index = Index::open(&imported.path).expect("open");
+        assert_eq!(index.source(), "fixture-ru-1");
+        assert_eq!(index.headwords(), 4);
+        assert_eq!(index.exception_forms(), 0);
+        let bank = index.find("bank").expect("find").expect("bank");
+        assert_eq!(bank.senses.len(), 4);
+        assert!(bank.senses.iter().all(|sense| sense.synonyms.is_empty()));
+        assert_eq!(
+            bank.translations,
+            ["бе́рег", "брег", "банк", "ряд", "накреня́ться"]
+        );
+        let unit = index.find("R&D").expect("find").expect("R&D");
+        assert!(unit.senses.is_empty());
+        assert_eq!(unit.translations, ["НИОКР"]);
+        assert_eq!(index.find("Bank").expect("find"), None);
+        let left: Vec<_> = fs::read_dir(fixture.data())
+            .expect("data directory")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, ["freedict.index"]);
+    }
+
+    #[test]
+    fn a_second_freedict_import_replaces_the_index_with_the_same_bytes() {
+        let fixture = Fixture::new("freedict-again");
+        let archive = Archive::whole(&fixture);
+        let first = archive.import(&fixture).expect("import");
+        let bytes = fs::read(&first.path).expect("index");
+        let second = archive.import(&fixture).expect("import again");
+        assert_eq!(first, second);
+        assert_eq!(fs::read(&second.path).expect("index"), bytes);
+    }
+
+    #[test]
+    fn an_import_leaves_the_index_of_the_other_source_as_it_was() {
+        let fixture = Fixture::new("two-sources");
+        let archive = Archive::whole(&fixture);
+        let [wordnet] = fixture.known();
+        let known = [wordnet, archive.known()];
+        let data = fixture.data();
+
+        let oewn = import_known(&fixture.file(), &data, &known).expect("wordnet");
+        let oewn_bytes = fs::read(&oewn.path).expect("index");
+        let freedict = import_known(&archive.file, &data, &known).expect("freedict");
+        assert_ne!(oewn.path, freedict.path);
+        assert_eq!(fs::read(&oewn.path).expect("index"), oewn_bytes);
+
+        let freedict_bytes = fs::read(&freedict.path).expect("index");
+        import_known(&fixture.file(), &data, &known).expect("wordnet again");
+        assert_eq!(fs::read(&freedict.path).expect("index"), freedict_bytes);
+        assert_eq!(fs::read(&oewn.path).expect("index"), oewn_bytes);
+
+        // A refused file touches neither.
+        let short = Archive::new(&fixture, "short.xz", b"short");
+        assert!(import_known(&short.file, &data, &known).is_err());
+        assert_eq!(fs::read(&freedict.path).expect("index"), freedict_bytes);
+        assert_eq!(fs::read(&oewn.path).expect("index"), oewn_bytes);
+        let mut left: Vec<_> = fs::read_dir(&data)
+            .expect("data directory")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["freedict.index", "oewn.index"]);
+    }
+
+    #[test]
+    fn another_size_or_hash_of_the_archive_writes_nothing() {
+        let fixture = Fixture::new("freedict-refused");
+        let archive = Archive::whole(&fixture);
+        let whole = fs::read(&archive.file).expect("archive");
+        let [wordnet] = fixture.known();
+        let known = [wordnet, archive.known()];
+
+        let truncated = fixture.dir.path().join("truncated.xz");
+        fs::write(&truncated, &whole[..whole.len() - 9]).expect("write");
+        let error = import_known(&truncated, &fixture.data(), &known).expect_err("size");
+        assert!(matches!(error, ImportError::Size { .. }), "{error}");
+        let text = one_line(&error);
+        assert!(text.contains("truncated.xz"), "{text}");
+        // The sizes of both known files.
+        assert!(text.contains(&format!("{} bytes", whole.len())), "{text}");
+        assert!(
+            text.contains(&format!("{} bytes", fixture.gz.len())),
+            "{text}"
+        );
+        assert!(!text.contains("SHA-256"), "{text}");
+
+        let mut changed = whole.clone();
+        changed[whole.len() / 2] ^= 1;
+        let file = fixture.dir.path().join("changed.xz");
+        fs::write(&file, &changed).expect("write");
+        let error = import_known(&file, &fixture.data(), &known).expect_err("hash");
+        assert!(matches!(error, ImportError::Hash { .. }), "{error}");
+        let text = one_line(&error);
+        assert!(text.contains("changed.xz"), "{text}");
+        assert!(text.contains(&archive.sha256), "{text}");
+        assert!(text.contains(&hex(&changed)), "{text}");
+        // Only the known file of this size applies.
+        assert!(!text.contains(&fixture.sha256), "{text}");
+        assert!(!fixture.dir.path().join("data").exists());
+    }
+
+    #[test]
+    fn a_known_archive_with_bad_contents_writes_nothing() {
+        let fixture = Fixture::new("freedict-contents");
+        let tei = TEI.as_bytes();
+        let without_orth = TEI.replace("<orth>shore</orth>", "");
+        let without_entries = "<TEI><text><body></body></text></TEI>";
+        let cases: [(&str, Vec<u8>, &str); 8] = [
+            ("not xz", b"this is not xz at all".to_vec(), "not an xz"),
+            ("xz of no tar", xz_of(tei), "not a tar archive"),
+            ("an empty archive", xz_of(&tar_of(&[])), FREEDICT_MEMBER),
+            (
+                "no dictionary member",
+                xz_of(&tar_of(&[
+                    ("eng-rus/COPYING", b"a licence"),
+                    ("eng-rus.tei", tei),
+                    ("eng-rus/eng-rus.tei.bak", tei),
+                ])),
+                FREEDICT_MEMBER,
+            ),
+            (
+                "the member is not TEI",
+                xz_of(&tar_of(&[(FREEDICT_MEMBER, FIXTURE.as_bytes())])),
+                "not a FreeDict TEI file",
+            ),
+            (
+                "the member is not XML",
+                xz_of(&tar_of(&[(FREEDICT_MEMBER, b"plain text")])),
+                "no entry",
+            ),
+            (
+                "an entry without orth",
+                xz_of(&tar_of(&[(FREEDICT_MEMBER, without_orth.as_bytes())])),
+                "no orth",
+            ),
+            (
+                "no entry",
+                xz_of(&tar_of(&[(FREEDICT_MEMBER, without_entries.as_bytes())])),
+                "no entry",
+            ),
+        ];
+        for (name, bytes, cause) in cases {
+            let archive = Archive::new(&fixture, "bad.tar.xz", &bytes);
+            let error = archive.import(&fixture).expect_err(name);
+            assert!(
+                matches!(error, ImportError::Contents { .. }),
+                "{name}: {error}"
+            );
+            let text = one_line(&error);
+            assert!(text.contains("bad.tar.xz"), "{name}: {text}");
+            assert!(text.contains(cause), "{name}: {text}");
+            assert!(!fixture.dir.path().join("data").exists(), "{name}");
+        }
+
+        // The index of an earlier import stays.
+        let imported = Archive::whole(&fixture).import(&fixture).expect("import");
+        let before = fs::read(&imported.path).expect("index");
+        let archive = Archive::new(&fixture, "bad.tar.xz", &xz_of(&tar_of(&[])));
+        assert!(archive.import(&fixture).is_err());
+        assert_eq!(fs::read(&imported.path).expect("index"), before);
     }
 
     #[test]

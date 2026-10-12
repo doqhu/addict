@@ -6,10 +6,14 @@
 //!
 //! `addict import <FILE>` turns a dictionary file the user has downloaded
 //! into an index in the data directory, `$XDG_DATA_HOME/addict` or
-//! `$HOME/.local/share/addict`. Only the chosen files are accepted, by size
-//! and SHA-256; the index replaces the previous one of the same source. The
-//! command prints the path of the index and the counts of its headwords and
-//! exception forms. The resident application does not read the index yet.
+//! `$HOME/.local/share/addict`. Only the two chosen files are accepted, by
+//! size and SHA-256: `english-wordnet-2025.xml.gz`, the English definitions
+//! and synonyms, gives `oewn.index`, and
+//! `freedict-eng-rus-2025.11.23.src.tar.xz`, the Russian translations, gives
+//! `freedict.index`. The index replaces the previous one of the same source
+//! and the index of the other source is not touched. The command prints the
+//! path of the index and the counts of its headwords and exception forms.
+//! The resident application does not read the indexes yet.
 //!
 //! With no arguments the process is the resident application: one hidden
 //! window, shown each time the global shortcut is pressed. On each press the

@@ -3,16 +3,21 @@
 //!
 //! [`format`] owns the layout and the writer, [`index`] reads a written file
 //! by positioned reads and answers the `addict_core` dictionary contract,
-//! [`oewn`] turns an Open English WordNet file into the writer's input and
-//! [`import`] is the logic of `addict import`.
+//! [`combined`] answers it with one article from two open indexes, [`oewn`]
+//! and [`freedict`] turn an Open English WordNet file and a FreeDict TEI
+//! file into the writer's input and [`import`] is the logic of `addict
+//! import`.
 
 #![forbid(unsafe_code)]
 
+pub mod combined;
 pub mod format;
+pub mod freedict;
 pub mod import;
 pub mod index;
 pub mod oewn;
 
+pub use combined::Combined;
 pub use index::{Error, Index};
 
 #[cfg(test)]
