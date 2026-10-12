@@ -32,10 +32,22 @@
 //!
 //! The input word is looked up in the built-in sample dictionary of a few
 //! words. The lookup runs off the UI thread with a deadline, and the window
-//! shows its outcome as plain text: the article, a line saying the dictionary
-//! has no entry, or a line saying the lookup did not finish. Another word, a
-//! second click on the same one or an edit of the field replaces the lookup,
-//! and the outcome of a replaced lookup is never shown.
+//! shows its outcome: the article, a line saying the dictionary has no entry,
+//! or a line saying the lookup did not finish. Another word, a second click
+//! on the same one or an edit of the field replaces the lookup, and the
+//! outcome of a replaced lookup is never shown.
+//!
+//! An article is shown as the list of its senses, numbered, each definition
+//! a link; the list scrolls when it is taller than its area. No sense is
+//! chosen when the article arrives, and a line below the list asks to choose
+//! one. A click on a sense shows its definition there as a short explanation,
+//! under a mark saying that it is the dictionary definition of the chosen
+//! sense and is not checked against the sentence, and with it the synonyms of
+//! that sense. Below that stand the Russian translations, which belong to the
+//! word and not to a sense. What the article lacks has its own line: no
+//! English definitions, no synonyms for the chosen sense, no Russian
+//! translation. Choosing a sense looks nothing up, and the next result
+//! forgets the choice.
 //!
 //! A paste into the field with Ctrl+V, Shift+Insert or the menu replaces the
 //! whole field with the clipboard text as one line, and with it the input and
