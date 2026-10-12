@@ -1,12 +1,15 @@
 //! What the window says about its state: the source label and the status,
 //! below them the binding row when the shortcut is not bound, then the field
 //! for a word or a sentence, the text of the field with its words as links
-//! and the result of the lookup of the chosen word.
+//! and the result of the lookup of the chosen word: the senses of the word as
+//! links in a list that scrolls, and below the list what is said about the
+//! sense that was clicked and about the word.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
-//! [`binding_texts`], [`sentence_markup`] and [`result_text`] are pure, so
-//! they are tested without a display; [`View`] puts their results into its
-//! widgets.
+//! [`binding_texts`], [`sentence_markup`], [`senses_markup`] and
+//! [`details_markup`] are pure, and so is [`Shown`], the result with the sense
+//! chosen in it; they are tested without a display, and [`View`] puts their
+//! results into its widgets.
 //!
 //! The field's paste is taken over here, and it is the only place where the
 //! application reads the clipboard: the user's paste action, and nothing
@@ -112,6 +115,10 @@ const FIELD_PLACEHOLDER: &str = "Type or paste a word, or a sentence to click a 
 /// How wide the wrapping texts ask to be, in characters.
 const TEXT_WIDTH_CHARS: i32 = 56;
 
+/// The least height of the list of senses, in pixels. The list takes
+/// whatever height the window has left above this.
+const SENSES_MIN_HEIGHT: i32 = 72;
+
 /// The sentence as Pango markup: the text as given, with each of `words` (byte
 /// ranges of `sentence`, in order) as a link whose target is the index of the
 /// word, and the `selected` word bold. `&`, `<` and `>` of the text are
@@ -168,32 +175,164 @@ pub enum Lookup {
     Unfinished,
 }
 
-/// The result as plain text. No wildcard arm: a new variant does not compile
-/// until it is given its text. The line of an unfinished lookup names no
-/// cause.
-pub fn result_text(lookup: &Lookup) -> String {
+/// The line of a lookup that still runs.
+const PENDING: &str = "Looking up…";
+
+/// The line of a lookup that ended without an answer. It names no cause.
+const UNFINISHED: &str = "The lookup did not finish.";
+
+/// The line of a word the dictionary has no entry for: what stands before the
+/// word and what stands after it.
+const NO_ENTRY_BEFORE: &str = "The dictionary has no entry for “";
+const NO_ENTRY_AFTER: &str = "”.";
+
+/// What stands below the list while no sense is chosen.
+const CHOOSE_SENSE: &str = "Click a sense to see its short explanation and its synonyms.";
+
+/// The mark above the definition of the chosen sense. It says what the text
+/// is and claims no fit to the sentence.
+const EXPLANATION_MARK: &str = "Short explanation — the dictionary definition of the sense you chose; \
+     it is not checked against the sentence:";
+
+/// What stands before the synonyms of the chosen sense.
+const SYNONYMS_LABEL: &str = "Synonyms of this sense:";
+
+/// The line of a chosen sense without synonyms.
+const NO_SYNONYMS: &str = "The dictionary gives no synonyms for this sense.";
+
+/// What stands before the translations. They belong to the word, not to a
+/// sense.
+const RUSSIAN_LABEL: &str = "Russian, for the word as a whole:";
+
+/// The line of an article without translations.
+const NO_TRANSLATION: &str = "The dictionary has no Russian translation of this word.";
+
+/// The line of an article without senses.
+const NO_DEFINITIONS: &str = "The dictionary has no English definitions of this word.";
+
+/// The list of senses as Pango markup: one numbered line for each sense, its
+/// definition a link whose target is the index of the sense, and the `chosen`
+/// one bold. Empty when `lookup` is not an article with senses. The
+/// definitions are escaped.
+pub fn senses_markup(lookup: &Lookup, chosen: Option<usize>) -> String {
+    let Lookup::Article(article) = lookup else {
+        return String::new();
+    };
+    let mut markup = String::new();
+    for (index, sense) in article.senses.iter().enumerate() {
+        if index > 0 {
+            markup.push('\n');
+        }
+        // Writing to a `String` does not fail.
+        let _ = write!(markup, "{}. <a href=\"{index}\">", index + 1);
+        if chosen == Some(index) {
+            markup.push_str("<b>");
+            push_escaped(&mut markup, &sense.definition);
+            markup.push_str("</b>");
+        } else {
+            push_escaped(&mut markup, &sense.definition);
+        }
+        markup.push_str("</a>");
+    }
+    markup
+}
+
+/// What stands below the list of senses, as Pango markup. For an article:
+/// the line asking to choose a sense, or the marked definition of the `chosen`
+/// one with its synonyms, then the translations of the word; whatever the
+/// article lacks has its own line. For the other results their one line. No
+/// wildcard arm: a new variant does not compile until it is given its text.
+/// The texts of the dictionary and the word are escaped.
+pub fn details_markup(lookup: &Lookup, chosen: Option<usize>) -> String {
+    let mut markup = String::new();
     match lookup {
-        Lookup::Pending => "Looking up…".to_owned(),
-        Lookup::Article(article) => article_text(article),
-        Lookup::NoEntry { word } => format!("The dictionary has no entry for “{word}”."),
-        Lookup::Unfinished => "The lookup did not finish.".to_owned(),
+        Lookup::Pending => push_escaped(&mut markup, PENDING),
+        Lookup::Article(article) => push_article(&mut markup, article, chosen),
+        Lookup::NoEntry { word } => {
+            push_escaped(&mut markup, NO_ENTRY_BEFORE);
+            push_escaped(&mut markup, word);
+            push_escaped(&mut markup, NO_ENTRY_AFTER);
+        }
+        Lookup::Unfinished => push_escaped(&mut markup, UNFINISHED),
+    }
+    markup
+}
+
+/// The lines of `article` that stand below its list of senses. A `chosen`
+/// index the article does not have is no choice.
+fn push_article(markup: &mut String, article: &Article, chosen: Option<usize>) {
+    let sense = chosen.and_then(|index| article.senses.get(index));
+    if article.senses.is_empty() {
+        push_escaped(markup, NO_DEFINITIONS);
+    } else if let Some(sense) = sense {
+        markup.push_str("<i>");
+        push_escaped(markup, EXPLANATION_MARK);
+        markup.push_str("</i>\n");
+        push_escaped(markup, &sense.definition);
+        markup.push('\n');
+        if sense.synonyms.is_empty() {
+            push_escaped(markup, NO_SYNONYMS);
+        } else {
+            push_listed(markup, SYNONYMS_LABEL, &sense.synonyms);
+        }
+    } else {
+        push_escaped(markup, CHOOSE_SENSE);
+    }
+    markup.push_str("\n\n");
+    if article.translations.is_empty() {
+        push_escaped(markup, NO_TRANSLATION);
+    } else {
+        push_listed(markup, RUSSIAN_LABEL, &article.translations);
     }
 }
 
-/// The numbered senses, each with its synonyms when it has any, then the
-/// translations.
-fn article_text(article: &Article) -> String {
-    let mut lines = Vec::new();
-    for (index, sense) in article.senses.iter().enumerate() {
-        lines.push(format!("{}. {}", index + 1, sense.definition));
-        if !sense.synonyms.is_empty() {
-            lines.push(format!("    synonyms: {}", sense.synonyms.join(", ")));
+/// Appends `label` and the `items` after it, separated by commas.
+fn push_listed(markup: &mut String, label: &str, items: &[String]) {
+    push_escaped(markup, label);
+    for (index, item) in items.iter().enumerate() {
+        markup.push_str(if index == 0 { " " } else { ", " });
+        push_escaped(markup, item);
+    }
+}
+
+/// The result the window shows and the sense chosen in it.
+#[derive(Debug, Default)]
+pub struct Shown {
+    lookup: Option<Lookup>,
+    sense: Option<usize>,
+}
+
+impl Shown {
+    /// Another result, or none, is shown: the sense chosen in the one before
+    /// is forgotten.
+    pub fn show(&mut self, lookup: Option<Lookup>) {
+        self.lookup = lookup;
+        self.sense = None;
+    }
+
+    /// Chooses the sense with this index and says whether it is chosen now:
+    /// `false`, with nothing changed, unless the shown result is an article
+    /// that has the sense. Choosing the chosen sense again is `true`.
+    pub fn choose(&mut self, index: usize) -> bool {
+        let Some(Lookup::Article(article)) = &self.lookup else {
+            return false;
+        };
+        if index >= article.senses.len() {
+            return false;
         }
+        self.sense = Some(index);
+        true
     }
-    if !article.translations.is_empty() {
-        lines.push(format!("Russian: {}", article.translations.join(", ")));
+
+    /// The shown result.
+    pub fn lookup(&self) -> Option<&Lookup> {
+        self.lookup.as_ref()
     }
-    lines.join("\n")
+
+    /// The index of the chosen sense.
+    pub fn sense(&self) -> Option<usize> {
+        self.sense
+    }
 }
 
 /// Takes over the paste of `field`: Ctrl+V, Shift+Insert and Paste of the menu
@@ -252,7 +391,8 @@ fn replace_on_paste(field: &gtk::Entry) {
 
 /// The source label and the status, one above the other, then the binding
 /// row: its line, the detail and Retry; then the field for a word or a
-/// sentence, the text of the field with its words as links and the result.
+/// sentence, the text of the field with its words as links and the result:
+/// the list of senses, which scrolls, and below it the rest, which does not.
 pub struct View {
     root: gtk::Box,
     source: gtk::Label,
@@ -263,7 +403,12 @@ pub struct View {
     retry: gtk::Button,
     field: gtk::Entry,
     sentence: gtk::Label,
-    result: gtk::Label,
+    /// The senses as links, inside `senses_area`.
+    senses: gtk::Label,
+    /// Scrolls the list; hidden when there is no list.
+    senses_area: gtk::ScrolledWindow,
+    /// What stands below the list.
+    details: gtk::Label,
 }
 
 impl View {
@@ -310,7 +455,34 @@ impl View {
             .xalign(0.0)
             .visible(false)
             .build();
-        let result = gtk::Label::builder()
+        // Not selectable: a click on a link must not give the label the
+        // focus.
+        let senses = gtk::Label::builder()
+            .use_markup(true)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .max_width_chars(TEXT_WIDTH_CHARS)
+            .xalign(0.0)
+            .valign(gtk::Align::Start)
+            .build();
+        // Built here, not by the scrolled window: its own viewport scrolls to
+        // the child that takes the focus, and a click on a sense must not
+        // move the list.
+        let viewport = gtk::Viewport::builder()
+            .scroll_to_focus(false)
+            .child(&senses)
+            .build();
+        // The list takes the height the window has left, so the window is as
+        // tall for a long list as for a short one.
+        let senses_area = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .min_content_height(SENSES_MIN_HEIGHT)
+            .vexpand(true)
+            .child(&viewport)
+            .visible(false)
+            .build();
+        let details = gtk::Label::builder()
+            .use_markup(true)
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
             .max_width_chars(TEXT_WIDTH_CHARS)
@@ -320,7 +492,8 @@ impl View {
             .build();
         root.append(&field);
         root.append(&sentence);
-        root.append(&result);
+        root.append(&senses_area);
+        root.append(&details);
 
         let view = Self {
             root,
@@ -332,7 +505,9 @@ impl View {
             retry,
             field,
             sentence,
-            result,
+            senses,
+            senses_area,
+            details,
         };
         view.render(state);
         view.render_binding(binding);
@@ -392,6 +567,17 @@ impl View {
         });
     }
 
+    /// Runs `chosen` with the index of a sense each time its link is clicked.
+    pub fn connect_sense_chosen(&self, chosen: impl Fn(usize) + 'static) {
+        self.senses.connect_activate_link(move |_, target| {
+            if let Ok(index) = target.parse() {
+                chosen(index);
+            }
+            // The target is an index: GTK must not open it as a URI.
+            glib::Propagation::Stop
+        });
+    }
+
     /// The text the field holds now.
     pub fn field_text(&self) -> String {
         self.field.text().into()
@@ -414,15 +600,27 @@ impl View {
         self.sentence.set_visible(true);
     }
 
-    /// Shows the text of `lookup`, or hides the result when there is none.
-    pub fn render_result(&self, lookup: Option<&Lookup>) {
+    /// Shows `lookup` with the sense `chosen` in it, or hides the result
+    /// when there is none. With no sense chosen the list is put at its top:
+    /// that is how a result arrives. A choice leaves the list where it is.
+    pub fn render_result(&self, lookup: Option<&Lookup>, chosen: Option<usize>) {
+        // Empty first, as for the sentence: the targets are indices, and GTK
+        // would show the same-numbered sense of the next markup as visited.
+        self.senses.set_markup("");
         let Some(lookup) = lookup else {
-            self.result.set_visible(false);
-            self.result.set_text("");
+            self.senses_area.set_visible(false);
+            self.details.set_visible(false);
+            self.details.set_markup("");
             return;
         };
-        self.result.set_text(&result_text(lookup));
-        self.result.set_visible(true);
+        let list = senses_markup(lookup, chosen);
+        self.senses.set_markup(&list);
+        self.senses_area.set_visible(!list.is_empty());
+        if chosen.is_none() {
+            self.senses_area.vadjustment().set_value(0.0);
+        }
+        self.details.set_markup(&details_markup(lookup, chosen));
+        self.details.set_visible(true);
     }
 
     /// Puts the keyboard focus into the field, so a paste lands there. The
@@ -441,7 +639,9 @@ mod tests {
     };
 
     use super::{
-        Binding, FIELD_PLACEHOLDER, Lookup, binding_texts, result_text, sentence_markup, texts,
+        Binding, CHOOSE_SENSE, EXPLANATION_MARK, FIELD_PLACEHOLDER, Lookup, NO_DEFINITIONS,
+        NO_SYNONYMS, NO_TRANSLATION, PENDING, RUSSIAN_LABEL, SYNONYMS_LABEL, Shown, UNFINISHED,
+        binding_texts, details_markup, senses_markup, sentence_markup, texts,
     };
 
     const SENTENCE: &str = "I sat on the bank.";
@@ -584,9 +784,38 @@ mod tests {
         all
     }
 
+    /// The text a label shows for `markup`: the tags dropped, the escapes
+    /// read back.
+    fn plain(markup: &str) -> String {
+        let mut text = String::new();
+        let mut inside = false;
+        for character in markup.chars() {
+            match character {
+                '<' => inside = true,
+                '>' => inside = false,
+                other if !inside => text.push(other),
+                _ => {}
+            }
+        }
+        text.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+    }
+
+    /// The lines shown below the list.
+    fn details(lookup: &Lookup, chosen: Option<usize>) -> Vec<String> {
+        plain(&details_markup(lookup, chosen))
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
     #[test]
     fn every_result_has_its_own_text() {
-        let texts: Vec<_> = every_lookup().iter().map(result_text).collect();
+        let texts: Vec<_> = every_lookup()
+            .iter()
+            .map(|lookup| details_markup(lookup, None))
+            .collect();
         for (index, text) in texts.iter().enumerate() {
             assert!(!text.trim().is_empty());
             assert!(!texts[..index].contains(text), "{text}");
@@ -594,62 +823,294 @@ mod tests {
     }
 
     #[test]
-    fn every_result_but_an_article_is_one_line() {
+    fn every_result_but_an_article_is_one_line_and_has_no_list() {
         for lookup in every_lookup() {
-            let lines = result_text(&lookup).lines().count();
-            assert_eq!(
-                lines == 1,
-                !matches!(lookup, Lookup::Article(_)),
-                "{lookup:?}"
+            let article = matches!(lookup, Lookup::Article(_));
+            for chosen in [None, Some(0), Some(7)] {
+                assert_eq!(details(&lookup, chosen).len() == 1, !article, "{lookup:?}");
+                assert_eq!(
+                    senses_markup(&lookup, chosen).is_empty(),
+                    !article,
+                    "{lookup:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_pending_and_unfinished_lines_keep_their_wording() {
+        assert_eq!(details_markup(&Lookup::Pending, None), "Looking up…");
+        assert_eq!(
+            details_markup(&Lookup::Unfinished, None),
+            "The lookup did not finish."
+        );
+        assert_eq!(PENDING, "Looking up…");
+        assert_eq!(UNFINISHED, "The lookup did not finish.");
+    }
+
+    #[test]
+    fn an_article_as_it_arrives_lists_every_sense_and_chooses_none() {
+        let lookup = Lookup::Article(article());
+        let list = senses_markup(&lookup, None);
+        assert_eq!(
+            list,
+            "1. <a href=\"0\">first</a>\n2. <a href=\"1\">second</a>"
+        );
+        assert!(!list.contains("<b>"), "{list}");
+    }
+
+    #[test]
+    fn an_article_as_it_arrives_asks_to_choose_and_explains_nothing() {
+        let lookup = Lookup::Article(article());
+        assert_eq!(
+            details(&lookup, None),
+            [
+                CHOOSE_SENSE.to_owned(),
+                String::new(),
+                format!("{RUSSIAN_LABEL} раз, два"),
+            ]
+        );
+        let markup = details_markup(&lookup, None);
+        for absent in [EXPLANATION_MARK, SYNONYMS_LABEL, NO_SYNONYMS, "one", "uno"] {
+            assert!(!markup.contains(absent), "{absent:?} in {markup}");
+        }
+    }
+
+    #[test]
+    fn the_chosen_sense_is_bold_in_the_list_and_explained_below_it() {
+        let lookup = Lookup::Article(article());
+        assert_eq!(
+            senses_markup(&lookup, Some(0)),
+            "1. <a href=\"0\"><b>first</b></a>\n2. <a href=\"1\">second</a>"
+        );
+        assert_eq!(
+            details(&lookup, Some(0)),
+            [
+                EXPLANATION_MARK.to_owned(),
+                "first".to_owned(),
+                format!("{SYNONYMS_LABEL} one, uno"),
+                String::new(),
+                format!("{RUSSIAN_LABEL} раз, два"),
+            ]
+        );
+        assert!(!details_markup(&lookup, Some(0)).contains(CHOOSE_SENSE));
+    }
+
+    #[test]
+    fn only_the_chosen_sense_is_bold() {
+        let article = Sample.lookup("bank").expect("bank");
+        let count = article.senses.len();
+        let lookup = Lookup::Article(article.clone());
+        for chosen in 0..count {
+            let markup = senses_markup(&lookup, Some(chosen));
+            assert_eq!(markup.matches("<b>").count(), 1, "{markup}");
+            let definition = &article.senses[chosen].definition;
+            assert!(
+                markup.contains(&format!("<a href=\"{chosen}\"><b>{definition}</b></a>")),
+                "{markup}"
+            );
+            assert_eq!(markup.matches("<a href=").count(), count, "{markup}");
+        }
+    }
+
+    #[test]
+    fn a_chosen_sense_without_synonyms_says_so() {
+        let lookup = Lookup::Article(article());
+        assert_eq!(
+            details(&lookup, Some(1)),
+            [
+                EXPLANATION_MARK.to_owned(),
+                "second".to_owned(),
+                NO_SYNONYMS.to_owned(),
+                String::new(),
+                format!("{RUSSIAN_LABEL} раз, два"),
+            ]
+        );
+        assert!(!details_markup(&lookup, Some(1)).contains(SYNONYMS_LABEL));
+    }
+
+    #[test]
+    fn the_electricity_sense_of_charge_has_no_synonyms() {
+        let article = Sample.lookup("charge").expect("charge");
+        let index = article
+            .senses
+            .iter()
+            .position(|sense| sense.definition == "the amount of electricity held by an object")
+            .expect("the sense");
+        let lines = details(&Lookup::Article(article), Some(index));
+        assert!(lines.contains(&NO_SYNONYMS.to_owned()), "{lines:?}");
+    }
+
+    #[test]
+    fn an_article_without_translations_says_so() {
+        let mut bare = article();
+        bare.translations.clear();
+        let lookup = Lookup::Article(bare);
+        for chosen in [None, Some(0), Some(1)] {
+            let lines = details(&lookup, chosen);
+            assert_eq!(lines.last().map(String::as_str), Some(NO_TRANSLATION));
+            assert!(
+                !details_markup(&lookup, chosen).contains(RUSSIAN_LABEL),
+                "{lines:?}"
             );
         }
     }
 
     #[test]
-    fn an_article_lists_senses_synonyms_and_translations() {
+    fn an_article_without_senses_says_so_and_keeps_the_russian_line() {
+        let mut bare = article();
+        bare.senses.clear();
+        let lookup = Lookup::Article(bare);
+        // A sense cannot be chosen there; an index changes nothing.
+        for chosen in [None, Some(0)] {
+            assert_eq!(senses_markup(&lookup, chosen), "");
+            assert_eq!(
+                details(&lookup, chosen),
+                [
+                    NO_DEFINITIONS.to_owned(),
+                    String::new(),
+                    format!("{RUSSIAN_LABEL} раз, два"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn an_article_with_nothing_has_a_line_for_each_absence() {
+        let lookup = Lookup::Article(Article {
+            senses: Vec::new(),
+            translations: Vec::new(),
+        });
         assert_eq!(
-            result_text(&Lookup::Article(article())),
-            "1. first\n    synonyms: one, uno\n2. second\nRussian: раз, два"
+            details(&lookup, None),
+            [
+                NO_DEFINITIONS.to_owned(),
+                String::new(),
+                NO_TRANSLATION.to_owned()
+            ]
         );
     }
 
     #[test]
-    fn an_article_without_translations_has_no_line_for_them() {
-        let mut bare = article();
-        bare.translations.clear();
+    fn a_sense_the_article_does_not_have_is_no_choice() {
+        let lookup = Lookup::Article(article());
         assert_eq!(
-            result_text(&Lookup::Article(bare)),
-            "1. first\n    synonyms: one, uno\n2. second"
+            senses_markup(&lookup, Some(2)),
+            senses_markup(&lookup, None)
         );
+        assert_eq!(
+            details_markup(&lookup, Some(2)),
+            details_markup(&lookup, None)
+        );
+    }
+
+    #[test]
+    fn the_texts_of_the_dictionary_are_shown_as_written() {
+        let written = "a < b & c";
+        let lookup = Lookup::Article(Article {
+            senses: vec![Sense {
+                definition: written.to_owned(),
+                synonyms: vec!["<i>x</i>".to_owned(), "y & z".to_owned()],
+            }],
+            translations: vec!["<б>".to_owned(), "&amp;".to_owned()],
+        });
+        assert_eq!(
+            senses_markup(&lookup, None),
+            "1. <a href=\"0\">a &lt; b &amp; c</a>"
+        );
+        assert_eq!(
+            senses_markup(&lookup, Some(0)),
+            "1. <a href=\"0\"><b>a &lt; b &amp; c</b></a>"
+        );
+        let markup = details_markup(&lookup, Some(0));
+        assert!(markup.contains("\na &lt; b &amp; c\n"), "{markup}");
+        assert!(
+            markup.contains("&lt;i&gt;x&lt;/i&gt;, y &amp; z"),
+            "{markup}"
+        );
+        assert!(markup.contains("&lt;б&gt;, &amp;amp;"), "{markup}");
+        // The only tags are the ones of the mark.
+        assert_eq!(markup.matches('<').count(), 2, "{markup}");
+        assert!(plain(&markup).contains(written));
     }
 
     #[test]
     fn the_sample_article_of_bank_is_shown_in_full() {
         let article = Sample.lookup("bank").expect("bank");
-        let text = result_text(&Lookup::Article(article.clone()));
-        for sense in &article.senses {
+        let lookup = Lookup::Article(article.clone());
+        let list = plain(&senses_markup(&lookup, None));
+        assert_eq!(list.lines().count(), article.senses.len());
+        for (index, sense) in article.senses.iter().enumerate() {
+            assert!(
+                list.contains(&format!("{}. {}", index + 1, sense.definition)),
+                "{list}"
+            );
+            let text = plain(&details_markup(&lookup, Some(index)));
             assert!(text.contains(&sense.definition), "{text}");
             for synonym in &sense.synonyms {
                 assert!(text.contains(synonym), "{text}");
             }
+            // Of this sense only.
+            for other in article.senses.iter().filter(|other| *other != sense) {
+                assert!(!text.contains(&other.definition), "{text}");
+            }
+            for translation in &article.translations {
+                assert!(text.contains(translation), "{text}");
+            }
         }
-        for translation in &article.translations {
-            assert!(text.contains(translation), "{text}");
+    }
+
+    #[test]
+    fn the_mark_claims_no_fit_to_the_sentence() {
+        let mark = EXPLANATION_MARK.to_lowercase();
+        for claim in [
+            "in this sentence",
+            "in the sentence",
+            "here means",
+            "means here",
+            "context",
+            "fits",
+            "right sense",
+            "correct",
+            "best",
+        ] {
+            assert!(!mark.contains(claim), "{claim:?} in {mark:?}");
         }
+        assert!(mark.contains("dictionary definition"), "{mark}");
+        assert!(mark.contains("sense you chose"), "{mark}");
+        assert!(mark.contains("explanation"), "{mark}");
+    }
+
+    #[test]
+    fn the_russian_label_says_the_translations_are_of_the_word() {
+        let label = RUSSIAN_LABEL.to_lowercase();
+        assert!(label.contains("russian"), "{label}");
+        assert!(label.contains("word"), "{label}");
+        assert!(!label.contains("sense"), "{label}");
     }
 
     #[test]
     fn the_no_entry_line_names_the_word() {
-        let line = result_text(&Lookup::NoEntry {
-            word: "sat".to_owned(),
-        });
-        assert!(line.contains("sat"), "{line}");
-        assert!(line.contains("no entry"), "{line}");
+        let line = details_markup(
+            &Lookup::NoEntry {
+                word: "sat".to_owned(),
+            },
+            None,
+        );
+        assert_eq!(line, "The dictionary has no entry for “sat”.");
+        // The word is the user's text: it is escaped too.
+        let line = details_markup(
+            &Lookup::NoEntry {
+                word: "a<b&c".to_owned(),
+            },
+            None,
+        );
+        assert_eq!(line, "The dictionary has no entry for “a&lt;b&amp;c”.");
     }
 
     #[test]
     fn the_unfinished_line_names_no_cause() {
-        let line = result_text(&Lookup::Unfinished).to_lowercase();
+        let line = details_markup(&Lookup::Unfinished, None).to_lowercase();
         for cause in [
             "time",
             "deadline",
@@ -666,6 +1127,67 @@ mod tests {
             assert!(!line.contains(cause), "{cause:?} in {line:?}");
         }
         assert!(line.contains("did not finish"));
+    }
+
+    #[test]
+    fn nothing_is_shown_or_chosen_at_first() {
+        let mut shown = Shown::default();
+        assert_eq!(shown.lookup(), None);
+        assert_eq!(shown.sense(), None);
+        // No article shown: a click changes nothing.
+        assert!(!shown.choose(0));
+        assert_eq!(shown.sense(), None);
+    }
+
+    #[test]
+    fn the_sense_clicked_last_is_the_chosen_one() {
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(article())));
+        assert_eq!(shown.sense(), None);
+        assert!(shown.choose(1));
+        assert_eq!(shown.sense(), Some(1));
+        assert!(shown.choose(0));
+        assert_eq!(shown.sense(), Some(0));
+        // Again the same one: still chosen, and shown anew.
+        assert!(shown.choose(0));
+        assert_eq!(shown.sense(), Some(0));
+        assert_eq!(shown.lookup(), Some(&Lookup::Article(article())));
+    }
+
+    #[test]
+    fn a_new_result_forgets_the_chosen_sense() {
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(article())));
+        assert!(shown.choose(1));
+        // The same article again is a new result too.
+        shown.show(Some(Lookup::Article(article())));
+        assert_eq!(shown.sense(), None);
+        assert!(shown.choose(1));
+        shown.show(None);
+        assert_eq!(shown.lookup(), None);
+        assert_eq!(shown.sense(), None);
+    }
+
+    #[test]
+    fn a_click_on_a_sense_the_result_does_not_have_changes_nothing() {
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(article())));
+        assert!(shown.choose(1));
+        assert!(!shown.choose(2));
+        assert!(!shown.choose(usize::MAX));
+        assert_eq!(shown.sense(), Some(1));
+        // Every result that is not an article with that sense.
+        let mut bare = article();
+        bare.senses.clear();
+        let mut others = every_lookup();
+        others.retain(|lookup| !matches!(lookup, Lookup::Article(_)));
+        others.push(Lookup::Article(bare));
+        for lookup in others {
+            shown.show(Some(lookup.clone()));
+            assert!(!shown.choose(0), "{lookup:?}");
+            assert_eq!(shown.sense(), None, "{lookup:?}");
+            assert_eq!(shown.lookup(), Some(&lookup));
+        }
     }
 
     fn not_bound(detail: &str) -> Binding {

@@ -4,10 +4,12 @@
 //! This module owns the GTK application, its uniqueness, the window with its
 //! close and Esc handling, and the order of what happens on each event of the
 //! shortcut worker, of Retry, of a repeated launch, of the field and of a
-//! lookup, which runs on the work runner and comes back as an event. What the
-//! window says and the paste into its field are [`view`](crate::view)'s; what
-//! an edit or a click does to the manual input is [`manual`](crate::manual)'s;
-//! what is recorded with `--evidence` is [`recording`](crate::recording)'s.
+//! lookup, which runs on the work runner and comes back as an event. It keeps
+//! the shown result with the sense chosen in it, and a click on a sense only
+//! changes that choice. What the window says and the paste into its field are
+//! [`view`](crate::view)'s; what an edit or a click does to the manual input
+//! is [`manual`](crate::manual)'s; what is recorded with `--evidence` is
+//! [`recording`](crate::recording)'s.
 
 use std::{
     cell::{Cell, RefCell},
@@ -34,7 +36,7 @@ use crate::{
     evidence,
     manual::{self, Edit, Manual},
     recording::Recording,
-    view::{Binding, Lookup, View},
+    view::{Binding, Lookup, Shown, View},
 };
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
@@ -69,6 +71,8 @@ enum Event {
     Sentence(String),
     /// The word with this index in the shown sentence was clicked.
     Word(usize),
+    /// The sense with this index in the shown list was clicked.
+    Sense(usize),
     /// The lookup started as number `run` ended.
     Lookup {
         run: u64,
@@ -88,13 +92,17 @@ fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandl
     })
 }
 
+/// The height the window starts with, in pixels: the article of a sample
+/// word with a sense chosen fits without scrolling its list of senses.
+const WINDOW_HEIGHT: i32 = 480;
+
 /// The hidden window around the `view`: closing it hides it, and so does Esc.
 fn build_window(application: &gtk::Application, view: &View) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder()
         .application(application)
         .title("Addict")
         .default_width(480)
-        .default_height(240)
+        .default_height(WINDOW_HEIGHT)
         .child(view.root())
         .build();
     // Closing hides; the process and this window stay.
@@ -137,6 +145,8 @@ struct Session {
     manual: Manual,
     /// The lookup whose outcome is awaited; dropping it cancels the lookup.
     pending: Option<Job>,
+    /// The result the window shows and the sense chosen in it.
+    shown: Shown,
     /// Weak: the runner must go when the resident state is dropped. Never
     /// upgrades when the runner could not be started.
     work: Weak<Work>,
@@ -159,6 +169,7 @@ impl Session {
             Event::Retry => self.retry(),
             Event::Sentence(text) => self.sentence_changed(text),
             Event::Word(index) => self.word_chosen(index),
+            Event::Sense(index) => self.sense_chosen(index),
             Event::Lookup { run, outcome } => self.looked_up(run, outcome),
         }
     }
@@ -181,7 +192,7 @@ impl Session {
                 // number.
                 self.pending = None;
                 self.render_manual();
-                self.view.render_result(None);
+                self.show_result(None);
             }
             Edit::Lone(run) => self.start_lookup(run),
         }
@@ -207,7 +218,7 @@ impl Session {
         self.pending = None;
         self.render_manual();
         let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
-            self.view.render_result(None);
+            self.show_result(None);
             return;
         };
         let sender = self.sender.clone();
@@ -223,9 +234,9 @@ impl Session {
         match started {
             Ok(job) => {
                 self.pending = Some(job);
-                self.view.render_result(Some(&Lookup::Pending));
+                self.show_result(Some(Lookup::Pending));
             }
-            Err(lookup) => self.view.render_result(Some(&lookup)),
+            Err(lookup) => self.show_result(Some(lookup)),
         }
     }
 
@@ -239,7 +250,26 @@ impl Session {
             return;
         };
         if let Some(lookup) = manual::lookup_result(outcome, input.word()) {
-            self.view.render_result(Some(&lookup));
+            self.show_result(Some(lookup));
+        }
+    }
+
+    /// The one place the shown result changes: the sense chosen in the one
+    /// before is forgotten.
+    fn show_result(&mut self, lookup: Option<Lookup>) {
+        self.shown.show(lookup);
+        self.view
+            .render_result(self.shown.lookup(), self.shown.sense());
+    }
+
+    /// A sense was clicked: it is the chosen one when the shown result is an
+    /// article that has it. Nothing is looked up or read. A click on the
+    /// chosen sense renders too: GTK keeps a clicked link in the visited
+    /// colour until the markup is set again.
+    fn sense_chosen(&mut self, index: usize) {
+        if self.shown.choose(index) {
+            self.view
+                .render_result(self.shown.lookup(), self.shown.sense());
         }
     }
 
@@ -354,6 +384,10 @@ fn start(
     view.connect_word_chosen(move |index| {
         let _ = chosen.unbounded_send(Event::Word(index));
     });
+    let sense = sender.clone();
+    view.connect_sense_chosen(move |index| {
+        let _ = sense.unbounded_send(Event::Sense(index));
+    });
     let window = build_window(application, &view);
 
     // Only the primary instance gets here, so a second launch records no
@@ -382,6 +416,7 @@ fn start(
         current: Rc::downgrade(&handle),
         manual: Manual::default(),
         pending: None,
+        shown: Shown::default(),
         work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),
         dictionary: dictionary.clone(),
     };
