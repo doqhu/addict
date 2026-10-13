@@ -2,7 +2,7 @@
 //! the binding row and the line of the dictionary indexes, then the field
 //! for a word or a sentence, the text of the field with its words as links,
 //! the list of senses, which scrolls, what stands below the list and, last,
-//! the line of the online translation.
+//! the online texts.
 //!
 //! This module owns the widgets, their layout and their signals, and no
 //! text: what the widgets say is [`view`](crate::view)'s, and [`View`] puts
@@ -11,7 +11,8 @@
 //! The field's paste is taken over here, and it is the only place where the
 //! application reads the clipboard: the user's paste action, and nothing
 //! else, starts one asynchronous read, and the text that comes replaces the
-//! whole field as one line.
+//! whole field as one line and is submitted, as Enter in the field submits
+//! it.
 
 use std::{cell::Cell, ops::Range, rc::Rc};
 
@@ -21,8 +22,8 @@ use gtk::{gio, glib, prelude::*};
 use crate::{
     dictionaries::Indexes,
     view::{
-        Binding, FIELD_PLACEHOLDER, Lookup, Online, RETRY_LABEL, binding_texts, details_markup,
-        indexes_text, online_markup, senses_markup, sentence_markup, texts,
+        Binding, FIELD_PLACEHOLDER, Lookup, OnlineTexts, RETRY_LABEL, binding_texts,
+        details_markup, indexes_text, online_markup, senses_markup, sentence_markup, texts,
     },
 };
 
@@ -37,8 +38,10 @@ const SENSES_MIN_HEIGHT: i32 = 72;
 /// all emit `paste-clipboard` on the text widget inside the entry. GTK's own
 /// paste, which inserts at the cursor and keeps line breaks, is stopped; the
 /// clipboard is read once, off the UI thread's time, and its text replaces
-/// the whole field as one line. The paste of the primary selection with the
-/// middle button does not come through this signal and stays GTK's.
+/// the whole field as one line and is then submitted: the field emits
+/// `activate`, as it does for Enter. The paste of the primary selection with
+/// the middle button does not come through this signal, stays GTK's and
+/// submits nothing.
 ///
 /// Nothing happens here without that signal, and nothing waits for the read:
 /// the field stays editable, and a read that ends after the field was edited
@@ -83,6 +86,9 @@ fn replace_on_paste(field: &gtk::Entry) {
                 // for the new one, also when the two are the same text.
                 entry.set_text(&line);
                 entry.set_position(-1);
+                // After the text is in the field: whoever hears of the
+                // submit has heard of the new text first.
+                entry.emit_activate();
             });
     });
 }
@@ -141,7 +147,7 @@ fn binding_row() -> BindingRow {
 }
 
 /// The result area: the list of senses inside what scrolls it, what stands
-/// below the list and, below that, the line of the online translation.
+/// below the list and, below that, the online texts.
 struct ResultArea {
     senses: gtk::Label,
     senses_area: gtk::ScrolledWindow,
@@ -192,7 +198,7 @@ fn result_area() -> ResultArea {
 /// is something to say about them; then the field for a word or a
 /// sentence, the text of the field with its words as links and the result:
 /// the list of senses, which scrolls, and below it the rest, which does not,
-/// with the line of the online translation at the end.
+/// with the online texts at the end.
 pub struct View {
     root: gtk::Box,
     source: gtk::Label,
@@ -211,7 +217,8 @@ pub struct View {
     senses_area: gtk::ScrolledWindow,
     /// What stands below the list.
     details: gtk::Label,
-    /// The online translation, on its own line; hidden when there is none.
+    /// The online texts, each a paragraph under its label; hidden when there
+    /// is none.
     online: gtk::Label,
 }
 
@@ -324,6 +331,12 @@ impl View {
             .connect_changed(move |field| changed(field.text().as_str()));
     }
 
+    /// Runs `submitted` each time the text of the field is submitted: by
+    /// Enter in the field, and by a paste after it has replaced the text.
+    pub fn connect_submitted(&self, submitted: impl Fn() + 'static) {
+        self.field.connect_activate(move |_| submitted());
+    }
+
     /// Runs `chosen` with the index of a word each time its link is clicked.
     pub fn connect_word_chosen(&self, chosen: impl Fn(usize) + 'static) {
         connect_index_link(&self.sentence, chosen);
@@ -379,11 +392,11 @@ impl View {
         self.details.set_visible(true);
     }
 
-    /// Shows the line of `online`, or hides it when there is none.
-    pub fn render_online(&self, online: Option<&Online>) {
-        let markup = online.map(online_markup).unwrap_or_default();
+    /// Shows the blocks of `online`, or hides them when there is none.
+    pub fn render_online(&self, online: &OnlineTexts<'_>) {
+        let markup = online_markup(online);
         self.online.set_markup(&markup);
-        self.online.set_visible(online.is_some());
+        self.online.set_visible(!markup.is_empty());
     }
 
     /// Puts the keyboard focus into the field, so a paste lands there. The
