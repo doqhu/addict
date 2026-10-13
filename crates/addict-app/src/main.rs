@@ -55,6 +55,18 @@
 //! translation. Choosing a sense looks nothing up, and the next result
 //! forgets the choice.
 //!
+//! A click on a word of a sentence also asks DeepL, online, for the Russian
+//! translation of that word in that sentence: the word and the sentence are
+//! sent, and nothing else is. The answer stands on a line of its own below
+//! the result; the article is shown as before and does not wait for it. A
+//! lone word, typing, Enter and a paste send nothing. The key is read at each
+//! request from `$XDG_CONFIG_HOME/addict/deepl.key`, or
+//! `$HOME/.config/addict/deepl.key`, a file only its owner may read or write:
+//! when its mode has any bit outside `0600` it is refused unread. The request has a deadline, and
+//! another click, an edit or a paste gives it up. When it gives no
+//! translation, for any reason, the line says that online translation is not
+//! available.
+//!
 //! A paste into the field with Ctrl+V, Shift+Insert or the menu replaces the
 //! whole field with the clipboard text as one line, and with it the input and
 //! the result. This is the only time the clipboard is read: once per paste,
@@ -76,7 +88,8 @@
 //!
 //! This module owns the command line and what each form of it starts; the
 //! entry commands are [`entries`]'s, the import is `addict_dictionary`'s, the
-//! indexes as a source of articles are [`dictionaries`]'s, the resident
+//! indexes as a source of articles are [`dictionaries`]'s, the online
+//! translator is `addict_deepl`'s, the resident
 //! application is [`resident`]'s, the texts of its window are [`view`]'s and
 //! the widgets of the window are [`widgets`]'s.
 

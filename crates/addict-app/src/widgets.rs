@@ -1,7 +1,8 @@
 //! The widgets of the window: the source label and the status, below them
 //! the binding row and the line of the dictionary indexes, then the field
 //! for a word or a sentence, the text of the field with its words as links,
-//! the list of senses, which scrolls, and what stands below the list.
+//! the list of senses, which scrolls, what stands below the list and, last,
+//! the line of the online translation.
 //!
 //! This module owns the widgets, their layout and their signals, and no
 //! text: what the widgets say is [`view`](crate::view)'s, and [`View`] puts
@@ -20,8 +21,8 @@ use gtk::{gio, glib, prelude::*};
 use crate::{
     dictionaries::Indexes,
     view::{
-        Binding, FIELD_PLACEHOLDER, Lookup, RETRY_LABEL, binding_texts, details_markup,
-        indexes_text, senses_markup, sentence_markup, texts,
+        Binding, FIELD_PLACEHOLDER, Lookup, Online, RETRY_LABEL, binding_texts, details_markup,
+        indexes_text, online_markup, senses_markup, sentence_markup, texts,
     },
 };
 
@@ -139,12 +140,13 @@ fn binding_row() -> BindingRow {
     }
 }
 
-/// The result area: the list of senses inside what scrolls it, and what
-/// stands below the list.
+/// The result area: the list of senses inside what scrolls it, what stands
+/// below the list and, below that, the line of the online translation.
 struct ResultArea {
     senses: gtk::Label,
     senses_area: gtk::ScrolledWindow,
     details: gtk::Label,
+    online: gtk::Label,
 }
 
 fn result_area() -> ResultArea {
@@ -173,10 +175,15 @@ fn result_area() -> ResultArea {
         .selectable(true)
         .visible(false)
         .build();
+    let online = wrapping(gtk::Label::builder().use_markup(true))
+        .selectable(true)
+        .visible(false)
+        .build();
     ResultArea {
         senses,
         senses_area,
         details,
+        online,
     }
 }
 
@@ -184,7 +191,8 @@ fn result_area() -> ResultArea {
 /// row: its line, the detail and Retry; the line of the indexes when there
 /// is something to say about them; then the field for a word or a
 /// sentence, the text of the field with its words as links and the result:
-/// the list of senses, which scrolls, and below it the rest, which does not.
+/// the list of senses, which scrolls, and below it the rest, which does not,
+/// with the line of the online translation at the end.
 pub struct View {
     root: gtk::Box,
     source: gtk::Label,
@@ -203,6 +211,8 @@ pub struct View {
     senses_area: gtk::ScrolledWindow,
     /// What stands below the list.
     details: gtk::Label,
+    /// The online translation, on its own line; hidden when there is none.
+    online: gtk::Label,
 }
 
 impl View {
@@ -241,6 +251,7 @@ impl View {
         root.append(&sentence);
         root.append(&result.senses_area);
         root.append(&result.details);
+        root.append(&result.online);
 
         let view = Self {
             root,
@@ -256,6 +267,7 @@ impl View {
             senses: result.senses,
             senses_area: result.senses_area,
             details: result.details,
+            online: result.online,
         };
         view.render(state);
         view.render_binding(binding);
@@ -365,6 +377,13 @@ impl View {
         }
         self.details.set_markup(&details_markup(lookup, chosen));
         self.details.set_visible(true);
+    }
+
+    /// Shows the line of `online`, or hides it when there is none.
+    pub fn render_online(&self, online: Option<&Online>) {
+        let markup = online.map(online_markup).unwrap_or_default();
+        self.online.set_markup(&markup);
+        self.online.set_visible(online.is_some());
     }
 
     /// Puts the keyboard focus into the field, so a paste lands there. The

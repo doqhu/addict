@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 addict-core = { path = "../addict-core" }
+addict-deepl = { path = "../addict-deepl" }
 addict-dictionary = { path = "../addict-dictionary" }
 addict-platform = { path = "../addict-platform" }
 clap = { version = "=4.6.7", features = ["derive"] }
@@ -25,7 +26,10 @@ wayland-client = "=0.31.15"
 wayland-protocols = { version = "=0.32.13", features = ["client"] }
 
 [dev-dependencies]
-# The sample dictionary is for tests only: the product cannot name it.
+# The sample dictionary and translator are for tests only: the product cannot
+# name them.
 addict-core = { path = "../addict-core", features = ["sample"] }
+# The stub of the DeepL server, for the tests only.
+addict-deepl = { path = "../addict-deepl", features = ["stub"] }
 # The harness is the format oracle of the evidence tests; no broker, no probe.
 addict-exp4 = { path = "../addict-exp4", default-features = false }

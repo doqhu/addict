@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/addict-probe", "crates/addict-exp4", "crates/addict-context", "crates/addict-ui-gtk", "crates/addict-core", "crates/addict-platform", "crates/addict-dictionary", "crates/addict-app"]
+members = ["crates/addict-probe", "crates/addict-exp4", "crates/addict-context", "crates/addict-ui-gtk", "crates/addict-core", "crates/addict-platform", "crates/addict-dictionary", "crates/addict-deepl", "crates/addict-app"]
 exclude = ["experiments/exp4/upstream", "crates/addict-ui-gpui"]
-default-members = ["crates/addict-probe", "crates/addict-exp4", "crates/addict-context", "crates/addict-core", "crates/addict-platform", "crates/addict-dictionary", "crates/addict-app"]
+default-members = ["crates/addict-probe", "crates/addict-exp4", "crates/addict-context", "crates/addict-core", "crates/addict-platform", "crates/addict-dictionary", "crates/addict-deepl", "crates/addict-app"]
 
 [workspace.package]
 edition = "2024"

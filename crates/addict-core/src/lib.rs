@@ -4,6 +4,7 @@ pub mod dictionary;
 pub mod input;
 pub mod reduction;
 pub mod sentence;
+pub mod translation;
 
 /// Application id of the product; the single source of product identity.
 pub const APP_ID: &str = "dev.addict.Addict";
