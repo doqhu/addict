@@ -1087,7 +1087,10 @@ mod tests {
                     .expect("not cancelled"),
                 Err(online) => online,
             };
-            assert!(self.kept.answer(self.manual.text_number(), subject, online));
+            assert!(
+                self.kept
+                    .answer_current(self.manual.text_number(), subject, online)
+            );
         }
 
         fn asked(&self) -> Vec<Request> {
@@ -1218,7 +1221,7 @@ mod tests {
         assert_eq!(desk.shown(), OnlineTexts::default());
         // A late outcome of the old text is not kept.
         for subject in [Subject::Word(BANK), Subject::Sentence] {
-            assert!(!desk.kept.answer(old, subject, online("старый")));
+            assert!(!desk.kept.answer_current(old, subject, online("старый")));
         }
         assert_eq!(desk.shown(), OnlineTexts::default());
         assert_eq!(desk.asked().len(), 2);
@@ -1338,6 +1341,10 @@ mod tests {
     fn every_refusal_of_the_translator_is_the_shown_refusal() {
         for refusal in [
             Refusal::Key,
+            Refusal::UnreadableKey,
+            Refusal::UnsafeKey,
+            Refusal::Network,
+            Refusal::UnsupportedLanguage,
             Refusal::RejectedKey,
             Refusal::Quota,
             Refusal::TimedOut,
@@ -1545,7 +1552,7 @@ mod tests {
         let (outcome, _) = translated(translator, &bank_of_the_river(), WAIT);
         assert_eq!(
             translation_result(outcome),
-            Some(Online::Refused(Refusal::Key))
+            Some(Online::Refused(Refusal::UnsafeKey))
         );
         assert!(stub.seen().is_empty());
     }
@@ -1567,5 +1574,45 @@ mod tests {
     fn the_lookup_limit_is_finite_and_short() {
         assert!(!LOOKUP_LIMIT.is_zero());
         assert!(LOOKUP_LIMIT.as_secs() <= 10);
+    }
+    #[test]
+    fn every_online_failure_preserves_the_field_and_dictionary_article() {
+        for refusal in [
+            Refusal::Key,
+            Refusal::UnreadableKey,
+            Refusal::UnsafeKey,
+            Refusal::RejectedKey,
+            Refusal::Network,
+            Refusal::Quota,
+            Refusal::UnsupportedLanguage,
+            Refusal::TimedOut,
+            Refusal::Other,
+        ] {
+            let mut desk = Desk::with_text(Err(refusal), RIVER);
+            desk.click(BANK);
+            assert_eq!(desk.shown().word, Some(&Online::Refused(refusal)));
+            assert_eq!(desk.manual.input().expect("input").sentence(), Some(RIVER));
+            let (sender, receiver) = mpsc::channel();
+            let job = look_up(
+                Some(&desk.work),
+                Arc::new(Sampled),
+                "bank".to_owned(),
+                move |outcome| {
+                    sender.send(outcome).expect("lookup receiver");
+                },
+            )
+            .expect("lookup job");
+            let lookup =
+                lookup_result(receiver.recv_timeout(WAIT).expect("lookup outcome"), "bank");
+            assert_eq!(
+                lookup,
+                Some(Lookup::Article(Sample.lookup("bank").expect("article")))
+            );
+            drop(job);
+            desk.edit("river");
+            assert_eq!(desk.manual.sentence(), "river");
+            desk.submit();
+            assert_eq!(desk.shown().lone, Some(&Online::Refused(refusal)));
+        }
     }
 }

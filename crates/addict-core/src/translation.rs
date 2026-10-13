@@ -22,16 +22,23 @@ pub struct Request {
 /// Why a request gave no translation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// There is no key to use: it is missing, empty, unreadable or kept in a
-    /// way that is refused. Nothing was sent.
+    /// The key file is missing or has no valid key. Nothing was sent.
     Key,
+    /// The key file cannot be read. Nothing was sent.
+    UnreadableKey,
+    /// The key file has permissions outside 0600. Nothing was sent.
+    UnsafeKey,
+    /// The service could not be reached.
+    Network,
+    /// The service rejected the EN to RU language pair.
+    UnsupportedLanguage,
     /// The service rejected the key.
     RejectedKey,
     /// The quota of the key is used up.
     Quota,
     /// No answer came in time.
     TimedOut,
-    /// Anything else: no network, another status, an answer that cannot be
+    /// Anything else: another status, an answer that cannot be
     /// read.
     Other,
 }
@@ -134,6 +141,10 @@ mod tests {
     fn every_refusal_comes_through_the_contract() {
         let all = [
             Refusal::Key,
+            Refusal::UnreadableKey,
+            Refusal::UnsafeKey,
+            Refusal::Network,
+            Refusal::UnsupportedLanguage,
             Refusal::RejectedKey,
             Refusal::Quota,
             Refusal::TimedOut,
@@ -144,6 +155,10 @@ mod tests {
             // listed above.
             match refusal {
                 Refusal::Key
+                | Refusal::UnreadableKey
+                | Refusal::UnsafeKey
+                | Refusal::Network
+                | Refusal::UnsupportedLanguage
                 | Refusal::RejectedKey
                 | Refusal::Quota
                 | Refusal::TimedOut

@@ -93,6 +93,7 @@ enum Event {
     Translated {
         text: u64,
         subject: Subject,
+        number: u64,
         outcome: Outcome<Translated>,
     },
     /// The check at the start says where the dictionary indexes stand.
@@ -172,6 +173,7 @@ struct Session {
     articles: Arc<dyn Articles>,
     /// What a word or a sentence is translated by online.
     translator: Arc<dyn Translator>,
+    key_file: Option<std::path::PathBuf>,
     /// The online request of a word, in its sentence or alone, whose outcome
     /// is awaited; dropping it cancels the request.
     translating_word: Option<Job>,
@@ -205,8 +207,9 @@ impl Session {
             Event::Translated {
                 text,
                 subject,
+                number,
                 outcome,
-            } => self.translated(text, subject, outcome),
+            } => self.translated(text, subject, number, outcome),
             Event::Indexes(indexes) => {
                 self.check = None;
                 self.view.render_indexes(indexes);
@@ -346,6 +349,9 @@ impl Session {
     /// not start is a refusal at once.
     fn start_translation(&mut self, subject: Subject) {
         let text = self.manual.text_number();
+        let Some(number) = self.online.request_number(subject) else {
+            return;
+        };
         let request = self
             .manual
             .input()
@@ -360,6 +366,7 @@ impl Session {
                 let _ = sender.unbounded_send(Event::Translated {
                     text,
                     subject,
+                    number,
                     outcome,
                 });
             },
@@ -368,7 +375,7 @@ impl Session {
             // Replaces, and so cancels, the request the slot held.
             Ok(job) => *self.slot(subject) = Some(job),
             Err(online) => {
-                self.online.answer(text, subject, online);
+                self.online.answer(text, subject, number, online);
             }
         }
     }
@@ -385,11 +392,17 @@ impl Session {
     /// An online request ended. Its outcome is kept and shown only when it
     /// belongs to the text the field holds and is still awaited; a cancelled
     /// one was given up and shows nothing.
-    fn translated(&mut self, text: u64, subject: Subject, outcome: Outcome<Translated>) {
+    fn translated(
+        &mut self,
+        text: u64,
+        subject: Subject,
+        number: u64,
+        outcome: Outcome<Translated>,
+    ) {
         let Some(online) = manual::translation_result(outcome) else {
             return;
         };
-        if self.online.answer(text, subject, online) {
+        if self.online.answer(text, subject, number, online) {
             *self.slot(subject) = None;
             self.render_online();
         }
@@ -398,8 +411,10 @@ impl Session {
     /// Shows the online texts as they are now, with those of the chosen
     /// word.
     fn render_online(&self) {
-        self.view
-            .render_online(&self.online.shown(self.manual.chosen()));
+        self.view.render_online(
+            &self.online.shown(self.manual.chosen()),
+            self.key_file.as_deref(),
+        );
     }
 
     /// The one place the shown result changes: the sense chosen in the one
@@ -579,6 +594,8 @@ fn start(
         // On the worker: the UI thread wakes for the event.
         let _ = checked.unbounded_send(Event::Indexes(indexes));
     });
+    let translator = DeepL::new();
+    let key_file = translator.key_file().map(std::path::Path::to_owned);
     let mut session = Session {
         binding,
         view,
@@ -595,7 +612,8 @@ fn start(
         // Nothing is read or connected here: the key file and the network
         // are the runner's, at the first click on a word of a sentence or
         // the first submit of a lone word.
-        translator: Arc::new(DeepL::new()),
+        translator: Arc::new(translator),
+        key_file,
         translating_word: None,
         translating_sentence: None,
         online: Kept::default(),
