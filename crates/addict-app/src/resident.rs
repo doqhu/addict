@@ -9,7 +9,10 @@
 //! asked once at the start and comes with the outcome of every lookup, and
 //! the window says it whenever one is missing or unreadable. It keeps
 //! the shown result with the sense chosen in it, and a click on a sense only
-//! changes that choice. What the window says is [`view`](crate::view)'s; its
+//! changes that choice. A click on a word of a sentence also starts the
+//! online translation of the word, as a second job on the runner with its
+//! own outcome: the article never waits for it, and whatever replaces or
+//! drops the lookup drops the online request with it. What the window says is [`view`](crate::view)'s; its
 //! widgets and the paste into its field are [`widgets`](crate::widgets)'s;
 //! what an edit or a click does to the manual input
 //! is [`manual`](crate::manual)'s; what is recorded with `--evidence` is
@@ -23,7 +26,8 @@ use std::{
     time::Duration,
 };
 
-use addict_core::{APP_ID, input::window_state};
+use addict_core::{APP_ID, input::window_state, translation::Translator};
+use addict_deepl::DeepL;
 use addict_platform::{
     shortcut::{self, ShortcutEvent, ShortcutHandle},
     work::{Job, Outcome, Work},
@@ -35,9 +39,9 @@ use gtk::{gdk, gio, glib, prelude::*};
 use crate::{
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
-    manual::{self, Edit, Manual},
+    manual::{self, Edit, Manual, Translated},
     recording::Recording,
-    view::{Binding, Lookup, Shown},
+    view::{Binding, Lookup, Online, Shown},
     widgets::View,
 };
 
@@ -77,6 +81,11 @@ enum Event {
     Sense(usize),
     /// The lookup started as number `run` ended.
     Lookup { run: u64, outcome: Outcome<Looked> },
+    /// The online translation started with the lookup number `run` ended.
+    Translated {
+        run: u64,
+        outcome: Outcome<Translated>,
+    },
     /// The check at the start says where the dictionary indexes stand.
     Indexes(Indexes),
 }
@@ -152,6 +161,13 @@ struct Session {
     /// upgrades when the runner could not be started.
     work: Weak<Work>,
     articles: Arc<dyn Articles>,
+    /// What a word of a sentence is translated by online.
+    translator: Arc<dyn Translator>,
+    /// The online request whose outcome is awaited; dropping it cancels the
+    /// request.
+    translating: Option<Job>,
+    /// What the online line shows; `None` when there is no line.
+    online: Option<Online>,
     /// The check of the indexes at the start; dropping it cancels the check.
     check: Option<Job>,
 }
@@ -174,6 +190,7 @@ impl Session {
             Event::Word(index) => self.word_chosen(index),
             Event::Sense(index) => self.sense_chosen(index),
             Event::Lookup { run, outcome } => self.looked_up(run, outcome),
+            Event::Translated { run, outcome } => self.translated(run, outcome),
             Event::Indexes(indexes) => {
                 self.check = None;
                 self.view.render_indexes(indexes);
@@ -195,11 +212,13 @@ impl Session {
         match self.manual.edit(text) {
             Edit::Same => {}
             Edit::Cleared => {
-                // Cancels the lookup; whatever it still reports has an old
-                // number.
+                // Cancels the lookup and the online request; whatever they
+                // still report has an old number.
                 self.pending = None;
+                self.translating = None;
                 self.render_manual();
                 self.show_result(None);
+                self.show_online(None);
             }
             Edit::Lone(run) => self.start_lookup(run),
         }
@@ -219,10 +238,14 @@ impl Session {
     }
 
     /// Shows the input that was just chosen and starts its lookup, which has
-    /// the number `run`.
+    /// the number `run`, and beside it the online translation when the input
+    /// has a sentence.
     fn start_lookup(&mut self, run: u64) {
-        // The lookup of another word, if one runs, is replaced.
+        // The lookup of another word and its online request, if they run,
+        // are replaced, and the line of the word before is gone.
         self.pending = None;
+        self.translating = None;
+        self.show_online(None);
         self.render_manual();
         let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
             self.show_result(None);
@@ -245,6 +268,9 @@ impl Session {
             }
             Err(lookup) => self.show_result(Some(lookup)),
         }
+        // After the lookup: the runner takes its jobs in this order, so the
+        // article is read before the key file and the network are touched.
+        self.start_translation(run);
     }
 
     /// A lookup ended. Only the last started one is shown; where it found
@@ -269,6 +295,51 @@ impl Session {
         if let Some(lookup) = manual::lookup_result(outcome, input.word()) {
             self.show_result(Some(lookup));
         }
+    }
+
+    /// Starts the online translation of the chosen word in its sentence, a
+    /// job of its own beside the lookup with the number `run`. A word without
+    /// a sentence starts nothing and has no online line.
+    fn start_translation(&mut self, run: u64) {
+        let Some(input) = self.manual.input() else {
+            return;
+        };
+        let sender = self.sender.clone();
+        let started = manual::translate(
+            self.work.upgrade().as_deref(),
+            self.translator.clone(),
+            input,
+            move |outcome| {
+                // On the worker: the UI thread wakes for the event.
+                let _ = sender.unbounded_send(Event::Translated { run, outcome });
+            },
+        );
+        match started {
+            None => {}
+            Some(Ok(job)) => {
+                self.translating = Some(job);
+                self.show_online(Some(Online::Pending));
+            }
+            Some(Err(online)) => self.show_online(Some(online)),
+        }
+    }
+
+    /// An online translation ended. Only the one of the last click is shown,
+    /// in place of the pending line.
+    fn translated(&mut self, run: u64, outcome: Outcome<Translated>) {
+        if !self.manual.awaits(run) {
+            return;
+        }
+        self.translating = None;
+        if let Some(online) = manual::translation_result(outcome) {
+            self.show_online(Some(online));
+        }
+    }
+
+    /// The one place the online line changes.
+    fn show_online(&mut self, online: Option<Online>) {
+        self.online = online;
+        self.view.render_online(self.online.as_ref());
     }
 
     /// The one place the shown result changes: the sense chosen in the one
@@ -457,6 +528,11 @@ fn start(
         shown: Shown::default(),
         work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),
         articles: articles.clone(),
+        // Nothing is read or connected here: the key file and the network
+        // are the runner's, at the first click on a word of a sentence.
+        translator: Arc::new(DeepL::new()),
+        translating: None,
+        online: None,
         check,
     };
     glib::spawn_future_local(async move {

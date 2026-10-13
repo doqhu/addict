@@ -4,12 +4,14 @@
 //! for a word or a sentence, the text of the field with its words as links
 //! and the result of the lookup of the chosen word: the senses of the word as
 //! links in a list that scrolls, and below the list what is said about the
-//! sense that was clicked and about the word.
+//! sense that was clicked and about the word. Below the result, on a line of
+//! its own, stands the online translation of a word of a sentence.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
 //! [`binding_texts`], [`indexes_text`], [`sentence_markup`],
-//! [`senses_markup`] and [`details_markup`] are pure, and so is [`Shown`], the result with the sense
-//! chosen in it; they are tested without a display. This module owns no
+//! [`senses_markup`], [`details_markup`] and [`online_markup`] are pure, and
+//! so is [`Shown`], the result with the sense chosen in it; they are tested
+//! without a display. This module owns no
 //! widget: [`View`](crate::widgets::View) puts the results into its own.
 
 use std::{fmt::Write as _, ops::Range};
@@ -17,6 +19,7 @@ use std::{fmt::Write as _, ops::Range};
 use addict_core::{
     dictionary::Article,
     input::{Source, WindowState},
+    translation::Refusal,
 };
 
 use crate::dictionaries::{IndexFile, Indexes, State};
@@ -364,6 +367,49 @@ fn push_listed(markup: &mut String, label: &str, items: &[String]) {
     }
 }
 
+/// Where the online translation of the chosen word stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Online {
+    /// The request runs; its end is not known yet.
+    Pending,
+    /// The Russian text the translator gave for the word in its sentence.
+    Translated(String),
+    /// The request gave no translation.
+    Refused(Refusal),
+}
+
+/// The line of an online request that still runs.
+const ONLINE_PENDING: &str = "Translating online…";
+
+/// The line of an online request that gave no translation. It names no
+/// cause: every refusal has this one line.
+const ONLINE_UNAVAILABLE: &str = "Online translation is not available.";
+
+/// The online line as Pango markup: the pending line, the translation as it
+/// came, escaped, or the line of a refusal. No wildcard arm: a new state
+/// does not compile until it is given its line.
+pub fn online_markup(online: &Online) -> String {
+    let mut markup = String::new();
+    match online {
+        Online::Pending => push_escaped(&mut markup, ONLINE_PENDING),
+        Online::Translated(text) => push_escaped(&mut markup, text),
+        Online::Refused(refusal) => push_escaped(&mut markup, refusal_text(*refusal)),
+    }
+    markup
+}
+
+/// The line of `refusal`. No wildcard arm: a new kind does not compile until
+/// it is given its line.
+fn refusal_text(refusal: Refusal) -> &'static str {
+    match refusal {
+        Refusal::Key
+        | Refusal::RejectedKey
+        | Refusal::Quota
+        | Refusal::TimedOut
+        | Refusal::Other => ONLINE_UNAVAILABLE,
+    }
+}
+
 /// The result the window shows and the sense chosen in it.
 #[derive(Debug, Default)]
 pub struct Shown {
@@ -410,12 +456,14 @@ mod tests {
         dictionary::{Article, Dictionary, Sample, Sense},
         input::{Source, WindowState},
         sentence::words,
+        translation::Refusal,
     };
 
     use super::{
         Binding, CHOOSE_SENSE, EXPLANATION_MARK, FIELD_PLACEHOLDER, Lookup, NO_DEFINITIONS,
-        NO_SYNONYMS, NO_TRANSLATION, PENDING, RUSSIAN_LABEL, SYNONYMS_LABEL, Shown, UNFINISHED,
-        binding_texts, details_markup, indexes_text, senses_markup, sentence_markup, texts,
+        NO_SYNONYMS, NO_TRANSLATION, ONLINE_PENDING, ONLINE_UNAVAILABLE, Online, PENDING,
+        RUSSIAN_LABEL, SYNONYMS_LABEL, Shown, UNFINISHED, binding_texts, details_markup,
+        indexes_text, online_markup, senses_markup, sentence_markup, texts,
     };
     use crate::dictionaries::{
         Indexes, State,
@@ -423,6 +471,54 @@ mod tests {
     };
 
     const SENTENCE: &str = "I sat on the bank.";
+
+    #[test]
+    fn the_online_translation_is_shown_as_it_came() {
+        assert_eq!(
+            online_markup(&Online::Translated("берег".to_owned())),
+            "берег"
+        );
+        // What the translator gave is text, never markup.
+        assert_eq!(
+            online_markup(&Online::Translated("<b>берег</b> & банк".to_owned())),
+            "&lt;b&gt;берег&lt;/b&gt; &amp; банк"
+        );
+    }
+
+    #[test]
+    fn a_pending_online_request_has_its_own_line() {
+        assert_eq!(online_markup(&Online::Pending), ONLINE_PENDING);
+        assert_ne!(ONLINE_PENDING, PENDING);
+        assert_ne!(ONLINE_PENDING, ONLINE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn every_refusal_has_the_one_generic_line() {
+        assert_eq!(ONLINE_UNAVAILABLE, "Online translation is not available.");
+        for refusal in [
+            Refusal::Key,
+            Refusal::RejectedKey,
+            Refusal::Quota,
+            Refusal::TimedOut,
+            Refusal::Other,
+        ] {
+            assert_eq!(
+                online_markup(&Online::Refused(refusal)),
+                ONLINE_UNAVAILABLE,
+                "{refusal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_online_line_is_one_line_and_names_no_path() {
+        for online in [Online::Pending, Online::Refused(Refusal::Key)] {
+            let line = online_markup(&online);
+            assert_eq!(line.lines().count(), 1, "{line}");
+            assert!(!line.contains('/'), "{line}");
+            assert!(!line.contains("deepl"), "{line}");
+        }
+    }
 
     #[test]
     fn the_empty_field_asks_for_a_word_or_a_sentence() {

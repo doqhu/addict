@@ -9,7 +9,10 @@
 //! does to it is tested without a display. [`look_up`] starts a lookup on the
 //! work runner and [`lookup_result`] says what the window shows for its
 //! outcome; [`check_indexes`] asks on the runner where the dictionary indexes
-//! stand. Putting any of it on the screen is
+//! stand. [`translate`] starts the online translation of a word of a sentence
+//! as a job of its own, with its own deadline, and [`translation_result`]
+//! says what the window shows for its outcome; a word without a sentence
+//! sends nothing. Putting any of it on the screen is
 //! [`resident`](crate::resident)'s.
 
 use std::{ops::Range, sync::Arc, time::Duration};
@@ -17,16 +20,25 @@ use std::{ops::Range, sync::Arc, time::Duration};
 use addict_core::{
     input::{Input, Source, WindowState, window_state},
     sentence,
+    translation::{Refusal, Request, Translator},
 };
 use addict_platform::work::{Job, Outcome, Work};
 
 use crate::{
     dictionaries::{Answer, Articles, Indexes, Looked},
-    view::Lookup,
+    view::{Lookup, Online},
 };
 
 /// How long the lookup of one word may take.
 const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
+
+/// How long the online translation of one word may take. A network answer is
+/// slower than a file read, and this deadline is the only thing that ends a
+/// request without an answer.
+const TRANSLATE_LIMIT: Duration = Duration::from_secs(10);
+
+/// What an online translation ends with.
+pub type Translated = Result<String, Refusal>;
 
 /// What an edit of the field did to the manual input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,23 +191,86 @@ pub fn lookup_result(outcome: Outcome<Looked>, word: &str) -> Option<Lookup> {
     }
 }
 
+/// Starts the online translation of the word of `input` in its sentence on
+/// `work`, with a deadline: the word is the text and the sentence is the
+/// context, and nothing else is sent. `on_outcome` runs once on the worker
+/// thread. `None`, with nothing started, for an input without a sentence: a
+/// lone word is not sent online. Without a runner nothing starts and the
+/// state to show is given back.
+pub fn translate(
+    work: Option<&Work>,
+    translator: Arc<dyn Translator>,
+    input: &Input,
+    on_outcome: impl FnOnce(Outcome<Translated>) + Send + 'static,
+) -> Option<Result<Job, Online>> {
+    translate_within(TRANSLATE_LIMIT, work, translator, input, on_outcome)
+}
+
+/// [`translate`] with the deadline `limit`.
+fn translate_within(
+    limit: Duration,
+    work: Option<&Work>,
+    translator: Arc<dyn Translator>,
+    input: &Input,
+    on_outcome: impl FnOnce(Outcome<Translated>) + Send + 'static,
+) -> Option<Result<Job, Online>> {
+    let request = Request {
+        text: input.word().to_owned(),
+        context: Some(input.sentence()?.to_owned()),
+    };
+    let Some(work) = work else {
+        return Some(Err(Online::Refused(Refusal::Other)));
+    };
+    Some(Ok(work.run(
+        limit,
+        async move { translator.translate(request).await },
+        on_outcome,
+    )))
+}
+
+/// What the window shows for the `outcome` of an online translation, or
+/// `None` when it shows nothing new: a cancelled request is always one that
+/// was replaced or dropped. No wildcard arm: a new outcome does not compile
+/// until it is given its state.
+pub fn translation_result(outcome: Outcome<Translated>) -> Option<Online> {
+    match outcome {
+        Outcome::Finished(Ok(text)) => Some(Online::Translated(text)),
+        Outcome::Finished(Err(refusal)) => Some(Online::Refused(refusal)),
+        Outcome::TimedOut => Some(Online::Refused(Refusal::TimedOut)),
+        Outcome::Panicked => Some(Online::Refused(Refusal::Other)),
+        Outcome::Cancelled => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, thread, time::Duration};
+    use std::{
+        sync::{Arc, mpsc},
+        thread,
+        time::Duration,
+    };
 
     use addict_core::{
         dictionary::{Dictionary, Sample},
         input::{Source, WindowState},
+        translation::{Canned, Refusal, Request, Translating, Translator},
+    };
+    use addict_deepl::{
+        DeepL,
+        stub::{Reply, Stub, translation_body},
     };
     use addict_platform::work::{Outcome, Work};
 
-    use super::{Edit, LOOKUP_LIMIT, Manual, check_indexes, look_up, lookup_result};
+    use super::{
+        Edit, LOOKUP_LIMIT, Manual, TRANSLATE_LIMIT, Translated, check_indexes, look_up,
+        lookup_result, translate, translate_within, translation_result,
+    };
     use crate::{
         dictionaries::{
             Answer, Articles, Indexes, Looked, State,
             tests::{FREEDICT, OEWN, Sampled},
         },
-        view::Lookup,
+        view::{Lookup, Online},
     };
 
     const SENTENCE: &str = "I sat on the bank.";
@@ -723,6 +798,326 @@ mod tests {
             let shown = is_shown(&outcome);
             assert_eq!(lookup_result(outcome, "bank").is_some(), shown);
         }
+    }
+
+    const RIVER: &str = "I sat on the bank of the river.";
+
+    /// `bank` chosen in [`RIVER`].
+    fn bank_of_the_river() -> Manual {
+        let mut manual = with_sentence(RIVER);
+        manual.choose(4).expect("run");
+        assert_eq!(manual.input().expect("input").word(), "bank");
+        manual
+    }
+
+    fn bank_request() -> Request {
+        Request {
+            text: "bank".to_owned(),
+            context: Some(RIVER.to_owned()),
+        }
+    }
+
+    /// The outcome of the online translation of the input of `manual` that
+    /// ran on a real runner within `limit`, and whether its callback ran on
+    /// another thread than this one.
+    fn translated(
+        translator: Arc<dyn Translator>,
+        manual: &Manual,
+        limit: Duration,
+    ) -> (Outcome<Translated>, bool) {
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = mpsc::channel();
+        let caller = thread::current().id();
+        let job = translate_within(
+            limit,
+            Some(&work),
+            translator,
+            manual.input().expect("input"),
+            move |outcome| {
+                let _ = sender.send((outcome, thread::current().id() != caller));
+            },
+        )
+        .expect("a sentence")
+        .expect("job");
+        let reported = receiver.recv_timeout(WAIT).expect("outcome");
+        drop(job);
+        reported
+    }
+
+    /// A translator that never answers.
+    struct Mute;
+
+    impl Translator for Mute {
+        fn translate(&self, _request: Request) -> Translating<'_> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// A translator whose every call panics.
+    struct Faulty;
+
+    impl Translator for Faulty {
+        fn translate(&self, _request: Request) -> Translating<'_> {
+            Box::pin(async { panic!("the faulty test translator") })
+        }
+    }
+
+    #[test]
+    fn a_word_of_a_sentence_is_sent_with_its_sentence_and_nothing_else() {
+        let translator = Arc::new(Canned::new(Ok("берег")));
+        let (outcome, elsewhere) = translated(translator.clone(), &bank_of_the_river(), WAIT);
+        assert!(elsewhere);
+        assert_eq!(translator.asked(), [bank_request()]);
+        assert_eq!(
+            translation_result(outcome),
+            Some(Online::Translated("берег".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_lone_word_is_not_sent_online() {
+        let work = Work::start().expect("runner");
+        let translator = Arc::new(Canned::new(Ok("банк")));
+        // Typed, and clicked again.
+        let mut manual = Manual::default();
+        lone(&mut manual, "bank");
+        for _ in 0..2 {
+            let started = translate(
+                Some(&work),
+                translator.clone(),
+                manual.input().expect("input"),
+                |_| panic!("reported for a lone word"),
+            );
+            assert!(started.is_none());
+            manual.choose(0).expect("run");
+        }
+        // Dropping the runner waits for its jobs to be gone.
+        drop(work);
+        assert!(translator.asked().is_empty());
+    }
+
+    #[test]
+    fn without_a_runner_the_online_translation_is_refused_and_nothing_is_sent() {
+        let translator = Arc::new(Canned::new(Ok("берег")));
+        let manual = bank_of_the_river();
+        let started = translate(
+            None,
+            translator.clone(),
+            manual.input().expect("input"),
+            |_| panic!("reported without a runner"),
+        );
+        assert_eq!(
+            started.expect("a sentence").err(),
+            Some(Online::Refused(Refusal::Other))
+        );
+        assert!(translator.asked().is_empty());
+    }
+
+    #[test]
+    fn every_refusal_of_the_translator_is_the_shown_refusal() {
+        for refusal in [
+            Refusal::Key,
+            Refusal::RejectedKey,
+            Refusal::Quota,
+            Refusal::TimedOut,
+            Refusal::Other,
+        ] {
+            let translator = Arc::new(Canned::new(Err(refusal)));
+            let (outcome, _) = translated(translator, &bank_of_the_river(), WAIT);
+            assert_eq!(
+                translation_result(outcome),
+                Some(Online::Refused(refusal)),
+                "{refusal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_translator_that_never_answers_ends_at_the_deadline() {
+        let (outcome, _) = translated(
+            Arc::new(Mute),
+            &bank_of_the_river(),
+            Duration::from_millis(50),
+        );
+        assert_eq!(outcome, Outcome::TimedOut);
+        assert_eq!(
+            translation_result(outcome),
+            Some(Online::Refused(Refusal::TimedOut))
+        );
+    }
+
+    #[test]
+    fn a_translator_that_panics_is_a_refusal() {
+        let (outcome, _) = translated(Arc::new(Faulty), &bank_of_the_river(), WAIT);
+        assert_eq!(outcome, Outcome::Panicked);
+        assert_eq!(
+            translation_result(outcome),
+            Some(Online::Refused(Refusal::Other))
+        );
+    }
+
+    #[test]
+    fn a_dropped_online_request_is_cancelled_and_shows_nothing() {
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = mpsc::channel();
+        let manual = bank_of_the_river();
+        let job = translate(
+            Some(&work),
+            Arc::new(Mute),
+            manual.input().expect("input"),
+            move |outcome| {
+                let _ = sender.send(outcome);
+            },
+        )
+        .expect("a sentence")
+        .expect("job");
+        // What another click, an edit or a paste does to the pending request.
+        drop(job);
+        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+        assert_eq!(outcome, Outcome::Cancelled);
+        assert_eq!(translation_result(outcome), None);
+    }
+
+    #[test]
+    fn only_a_cancelled_online_request_shows_nothing() {
+        for outcome in [
+            Outcome::Finished(Ok("берег".to_owned())),
+            Outcome::Finished(Err(Refusal::Key)),
+            Outcome::Cancelled,
+            Outcome::TimedOut,
+            Outcome::Panicked,
+        ] {
+            let shown = is_shown(&outcome);
+            assert_eq!(translation_result(outcome).is_some(), shown);
+        }
+    }
+
+    #[test]
+    fn the_translate_limit_is_finite_and_its_own() {
+        assert!(!TRANSLATE_LIMIT.is_zero());
+        assert_eq!(TRANSLATE_LIMIT.as_secs(), 10);
+        assert!(TRANSLATE_LIMIT > LOOKUP_LIMIT);
+    }
+
+    /// A key file of one test with this mode, removed when the test ends.
+    struct KeyFile(std::path::PathBuf);
+
+    impl KeyFile {
+        fn new(tag: &str, mode: u32) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let path = std::env::temp_dir()
+                .join(format!("addict-manual-{tag}-{}.key", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            std::fs::write(&path, "a-key-of-the-stub\n").expect("write the key file");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                .expect("set the mode of the key file");
+            Self(path)
+        }
+    }
+
+    impl Drop for KeyFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// What the two jobs of one click report, on one channel.
+    #[derive(Debug)]
+    enum Reported {
+        Article(Outcome<Looked>),
+        Online(Outcome<Translated>),
+    }
+
+    #[test]
+    fn the_article_does_not_wait_for_a_slow_online_answer() {
+        let stub = Stub::start(Reply::Answer {
+            status: 200,
+            body: translation_body("берег"),
+            after: Duration::from_millis(300),
+        })
+        .expect("stub");
+        let key = KeyFile::new("slow", 0o600);
+        let translator: Arc<dyn Translator> =
+            Arc::new(DeepL::with_base_url(&key.0, stub.base_url()));
+        let work = Work::start().expect("runner");
+        let manual = bank_of_the_river();
+        let input = manual.input().expect("input");
+        let (sender, receiver) = mpsc::channel();
+        let online = sender.clone();
+        // As a click starts them: the lookup, then the online request.
+        let lookup = look_up(
+            Some(&work),
+            Arc::new(Sampled),
+            input.word().to_owned(),
+            move |outcome| {
+                let _ = sender.send(Reported::Article(outcome));
+            },
+        )
+        .expect("job");
+        let translation = translate(Some(&work), translator, input, move |outcome| {
+            let _ = online.send(Reported::Online(outcome));
+        })
+        .expect("a sentence")
+        .expect("job");
+
+        let first = receiver.recv_timeout(WAIT).expect("the first outcome");
+        let Reported::Article(outcome) = first else {
+            panic!("the online answer came first: {first:?}");
+        };
+        assert_eq!(
+            lookup_result(outcome, "bank"),
+            Some(Lookup::Article(Sample.lookup("bank").expect("bank")))
+        );
+        let second = receiver.recv_timeout(WAIT).expect("the second outcome");
+        let Reported::Online(outcome) = second else {
+            panic!("two articles: {second:?}");
+        };
+        assert_eq!(
+            translation_result(outcome),
+            Some(Online::Translated("берег".to_owned()))
+        );
+        drop((lookup, translation));
+
+        // The word and its sentence went out, once, and nothing else did.
+        let seen = stub.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].line, "POST /v2/translate HTTP/1.1");
+        let body: serde_json::Value = serde_json::from_str(&seen[0].body).expect("JSON");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "text": ["bank"],
+                "context": RIVER,
+                "source_lang": "EN",
+                "target_lang": "RU",
+            })
+        );
+    }
+
+    #[test]
+    fn a_key_file_that_is_too_open_is_a_refusal_and_nothing_leaves() {
+        let stub = Stub::start(Reply::translation("берег")).expect("stub");
+        let key = KeyFile::new("open", 0o644);
+        let translator = Arc::new(DeepL::with_base_url(&key.0, stub.base_url()));
+        let (outcome, _) = translated(translator, &bank_of_the_river(), WAIT);
+        assert_eq!(
+            translation_result(outcome),
+            Some(Online::Refused(Refusal::Key))
+        );
+        assert!(stub.seen().is_empty());
+    }
+
+    #[test]
+    fn a_silent_server_ends_at_the_deadline() {
+        let stub = Stub::start(Reply::Silence).expect("stub");
+        let key = KeyFile::new("silent", 0o600);
+        let translator = Arc::new(DeepL::with_base_url(&key.0, stub.base_url()));
+        let (outcome, _) = translated(translator, &bank_of_the_river(), Duration::from_secs(2));
+        assert_eq!(
+            translation_result(outcome),
+            Some(Online::Refused(Refusal::TimedOut))
+        );
+        assert_eq!(stub.seen().len(), 1);
     }
 
     #[test]

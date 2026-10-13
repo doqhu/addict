@@ -1,0 +1,31 @@
+[package]
+name = "addict-deepl"
+version = "0.1.0"
+description = "Addict online translator: the DeepL client and its key file, GTK-free"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "addict_deepl"
+path = "src/lib.rs"
+
+[dependencies]
+addict-core = { path = "../addict-core" }
+# No default features: TLS is rustls with the bundled Mozilla roots, so nothing
+# links OpenSSL or looks for its certificate directories. 0.13 offers rustls
+# only together with the platform verifier, which brings `openssl-probe`.
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+# Only the stub server of the tests uses it directly.
+tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt", "sync", "time"], optional = true }
+
+[features]
+# The stub server on a loopback port, for the tests of this crate and of the
+# crates that use it. The product cannot name it.
+stub = ["dep:tokio"]
+
+[dev-dependencies]
+addict-deepl = { path = ".", features = ["stub"] }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.2", features = ["macros", "rt", "time"] }
