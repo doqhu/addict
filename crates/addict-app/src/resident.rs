@@ -246,8 +246,14 @@ impl Session {
     }
 
     /// A lookup ended. Only the last started one is shown; where it found
-    /// the indexes is shown for every one that read them.
+    /// the indexes is shown for every one that read them, and every one
+    /// that was not given up is recorded.
     fn looked_up(&mut self, run: u64, outcome: Outcome<Looked>) {
+        if let Some(recording) = &self.recording
+            && let Some(answered) = evidence::answered(&outcome)
+        {
+            recording.looked_up(answered);
+        }
         if let Outcome::Finished(looked) = &outcome {
             self.view.render_indexes(looked.indexes);
         }

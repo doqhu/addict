@@ -16,7 +16,10 @@ use std::{
     time::SystemTime,
 };
 
+use addict_platform::work::Outcome;
 use serde_json::{Value, json};
+
+use crate::dictionaries::{Answer, Looked};
 
 /// The version of the record format, as the harness checks it.
 const SCHEMA: u32 = 1;
@@ -130,6 +133,54 @@ pub fn focus(id: &str, focused: bool) -> Record {
     }
 }
 
+/// How a lookup ended, as the evidence names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answered {
+    Article,
+    NoEntry,
+    NotImported,
+    Unreadable,
+    /// The lookup ran out of its time or panicked.
+    Unfinished,
+}
+
+impl Answered {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Article => "article",
+            Self::NoEntry => "no-entry",
+            Self::NotImported => "not-imported",
+            Self::Unreadable => "unreadable",
+            Self::Unfinished => "unfinished",
+        }
+    }
+}
+
+/// What the evidence says of a lookup that ended with `outcome`. A cancelled
+/// lookup was given up for another input and is not one.
+pub fn answered(outcome: &Outcome<Looked>) -> Option<Answered> {
+    Some(match outcome {
+        Outcome::Finished(looked) => match looked.answer {
+            Answer::Article(_) => Answered::Article,
+            Answer::NoEntry => Answered::NoEntry,
+            Answer::NotImported => Answered::NotImported,
+            Answer::Unreadable(_) => Answered::Unreadable,
+        },
+        Outcome::TimedOut | Outcome::Panicked => Answered::Unfinished,
+        Outcome::Cancelled => return None,
+    })
+}
+
+/// A lookup ended. The record says how and nothing of the word: the harness
+/// needs to know that the indexes were asked, not what the user reads.
+pub fn lookup(answered: Answered) -> Record {
+    Record {
+        invocation_id: None,
+        event: "lookup",
+        details: json!({"answer": answered.label()}),
+    }
+}
+
 /// The id of the activation number `count` of this process.
 pub fn invocation_id(pid: u32, receipt_monotonic_ns: u64, count: u64) -> String {
     format!("{pid}-{receipt_monotonic_ns}-{count}")
@@ -223,7 +274,10 @@ mod tests {
         protocol::{Backend, Mode, Origin as HarnessOrigin},
     };
 
+    use addict_core::dictionary::Article;
+
     use super::*;
+    use crate::dictionaries::{IndexFile, Indexes};
 
     const BOOT: &str = "test-boot";
 
@@ -359,6 +413,52 @@ mod tests {
             rows[7].details["limitation"],
             "wp_presentation frame discarded"
         );
+    }
+
+    #[test]
+    fn a_lookup_is_recorded_by_its_answer_and_without_its_word() {
+        let file = TempFile::new("lookup");
+        let mut writer = start(&file.0, Origin::Foliate);
+        let article = Article {
+            senses: Vec::new(),
+            translations: vec!["банк".to_owned()],
+        };
+        let oewn = IndexFile {
+            index: "oewn.index",
+            published: "english-wordnet-2025.xml.gz",
+        };
+        let looked = |answer| {
+            Outcome::Finished(Looked {
+                answer,
+                indexes: Indexes::OPEN,
+            })
+        };
+        let outcomes = [
+            (looked(Answer::Article(article)), "article"),
+            (looked(Answer::NoEntry), "no-entry"),
+            (looked(Answer::NotImported), "not-imported"),
+            (looked(Answer::Unreadable(oewn)), "unreadable"),
+            (Outcome::TimedOut, "unfinished"),
+            (Outcome::Panicked, "unfinished"),
+        ];
+        for (outcome, _) in &outcomes {
+            writer.write(&lookup(answered(outcome).expect("a lookup that ended")));
+        }
+        // A lookup given up for another input is not recorded.
+        assert_eq!(answered(&Outcome::Cancelled), None);
+
+        let rows = read(&file.0);
+        assert_eq!(rows.len(), 1 + outcomes.len());
+        for (row, (_, label)) in rows[1..].iter().zip(&outcomes) {
+            assert_eq!(row.event, "lookup");
+            assert_eq!(row.invocation_id, None);
+            assert_eq!(
+                (row.backend, row.mode, row.origin),
+                (Backend::Gtk4, Mode::Resident, HarnessOrigin::Foliate)
+            );
+            // The answer and nothing else: no word, no article.
+            assert_eq!(row.details, json!({"answer": label}));
+        }
     }
 
     #[test]
