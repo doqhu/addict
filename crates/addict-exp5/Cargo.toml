@@ -1,0 +1,28 @@
+[package]
+name = "addict-exp5"
+version = "0.1.0"
+description = "EXP-5: the check set of DeepL for EN→RU, its quota and its answers with and without context"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "addict_exp5"
+path = "src/lib.rs"
+
+[[bin]]
+name = "addict-exp5"
+path = "src/main.rs"
+
+[dependencies]
+addict-core = { path = "../addict-core" }
+addict-deepl = { path = "../addict-deepl" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+tokio = { version = "=1.53.2", features = ["rt", "time"] }
+
+[dev-dependencies]
+# The stub server of the client, for the rows one reply is enough for.
+addict-deepl = { path = "../addict-deepl", features = ["stub"] }
+tokio = { version = "=1.53.2", features = ["macros", "rt", "time"] }

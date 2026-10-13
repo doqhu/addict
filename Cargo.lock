@@ -80,6 +80,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "addict-exp5"
+version = "0.1.0"
+dependencies = [
+ "addict-core",
+ "addict-deepl",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "addict-platform"
 version = "0.1.0"
 dependencies = [
