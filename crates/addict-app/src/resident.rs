@@ -4,7 +4,10 @@
 //! This module owns the GTK application, its uniqueness, the window with its
 //! close and Esc handling, and the order of what happens on each event of the
 //! shortcut worker, of Retry, of a repeated launch, of the field and of a
-//! lookup, which runs on the work runner and comes back as an event. It keeps
+//! lookup, which runs on the work runner and comes back as an event. The
+//! dictionary indexes are opened and read there too: where they stand is
+//! asked once at the start and comes with the outcome of every lookup, and
+//! the window says it whenever one is missing or unreadable. It keeps
 //! the shown result with the sense chosen in it, and a click on a sense only
 //! changes that choice. What the window says and the paste into its field are
 //! [`view`](crate::view)'s; what an edit or a click does to the manual input
@@ -19,11 +22,7 @@ use std::{
     time::Duration,
 };
 
-use addict_core::{
-    APP_ID,
-    dictionary::{Article, Dictionary, Sample},
-    input::window_state,
-};
+use addict_core::{APP_ID, input::window_state};
 use addict_platform::{
     shortcut::{self, ShortcutEvent, ShortcutHandle},
     work::{Job, Outcome, Work},
@@ -33,6 +32,7 @@ use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
+    dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
     manual::{self, Edit, Manual},
     recording::Recording,
@@ -55,7 +55,7 @@ struct Resident {
     /// The runner of the lookups; `None` when it could not be started.
     _work: Option<Rc<Work>>,
     /// What the lookups ask.
-    _dictionary: Arc<dyn Dictionary>,
+    _articles: Arc<dyn Articles>,
 }
 
 /// Everything the worker threads tell the UI thread, over one channel.
@@ -74,10 +74,9 @@ enum Event {
     /// The sense with this index in the shown list was clicked.
     Sense(usize),
     /// The lookup started as number `run` ended.
-    Lookup {
-        run: u64,
-        outcome: Outcome<Option<Article>>,
-    },
+    Lookup { run: u64, outcome: Outcome<Looked> },
+    /// The check at the start says where the dictionary indexes stand.
+    Indexes(Indexes),
 }
 
 /// Starts one attempt to bind the shortcut; its events go to `sender`. With
@@ -92,8 +91,8 @@ fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandl
     })
 }
 
-/// The height the window starts with, in pixels: the article of a sample
-/// word with a sense chosen fits without scrolling its list of senses.
+/// The height the window starts with, in pixels: an article of a few
+/// senses with one of them chosen fits without scrolling its list.
 const WINDOW_HEIGHT: i32 = 480;
 
 /// The hidden window around the `view`: closing it hides it, and so does Esc.
@@ -150,7 +149,9 @@ struct Session {
     /// Weak: the runner must go when the resident state is dropped. Never
     /// upgrades when the runner could not be started.
     work: Weak<Work>,
-    dictionary: Arc<dyn Dictionary>,
+    articles: Arc<dyn Articles>,
+    /// The check of the indexes at the start; dropping it cancels the check.
+    check: Option<Job>,
 }
 
 impl Session {
@@ -171,6 +172,10 @@ impl Session {
             Event::Word(index) => self.word_chosen(index),
             Event::Sense(index) => self.sense_chosen(index),
             Event::Lookup { run, outcome } => self.looked_up(run, outcome),
+            Event::Indexes(indexes) => {
+                self.check = None;
+                self.view.render_indexes(indexes);
+            }
         }
     }
 
@@ -224,7 +229,7 @@ impl Session {
         let sender = self.sender.clone();
         let started = manual::look_up(
             self.work.upgrade().as_deref(),
-            self.dictionary.clone(),
+            self.articles.clone(),
             word,
             move |outcome| {
                 // On the worker: the UI thread wakes for the event.
@@ -240,8 +245,12 @@ impl Session {
         }
     }
 
-    /// A lookup ended. Only the last started one is shown.
-    fn looked_up(&mut self, run: u64, outcome: Outcome<Option<Article>>) {
+    /// A lookup ended. Only the last started one is shown; where it found
+    /// the indexes is shown for every one that read them.
+    fn looked_up(&mut self, run: u64, outcome: Outcome<Looked>) {
+        if let Outcome::Finished(looked) = &outcome {
+            self.view.render_indexes(looked.indexes);
+        }
         if !self.manual.awaits(run) {
             return;
         }
@@ -405,7 +414,14 @@ fn start(
             None
         }
     };
-    let dictionary: Arc<dyn Dictionary> = Arc::new(Sample);
+    // Nothing is opened here: the indexes are files, and files are the
+    // runner's.
+    let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());
+    let checked = sender.clone();
+    let check = manual::check_indexes(work.as_deref(), articles.clone(), move |indexes| {
+        // On the worker: the UI thread wakes for the event.
+        let _ = checked.unbounded_send(Event::Indexes(indexes));
+    });
     let mut session = Session {
         binding,
         view,
@@ -418,7 +434,8 @@ fn start(
         pending: None,
         shown: Shown::default(),
         work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),
-        dictionary: dictionary.clone(),
+        articles: articles.clone(),
+        check,
     };
     glib::spawn_future_local(async move {
         while let Some(event) = receiver.next().await {
@@ -430,7 +447,7 @@ fn start(
         _shortcut: handle,
         events,
         _work: work,
-        _dictionary: dictionary,
+        _articles: articles,
     }
 }
 

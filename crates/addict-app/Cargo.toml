@@ -25,5 +25,7 @@ wayland-client = "=0.31.15"
 wayland-protocols = { version = "=0.32.13", features = ["client"] }
 
 [dev-dependencies]
+# The sample dictionary is for tests only: the product cannot name it.
+addict-core = { path = "../addict-core", features = ["sample"] }
 # The harness is the format oracle of the evidence tests; no broker, no probe.
 addict-exp4 = { path = "../addict-exp4", default-features = false }

@@ -1,8 +1,9 @@
 //! The dictionary contract: a word in, its [`Article`] out.
 //!
 //! [`Dictionary::lookup`] is synchronous: core has no runtime, and keeping a
-//! lookup off the UI thread is the caller's duty. [`Sample`] is the built-in
-//! dictionary of a few words; its texts were written for this project.
+//! lookup off the UI thread is the caller's duty. `Sample` is a dictionary of
+//! a few words for tests, present only with the `sample` feature; its texts
+//! were written for this project.
 
 /// What a dictionary says about one word.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,9 +30,11 @@ pub trait Dictionary: Send + Sync {
 }
 
 /// One sense of the sample: its definition and its synonyms.
+#[cfg(any(test, feature = "sample"))]
 type SampleSense = (&'static str, &'static [&'static str]);
 
 /// One entry of the sample: the word, its senses and its translations.
+#[cfg(any(test, feature = "sample"))]
 type SampleEntry = (
     &'static str,
     &'static [SampleSense],
@@ -39,6 +42,7 @@ type SampleEntry = (
 );
 
 /// The entries of [`Sample`]; the words are lowercase.
+#[cfg(any(test, feature = "sample"))]
 const ENTRIES: &[SampleEntry] = &[
     (
         "bank",
@@ -111,11 +115,13 @@ const ENTRIES: &[SampleEntry] = &[
     ),
 ];
 
-/// The built-in dictionary of a few words. A word matches its entry when it
+/// The dictionary of a few words, for tests. A word matches its entry when it
 /// is the entry's word after trimming and lowercasing, and in no other form.
+#[cfg(any(test, feature = "sample"))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Sample;
 
+#[cfg(any(test, feature = "sample"))]
 impl Dictionary for Sample {
     fn lookup(&self, word: &str) -> Option<Article> {
         let key = word.trim().to_lowercase();
@@ -133,6 +139,7 @@ impl Dictionary for Sample {
     }
 }
 
+#[cfg(any(test, feature = "sample"))]
 fn owned(texts: &[&str]) -> Vec<String> {
     texts.iter().map(|text| (*text).to_owned()).collect()
 }

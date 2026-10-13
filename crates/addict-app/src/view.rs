@@ -1,13 +1,14 @@
 //! What the window says about its state: the source label and the status,
-//! below them the binding row when the shortcut is not bound, then the field
+//! below them the binding row when the shortcut is not bound and the line of
+//! the dictionary indexes when one is missing or unreadable, then the field
 //! for a word or a sentence, the text of the field with its words as links
 //! and the result of the lookup of the chosen word: the senses of the word as
 //! links in a list that scrolls, and below the list what is said about the
 //! sense that was clicked and about the word.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
-//! [`binding_texts`], [`sentence_markup`], [`senses_markup`] and
-//! [`details_markup`] are pure, and so is [`Shown`], the result with the sense
+//! [`binding_texts`], [`indexes_text`], [`sentence_markup`],
+//! [`senses_markup`] and [`details_markup`] are pure, and so is [`Shown`], the result with the sense
 //! chosen in it; they are tested without a display, and [`View`] puts their
 //! results into its widgets.
 //!
@@ -24,6 +25,8 @@ use addict_core::{
     sentence,
 };
 use gtk::{gio, glib, prelude::*};
+
+use crate::dictionaries::{IndexFile, Indexes, State};
 
 /// The two texts of one window state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +112,62 @@ pub fn binding_texts(binding: &Binding) -> Option<BindingTexts<'_>> {
 
 const RETRY_LABEL: &str = "Retry";
 
+/// The command that imports a downloaded dictionary file, as the user types
+/// it.
+const IMPORT_COMMAND: &str = "addict import <FILE>";
+
+/// The start of the line of the indexes when neither is imported.
+const NOT_IMPORTED: &str = "The dictionaries are not imported.";
+
+/// What the index of the definitions and the index of the translations
+/// give, in the order of [`Indexes::files`].
+const INDEX_GIVES: [&str; 2] = ["English definitions and synonyms", "Russian translations"];
+
+/// The line of the indexes: what is said about every index that is missing
+/// or cannot be read, one line for each, with the command that imports its
+/// file. Empty when both are open. Plain text, not markup.
+pub fn indexes_text(indexes: Indexes) -> String {
+    if indexes == Indexes::OPEN {
+        return String::new();
+    }
+    let files = indexes.files();
+    if let [
+        (definitions, State::Missing),
+        (translations, State::Missing),
+    ] = files
+    {
+        return format!(
+            "{NOT_IMPORTED} Import each downloaded file with {IMPORT_COMMAND}: {} and {}.",
+            definitions.published, translations.published
+        );
+    }
+    let mut text = String::new();
+    for ((file, state), gives) in files.into_iter().zip(INDEX_GIVES) {
+        let line = match state {
+            State::Open => continue,
+            State::Missing => format!(
+                "No {gives}: {} is not imported. Import it with {IMPORT_COMMAND}.",
+                file.published
+            ),
+            State::Unreadable => format!("No {gives}: {}", unreadable_text(file)),
+        };
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&line);
+    }
+    text
+}
+
+/// What is said about an index that cannot be read: its file and the
+/// dictionary file to import again.
+fn unreadable_text(file: IndexFile) -> String {
+    format!(
+        "the index {} cannot be read. Import {} again with {IMPORT_COMMAND}.",
+        file.index, file.published
+    )
+}
+
 /// What the empty field says.
 const FIELD_PLACEHOLDER: &str = "Type or paste a word, or a sentence to click a word in";
 
@@ -171,6 +230,10 @@ pub enum Lookup {
     Article(Article),
     /// The dictionary has no entry for `word`.
     NoEntry { word: String },
+    /// No index is open: there is nothing to look `word` up in.
+    NotImported { word: String },
+    /// An open index could not be read, so the word has no answer.
+    Unreadable(IndexFile),
     /// The lookup ended without an answer.
     Unfinished,
 }
@@ -185,6 +248,14 @@ const UNFINISHED: &str = "The lookup did not finish.";
 /// word and what stands after it.
 const NO_ENTRY_BEFORE: &str = "The dictionary has no entry for “";
 const NO_ENTRY_AFTER: &str = "”.";
+
+/// The line of a word that no imported dictionary could be asked about: what
+/// stands before the word and what stands after it.
+const NOT_IMPORTED_BEFORE: &str = "There is no imported dictionary to look “";
+const NOT_IMPORTED_AFTER: &str = "” up in. Import a downloaded dictionary file with ";
+
+/// What stands before the line of an index that cannot be read.
+const UNREADABLE_BEFORE: &str = "The word was not looked up: ";
 
 /// What stands below the list while no sense is chosen.
 const CHOOSE_SENSE: &str = "Click a sense to see its short explanation and its synonyms.";
@@ -252,6 +323,17 @@ pub fn details_markup(lookup: &Lookup, chosen: Option<usize>) -> String {
             push_escaped(&mut markup, NO_ENTRY_BEFORE);
             push_escaped(&mut markup, word);
             push_escaped(&mut markup, NO_ENTRY_AFTER);
+        }
+        Lookup::NotImported { word } => {
+            push_escaped(&mut markup, NOT_IMPORTED_BEFORE);
+            push_escaped(&mut markup, word);
+            push_escaped(&mut markup, NOT_IMPORTED_AFTER);
+            push_escaped(&mut markup, IMPORT_COMMAND);
+            markup.push('.');
+        }
+        Lookup::Unreadable(file) => {
+            push_escaped(&mut markup, UNREADABLE_BEFORE);
+            push_escaped(&mut markup, &unreadable_text(*file));
         }
         Lookup::Unfinished => push_escaped(&mut markup, UNFINISHED),
     }
@@ -390,7 +472,8 @@ fn replace_on_paste(field: &gtk::Entry) {
 }
 
 /// The source label and the status, one above the other, then the binding
-/// row: its line, the detail and Retry; then the field for a word or a
+/// row: its line, the detail and Retry; the line of the indexes when there
+/// is something to say about them; then the field for a word or a
 /// sentence, the text of the field with its words as links and the result:
 /// the list of senses, which scrolls, and below it the rest, which does not.
 pub struct View {
@@ -401,6 +484,8 @@ pub struct View {
     binding_text: gtk::Label,
     binding_detail: gtk::Label,
     retry: gtk::Button,
+    /// What is said about the dictionary indexes; hidden when both are open.
+    indexes: gtk::Label,
     field: gtk::Entry,
     sentence: gtk::Label,
     /// The senses as links, inside `senses_area`.
@@ -442,6 +527,17 @@ impl View {
         row.append(&binding_detail);
         row.append(&retry);
         root.append(&row);
+
+        // Hidden until the indexes were checked. Not selectable: it must not
+        // take the focus from the field.
+        let indexes = gtk::Label::builder()
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .max_width_chars(TEXT_WIDTH_CHARS)
+            .xalign(0.0)
+            .visible(false)
+            .build();
+        root.append(&indexes);
 
         let field = gtk::Entry::builder()
             .placeholder_text(FIELD_PLACEHOLDER)
@@ -503,6 +599,7 @@ impl View {
             binding_text,
             binding_detail,
             retry,
+            indexes,
             field,
             sentence,
             senses,
@@ -543,6 +640,14 @@ impl View {
             // takes the focus and selects its text.
             self.retry.grab_focus();
         }
+    }
+
+    /// Shows what is said about `indexes`, or hides the line when both are
+    /// open.
+    pub fn render_indexes(&self, indexes: Indexes) {
+        let text = indexes_text(indexes);
+        self.indexes.set_text(&text);
+        self.indexes.set_visible(!text.is_empty());
     }
 
     /// Runs `retry` each time Retry is pressed.
@@ -641,7 +746,11 @@ mod tests {
     use super::{
         Binding, CHOOSE_SENSE, EXPLANATION_MARK, FIELD_PLACEHOLDER, Lookup, NO_DEFINITIONS,
         NO_SYNONYMS, NO_TRANSLATION, PENDING, RUSSIAN_LABEL, SYNONYMS_LABEL, Shown, UNFINISHED,
-        binding_texts, details_markup, senses_markup, sentence_markup, texts,
+        binding_texts, details_markup, indexes_text, senses_markup, sentence_markup, texts,
+    };
+    use crate::dictionaries::{
+        Indexes, State,
+        tests::{FREEDICT, OEWN},
     };
 
     const SENTENCE: &str = "I sat on the bank.";
@@ -771,6 +880,10 @@ mod tests {
             Lookup::NoEntry {
                 word: "sat".to_owned(),
             },
+            Lookup::NotImported {
+                word: "sat".to_owned(),
+            },
+            Lookup::Unreadable(OEWN),
             Lookup::Unfinished,
         ];
         for lookup in &all {
@@ -778,6 +891,8 @@ mod tests {
                 Lookup::Pending
                 | Lookup::Article(_)
                 | Lookup::NoEntry { .. }
+                | Lookup::NotImported { .. }
+                | Lookup::Unreadable(_)
                 | Lookup::Unfinished => {}
             }
         }
@@ -1106,6 +1221,123 @@ mod tests {
             None,
         );
         assert_eq!(line, "The dictionary has no entry for “a&lt;b&amp;c”.");
+    }
+
+    #[test]
+    fn the_not_imported_line_names_the_word_and_the_command() {
+        let line = details_markup(
+            &Lookup::NotImported {
+                word: "a<b".to_owned(),
+            },
+            None,
+        );
+        assert_eq!(
+            line,
+            "There is no imported dictionary to look “a&lt;b” up in. \
+             Import a downloaded dictionary file with addict import &lt;FILE&gt;."
+        );
+    }
+
+    #[test]
+    fn the_unreadable_line_names_the_index_its_file_and_the_command() {
+        for file in [OEWN, FREEDICT] {
+            let line = plain(&details_markup(&Lookup::Unreadable(file), None));
+            assert!(line.contains(file.index), "{line}");
+            assert!(line.contains(file.published), "{line}");
+            assert!(line.contains("cannot be read"), "{line}");
+            assert!(line.contains("again"), "{line}");
+            assert!(line.contains("addict import <FILE>"), "{line}");
+            assert!(!line.contains("did not finish"), "{line}");
+        }
+    }
+
+    const STATES: [State; 3] = [State::Open, State::Missing, State::Unreadable];
+
+    #[test]
+    fn the_line_of_the_indexes_is_empty_only_when_both_are_open() {
+        for definitions in STATES {
+            for translations in STATES {
+                let indexes = Indexes {
+                    definitions,
+                    translations,
+                };
+                assert_eq!(
+                    indexes_text(indexes).is_empty(),
+                    indexes == Indexes::OPEN,
+                    "{indexes:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn with_nothing_imported_the_line_says_so_and_names_both_files() {
+        let line = indexes_text(Indexes {
+            definitions: State::Missing,
+            translations: State::Missing,
+        });
+        assert_eq!(
+            line,
+            "The dictionaries are not imported. Import each downloaded file with \
+             addict import <FILE>: english-wordnet-2025.xml.gz and \
+             freedict-eng-rus-2025.11.23.src.tar.xz."
+        );
+    }
+
+    #[test]
+    fn the_line_of_the_indexes_names_each_one_that_is_not_open() {
+        for definitions in STATES {
+            for translations in STATES {
+                let text = indexes_text(Indexes {
+                    definitions,
+                    translations,
+                });
+                let named = [(OEWN, definitions), (FREEDICT, translations)];
+                let lines = named.iter().filter(|(_, s)| *s != State::Open).count();
+                if lines > 0 && (definitions, translations) != (State::Missing, State::Missing) {
+                    assert_eq!(text.lines().count(), lines, "{text}");
+                }
+                for (file, state) in named {
+                    // The file to import is named exactly for an index that
+                    // is not open, and its index file when it is unreadable.
+                    assert_eq!(
+                        text.contains(file.published),
+                        state != State::Open,
+                        "{text}"
+                    );
+                    assert_eq!(
+                        text.contains(file.index),
+                        state == State::Unreadable,
+                        "{text}"
+                    );
+                }
+                if !text.is_empty() {
+                    assert!(text.contains("addict import <FILE>"), "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn one_index_alone_says_what_the_other_would_give() {
+        let text = indexes_text(Indexes {
+            definitions: State::Open,
+            translations: State::Missing,
+        });
+        assert_eq!(
+            text,
+            "No Russian translations: freedict-eng-rus-2025.11.23.src.tar.xz is not \
+             imported. Import it with addict import <FILE>."
+        );
+        let text = indexes_text(Indexes {
+            definitions: State::Unreadable,
+            translations: State::Open,
+        });
+        assert_eq!(
+            text,
+            "No English definitions and synonyms: the index oewn.index cannot be read. \
+             Import english-wordnet-2025.xml.gz again with addict import <FILE>."
+        );
     }
 
     #[test]
