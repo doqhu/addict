@@ -3,22 +3,31 @@
 # Run it in a terminal of an unlocked Wayland session and follow the prompts.
 #   acceptance.sh calibrate                  ten presses -> clock certificate of this boot
 #   acceptance.sh <foliate|android-studio>   one session: cold press, 60 s idle sample,
-#                                            30 warm presses, 60 s idle sample, GPU record, summary
+#                                            30 warm presses, 30 lookups, 60 s idle sample,
+#                                            GPU record, summary
+# A session is of the product with both dictionary indexes imported and records them.
 # Exit 0 only when the certificate was written or the session's row is `pass`.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 action=${1:-}
 app="$root/target/release/addict"
 exp="$root/target/release/addict-exp4"
-out="$root/_bmad-output/initiative-linux-rust-translator/acceptance-resident-hotkey-window"
+out="$root/_bmad-output/initiative-linux-rust-translator/acceptance-manual-sentence-offline-dictionary"
 results="$out/results.jsonl"
 calibration="$out/calibration.jsonl"
 boot=$(cat /proc/sys/kernel/random/boot_id)
 # A certificate speaks for one boot: each boot keeps its own, with its evidence text.
 clock="$out/clock-$boot"
 certificate="$clock/clock-certificate.json"
-entry="${XDG_DATA_HOME:-$HOME/.local/share}/applications/dev.addict.Addict.desktop"
 build='cargo build --release -p addict-app -p addict-exp4'
+# The data directory as the application finds it: a relative XDG_DATA_HOME is ignored.
+data=${XDG_DATA_HOME:-}
+[[ $data == /* ]] || data=$HOME/.local/share
+entry="$data/applications/dev.addict.Addict.desktop"
+# Each index with the published file it is imported from.
+indexes=("$data/addict/oewn.index" "$data/addict/freedict.index")
+published=(english-wordnet-2025.xml.gz freedict-eng-rus-2025.11.23.src.tar.xz)
+lookups=30
 
 case $action in
   calibrate) origin=local name='any application' file=$calibration ;;
@@ -26,6 +35,17 @@ case $action in
   android-studio) origin=android-studio name='Android Studio' file=$results ;;
   *) echo 'usage: acceptance.sh <calibrate|foliate|android-studio>' >&2; exit 2 ;;
 esac
+
+# A session without both indexes would measure another state of the program.
+if [[ $action != calibrate ]]; then
+  missing=0
+  for i in "${!indexes[@]}"; do
+    [[ -f ${indexes[i]} ]] && continue
+    echo "Index ${indexes[i]} missing; import it: $app import <path to ${published[i]}>" >&2
+    missing=1
+  done
+  (( missing == 0 )) || exit 1
+fi
 
 # Release build of the current sources: a stale binary would measure another program.
 (cd "$root" && $build --quiet) || { echo "Release build failed: $build" >&2; exit 1; }
@@ -53,20 +73,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Prints "<session started> <cold frames> <warm frames> <frames without a time> <presses>"
-# of the process this script started.
+# Prints "<session started> <cold frames> <warm frames> <frames without a time> <presses>
+# <lookups>" of the process this script started.
 progress() {
   python3 - "$file" "$pid" <<'EOF'
 import json, os, sys
-started = cold = warm = untimed = presses = 0
+started = cold = warm = untimed = presses = lookups = 0
+mine = False
 flags = {}
 if os.path.exists(sys.argv[1]):
     for line in open(sys.argv[1]):
         if not line.strip():
             continue
         row = json.loads(line)
-        if row['event'] == 'broker-started' and str(row['details'].get('pid')) == sys.argv[2]:
-            started = 1
+        if row['event'] == 'broker-started':
+            # A lookup names no press: it is of the session it follows.
+            mine = str(row['details'].get('pid')) == sys.argv[2]
+            if mine:
+                started = 1
+                lookups = 0
+        elif row['event'] == 'lookup' and mine:
+            lookups += 1
         identifier = row.get('invocation_id') or ''
         if not identifier.startswith(sys.argv[2] + '-'):
             continue
@@ -80,16 +107,17 @@ if os.path.exists(sys.argv[1]):
                 warm += 1
             if row['details'].get('time_ns') is None:
                 untimed += 1
-print(started, cold, warm, untimed, presses)
+print(started, cold, warm, untimed, presses, lookups)
 EOF
 }
 alive() { kill -0 "$pid" 2>/dev/null || { echo; echo 'addict exited; see its message above' >&2; exit 1; }; }
-wait_for() { # <label> <target> <field index>...: waits until the sum of the fields reaches the target
+base=0 # what the sum already was when the step began
+wait_for() { # <label> <target> <field index>...: waits until the sum of the fields, less $base, reaches the target
   local values total field
   while :; do
     alive
     read -r -a values <<<"$(progress)"
-    total=0
+    total=$((-base))
     for field in "${@:3}"; do total=$((total + values[field])); done
     printf '\r%s: %s/%s   frames without a time: %s ' "$1" "$total" "$2" "${values[3]}"
     (( total >= $2 )) && { echo; return; }
@@ -97,16 +125,18 @@ wait_for() { # <label> <target> <field index>...: waits until the sum of the fie
   done
 }
 presses() { local values; read -r -a values <<<"$(progress)"; echo "${values[4]}"; }
+looked() { local values; read -r -a values <<<"$(progress)"; echo "${values[5]}"; }
 sample() { # <phase>: 60 s idle, then PSS, RSS and CPU of the process over one second
   local before
   read -r -p 'Make sure the window is closed (Esc), then press Enter here. '
-  before=$(presses)
+  before="$(presses) $(looked)"
   echo "Hands off for 60 s: idle sample ($1)."
   "$exp" sample --backend gtk4 --mode resident --origin "$origin" --roots "$pid" \
     --phase "$1" --idle-seconds 60 --inventory-complete --results "$results" >/dev/null
   alive
-  # A press during the wait means the process was not idle: the sample is not one.
-  [[ $(presses) == "$before" ]] || { echo 'A press arrived during the idle wait; repeat the session' >&2; exit 1; }
+  # A press or a lookup during the wait means the process was not idle: the sample is not one.
+  [[ "$(presses) $(looked)" == "$before" ]] \
+    || { echo 'A press or a lookup arrived during the idle wait; repeat the session' >&2; exit 1; }
 }
 
 "$app" --evidence "$file" --origin "$origin" &
@@ -124,6 +154,11 @@ if [[ $action == calibrate ]]; then
   exit 0
 fi
 
+# What this session measures with. Uncommitted sources are said: the build is of them.
+commit=$(git -C "$root" rev-parse HEAD)
+[[ -z $(git -C "$root" status --porcelain) ]] || commit+=-dirty
+"$exp" data-sets --results "$results" --roots "$pid" --commit "$commit" --files "${indexes[@]}"
+
 echo "1. Focus $name, press Super+Q once (cold start), check the window, close it with Esc."
 echo '   If the bind dialog was dismissed or the window appeared by itself, stop with Ctrl+C and start again.'
 wait_for 'cold activation' 1 1
@@ -131,6 +166,14 @@ sample before-invocation
 echo "2. From $name: Super+Q, wait for the window, Esc. Exactly 30 times, no extra presses."
 wait_for 'warm activations' 30 2
 echo 'Stop pressing.'
+echo "3. Super+Q once more (this press is measured too, as an extra attempt), paste a sentence into"
+echo "   the field and click its words, one after another, waiting for each result, until $lookups lookups"
+echo "   are counted. The window stays open meanwhile."
+# Only a lookup after the 30 presses counts.
+base=$(looked)
+wait_for 'lookups' "$lookups" 5
+base=0
+echo 'Stop clicking.'
 sample after-close
 "$exp" gpu --results "$results" --roots "$pid"
 
@@ -143,4 +186,4 @@ open(sys.argv[2], "w").write(text + "\n")
 print(text)
 print("== {}: {} ==".format(sys.argv[1], row["acceptance"]))
 sys.exit(0 if row["acceptance"] == "pass" else 1)
-' "$origin" "$out/summary-$origin-$boot.json" <<<"$summary"
+' "$origin" "$out/summary-$origin-$boot-$pid.json" <<<"$summary"

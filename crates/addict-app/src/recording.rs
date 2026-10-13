@@ -92,6 +92,11 @@ impl Recording {
             .write(&evidence::token_consumption(id, token_consumed));
     }
 
+    /// A lookup ended as `answered`.
+    pub fn looked_up(&self, answered: evidence::Answered) {
+        self.writer.borrow_mut().write(&evidence::lookup(answered));
+    }
+
     /// The window was shown with no press behind it.
     pub fn shown_without_press(&self) {
         self.shown.set(true);

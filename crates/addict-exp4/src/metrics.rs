@@ -5,9 +5,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub const MEMORY_LIMIT: u64 = 100_000_000;
@@ -601,6 +601,10 @@ pub const PRODUCT_ORIGINS: [Origin; 2] = [Origin::Foliate, Origin::AndroidStudio
 /// The idle states the memory threshold is judged on. The state after an OCR
 /// cycle belongs to the OCR epic and is reported as not measured.
 pub const PRODUCT_PHASES: [&str; 2] = ["before-invocation", "after-close"];
+/// The `lookup` records of the session that must lie between its trial and
+/// its closing sample: "after closing the result" is a state in which words
+/// were looked up.
+pub const PRODUCT_LOOKUPS: usize = 30;
 
 #[derive(Debug, Serialize)]
 pub struct ProductSummary {
@@ -621,6 +625,14 @@ pub struct ProductSummary {
     pub memory_status: String,
     pub idle_cpu_percent_max: Option<f64>,
     pub idle_cpu_status: String,
+    /// The `lookup` records after the trial and before the latest closing
+    /// sample, or to the end of the session when it has none.
+    pub lookups: usize,
+    /// The same records by the kind of their answer; reported, not judged.
+    pub lookup_answers: BTreeMap<String, usize>,
+    /// The latest `data-sets` record of the session: without it the row does
+    /// not say what was measured and is not a pass.
+    pub data_sets: Option<serde_json::Value>,
     /// The latest `gpu` record of the session; reported, not judged.
     pub gpu: Option<serde_json::Value>,
     pub not_measured: Vec<String>,
@@ -628,8 +640,9 @@ pub struct ProductSummary {
 }
 /// The acceptance of the product, one row per application, from its latest
 /// session. Unlike [`summarize`]: Android Studio has a row, one process is the
-/// whole inventory, two idle states are judged, any idle CPU fails, and no
-/// `human-scenarios` record is needed.
+/// whole inventory, two idle states are judged, any idle CPU fails, no
+/// `human-scenarios` record is needed, the closing sample counts only after
+/// [`PRODUCT_LOOKUPS`] lookups, and the data sets must be recorded.
 pub fn summarize_product(
     records: &[Evidence],
     mapping: Option<&ClockMapping>,
@@ -671,6 +684,13 @@ pub fn summarize_product(
                         .is_some_and(|id| latency.trial.contains(&id))
             });
 
+            // The lookups between the trial and the row `index`: one made
+            // before or among the presses is not one of the closing state.
+            let lookups_before = |index: usize| {
+                let from = trial_end.map_or(rows.len(), |end| end + 1).min(index);
+                rows[from..index].iter().filter(|r| r.event == "lookup")
+            };
+
             let (mut memory_status, mut cpu_status) = ("pass", "pass");
             let mut pss = Vec::new();
             let mut cpu_max: Option<f64> = None;
@@ -695,6 +715,7 @@ pub fn summarize_product(
                             first_warm.is_none_or(|first| index < first)
                         } else {
                             trial_end.is_some_and(|end| index > end)
+                                && lookups_before(index).count() >= PRODUCT_LOOKUPS
                         };
                     let sample_pss = sample["pss_bytes"].as_u64().filter(|_| counts);
                     let sample_cpu = sample["cpu_percent_one_core"].as_f64().filter(|_| counts);
@@ -738,10 +759,24 @@ pub fn summarize_product(
             {
                 not_measured.push("GPU memory of the process".to_owned());
             }
+            let closing = rows
+                .iter()
+                .rposition(|r| r.event == "memory" && r.details["phase"] == "after-close")
+                .unwrap_or(rows.len());
+            let mut lookup_answers = BTreeMap::new();
+            for row in lookups_before(closing) {
+                let answer = row.details["answer"].as_str().unwrap_or("unknown");
+                *lookup_answers.entry(answer.to_owned()).or_insert(0) += 1;
+            }
+            let data_sets = rows
+                .iter()
+                .rev()
+                .find(|r| r.event == "data-sets")
+                .map(|r| r.details.clone());
             let statuses = [latency.status, memory_status, cpu_status];
             let acceptance = if statuses.contains(&"fail") {
                 "fail"
-            } else if statuses.iter().all(|&s| s == "pass") {
+            } else if statuses.iter().all(|&s| s == "pass") && data_sets.is_some() {
                 "pass"
             } else {
                 "incomplete"
@@ -763,12 +798,34 @@ pub fn summarize_product(
                 memory_status: memory_status.into(),
                 idle_cpu_percent_max: cpu_max,
                 idle_cpu_status: cpu_status.into(),
+                lookups: lookups_before(closing).count(),
+                lookup_answers,
+                data_sets,
                 gpu,
                 not_measured,
                 acceptance: acceptance.into(),
             }
         })
         .collect()
+}
+
+/// What a session measured with: the name, size and SHA-256 of each of
+/// `files`, and the `commit` of the sources, as the caller names it.
+pub fn data_sets(files: &[PathBuf], commit: &str) -> io::Result<serde_json::Value> {
+    use sha2::{Digest, Sha256};
+    let files = files
+        .iter()
+        .map(|path| {
+            let bytes = std::fs::read(path)
+                .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+            Ok(serde_json::json!({
+                "name": path.file_name().map(|name| name.to_string_lossy()),
+                "bytes": bytes.len(),
+                "sha256": format!("{:x}", Sha256::digest(&bytes)),
+            }))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(serde_json::json!({"files": files, "commit": commit}))
 }
 
 /// Presses a calibration needs at least.
@@ -1375,6 +1432,9 @@ mod product_tests {
             json!({"phase":phase,"sample":{"pss_bytes":pss,"rss_bytes":120_000_000,"cpu_percent_one_core":cpu,"idle_seconds":60,"inventory_complete":true,"processes":[{"pid":PID}]}}),
         )
     }
+    fn lookup(origin: Origin, answer: &str) -> Evidence {
+        row(origin, "lookup", None, json!({"answer":answer}))
+    }
     /// A whole session as the runbook drives it: 298 ms to every frame, which
     /// is 300 ms with the certificate's uncertainty and the quantization.
     fn session(origin: Origin) -> Vec<Evidence> {
@@ -1384,10 +1444,19 @@ mod product_tests {
             None,
             json!({"pid":PID,"boot_id":"boot","application":"addict"}),
         )];
+        rows.push(row(
+            origin,
+            "data-sets",
+            None,
+            json!({"files":[{"name":"oewn.index","bytes":1,"sha256":"a"}],"commit":"c"}),
+        ));
         rows.extend(press(origin, 1, true, 900));
         rows.push(memory(origin, "before-invocation", 40_000_000, 0.0));
         for count in 2..=31 {
             rows.extend(press(origin, count, false, 298));
+        }
+        for _ in 0..PRODUCT_LOOKUPS {
+            rows.push(lookup(origin, "article"));
         }
         rows.push(memory(origin, "after-close", MEMORY_LIMIT, 0.0));
         rows.push(row(
@@ -1581,13 +1650,116 @@ mod product_tests {
             .position(|r| r.event == "memory" && r.details["phase"] == "after-close")
             .unwrap();
         let sample = rows.remove(after);
-        rows.insert(8, sample);
+        rows.insert(9, sample);
         assert_eq!(product(&rows, Origin::Foliate).memory_status, "incomplete");
         let mut rows = session(Origin::Foliate);
-        let before = rows.remove(4);
+        let before = rows.remove(5);
         assert_eq!(before.details["phase"], "before-invocation");
-        rows.insert(10, before);
+        rows.insert(11, before);
         assert_eq!(product(&rows, Origin::Foliate).memory_status, "incomplete");
+    }
+
+    #[test]
+    fn the_closing_sample_counts_only_after_thirty_lookups() {
+        let s = product(&session(Origin::Foliate), Origin::Foliate);
+        assert_eq!((s.lookups, s.acceptance.as_str()), (30, "pass"));
+        assert_eq!(s.lookup_answers["article"], 30);
+
+        // One short: the sample is missing, and its values are not reported.
+        let mut rows = session(Origin::Foliate);
+        let first = rows.iter().position(|r| r.event == "lookup").unwrap();
+        rows.remove(first);
+        sample_mut(&mut rows, "after-close")["pss_bytes"] = json!(MEMORY_LIMIT + 1);
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!(s.lookups, 29);
+        assert_eq!(
+            (s.memory_status.as_str(), s.idle_cpu_status.as_str()),
+            ("incomplete", "incomplete")
+        );
+        assert_eq!(s.acceptance, "incomplete");
+        assert_eq!(s.pss_max_bytes, Some(40_000_000));
+
+        // A lookup after the sample does not make it one after lookups.
+        rows.push(lookup(Origin::Foliate, "article"));
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!((s.lookups, s.acceptance.as_str()), (29, "incomplete"));
+
+        // Nor does one made before the trial ended.
+        let mut rows = session(Origin::Foliate);
+        let moved = rows.remove(first);
+        rows.insert(2, moved);
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!((s.lookups, s.acceptance.as_str()), (29, "incomplete"));
+        assert_eq!(s.lookup_answers["article"], 29);
+
+        // Every kind of answer is a lookup; the kinds are reported.
+        let mut rows = session(Origin::Foliate);
+        rows[first].details["answer"] = json!("no-entry");
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!((s.lookups, s.acceptance.as_str()), (30, "pass"));
+        assert_eq!(
+            (s.lookup_answers["article"], s.lookup_answers["no-entry"]),
+            (29, 1)
+        );
+    }
+
+    #[test]
+    fn the_lookups_of_another_session_do_not_count() {
+        // An earlier session of the same application had all thirty.
+        let mut rows = session(Origin::Foliate);
+        let mut second = session(Origin::Foliate);
+        second.retain(|r| r.event != "lookup");
+        rows.extend(second);
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!((s.lookups, s.acceptance.as_str()), (0, "incomplete"));
+        // Nor do those of the other application.
+        let mut rows = session(Origin::AndroidStudio);
+        let mut other = session(Origin::Foliate);
+        other.retain(|r| r.event != "lookup");
+        rows.extend(other);
+        assert_eq!(product(&rows, Origin::AndroidStudio).acceptance, "pass");
+        assert_eq!(product(&rows, Origin::Foliate).lookups, 0);
+    }
+
+    #[test]
+    fn a_session_without_its_data_sets_is_incomplete() {
+        let mut rows = session(Origin::Foliate);
+        assert_eq!(
+            product(&rows, Origin::Foliate).data_sets.unwrap()["commit"],
+            "c"
+        );
+        rows.retain(|r| r.event != "data-sets");
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!(s.data_sets, None);
+        assert_eq!(
+            (s.latency_status.as_str(), s.memory_status.as_str()),
+            ("pass", "pass")
+        );
+        assert_eq!(s.acceptance, "incomplete");
+        // A failure is still one.
+        sample_mut(&mut rows, "before-invocation")["pss_bytes"] = json!(MEMORY_LIMIT + 1);
+        assert_eq!(product(&rows, Origin::Foliate).acceptance, "fail");
+    }
+
+    #[test]
+    fn the_data_sets_name_each_file_with_its_size_and_hash() {
+        let path = std::env::temp_dir().join(format!("addict-exp4-sets-{}", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        let sets = data_sets(std::slice::from_ref(&path), "c0ffee");
+        std::fs::remove_file(&path).unwrap();
+        let sets = sets.unwrap();
+        assert_eq!(sets["commit"], "c0ffee");
+        assert_eq!(sets["files"][0]["bytes"], 3);
+        assert_eq!(
+            sets["files"][0]["sha256"],
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sets["files"][0]["name"].as_str(),
+            path.file_name().unwrap().to_str()
+        );
+        // A file that cannot be read gives no record.
+        assert!(data_sets(&[path], "c0ffee").is_err());
     }
 
     #[test]
@@ -1610,6 +1782,8 @@ mod product_tests {
             "idle_cpu",
             "\"gpu\"",
             "not_measured",
+            "lookups",
+            "data_sets",
             "android-studio",
         ] {
             assert!(!text.contains(field), "{field}");

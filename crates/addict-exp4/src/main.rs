@@ -109,6 +109,18 @@ enum Action {
         #[arg(long, value_delimiter = ',', required = true)]
         roots: Vec<u32>,
     },
+    /// Append what a recorded session measures with: each file's name, size and SHA-256.
+    DataSets {
+        #[arg(long)]
+        results: PathBuf,
+        #[arg(long, value_delimiter = ',', required = true)]
+        roots: Vec<u32>,
+        /// The commit of the measured sources, as the caller names it.
+        #[arg(long)]
+        commit: String,
+        #[arg(long, num_args = 1.., required = true)]
+        files: Vec<PathBuf>,
+    },
     HumanScenarios {
         #[arg(long, value_enum)]
         backend: Backend,
@@ -133,6 +145,20 @@ async fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+/// The start of the latest session whose process is one of `roots`: a record
+/// about that process carries the labels of its session.
+fn recorded_session(results: &std::path::Path, roots: &[u32]) -> io::Result<Evidence> {
+    metrics::read_evidence(results)?
+        .into_iter()
+        .rev()
+        .find(|r| {
+            r.event == "broker-started"
+                && r.details["pid"]
+                    .as_u64()
+                    .is_some_and(|pid| roots.iter().any(|&root| u64::from(root) == pid))
+        })
+        .ok_or_else(|| io::Error::other("no recorded session of these roots"))
 }
 async fn run(cli: Cli) -> io::Result<()> {
     match cli.command {
@@ -306,18 +332,7 @@ async fn run(cli: Cli) -> io::Result<()> {
             Ok(())
         }
         Action::Gpu { results, roots } => {
-            // The record carries the labels of the session whose process is measured.
-            let records = metrics::read_evidence(&results)?;
-            let session = records
-                .iter()
-                .rev()
-                .find(|r| {
-                    r.event == "broker-started"
-                        && r.details["pid"]
-                            .as_u64()
-                            .is_some_and(|pid| roots.iter().any(|&root| u64::from(root) == pid))
-                })
-                .ok_or_else(|| io::Error::other("no recorded session of these roots"))?;
+            let session = recorded_session(&results, &roots)?;
             append(
                 &results,
                 &Evidence::new(
@@ -327,6 +342,25 @@ async fn run(cli: Cli) -> io::Result<()> {
                     None,
                     "gpu",
                     serde_json::to_value(metrics::gpu(&roots)?)?,
+                ),
+            )
+        }
+        Action::DataSets {
+            results,
+            roots,
+            commit,
+            files,
+        } => {
+            let session = recorded_session(&results, &roots)?;
+            append(
+                &results,
+                &Evidence::new(
+                    session.backend,
+                    session.mode,
+                    session.origin,
+                    None,
+                    "data-sets",
+                    metrics::data_sets(&files, &commit)?,
                 ),
             )
         }
