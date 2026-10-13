@@ -55,23 +55,36 @@
 //! translation. Choosing a sense looks nothing up, and the next result
 //! forgets the choice.
 //!
-//! A click on a word of a sentence also asks DeepL, online, for the Russian
-//! translation of that word in that sentence: the word and the sentence are
-//! sent, and nothing else is. The answer stands on a line of its own below
-//! the result; the article is shown as before and does not wait for it. A
-//! lone word, typing, Enter and a paste send nothing. The key is read at each
+//! A click on a word of a sentence also asks DeepL, online, for two Russian
+//! texts: the word translated in that sentence, for which the word and the
+//! sentence as its context are sent, and, once for the text of the field,
+//! the sentence itself, sent without context. Nothing else is sent. Each
+//! stands below the result under a label that says what it is, apart from
+//! the article, which is shown as before and does not wait for them. What
+//! was answered or is still awaited is not asked for again: a second click
+//! on the word sends nothing, another word sends only itself and keeps the
+//! translation of the sentence, and going back to a word shows what was
+//! kept. A text of more than 500 characters is not sent as a sentence: a
+//! line under the label of the sentence says it is too long, and the clicked
+//! word is still sent with the whole text as its context. A lone word is
+//! sent, without context, only when Enter is pressed in the field or the
+//! word was pasted there, and stands under a label of its own; typing it or
+//! clicking it sends nothing, and neither does Enter in an empty field or in
+//! a sentence, or the paste of a sentence. The key is read at each
 //! request from `$XDG_CONFIG_HOME/addict/deepl.key`, or
 //! `$HOME/.config/addict/deepl.key`, a file only its owner may read or write:
-//! when its mode has any bit outside `0600` it is refused unread. The request has a deadline, and
-//! another click, an edit or a paste gives it up. When it gives no
-//! translation, for any reason, the line says that online translation is not
-//! available.
+//! when its mode has any bit outside `0600` it is refused unread. A request
+//! has a deadline. Any change of the text, an edit or a paste, drops every
+//! online text and gives up every request, and a click on another word gives
+//! up the request of the word before. When a request gives no translation,
+//! for any reason, the line under its label says that online translation is
+//! not available; it is not kept, and the next click or Enter asks again.
 //!
 //! A paste into the field with Ctrl+V, Shift+Insert or the menu replaces the
 //! whole field with the clipboard text as one line, and with it the input and
-//! the result. This is the only time the clipboard is read: once per paste,
-//! without blocking the window. A clipboard that holds no text changes
-//! nothing.
+//! the result; the pasted text is then submitted, as by Enter. This is the
+//! only time the clipboard is read: once per paste, without blocking the
+//! window. A clipboard that holds no text changes nothing.
 //!
 //! The application is unique: a second launch exits at once and makes the
 //! resident instance show its window, as a press of the shortcut does.
@@ -89,7 +102,8 @@
 //! This module owns the command line and what each form of it starts; the
 //! entry commands are [`entries`]'s, the import is `addict_dictionary`'s, the
 //! indexes as a source of articles are [`dictionaries`]'s, the online
-//! translator is `addict_deepl`'s, the resident
+//! translator is `addict_deepl`'s, what is asked of it and kept is
+//! [`online`]'s, the resident
 //! application is [`resident`]'s, the texts of its window are [`view`]'s and
 //! the widgets of the window are [`widgets`]'s.
 
@@ -97,6 +111,7 @@ mod dictionaries;
 mod entries;
 mod evidence;
 mod manual;
+mod online;
 mod presentation;
 mod recording;
 mod resident;

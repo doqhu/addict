@@ -9,11 +9,12 @@
 //! does to it is tested without a display. [`look_up`] starts a lookup on the
 //! work runner and [`lookup_result`] says what the window shows for its
 //! outcome; [`check_indexes`] asks on the runner where the dictionary indexes
-//! stand. [`translate`] starts the online translation of a word of a sentence
-//! as a job of its own, with its own deadline, and [`translation_result`]
-//! says what the window shows for its outcome; a word without a sentence
-//! sends nothing. Putting any of it on the screen is
-//! [`resident`](crate::resident)'s.
+//! stand. [`request`] builds the one online request about a
+//! [`Subject`]: the word with its sentence as context, the sentence itself,
+//! or a lone word; [`translate`] starts it as a job of its own, with its own
+//! deadline, and [`translation_result`] says what the window shows for its
+//! outcome. Which of them are sent, and when, is [`online`](crate::online)'s.
+//! Putting any of it on the screen is [`resident`](crate::resident)'s.
 
 use std::{ops::Range, sync::Arc, time::Duration};
 
@@ -26,16 +27,22 @@ use addict_platform::work::{Job, Outcome, Work};
 
 use crate::{
     dictionaries::{Answer, Articles, Indexes, Looked},
+    online::{Kind, Subject},
     view::{Lookup, Online},
 };
 
 /// How long the lookup of one word may take.
 const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
 
-/// How long the online translation of one word may take. A network answer is
-/// slower than a file read, and this deadline is the only thing that ends a
-/// request without an answer.
+/// How long one online request may take. A network answer is slower than a
+/// file read, and this deadline is the only thing that ends a request
+/// without an answer.
 const TRANSLATE_LIMIT: Duration = Duration::from_secs(10);
+
+/// The most characters, not bytes, the text of the field may have for its
+/// sentence to be sent for translation. A longer text is still the context
+/// of its clicked word.
+pub const SENTENCE_LIMIT: usize = 500;
 
 /// What an online translation ends with.
 pub type Translated = Result<String, Refusal>;
@@ -67,6 +74,10 @@ pub struct Manual {
     /// The number of the last started lookup. An outcome that carries another
     /// number belongs to a lookup that was replaced.
     run: u64,
+    /// The number of the text: only a new text changes it, a click does not.
+    /// An online outcome that carries another number belongs to an older
+    /// text.
+    text: u64,
 }
 
 impl Manual {
@@ -86,6 +97,18 @@ impl Manual {
         self.input.as_ref()
     }
 
+    /// The number of the text the field holds. It changes with every new
+    /// text and with nothing else.
+    pub fn text_number(&self) -> u64 {
+        self.text
+    }
+
+    /// What the text is for the online requests: no word, a lone word or a
+    /// sentence, which may be too long to be sent itself.
+    pub fn kind(&self) -> Kind {
+        Kind::of(&self.sentence, self.words.len())
+    }
+
     /// The window state of this moment: nothing is read from a source, so it
     /// depends on the input alone.
     pub fn state(&self) -> WindowState {
@@ -103,8 +126,10 @@ impl Manual {
         self.sentence = text;
         self.chosen = None;
         self.input = None;
-        // Whatever the lookup of the old text still reports is not awaited.
+        // Whatever the lookup of the old text still reports is not awaited,
+        // and neither is any online request of it.
         self.run += 1;
+        self.text += 1;
         if self.words.len() != 1 {
             return Edit::Cleared;
         }
@@ -191,19 +216,41 @@ pub fn lookup_result(outcome: Outcome<Looked>, word: &str) -> Option<Lookup> {
     }
 }
 
-/// Starts the online translation of the word of `input` in its sentence on
-/// `work`, with a deadline: the word is the text and the sentence is the
-/// context, and nothing else is sent. `on_outcome` runs once on the worker
-/// thread. `None`, with nothing started, for an input without a sentence: a
-/// lone word is not sent online. Without a runner nothing starts and the
-/// state to show is given back.
+/// The online request about `subject` for `input`, with nothing in it but
+/// what is named here. For a word of a sentence: the word, with the sentence
+/// as context. For the sentence: the sentence, without context. For a lone
+/// word: the word, without context. `None` when the input is not of that
+/// kind: a lone word has no sentence, and a word of a sentence is not sent
+/// without it.
+pub fn request(input: &Input, subject: Subject) -> Option<Request> {
+    let sentence = input.sentence().map(str::to_owned);
+    match subject {
+        Subject::Word(_) => Some(Request {
+            text: input.word().to_owned(),
+            context: Some(sentence?),
+        }),
+        Subject::Sentence => Some(Request {
+            text: sentence?,
+            context: None,
+        }),
+        Subject::Lone => sentence.is_none().then(|| Request {
+            text: input.word().to_owned(),
+            context: None,
+        }),
+    }
+}
+
+/// Starts the online `request` on `work`, with a deadline; every online
+/// request starts here. `on_outcome` runs once on the worker thread. Without
+/// a request or without a runner nothing starts and the state to show is
+/// given back.
 pub fn translate(
     work: Option<&Work>,
     translator: Arc<dyn Translator>,
-    input: &Input,
+    request: Option<Request>,
     on_outcome: impl FnOnce(Outcome<Translated>) + Send + 'static,
-) -> Option<Result<Job, Online>> {
-    translate_within(TRANSLATE_LIMIT, work, translator, input, on_outcome)
+) -> Result<Job, Online> {
+    translate_within(TRANSLATE_LIMIT, work, translator, request, on_outcome)
 }
 
 /// [`translate`] with the deadline `limit`.
@@ -211,21 +258,17 @@ fn translate_within(
     limit: Duration,
     work: Option<&Work>,
     translator: Arc<dyn Translator>,
-    input: &Input,
+    request: Option<Request>,
     on_outcome: impl FnOnce(Outcome<Translated>) + Send + 'static,
-) -> Option<Result<Job, Online>> {
-    let request = Request {
-        text: input.word().to_owned(),
-        context: Some(input.sentence()?.to_owned()),
+) -> Result<Job, Online> {
+    let (Some(work), Some(request)) = (work, request) else {
+        return Err(Online::Refused(Refusal::Other));
     };
-    let Some(work) = work else {
-        return Some(Err(Online::Refused(Refusal::Other)));
-    };
-    Some(Ok(work.run(
+    Ok(work.run(
         limit,
         async move { translator.translate(request).await },
         on_outcome,
-    )))
+    ))
 }
 
 /// What the window shows for the `outcome` of an online translation, or
@@ -262,15 +305,16 @@ mod tests {
     use addict_platform::work::{Outcome, Work};
 
     use super::{
-        Edit, LOOKUP_LIMIT, Manual, TRANSLATE_LIMIT, Translated, check_indexes, look_up,
-        lookup_result, translate, translate_within, translation_result,
+        Edit, LOOKUP_LIMIT, Manual, SENTENCE_LIMIT, TRANSLATE_LIMIT, Translated, check_indexes,
+        look_up, lookup_result, request, translate, translate_within, translation_result,
     };
     use crate::{
         dictionaries::{
             Answer, Articles, Indexes, Looked, State,
             tests::{FREEDICT, OEWN, Sampled},
         },
-        view::{Lookup, Online},
+        online::{Kept, Kind, Subject},
+        view::{Lookup, Online, OnlineTexts, Whole},
     };
 
     const SENTENCE: &str = "I sat on the bank.";
@@ -817,8 +861,14 @@ mod tests {
         }
     }
 
-    /// The outcome of the online translation of the input of `manual` that
-    /// ran on a real runner within `limit`, and whether its callback ran on
+    /// The request about the chosen word of `manual` in its sentence.
+    fn word_request(manual: &Manual) -> Request {
+        let chosen = manual.chosen().expect("chosen");
+        request(manual.input().expect("input"), Subject::Word(chosen)).expect("a sentence")
+    }
+
+    /// The outcome of the online translation of the chosen word of `manual`
+    /// in its sentence that ran on a real runner within `limit`, and whether its callback ran on
     /// another thread than this one.
     fn translated(
         translator: Arc<dyn Translator>,
@@ -832,12 +882,11 @@ mod tests {
             limit,
             Some(&work),
             translator,
-            manual.input().expect("input"),
+            Some(word_request(manual)),
             move |outcome| {
                 let _ = sender.send((outcome, thread::current().id() != caller));
             },
         )
-        .expect("a sentence")
         .expect("job");
         let reported = receiver.recv_timeout(WAIT).expect("outcome");
         drop(job);
@@ -874,42 +923,414 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_lone_word_is_not_sent_online() {
-        let work = Work::start().expect("runner");
-        let translator = Arc::new(Canned::new(Ok("банк")));
-        // Typed, and clicked again.
-        let mut manual = Manual::default();
-        lone(&mut manual, "bank");
-        for _ in 0..2 {
-            let started = translate(
-                Some(&work),
-                translator.clone(),
-                manual.input().expect("input"),
-                |_| panic!("reported for a lone word"),
-            );
-            assert!(started.is_none());
-            manual.choose(0).expect("run");
+    fn sentence_request() -> Request {
+        Request {
+            text: RIVER.to_owned(),
+            context: None,
         }
-        // Dropping the runner waits for its jobs to be gone.
-        drop(work);
-        assert!(translator.asked().is_empty());
+    }
+
+    fn river_request() -> Request {
+        Request {
+            text: "river".to_owned(),
+            context: Some(RIVER.to_owned()),
+        }
+    }
+
+    fn lone_request(word: &str) -> Request {
+        Request {
+            text: word.to_owned(),
+            context: None,
+        }
+    }
+
+    /// The indices of `bank` and `river` in [`RIVER`].
+    const BANK: usize = 4;
+    const RIVER_WORD: usize = 7;
+
+    /// A text of exactly [`SENTENCE_LIMIT`] characters that starts with
+    /// [`RIVER`]; its bytes are more.
+    fn text_at_the_limit() -> String {
+        let more = SENTENCE_LIMIT - RIVER.chars().count();
+        let text = format!("{RIVER}{}{}", " я".repeat(more / 2), "!".repeat(more % 2));
+        assert_eq!(text.chars().count(), SENTENCE_LIMIT);
+        assert!(text.len() > SENTENCE_LIMIT);
+        text
     }
 
     #[test]
-    fn without_a_runner_the_online_translation_is_refused_and_nothing_is_sent() {
+    fn each_subject_has_its_one_request_and_nothing_else_in_it() {
+        let manual = bank_of_the_river();
+        let input = manual.input().expect("input");
+        assert_eq!(request(input, Subject::Word(BANK)), Some(bank_request()));
+        assert_eq!(request(input, Subject::Sentence), Some(sentence_request()));
+        // A word of a sentence is not sent without it.
+        assert_eq!(request(input, Subject::Lone), None);
+
+        let mut manual = Manual::default();
+        lone(&mut manual, " Bank. ");
+        let input = manual.input().expect("input");
+        assert_eq!(request(input, Subject::Lone), Some(lone_request("Bank")));
+        // A lone word has no sentence to send, as text or as context.
+        assert_eq!(request(input, Subject::Word(0)), None);
+        assert_eq!(request(input, Subject::Sentence), None);
+    }
+
+    #[test]
+    fn the_number_of_the_text_changes_with_the_text_and_not_with_a_click() {
+        let mut manual = with_sentence(RIVER);
+        let text = manual.text_number();
+        let first = manual.choose(BANK).expect("run");
+        let second = manual.choose(BANK).expect("run");
+        manual.choose(RIVER_WORD).expect("run");
+        assert_ne!(first, second);
+        assert_eq!(manual.text_number(), text);
+        assert_eq!(manual.edit(RIVER.to_owned()), Edit::Same);
+        assert_eq!(manual.text_number(), text);
+        // Every new text has a number of its own, the same text put back too.
+        assert_eq!(manual.edit(String::new()), Edit::Cleared);
+        let emptied = manual.text_number();
+        assert_ne!(emptied, text);
+        assert_eq!(manual.edit(RIVER.to_owned()), Edit::Cleared);
+        assert_ne!(manual.text_number(), emptied);
+        assert_ne!(manual.text_number(), text);
+        let before = manual.text_number();
+        lone(&mut manual, "bank");
+        assert_ne!(manual.text_number(), before);
+    }
+
+    #[test]
+    fn the_kind_of_the_text_is_counted_on_the_field_as_it_is() {
+        assert_eq!(Manual::default().kind(), Kind::Empty);
+        assert_eq!(with_sentence(" bank. ").kind(), Kind::Lone);
+        assert_eq!(with_sentence(RIVER).kind(), Kind::Sentence { long: false });
+        assert_eq!(SENTENCE_LIMIT, 500);
+        let most = text_at_the_limit();
+        assert_eq!(with_sentence(&most).kind(), Kind::Sentence { long: false });
+        let over = format!("{most}.");
+        assert_eq!(with_sentence(&over).kind(), Kind::Sentence { long: true });
+    }
+
+    /// The manual path as the resident drives it, without a window: an edit
+    /// starts the online texts of the new text anew, a click and a submit
+    /// send what [`Kept`] asks for through [`request`] and [`translate`], on
+    /// a real runner, and every outcome is given back to [`Kept`] before the
+    /// next step.
+    struct Desk {
+        manual: Manual,
+        kept: Kept,
+        work: Work,
+        translator: Arc<Canned>,
+    }
+
+    impl Desk {
+        fn new(answer: Result<&str, Refusal>) -> Self {
+            Self {
+                manual: Manual::default(),
+                kept: Kept::default(),
+                work: Work::start().expect("runner"),
+                translator: Arc::new(Canned::new(answer)),
+            }
+        }
+
+        fn with_text(answer: Result<&str, Refusal>, text: &str) -> Self {
+            let mut desk = Self::new(answer);
+            desk.edit(text);
+            desk
+        }
+
+        /// The field holds `text`, typed or put there.
+        fn edit(&mut self, text: &str) {
+            if self.manual.edit(text.to_owned()) != Edit::Same {
+                self.kept = Kept::of(self.manual.text_number(), self.manual.kind());
+            }
+        }
+
+        /// A paste: the old text is removed, the new one is put and
+        /// submitted.
+        fn paste(&mut self, text: &str) {
+            self.edit("");
+            self.edit(text);
+            self.submit();
+        }
+
+        fn click(&mut self, index: usize) {
+            self.manual.choose(index).expect("run");
+            for subject in self.kept.click(index).ask {
+                self.send(subject);
+            }
+        }
+
+        /// Enter in the field.
+        fn submit(&mut self) {
+            if self.kept.submit() {
+                self.send(Subject::Lone);
+            }
+        }
+
+        fn send(&mut self, subject: Subject) {
+            let (sender, receiver) = mpsc::channel();
+            let asked = self
+                .manual
+                .input()
+                .and_then(|input| request(input, subject));
+            let started = translate(
+                Some(&self.work),
+                self.translator.clone(),
+                asked,
+                move |outcome| {
+                    let _ = sender.send(outcome);
+                },
+            );
+            let online = match started {
+                Ok(_job) => translation_result(receiver.recv_timeout(WAIT).expect("outcome"))
+                    .expect("not cancelled"),
+                Err(online) => online,
+            };
+            assert!(self.kept.answer(self.manual.text_number(), subject, online));
+        }
+
+        fn asked(&self) -> Vec<Request> {
+            self.translator.asked()
+        }
+
+        fn shown(&self) -> OnlineTexts<'_> {
+            self.kept.shown(self.manual.chosen())
+        }
+    }
+
+    fn online(text: &str) -> Online {
+        Online::Translated(text.to_owned())
+    }
+
+    #[test]
+    fn the_first_click_sends_the_word_with_its_sentence_and_the_sentence() {
+        let mut desk = Desk::with_text(Ok("берег"), RIVER);
+        desk.click(BANK);
+        assert_eq!(desk.asked(), [bank_request(), sentence_request()]);
+        let whole = Whole::Asked(online("берег"));
+        assert_eq!(
+            desk.shown(),
+            OnlineTexts {
+                word: Some(&online("берег")),
+                sentence: Some(&whole),
+                lone: None,
+            }
+        );
+    }
+
+    #[test]
+    fn the_same_word_again_sends_nothing() {
+        let mut desk = Desk::with_text(Ok("берег"), RIVER);
+        desk.click(BANK);
+        desk.click(BANK);
+        desk.click(BANK);
+        assert_eq!(desk.asked(), [bank_request(), sentence_request()]);
+        assert_eq!(desk.shown().word, Some(&online("берег")));
+    }
+
+    #[test]
+    fn another_word_sends_itself_only_and_going_back_sends_nothing() {
+        let mut desk = Desk::with_text(Ok("берег"), RIVER);
+        desk.click(BANK);
+        desk.click(RIVER_WORD);
+        let sent = [bank_request(), sentence_request(), river_request()];
+        assert_eq!(desk.asked(), sent);
+        // The sentence stays while another word is the chosen one.
+        let whole = Whole::Asked(online("берег"));
+        assert_eq!(desk.shown().sentence, Some(&whole));
+        desk.click(BANK);
+        desk.click(RIVER_WORD);
+        assert_eq!(desk.asked(), sent);
+    }
+
+    #[test]
+    fn what_was_refused_is_sent_again_by_the_next_click() {
+        let mut desk = Desk::with_text(Err(Refusal::Quota), RIVER);
+        desk.click(BANK);
+        let refused = Online::Refused(Refusal::Quota);
+        assert_eq!(desk.shown().word, Some(&refused));
+        assert_eq!(desk.shown().sentence, Some(&Whole::Asked(refused)));
+        desk.click(BANK);
+        // The sentence again by a click on any word.
+        desk.click(RIVER_WORD);
+        assert_eq!(
+            desk.asked(),
+            [
+                bank_request(),
+                sentence_request(),
+                bank_request(),
+                sentence_request(),
+                river_request(),
+                sentence_request(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_text_sends_the_word_with_the_text_as_context_and_no_sentence() {
+        let text = format!("{}.", text_at_the_limit());
+        assert_eq!(text.chars().count(), SENTENCE_LIMIT + 1);
+        let mut desk = Desk::with_text(Ok("берег"), &text);
+        desk.click(BANK);
+        desk.click(BANK);
+        assert_eq!(
+            desk.asked(),
+            [Request {
+                text: "bank".to_owned(),
+                context: Some(text.clone()),
+            }]
+        );
+        assert_eq!(desk.shown().sentence, Some(&Whole::TooLong));
+        desk.click(RIVER_WORD);
+        assert_eq!(desk.asked().len(), 2);
+        assert_eq!(
+            desk.asked()[1],
+            Request {
+                text: "river".to_owned(),
+                context: Some(text),
+            }
+        );
+    }
+
+    #[test]
+    fn a_text_of_exactly_the_limit_is_sent_as_a_sentence() {
+        let text = text_at_the_limit();
+        let mut desk = Desk::with_text(Ok("берег"), &text);
+        desk.click(BANK);
+        assert_eq!(desk.asked().len(), 2);
+        assert_eq!(
+            desk.asked()[1],
+            Request {
+                text,
+                context: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_new_text_drops_the_online_texts_and_asks_anew() {
+        let mut desk = Desk::with_text(Ok("берег"), RIVER);
+        desk.click(BANK);
+        let old = desk.manual.text_number();
+        let edited = "I sat on the bank of the river";
+        desk.edit(edited);
+        assert_eq!(desk.shown(), OnlineTexts::default());
+        // A late outcome of the old text is not kept.
+        for subject in [Subject::Word(BANK), Subject::Sentence] {
+            assert!(!desk.kept.answer(old, subject, online("старый")));
+        }
+        assert_eq!(desk.shown(), OnlineTexts::default());
+        assert_eq!(desk.asked().len(), 2);
+        desk.click(BANK);
+        assert_eq!(desk.asked().len(), 4);
+        assert_eq!(
+            desk.asked()[2..],
+            [
+                Request {
+                    text: "bank".to_owned(),
+                    context: Some(edited.to_owned()),
+                },
+                lone_request(edited),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_pasted_sentence_sends_nothing_until_a_word_is_clicked() {
+        let mut desk = Desk::new(Ok("берег"));
+        desk.paste(RIVER);
+        // Enter in it sends nothing either.
+        desk.submit();
+        assert!(desk.asked().is_empty());
+        assert_eq!(desk.shown(), OnlineTexts::default());
+        desk.click(BANK);
+        assert_eq!(desk.asked(), [bank_request(), sentence_request()]);
+        desk.submit();
+        assert_eq!(desk.asked().len(), 2);
+    }
+
+    #[test]
+    fn a_typed_lone_word_sends_nothing_typed_or_clicked() {
+        let mut desk = Desk::new(Ok("банк"));
+        for text in ["b", "ba", "ban", "bank"] {
+            desk.edit(text);
+            assert_eq!(desk.manual.input().expect("input").word(), text);
+        }
+        desk.click(0);
+        desk.click(0);
+        assert!(desk.asked().is_empty());
+        assert_eq!(desk.shown(), OnlineTexts::default());
+    }
+
+    #[test]
+    fn enter_sends_a_lone_word_without_context_once() {
+        let mut desk = Desk::with_text(Ok("банк"), "bank");
+        desk.submit();
+        assert_eq!(desk.asked(), [lone_request("bank")]);
+        assert_eq!(
+            desk.shown(),
+            OnlineTexts {
+                word: None,
+                sentence: None,
+                lone: Some(&online("банк")),
+            }
+        );
+        desk.submit();
+        desk.click(0);
+        assert_eq!(desk.asked(), [lone_request("bank")]);
+    }
+
+    #[test]
+    fn a_pasted_lone_word_is_sent_as_enter_sends_it() {
+        let mut desk = Desk::new(Ok("банк"));
+        desk.paste(" Bank. ");
+        assert_eq!(desk.asked(), [lone_request("Bank")]);
+        assert_eq!(desk.shown().lone, Some(&online("банк")));
+        desk.submit();
+        assert_eq!(desk.asked().len(), 1);
+        // The same word pasted again is a new text.
+        desk.paste(" Bank. ");
+        assert_eq!(desk.asked(), [lone_request("Bank"), lone_request("Bank")]);
+    }
+
+    #[test]
+    fn a_refused_lone_word_is_sent_again_by_the_next_enter() {
+        let mut desk = Desk::with_text(Err(Refusal::Key), "bank");
+        desk.submit();
+        assert_eq!(desk.shown().lone, Some(&Online::Refused(Refusal::Key)));
+        desk.submit();
+        assert_eq!(desk.asked(), [lone_request("bank"), lone_request("bank")]);
+    }
+
+    #[test]
+    fn enter_in_an_empty_field_sends_nothing() {
+        let mut desk = Desk::new(Ok("банк"));
+        desk.submit();
+        desk.edit(" 12 ");
+        desk.submit();
+        assert!(desk.asked().is_empty());
+        assert_eq!(desk.shown(), OnlineTexts::default());
+    }
+
+    #[test]
+    fn without_a_runner_or_a_request_nothing_is_sent_and_it_is_a_refusal() {
         let translator = Arc::new(Canned::new(Ok("берег")));
         let manual = bank_of_the_river();
         let started = translate(
             None,
             translator.clone(),
-            manual.input().expect("input"),
+            Some(word_request(&manual)),
             |_| panic!("reported without a runner"),
         );
-        assert_eq!(
-            started.expect("a sentence").err(),
-            Some(Online::Refused(Refusal::Other))
-        );
+        assert_eq!(started.err(), Some(Online::Refused(Refusal::Other)));
+        let work = Work::start().expect("runner");
+        let started = translate(Some(&work), translator.clone(), None, |_| {
+            panic!("reported without a request")
+        });
+        assert_eq!(started.err(), Some(Online::Refused(Refusal::Other)));
+        // Dropping the runner waits for its jobs to be gone.
+        drop(work);
         assert!(translator.asked().is_empty());
     }
 
@@ -964,12 +1385,11 @@ mod tests {
         let job = translate(
             Some(&work),
             Arc::new(Mute),
-            manual.input().expect("input"),
+            Some(word_request(&manual)),
             move |outcome| {
                 let _ = sender.send(outcome);
             },
         )
-        .expect("a sentence")
         .expect("job");
         // What another click, an edit or a paste does to the pending request.
         drop(job);
@@ -1021,7 +1441,7 @@ mod tests {
         }
     }
 
-    /// What the two jobs of one click report, on one channel.
+    /// What the jobs of one click report, on one channel.
     #[derive(Debug)]
     enum Reported {
         Article(Outcome<Looked>),
@@ -1043,55 +1463,78 @@ mod tests {
         let manual = bank_of_the_river();
         let input = manual.input().expect("input");
         let (sender, receiver) = mpsc::channel();
-        let online = sender.clone();
-        // As a click starts them: the lookup, then the online request.
+        // As a click starts them: the lookup, then the two online requests.
+        let lookup_sender = sender.clone();
         let lookup = look_up(
             Some(&work),
             Arc::new(Sampled),
             input.word().to_owned(),
             move |outcome| {
-                let _ = sender.send(Reported::Article(outcome));
+                let _ = lookup_sender.send(Reported::Article(outcome));
             },
         )
         .expect("job");
-        let translation = translate(Some(&work), translator, input, move |outcome| {
-            let _ = online.send(Reported::Online(outcome));
-        })
-        .expect("a sentence")
-        .expect("job");
+        let mut kept = Kept::of(manual.text_number(), manual.kind());
+        let asked = kept.click(BANK).ask;
+        assert_eq!(asked, [Subject::Word(BANK), Subject::Sentence]);
+        let translations: Vec<_> = asked
+            .into_iter()
+            .map(|subject| {
+                let online = sender.clone();
+                translate(
+                    Some(&work),
+                    translator.clone(),
+                    request(input, subject),
+                    move |outcome| {
+                        let _ = online.send(Reported::Online(outcome));
+                    },
+                )
+                .expect("job")
+            })
+            .collect();
 
         let first = receiver.recv_timeout(WAIT).expect("the first outcome");
         let Reported::Article(outcome) = first else {
-            panic!("the online answer came first: {first:?}");
+            panic!("an online answer came first: {first:?}");
         };
         assert_eq!(
             lookup_result(outcome, "bank"),
             Some(Lookup::Article(Sample.lookup("bank").expect("bank")))
         );
-        let second = receiver.recv_timeout(WAIT).expect("the second outcome");
-        let Reported::Online(outcome) = second else {
-            panic!("two articles: {second:?}");
-        };
-        assert_eq!(
-            translation_result(outcome),
-            Some(Online::Translated("берег".to_owned()))
-        );
-        drop((lookup, translation));
+        for _ in 0..2 {
+            let later = receiver.recv_timeout(WAIT).expect("an online outcome");
+            let Reported::Online(outcome) = later else {
+                panic!("two articles: {later:?}");
+            };
+            assert_eq!(
+                translation_result(outcome),
+                Some(Online::Translated("берег".to_owned()))
+            );
+        }
+        drop((lookup, translations));
 
-        // The word and its sentence went out, once, and nothing else did.
+        // The word with its sentence and the sentence went out, once each,
+        // and nothing else did.
         let seen = stub.seen();
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].line, "POST /v2/translate HTTP/1.1");
-        let body: serde_json::Value = serde_json::from_str(&seen[0].body).expect("JSON");
-        assert_eq!(
-            body,
-            serde_json::json!({
-                "text": ["bank"],
-                "context": RIVER,
-                "source_lang": "EN",
-                "target_lang": "RU",
-            })
-        );
+        assert_eq!(seen.len(), 2);
+        let mut bodies = Vec::new();
+        for request in &seen {
+            assert_eq!(request.line, "POST /v2/translate HTTP/1.1");
+            bodies.push(serde_json::from_str::<serde_json::Value>(&request.body).expect("JSON"));
+        }
+        let word = serde_json::json!({
+            "text": ["bank"],
+            "context": RIVER,
+            "source_lang": "EN",
+            "target_lang": "RU",
+        });
+        let sentence = serde_json::json!({
+            "text": [RIVER],
+            "source_lang": "EN",
+            "target_lang": "RU",
+        });
+        assert!(bodies.contains(&word), "{bodies:?}");
+        assert!(bodies.contains(&sentence), "{bodies:?}");
     }
 
     #[test]

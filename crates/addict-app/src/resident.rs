@@ -9,14 +9,18 @@
 //! asked once at the start and comes with the outcome of every lookup, and
 //! the window says it whenever one is missing or unreadable. It keeps
 //! the shown result with the sense chosen in it, and a click on a sense only
-//! changes that choice. A click on a word of a sentence also starts the
-//! online translation of the word, as a second job on the runner with its
-//! own outcome: the article never waits for it, and whatever replaces or
-//! drops the lookup drops the online request with it. What the window says is [`view`](crate::view)'s; its
-//! widgets and the paste into its field are [`widgets`](crate::widgets)'s;
-//! what an edit or a click does to the manual input
-//! is [`manual`](crate::manual)'s; what is recorded with `--evidence` is
-//! [`recording`](crate::recording)'s.
+//! changes that choice. A click on a word of a sentence also asks online for
+//! the word in the sentence and, once for the text, for the sentence itself;
+//! Enter in the field, or a paste, asks for a lone word. Each request is a
+//! job of its own on the runner, in one of two slots, the word's and the
+//! sentence's, and comes back as an event with the number of its text: the
+//! article never waits for it, a repeated click leaves it alone, another
+//! word gives up only the word's, and a new text gives up both. What is
+//! asked for and what is kept is [`online`](crate::online)'s. What the
+//! window says is [`view`](crate::view)'s; its widgets and the paste into
+//! its field are [`widgets`](crate::widgets)'s; what an edit or a click does
+//! to the manual input is [`manual`](crate::manual)'s; what is recorded with
+//! `--evidence` is [`recording`](crate::recording)'s.
 
 use std::{
     cell::{Cell, RefCell},
@@ -40,8 +44,9 @@ use crate::{
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
     manual::{self, Edit, Manual, Translated},
+    online::{Kept, Subject},
     recording::Recording,
-    view::{Binding, Lookup, Online, Shown},
+    view::{Binding, Lookup, Shown},
     widgets::View,
 };
 
@@ -79,11 +84,15 @@ enum Event {
     Word(usize),
     /// The sense with this index in the shown list was clicked.
     Sense(usize),
+    /// The text of the field was submitted, by Enter or by a paste.
+    Submitted,
     /// The lookup started as number `run` ended.
     Lookup { run: u64, outcome: Outcome<Looked> },
-    /// The online translation started with the lookup number `run` ended.
+    /// The online request about `subject`, sent for the text with the number
+    /// `text`, ended.
     Translated {
-        run: u64,
+        text: u64,
+        subject: Subject,
         outcome: Outcome<Translated>,
     },
     /// The check at the start says where the dictionary indexes stand.
@@ -161,13 +170,15 @@ struct Session {
     /// upgrades when the runner could not be started.
     work: Weak<Work>,
     articles: Arc<dyn Articles>,
-    /// What a word of a sentence is translated by online.
+    /// What a word or a sentence is translated by online.
     translator: Arc<dyn Translator>,
-    /// The online request whose outcome is awaited; dropping it cancels the
-    /// request.
-    translating: Option<Job>,
-    /// What the online line shows; `None` when there is no line.
-    online: Option<Online>,
+    /// The online request of a word, in its sentence or alone, whose outcome
+    /// is awaited; dropping it cancels the request.
+    translating_word: Option<Job>,
+    /// The same for the request of the sentence.
+    translating_sentence: Option<Job>,
+    /// The online texts of the text the field holds.
+    online: Kept,
     /// The check of the indexes at the start; dropping it cancels the check.
     check: Option<Job>,
 }
@@ -189,8 +200,13 @@ impl Session {
             Event::Sentence(text) => self.sentence_changed(text),
             Event::Word(index) => self.word_chosen(index),
             Event::Sense(index) => self.sense_chosen(index),
+            Event::Submitted => self.submitted(),
             Event::Lookup { run, outcome } => self.looked_up(run, outcome),
-            Event::Translated { run, outcome } => self.translated(run, outcome),
+            Event::Translated {
+                text,
+                subject,
+                outcome,
+            } => self.translated(text, subject, outcome),
             Event::Indexes(indexes) => {
                 self.check = None;
                 self.view.render_indexes(indexes);
@@ -206,46 +222,77 @@ impl Session {
         }
     }
 
-    /// The field holds another text: what was chosen in the old one is gone.
-    /// A text of one word is that word without context, looked up at once.
+    /// The field holds another text: what was chosen in the old one is gone,
+    /// and so is every online text of it. A text of one word is that word
+    /// without context, looked up at once; nothing of it is sent online.
     fn sentence_changed(&mut self, text: String) {
-        match self.manual.edit(text) {
+        let edit = self.manual.edit(text);
+        if edit == Edit::Same {
+            return;
+        }
+        // Cancels the online requests; whatever they still report has the
+        // number of an old text.
+        self.translating_word = None;
+        self.translating_sentence = None;
+        self.online = Kept::of(self.manual.text_number(), self.manual.kind());
+        self.render_online();
+        match edit {
             Edit::Same => {}
             Edit::Cleared => {
-                // Cancels the lookup and the online request; whatever they
-                // still report has an old number.
+                // Cancels the lookup; whatever it still reports has an old
+                // number.
                 self.pending = None;
-                self.translating = None;
                 self.render_manual();
                 self.show_result(None);
-                self.show_online(None);
             }
             Edit::Lone(run) => self.start_lookup(run),
         }
     }
 
     /// A word was clicked: it becomes the input, with its sentence when it
-    /// has one, and is looked up.
+    /// has one, and is looked up. In a sentence, what is not yet known
+    /// online about the word and about the sentence is asked for.
     fn word_chosen(&mut self, index: usize) {
         // A click that came before the field's newer text was handled here
         // names a word of a sentence that is no longer shown.
         if self.view.field_text() != self.manual.sentence() {
             return;
         }
-        if let Some(run) = self.manual.choose(index) {
-            self.start_lookup(run);
+        let Some(run) = self.manual.choose(index) else {
+            return;
+        };
+        self.start_lookup(run);
+        // After the lookup: the runner takes its jobs in this order, so the
+        // article is read before the key file and the network are touched.
+        let click = self.online.click(index);
+        if click.gave_up {
+            self.translating_word = None;
+        }
+        for subject in click.ask {
+            self.start_translation(subject);
+        }
+        self.render_online();
+    }
+
+    /// The text of the field was submitted, by Enter or by a paste: a lone
+    /// word is asked for online, unless it was already. Nothing else
+    /// changes, and an empty field or a sentence sends nothing.
+    fn submitted(&mut self) {
+        // As for a click: the field may hold a newer text already.
+        if self.view.field_text() != self.manual.sentence() {
+            return;
+        }
+        if self.online.submit() {
+            self.start_translation(Subject::Lone);
+            self.render_online();
         }
     }
 
     /// Shows the input that was just chosen and starts its lookup, which has
-    /// the number `run`, and beside it the online translation when the input
-    /// has a sentence.
+    /// the number `run`. The online texts are not touched.
     fn start_lookup(&mut self, run: u64) {
-        // The lookup of another word and its online request, if they run,
-        // are replaced, and the line of the word before is gone.
+        // The lookup of another word, if it runs, is replaced.
         self.pending = None;
-        self.translating = None;
-        self.show_online(None);
         self.render_manual();
         let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
             self.show_result(None);
@@ -268,9 +315,6 @@ impl Session {
             }
             Err(lookup) => self.show_result(Some(lookup)),
         }
-        // After the lookup: the runner takes its jobs in this order, so the
-        // article is read before the key file and the network are touched.
-        self.start_translation(run);
     }
 
     /// A lookup ended. Only the last started one is shown; where it found
@@ -297,49 +341,65 @@ impl Session {
         }
     }
 
-    /// Starts the online translation of the chosen word in its sentence, a
-    /// job of its own beside the lookup with the number `run`. A word without
-    /// a sentence starts nothing and has no online line.
-    fn start_translation(&mut self, run: u64) {
-        let Some(input) = self.manual.input() else {
-            return;
-        };
+    /// Sends the online request about `subject` that [`Kept`] has just
+    /// asked for, as a job in the slot of its subject. A request that could
+    /// not start is a refusal at once.
+    fn start_translation(&mut self, subject: Subject) {
+        let text = self.manual.text_number();
+        let request = self
+            .manual
+            .input()
+            .and_then(|input| manual::request(input, subject));
         let sender = self.sender.clone();
         let started = manual::translate(
             self.work.upgrade().as_deref(),
             self.translator.clone(),
-            input,
+            request,
             move |outcome| {
                 // On the worker: the UI thread wakes for the event.
-                let _ = sender.unbounded_send(Event::Translated { run, outcome });
+                let _ = sender.unbounded_send(Event::Translated {
+                    text,
+                    subject,
+                    outcome,
+                });
             },
         );
         match started {
-            None => {}
-            Some(Ok(job)) => {
-                self.translating = Some(job);
-                self.show_online(Some(Online::Pending));
+            // Replaces, and so cancels, the request the slot held.
+            Ok(job) => *self.slot(subject) = Some(job),
+            Err(online) => {
+                self.online.answer(text, subject, online);
             }
-            Some(Err(online)) => self.show_online(Some(online)),
         }
     }
 
-    /// An online translation ended. Only the one of the last click is shown,
-    /// in place of the pending line.
-    fn translated(&mut self, run: u64, outcome: Outcome<Translated>) {
-        if !self.manual.awaits(run) {
+    /// The slot of the job that asks about `subject`. No wildcard arm: a new
+    /// subject does not compile until it is given its slot.
+    fn slot(&mut self, subject: Subject) -> &mut Option<Job> {
+        match subject {
+            Subject::Word(_) | Subject::Lone => &mut self.translating_word,
+            Subject::Sentence => &mut self.translating_sentence,
+        }
+    }
+
+    /// An online request ended. Its outcome is kept and shown only when it
+    /// belongs to the text the field holds and is still awaited; a cancelled
+    /// one was given up and shows nothing.
+    fn translated(&mut self, text: u64, subject: Subject, outcome: Outcome<Translated>) {
+        let Some(online) = manual::translation_result(outcome) else {
             return;
-        }
-        self.translating = None;
-        if let Some(online) = manual::translation_result(outcome) {
-            self.show_online(Some(online));
+        };
+        if self.online.answer(text, subject, online) {
+            *self.slot(subject) = None;
+            self.render_online();
         }
     }
 
-    /// The one place the online line changes.
-    fn show_online(&mut self, online: Option<Online>) {
-        self.online = online;
-        self.view.render_online(self.online.as_ref());
+    /// Shows the online texts as they are now, with those of the chosen
+    /// word.
+    fn render_online(&self) {
+        self.view
+            .render_online(&self.online.shown(self.manual.chosen()));
     }
 
     /// The one place the shown result changes: the sense chosen in the one
@@ -453,7 +513,7 @@ impl Session {
 }
 
 /// Sends what the user does in the `view` to `sender`: Retry, an edit of the
-/// field, a click on a word and a click on a sense.
+/// field, a submit of its text, a click on a word and a click on a sense.
 fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     let retry = sender.clone();
     view.connect_retry(move || {
@@ -462,6 +522,10 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     let changed = sender.clone();
     view.connect_sentence_changed(move |text| {
         let _ = changed.unbounded_send(Event::Sentence(text.to_owned()));
+    });
+    let submitted = sender.clone();
+    view.connect_submitted(move || {
+        let _ = submitted.unbounded_send(Event::Submitted);
     });
     let chosen = sender.clone();
     view.connect_word_chosen(move |index| {
@@ -529,10 +593,12 @@ fn start(
         work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),
         articles: articles.clone(),
         // Nothing is read or connected here: the key file and the network
-        // are the runner's, at the first click on a word of a sentence.
+        // are the runner's, at the first click on a word of a sentence or
+        // the first submit of a lone word.
         translator: Arc::new(DeepL::new()),
-        translating: None,
-        online: None,
+        translating_word: None,
+        translating_sentence: None,
+        online: Kept::default(),
         check,
     };
     glib::spawn_future_local(async move {
