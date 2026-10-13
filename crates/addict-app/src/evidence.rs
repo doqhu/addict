@@ -7,19 +7,25 @@
 //!
 //! The event names and the fields of `details` are the harness's own. The
 //! session start is named `broker-started` because that is the record the
-//! harness splits sessions on.
+//! harness splits sessions on. The `online` record is the exception: the
+//! harness reads its line and judges nothing by it.
 
 use std::{
     fs::{File, OpenOptions},
     io::{self, Write},
     path::Path,
-    time::SystemTime,
+    time::{Instant, SystemTime},
 };
 
+use addict_core::translation::Refusal;
 use addict_platform::work::Outcome;
 use serde_json::{Value, json};
 
-use crate::dictionaries::{Answer, Looked};
+use crate::{
+    dictionaries::{Answer, Looked},
+    online::Subject,
+    view::Online,
+};
 
 /// The version of the record format, as the harness checks it.
 const SCHEMA: u32 = 1;
@@ -54,6 +60,17 @@ pub struct Record {
     invocation_id: Option<String>,
     event: &'static str,
     details: Value,
+}
+
+#[cfg(test)]
+impl Record {
+    pub fn event(&self) -> &str {
+        self.event
+    }
+
+    pub fn details(&self) -> &Value {
+        &self.details
+    }
 }
 
 /// The start of a recording process. `boot_id` is what lets the harness tell
@@ -178,6 +195,201 @@ pub fn lookup(answered: Answered) -> Record {
         invocation_id: None,
         event: "lookup",
         details: json!({"answer": answered.label()}),
+    }
+}
+
+/// What an online request was about, as the evidence names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Requested {
+    /// A word, in its sentence or alone.
+    Word,
+    Sentence,
+    /// The definition of the chosen sense.
+    Definition,
+}
+
+impl Requested {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Word => "word",
+            Self::Sentence => "sentence",
+            Self::Definition => "definition",
+        }
+    }
+}
+
+/// No wildcard arm: a new subject does not compile until it is given its
+/// kind.
+impl From<Subject> for Requested {
+    fn from(subject: Subject) -> Self {
+        match subject {
+            Subject::Word(_) | Subject::Lone => Self::Word,
+            Subject::Sentence => Self::Sentence,
+        }
+    }
+}
+
+/// How an online request ended, as the evidence names it: with a translation
+/// or with the refusal it got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    Translated,
+    Refused(Refusal),
+}
+
+impl Ended {
+    /// No wildcard arm: a new refusal does not compile until it is given its
+    /// label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Translated => "translated",
+            Self::Refused(Refusal::Key) => "no-key",
+            Self::Refused(Refusal::UnreadableKey) => "unreadable-key",
+            Self::Refused(Refusal::UnsafeKey) => "unsafe-key",
+            Self::Refused(Refusal::Network) => "network",
+            Self::Refused(Refusal::UnsupportedLanguage) => "unsupported-language",
+            Self::Refused(Refusal::RejectedKey) => "rejected-key",
+            Self::Refused(Refusal::Quota) => "quota",
+            Self::Refused(Refusal::TimedOut) => "timed-out",
+            Self::Refused(Refusal::Other) => "other",
+        }
+    }
+}
+
+/// What the evidence says of an online request that stands as `online`. One
+/// that still runs has not ended. The translation itself is dropped here.
+pub fn ended(online: &Online) -> Option<Ended> {
+    match online {
+        Online::Translated(_) => Some(Ended::Translated),
+        Online::Refused(refusal) => Some(Ended::Refused(*refusal)),
+        Online::Pending => None,
+    }
+}
+
+/// The memory of this process, in bytes; a value that could not be read is
+/// `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Memory {
+    /// The kernel's high-water mark of the RSS.
+    peak_rss_bytes: Option<u64>,
+    pss_bytes: Option<u64>,
+}
+
+impl Memory {
+    /// Reads `VmHWM` of `/proc/self/status` and `Pss` of
+    /// `/proc/self/smaps_rollup`.
+    fn read() -> Self {
+        let field = |path: &str, name: &str| {
+            let text = std::fs::read_to_string(path).ok()?;
+            proc_bytes(&text, name)
+        };
+        Self {
+            peak_rss_bytes: field("/proc/self/status", "VmHWM:"),
+            pss_bytes: field("/proc/self/smaps_rollup", "Pss:"),
+        }
+    }
+}
+
+/// The value of the line of `text` that begins with `name`, which the kernel
+/// writes in kB, in bytes.
+fn proc_bytes(text: &str, name: &str) -> Option<u64> {
+    let mut fields = text
+        .lines()
+        .find_map(|line| line.strip_prefix(name))?
+        .split_whitespace();
+    let kilobytes: u64 = fields.next()?.parse().ok()?;
+    (fields.next() == Some("kB")).then_some(())?;
+    kilobytes.checked_mul(1024)
+}
+
+/// The start of an online request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Started(Instant);
+
+impl Started {
+    fn now() -> Self {
+        Self(Instant::now())
+    }
+
+    /// The request ended now.
+    fn ended(self) -> Elapsed {
+        Elapsed(u64::try_from(self.0.elapsed().as_millis()).unwrap_or(u64::MAX))
+    }
+}
+
+/// The milliseconds from the start of an online request to its outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Elapsed(u64);
+
+/// What the record of an online request says was measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Measured {
+    elapsed_ms: u64,
+    memory: Memory,
+}
+
+/// The measuring of one online request. It holds the start of the request
+/// only when evidence is recorded: without the flag no clock is read, and
+/// then no time is taken at the outcome and no memory is read for a record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Probe(Option<Started>);
+
+impl Probe {
+    /// Call it when the request is handed to the runner.
+    pub fn start(recording: bool) -> Self {
+        Self(recording.then(Started::now))
+    }
+
+    /// The request ended now. Call it where the outcome arrives, on the
+    /// worker: the time is not the redraw's. It reads the clock and nothing
+    /// else, so the worker is not held.
+    pub fn ended(self) -> Option<Elapsed> {
+        self.0.map(Started::ended)
+    }
+
+    /// The request could not start: no time passed.
+    pub fn not_started(self) -> Option<Elapsed> {
+        self.0.map(|_| Elapsed(0))
+    }
+
+    #[cfg(test)]
+    pub fn started(self) -> Option<Started> {
+        self.0
+    }
+}
+
+/// The record of an online request for `requested` that stands as `online`
+/// and took `elapsed`. None for a request that has not ended, and none
+/// without a time: evidence is not recorded then. The memory is read here,
+/// off the worker, and only for a record that is made.
+pub fn online_record(
+    requested: Requested,
+    online: &Online,
+    elapsed: Option<Elapsed>,
+) -> Option<Record> {
+    let (ended, Elapsed(elapsed_ms)) = (ended(online)?, elapsed?);
+    let measured = Measured {
+        elapsed_ms,
+        memory: Memory::read(),
+    };
+    Some(self::online(requested, ended, measured))
+}
+
+/// An online request ended. The record says what kind of text was asked for,
+/// how it ended and what that took, and nothing of the text, of the answer
+/// or of the key. It names no press, and its event is its own: the harness
+/// counts it nowhere.
+fn online(requested: Requested, ended: Ended, measured: Measured) -> Record {
+    Record {
+        invocation_id: None,
+        event: "online",
+        details: json!({
+            "subject": requested.label(),
+            "outcome": ended.label(),
+            "elapsed_ms": measured.elapsed_ms,
+            "peak_rss_bytes": measured.memory.peak_rss_bytes,
+            "pss_bytes": measured.memory.pss_bytes,
+        }),
     }
 }
 
@@ -459,6 +671,188 @@ mod tests {
             // The answer and nothing else: no word, no article.
             assert_eq!(row.details, json!({"answer": label}));
         }
+    }
+
+    const MEMORY: Memory = Memory {
+        peak_rss_bytes: Some(141_234_176),
+        pss_bytes: Some(63_012_864),
+    };
+
+    /// Every way an online request ends, with its label.
+    fn endings() -> [(Online, &'static str); 10] {
+        let refused = |refusal| Online::Refused(refusal);
+        [
+            (Online::Translated("берег реки".to_owned()), "translated"),
+            (refused(Refusal::Key), "no-key"),
+            (refused(Refusal::UnreadableKey), "unreadable-key"),
+            (refused(Refusal::UnsafeKey), "unsafe-key"),
+            (refused(Refusal::Network), "network"),
+            (
+                refused(Refusal::UnsupportedLanguage),
+                "unsupported-language",
+            ),
+            (refused(Refusal::RejectedKey), "rejected-key"),
+            (refused(Refusal::Quota), "quota"),
+            (refused(Refusal::TimedOut), "timed-out"),
+            (refused(Refusal::Other), "other"),
+        ]
+    }
+
+    #[test]
+    fn an_online_request_is_recorded_by_its_kind_outcome_delay_and_memory() {
+        let file = TempFile::new("online");
+        let mut writer = start(&file.0, Origin::Foliate);
+        let kinds = [
+            (Requested::from(Subject::Word(3)), "word"),
+            (Requested::from(Subject::Lone), "word"),
+            (Requested::from(Subject::Sentence), "sentence"),
+            (Requested::Definition, "definition"),
+        ];
+        let mut expected = Vec::new();
+        for (requested, subject) in kinds {
+            for (elapsed_ms, (online, outcome)) in (400..).zip(endings()) {
+                let measured = Measured {
+                    elapsed_ms,
+                    memory: MEMORY,
+                };
+                let ended = ended(&online).expect("a request that ended");
+                writer.write(&super::online(requested, ended, measured));
+                expected.push(json!({
+                    "subject": subject,
+                    "outcome": outcome,
+                    "elapsed_ms": elapsed_ms,
+                    "peak_rss_bytes": 141_234_176,
+                    "pss_bytes": 63_012_864,
+                }));
+            }
+        }
+        // A request that still runs has no outcome to record.
+        assert_eq!(ended(&Online::Pending), None);
+
+        let text = std::fs::read_to_string(&file.0).expect("read the evidence");
+        // Nothing of the answer is in the file.
+        assert!(!text.contains("берег"));
+        let rows = read(&file.0);
+        assert_eq!(rows.len(), 1 + expected.len());
+        for (row, details) in rows[1..].iter().zip(&expected) {
+            assert_eq!(row.event, "online");
+            assert_eq!(row.invocation_id, None);
+            assert_eq!(
+                (row.backend, row.mode, row.origin),
+                (Backend::Gtk4, Mode::Resident, HarnessOrigin::Foliate)
+            );
+            // These five fields and nothing else.
+            assert_eq!(&row.details, details);
+        }
+    }
+
+    #[test]
+    fn memory_that_cannot_be_read_is_null_in_the_record() {
+        let file = TempFile::new("online-null");
+        let mut writer = start(&file.0, Origin::Foliate);
+        let measured = Measured {
+            elapsed_ms: 0,
+            memory: Memory {
+                peak_rss_bytes: None,
+                pss_bytes: None,
+            },
+        };
+        let refused = Ended::Refused(Refusal::Other);
+        writer.write(&online(Requested::Definition, refused, measured));
+        assert_eq!(
+            read(&file.0)[1].details,
+            json!({
+                "subject": "definition",
+                "outcome": "other",
+                "elapsed_ms": 0,
+                "peak_rss_bytes": null,
+                "pss_bytes": null,
+            })
+        );
+    }
+
+    #[test]
+    fn the_memory_fields_of_proc_are_read_in_bytes() {
+        let status =
+            "Name:\taddict\nVmPeak:\t  900000 kB\nVmHWM:\t  137924 kB\nVmRSS:\t  120000 kB\n";
+        assert_eq!(proc_bytes(status, "VmHWM:"), Some(137_924 * 1024));
+        let rollup = "55d0-7ffd ---p 00000000 00:00 0 [rollup]\nRss:  120000 kB\n\
+                      Pss:   61536 kB\nPss_Dirty:  100 kB\nPss_Anon:  200 kB\n";
+        assert_eq!(proc_bytes(rollup, "Pss:"), Some(61_536 * 1024));
+        // A missing field, another unit and a value that is no number.
+        assert_eq!(proc_bytes(rollup, "VmHWM:"), None);
+        assert_eq!(proc_bytes("VmHWM:\t12 MB\n", "VmHWM:"), None);
+        assert_eq!(proc_bytes("VmHWM:\tmany kB\n", "VmHWM:"), None);
+        assert_eq!(proc_bytes("VmHWM:\t12\n", "VmHWM:"), None);
+    }
+
+    #[test]
+    fn the_memory_of_this_process_is_read_when_the_record_is_made() {
+        let probe = Probe::start(true);
+        let elapsed = probe.ended().expect("a recorded request is timed");
+        assert!(elapsed.0 < 60_000);
+        assert_eq!(probe.not_started(), Some(Elapsed(0)));
+        let translated = Online::Translated("берег".to_owned());
+        let record = online_record(Requested::Word, &translated, Some(elapsed)).expect("a record");
+        assert_eq!(record.details["elapsed_ms"], elapsed.0);
+        for field in ["peak_rss_bytes", "pss_bytes"] {
+            assert!(
+                record.details[field]
+                    .as_u64()
+                    .is_some_and(|bytes| bytes > 0)
+            );
+        }
+        // No record, and so no read, of a request that still runs or was not
+        // timed.
+        assert_eq!(
+            online_record(Requested::Word, &Online::Pending, Some(elapsed)),
+            None
+        );
+        assert_eq!(online_record(Requested::Word, &translated, None), None);
+    }
+
+    #[test]
+    fn a_session_with_online_records_summarises_as_one_without() {
+        let session = |with_online: bool| {
+            let file = TempFile::new("online-summary");
+            let mut writer = start(&file.0, Origin::Foliate);
+            let measured = Measured {
+                elapsed_ms: 412,
+                memory: MEMORY,
+            };
+            let online = |writer: &mut Writer, requested| {
+                if with_online {
+                    writer.write(&super::online(requested, Ended::Translated, measured));
+                }
+            };
+            for count in 1..=5 {
+                press(&mut writer, count, true, true);
+                online(&mut writer, Requested::Word);
+            }
+            for _ in 0..3 {
+                writer.write(&lookup(Answered::Article));
+                online(&mut writer, Requested::Sentence);
+                online(&mut writer, Requested::Definition);
+            }
+            read(&file.0)
+        };
+        let (without, with) = (session(false), session(true));
+        assert_eq!(with.len(), without.len() + 5 + 6);
+        let value = |summary| serde_json::to_value(summary).expect("a summary is JSON");
+        for mapping in [None, Some(&mapping())] {
+            assert_eq!(
+                value(foliate(&with, mapping)),
+                value(foliate(&without, mapping))
+            );
+        }
+        let product = |rows: &[Evidence]| {
+            let all = metrics::summarize_product(rows, Some(&mapping()));
+            serde_json::to_value(all).expect("a summary is JSON")
+        };
+        let row = product(&with);
+        assert_eq!(row, product(&without));
+        assert_eq!(row[0]["lookups"], 3);
+        assert_eq!(row[0]["warm_attempts"], 4);
     }
 
     #[test]

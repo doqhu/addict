@@ -102,7 +102,10 @@
 //! With the hidden `--evidence <FILE> --origin <APPLICATION>` the application
 //! appends measurement evidence to the file: the start of the session and, for
 //! each press, the activation, the presentation of the frame that follows it
-//! and the focus. Without the flag none of that exists.
+//! and the focus; for each lookup that ended, its answer; and for each online
+//! request that ended, of a word, of the sentence or of a definition, its
+//! kind, its outcome, its delay and the memory of the process, and never its
+//! text. Without the flag none of that exists.
 //!
 //! This module owns the command line and what each form of it starts; the
 //! entry commands are [`entries`]'s, the import is `addict_dictionary`'s, the
