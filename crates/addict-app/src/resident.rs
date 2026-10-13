@@ -9,8 +9,9 @@
 //! asked once at the start and comes with the outcome of every lookup, and
 //! the window says it whenever one is missing or unreadable. It keeps
 //! the shown result with the sense chosen in it, and a click on a sense only
-//! changes that choice. What the window says and the paste into its field are
-//! [`view`](crate::view)'s; what an edit or a click does to the manual input
+//! changes that choice. What the window says is [`view`](crate::view)'s; its
+//! widgets and the paste into its field are [`widgets`](crate::widgets)'s;
+//! what an edit or a click does to the manual input
 //! is [`manual`](crate::manual)'s; what is recorded with `--evidence` is
 //! [`recording`](crate::recording)'s.
 
@@ -36,7 +37,8 @@ use crate::{
     evidence,
     manual::{self, Edit, Manual},
     recording::Recording,
-    view::{Binding, Lookup, Shown, View},
+    view::{Binding, Lookup, Shown},
+    widgets::View,
 };
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
@@ -273,6 +275,11 @@ impl Session {
     /// before is forgotten.
     fn show_result(&mut self, lookup: Option<Lookup>) {
         self.shown.show(lookup);
+        self.render_shown();
+    }
+
+    /// Shows the result and the sense chosen in it as they are now.
+    fn render_shown(&self) {
         self.view
             .render_result(self.shown.lookup(), self.shown.sense());
     }
@@ -283,8 +290,7 @@ impl Session {
     /// colour until the markup is set again.
     fn sense_chosen(&mut self, index: usize) {
         if self.shown.choose(index) {
-            self.view
-                .render_result(self.shown.lookup(), self.shown.sense());
+            self.render_shown();
         }
     }
 
@@ -375,18 +381,9 @@ impl Session {
     }
 }
 
-/// Builds the hidden window, starts the first attempt to bind the shortcut
-/// and the event loop. Runs once, in the primary instance.
-fn start(
-    application: &gtk::Application,
-    evidence: Option<Rc<RefCell<evidence::Writer>>>,
-) -> Resident {
-    // The worker threads push; the main context wakes only for an event.
-    let (sender, mut receiver) = futures_channel::mpsc::unbounded();
-
-    // The first attempt starts below, with the window still hidden.
-    let binding = Binding::Attempting;
-    let view = View::new(window_state(None, None), &binding);
+/// Sends what the user does in the `view` to `sender`: Retry, an edit of the
+/// field, a click on a word and a click on a sense.
+fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     let retry = sender.clone();
     view.connect_retry(move || {
         let _ = retry.unbounded_send(Event::Retry);
@@ -403,6 +400,33 @@ fn start(
     view.connect_sense_chosen(move |index| {
         let _ = sense.unbounded_send(Event::Sense(index));
     });
+}
+
+/// Starts the runner of the lookups. Without it the window still works; a
+/// click says that the lookup did not finish.
+fn start_work() -> Option<Rc<Work>> {
+    match Work::start() {
+        Ok(work) => Some(Rc::new(work)),
+        Err(e) => {
+            eprintln!("addict: lookups cannot run: {e}");
+            None
+        }
+    }
+}
+
+/// Builds the hidden window, starts the first attempt to bind the shortcut
+/// and the event loop. Runs once, in the primary instance.
+fn start(
+    application: &gtk::Application,
+    evidence: Option<Rc<RefCell<evidence::Writer>>>,
+) -> Resident {
+    // The worker threads push; the main context wakes only for an event.
+    let (sender, mut receiver) = futures_channel::mpsc::unbounded();
+
+    // The first attempt starts below, with the window still hidden.
+    let binding = Binding::Attempting;
+    let view = View::new(window_state(None, None), &binding);
+    connect_view(&view, &sender);
     let window = build_window(application, &view);
 
     // Only the primary instance gets here, so a second launch records no
@@ -411,15 +435,7 @@ fn start(
     let timed = recording.is_some();
     let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed))));
     let events = sender.clone();
-    // Without the runner the window still works; a click says that the lookup
-    // did not finish.
-    let work = match Work::start() {
-        Ok(work) => Some(Rc::new(work)),
-        Err(e) => {
-            eprintln!("addict: lookups cannot run: {e}");
-            None
-        }
-    };
+    let work = start_work();
     // Nothing is opened here: the indexes are files, and files are the
     // runner's.
     let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());

@@ -455,7 +455,7 @@ const SHORT: Damage = Damage("a record ends too early");
 pub(crate) mod tests {
     use super::*;
 
-    fn texts(words: &[&str]) -> Vec<String> {
+    pub(crate) fn texts(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
     }
 

@@ -16,28 +16,21 @@
 //! are skipped. The file is read as a stream; the headwords are held until
 //! its end, because the entries are not in the order of the index.
 
-use std::{collections::BTreeMap, fmt, io::BufRead};
+use std::{collections::BTreeMap, io::BufRead};
 
 use quick_xml::{
-    Reader, XmlVersion,
-    escape::resolve_predefined_entity,
+    Reader,
     events::{BytesStart, Event},
 };
 
-use crate::format::{Contents, Headword, SenseRecord};
+pub use crate::xml::ParseError;
+use crate::{
+    format::{Contents, Headword, SenseRecord},
+    xml,
+};
 
-/// Why a file could not be read as FreeDict TEI; the text says what and
-/// where.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseError(String);
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ParseError {}
+/// What is said about an entity that XML does not predefine.
+const UNKNOWN_ENTITY: &str = "an unknown entity in an entry";
 
 /// What an open `entry` has given so far.
 #[derive(Default)]
@@ -132,123 +125,124 @@ impl Parsed {
     }
 }
 
+/// What is open at a place of the stream.
+#[derive(Default)]
+struct Open {
+    /// The open entry and its depth.
+    entry: Option<(u32, Entry)>,
+    /// The depth of the open list of Russian translations.
+    russian: Option<u32>,
+    capture: Option<Capture>,
+    /// How many elements are open: a file cut between two entries is still
+    /// cut.
+    depth: u32,
+}
+
+impl Open {
+    /// An element with contents starts.
+    fn start(&mut self, element: &BytesStart<'_>) -> Result<(), ParseError> {
+        if self.depth == 0 {
+            root(element)?;
+        }
+        self.depth += 1;
+        match (element.local_name().as_ref(), self.entry.is_some()) {
+            (b"entry", false) => self.entry = Some((self.depth, Entry::default())),
+            (b"entry", true) => return Err(nested()),
+            (name, true) if self.capture.is_none() => {
+                let field = match name {
+                    b"orth" => Some(Field::Orth),
+                    b"def" => Some(Field::Definition),
+                    b"quote" if self.russian.is_some() => Some(Field::Translation),
+                    b"cit" if self.russian.is_none() && is_russian(element)? => {
+                        self.russian = Some(self.depth);
+                        None
+                    }
+                    _ => None,
+                };
+                let depth = self.depth;
+                self.capture = field.map(|field| Capture {
+                    field,
+                    depth,
+                    text: String::new(),
+                });
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// An element ends: the text collected in it goes to the open entry, and
+    /// an entry that ends goes to `parsed`.
+    fn end(&mut self, parsed: &mut Parsed) -> Result<(), ParseError> {
+        let depth = self.depth;
+        if let Some(done) = self.capture.take_if(|capture| capture.depth == depth)
+            && let Some((_, entry)) = self.entry.as_mut()
+        {
+            let text = done.text.trim();
+            if !text.is_empty() {
+                match done.field {
+                    Field::Orth => entry.orths.push(text.to_owned()),
+                    Field::Definition => entry.definitions.push(text.to_owned()),
+                    Field::Translation => entry.translations.push(text.to_owned()),
+                }
+            }
+        }
+        if self.russian == Some(depth) {
+            self.russian = None;
+        }
+        if let Some((_, entry)) = self.entry.take_if(|(at, _)| *at == depth) {
+            parsed.entry(entry)?;
+        }
+        self.depth = depth.saturating_sub(1);
+        Ok(())
+    }
+}
+
 /// Reads a FreeDict TEI file into the contents of an index with the source
 /// id `source`. Headwords come out sorted by their bytes, each once; there
 /// are no exception forms.
 pub fn parse(input: impl BufRead, source: &str) -> Result<Contents, ParseError> {
     let mut reader = Reader::from_reader(input);
     let mut parsed = Parsed::default();
-    // The open entry and its depth.
-    let mut entry: Option<(u32, Entry)> = None;
-    // The depth of the open list of Russian translations.
-    let mut russian: Option<u32> = None;
-    let mut capture: Option<Capture> = None;
-    // How many elements are open: a file cut between two entries is still
-    // cut.
-    let mut depth = 0u32;
+    let mut open = Open::default();
     let mut buffer = Vec::new();
     loop {
         buffer.clear();
-        let event = reader.read_event_into(&mut buffer).map_err(|error| {
-            ParseError(format!(
-                "not well-formed XML at byte {}: {error}",
-                reader.error_position()
-            ))
-        })?;
+        let event = xml::read_event(&mut reader, &mut buffer)?;
         match event {
-            Event::Start(element) => {
-                if depth == 0 {
-                    root(&element)?;
-                }
-                depth += 1;
-                match (element.local_name().as_ref(), entry.is_some()) {
-                    (b"entry", false) => entry = Some((depth, Entry::default())),
-                    (b"entry", true) => return Err(nested()),
-                    (name, true) if capture.is_none() => {
-                        let field = match name {
-                            b"orth" => Some(Field::Orth),
-                            b"def" => Some(Field::Definition),
-                            b"quote" if russian.is_some() => Some(Field::Translation),
-                            b"cit" if russian.is_none() && is_russian(&element)? => {
-                                russian = Some(depth);
-                                None
-                            }
-                            _ => None,
-                        };
-                        capture = field.map(|field| Capture {
-                            field,
-                            depth,
-                            text: String::new(),
-                        });
-                    }
-                    _ => {}
-                }
-            }
+            Event::Start(element) => open.start(&element)?,
             Event::Empty(element) => {
-                if depth == 0 {
+                if open.depth == 0 {
                     root(&element)?;
                 }
                 if element.local_name().as_ref() == b"entry" {
-                    if entry.is_some() {
+                    if open.entry.is_some() {
                         return Err(nested());
                     }
                     parsed.entry(Entry::default())?;
                 }
             }
-            Event::End(_) => {
-                if let Some(done) = capture.take_if(|capture| capture.depth == depth)
-                    && let Some((_, entry)) = entry.as_mut()
-                {
-                    let text = done.text.trim();
-                    if !text.is_empty() {
-                        match done.field {
-                            Field::Orth => entry.orths.push(text.to_owned()),
-                            Field::Definition => entry.definitions.push(text.to_owned()),
-                            Field::Translation => entry.translations.push(text.to_owned()),
-                        }
-                    }
-                }
-                if russian == Some(depth) {
-                    russian = None;
-                }
-                if let Some((_, entry)) = entry.take_if(|(at, _)| *at == depth) {
-                    parsed.entry(entry)?;
-                }
-                depth = depth.saturating_sub(1);
-            }
+            Event::End(_) => open.end(&mut parsed)?,
             Event::Text(text) => {
-                if let Some(capture) = capture.as_mut() {
-                    capture
-                        .text
-                        .push_str(&text.xml10_content().map_err(not_text)?);
+                if let Some(capture) = open.capture.as_mut() {
+                    xml::push_content(&mut capture.text, text.xml10_content(), malformed)?;
                 }
             }
             Event::CData(text) => {
-                if let Some(capture) = capture.as_mut() {
-                    capture
-                        .text
-                        .push_str(&text.xml10_content().map_err(not_text)?);
+                if let Some(capture) = open.capture.as_mut() {
+                    xml::push_content(&mut capture.text, text.xml10_content(), malformed)?;
                 }
             }
             Event::GeneralRef(reference) => {
-                if let Some(capture) = capture.as_mut() {
-                    let unknown = || malformed("an unknown entity in an entry".to_owned());
-                    match reference.resolve_char_ref().map_err(|_| unknown())? {
-                        Some(character) => capture.text.push(character),
-                        None => {
-                            let name = reference.decode().map_err(not_text)?;
-                            capture
-                                .text
-                                .push_str(resolve_predefined_entity(&name).ok_or_else(unknown)?);
-                        }
-                    }
+                if let Some(capture) = open.capture.as_mut() {
+                    xml::push_reference(&mut capture.text, &reference, malformed, UNKNOWN_ENTITY)?;
                 }
             }
             Event::Eof => break,
             Event::Comment(_) | Event::Decl(_) | Event::PI(_) | Event::DocType(_) => {}
         }
     }
-    if depth != 0 {
+    if open.depth != 0 {
         return Err(malformed("the file ends inside an element".to_owned()));
     }
     parsed.contents(source)
@@ -268,40 +262,18 @@ fn root(element: &BytesStart<'_>) -> Result<(), ParseError> {
 
 /// Whether a `cit` is the list of Russian translations of a sense.
 fn is_russian(element: &BytesStart<'_>) -> Result<bool, ParseError> {
-    Ok(attribute(element, "type")?.as_deref() == Some("trans")
-        && attribute(element, "xml:lang")?.as_deref() == Some("ru"))
-}
-
-/// The value of the attribute `name`, with its entities resolved.
-fn attribute(element: &BytesStart<'_>, name: &str) -> Result<Option<String>, ParseError> {
-    let bad = |error: &dyn fmt::Display| {
-        malformed(format!(
-            "a bad attribute in {}: {error}",
-            String::from_utf8_lossy(element.name().as_ref())
-        ))
-    };
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|error| bad(&error))?;
-        if attribute.key.as_ref() == name.as_bytes() {
-            return attribute
-                .normalized_value(XmlVersion::Implicit1_0)
-                .map(|value| Some(value.into_owned()))
-                .map_err(|error| bad(&error));
-        }
-    }
-    Ok(None)
+    Ok(
+        xml::attribute(element, "type", malformed)?.as_deref() == Some("trans")
+            && xml::attribute(element, "xml:lang", malformed)?.as_deref() == Some("ru"),
+    )
 }
 
 fn malformed(what: String) -> ParseError {
-    ParseError(format!("not a FreeDict TEI file: {what}"))
+    ParseError::new(format!("not a FreeDict TEI file: {what}"))
 }
 
 fn nested() -> ParseError {
     malformed("an entry inside an entry".to_owned())
-}
-
-fn not_text(error: impl fmt::Display) -> ParseError {
-    malformed(format!("a text cannot be decoded: {error}"))
 }
 
 #[cfg(test)]

@@ -5,26 +5,12 @@
 //! `ADDICT_INDEX` is the index file written by `addict import` and
 //! `ADDICT_TARGET_WORDS` is the list, one word per line, `#` for comments.
 
-use std::{collections::BTreeSet, path::PathBuf};
+mod common;
+
+use std::collections::BTreeSet;
 
 use addict_dictionary::Index;
-
-fn path_from(variable: &str) -> PathBuf {
-    std::env::var_os(variable)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| panic!("set {variable}"))
-}
-
-/// The proportional set size of this process, in kB.
-fn pss_kb() -> u64 {
-    let rollup = std::fs::read_to_string("/proc/self/smaps_rollup").expect("smaps_rollup");
-    rollup
-        .lines()
-        .find_map(|line| line.strip_prefix("Pss:"))
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|kb| kb.parse().ok())
-        .expect("a Pss line")
-}
+use common::{path_from, pss_kb};
 
 #[test]
 #[ignore = "needs the imported index: set ADDICT_INDEX and ADDICT_TARGET_WORDS"]
