@@ -22,9 +22,9 @@ use gtk::{gio, glib, prelude::*};
 use crate::{
     dictionaries::Indexes,
     view::{
-        Binding, FIELD_PLACEHOLDER, Lookup, OnlineTexts, RETRY_LABEL, binding_texts,
-        details_markup, indexes_text, online_markup_with_key_path, senses_markup, sentence_markup,
-        texts,
+        Binding, DEFINITION_ACTION, FIELD_PLACEHOLDER, OnlineTexts, RETRY_LABEL, Shown,
+        binding_texts, details_markup, details_markup_with_definition, indexes_text,
+        online_markup_with_key_path, senses_markup, sentence_markup, texts,
     },
 };
 
@@ -154,6 +154,7 @@ struct ResultArea {
     senses_area: gtk::ScrolledWindow,
     details: gtk::Label,
     online: gtk::Label,
+    definition_action: gtk::Button,
 }
 
 fn result_area() -> ResultArea {
@@ -186,11 +187,16 @@ fn result_area() -> ResultArea {
         .selectable(true)
         .visible(false)
         .build();
+    let definition_action = gtk::Button::builder()
+        .label(DEFINITION_ACTION)
+        .visible(false)
+        .build();
     ResultArea {
         senses,
         senses_area,
         details,
         online,
+        definition_action,
     }
 }
 
@@ -221,6 +227,7 @@ pub struct View {
     /// The online texts, each a paragraph under its label; hidden when there
     /// is none.
     online: gtk::Label,
+    definition_action: gtk::Button,
 }
 
 impl View {
@@ -259,6 +266,7 @@ impl View {
         root.append(&sentence);
         root.append(&result.senses_area);
         root.append(&result.details);
+        root.append(&result.definition_action);
         root.append(&result.online);
 
         let view = Self {
@@ -276,6 +284,7 @@ impl View {
             senses_area: result.senses_area,
             details: result.details,
             online: result.online,
+            definition_action: result.definition_action,
         };
         view.render(state);
         view.render_binding(binding);
@@ -348,6 +357,10 @@ impl View {
         connect_index_link(&self.senses, chosen);
     }
 
+    pub fn connect_definition_action(&self, action: impl Fn() + 'static) {
+        self.definition_action.connect_clicked(move |_| action());
+    }
+
     /// The text the field holds now.
     pub fn field_text(&self) -> String {
         self.field.text().into()
@@ -373,7 +386,12 @@ impl View {
     /// Shows `lookup` with the sense `chosen` in it, or hides the result
     /// when there is none. With no sense chosen the list is put at its top:
     /// that is how a result arrives. A choice leaves the list where it is.
-    pub fn render_result(&self, lookup: Option<&Lookup>, chosen: Option<usize>) {
+    pub fn render_result(&self, shown: &Shown, key_file: Option<&std::path::Path>) {
+        let lookup = shown.lookup();
+        let chosen = shown.sense();
+        let (visible, sensitive) = shown.definition_action();
+        self.definition_action.set_visible(visible);
+        self.definition_action.set_sensitive(sensitive);
         // Empty first, as for the sentence: the targets are indices, and GTK
         // would show the same-numbered sense of the next markup as visited.
         self.senses.set_markup("");
@@ -389,7 +407,11 @@ impl View {
         if chosen.is_none() {
             self.senses_area.vadjustment().set_value(0.0);
         }
-        self.details.set_markup(&details_markup(lookup, chosen));
+        let markup = match shown.definition() {
+            Some(online) => details_markup_with_definition(lookup, chosen, Some(online), key_file),
+            None => details_markup(lookup, chosen),
+        };
+        self.details.set_markup(&markup);
         self.details.set_visible(true);
     }
 
