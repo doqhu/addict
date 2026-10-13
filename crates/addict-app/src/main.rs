@@ -77,8 +77,10 @@
 //! has a deadline. Any change of the text, an edit or a paste, drops every
 //! online text and gives up every request, and a click on another word gives
 //! up the request of the word before. When a request gives no translation,
-//! for any reason, the line under its label says that online translation is
-//! not available; it is not kept, and the next click or Enter asks again.
+//! its line distinguishes key, connection, quota, language and timeout failures.
+//! Key failures name the configured key file; unsafe permissions name 0600.
+//! The next eligible click or Enter retries failed requests; successful
+//! translations stay available. No request is automatically retried.
 //!
 //! A paste into the field with Ctrl+V, Shift+Insert or the menu replaces the
 //! whole field with the clipboard text as one line, and with it the input and

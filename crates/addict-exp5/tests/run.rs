@@ -260,7 +260,7 @@ async fn without_a_usable_key_nothing_is_sent_and_the_message_names_the_key_file
             .await
             .expect_err("no key");
         assert!(
-            matches!(failure, Failure::Languages(Refusal::Key)),
+            matches!(failure, Failure::Languages(refusal) if refusal == if mode == 0o644 { Refusal::UnsafeKey } else { Refusal::Key }),
             "{failure:?}"
         );
         let message = explain(&failure, Some(&dir.key_path()));

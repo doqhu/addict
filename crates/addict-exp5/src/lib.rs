@@ -214,14 +214,15 @@ pub fn verdict(answer: &str, accepted: &[String]) -> Verdict {
     }
 }
 
-/// The name of a refusal in the results file.
+/// The historical EXP-5 name of a refusal in the results file.
+/// More specific product refusals retain the existing evidence vocabulary.
 pub fn refusal_name(refusal: Refusal) -> &'static str {
     match refusal {
-        Refusal::Key => "key",
+        Refusal::Key | Refusal::UnreadableKey | Refusal::UnsafeKey => "key",
         Refusal::RejectedKey => "rejected_key",
         Refusal::Quota => "quota",
         Refusal::TimedOut => "timed_out",
-        Refusal::Other => "other",
+        Refusal::Other | Refusal::Network | Refusal::UnsupportedLanguage => "other",
     }
 }
 
@@ -397,13 +398,13 @@ pub fn explain(failure: &Failure, key_file: Option<&Path>) -> String {
         |path| format!("the key file {}", path.display()),
     );
     let why = match failure.refusal() {
-        Some(Refusal::Key) => format!(
+        Some(Refusal::Key | Refusal::UnreadableKey | Refusal::UnsafeKey) => format!(
             "{key_file} gives no usable key: it must exist, hold the key alone and have mode 0600"
         ),
         Some(Refusal::RejectedKey) => format!("DeepL rejected the key of {key_file}"),
         Some(Refusal::Quota) => "the quota of the key is used up".to_owned(),
         Some(Refusal::TimedOut) => "no answer came in time".to_owned(),
-        Some(Refusal::Other) | None => {
+        Some(Refusal::Other | Refusal::Network | Refusal::UnsupportedLanguage) | None => {
             "the request failed (no network, another status or an unreadable answer)".to_owned()
         }
     };
@@ -520,13 +521,30 @@ async fn ask(
             };
             write(file, &record)?;
             match (answer, verdict) {
-                (Err(refusal @ (Refusal::Quota | Refusal::Key | Refusal::RejectedKey)), _) => {
+                (
+                    Err(
+                        refusal @ (Refusal::Quota
+                        | Refusal::Key
+                        | Refusal::UnreadableKey
+                        | Refusal::UnsafeKey
+                        | Refusal::RejectedKey),
+                    ),
+                    _,
+                ) => {
                     return Err(Failure::Item {
                         id: item.id,
                         refusal,
                     });
                 }
-                (Err(Refusal::TimedOut | Refusal::Other), _) => summary.refused += 1,
+                (
+                    Err(
+                        Refusal::TimedOut
+                        | Refusal::Other
+                        | Refusal::Network
+                        | Refusal::UnsupportedLanguage,
+                    ),
+                    _,
+                ) => summary.refused += 1,
                 (Ok(_), Some(Verdict::Match)) if context => summary.matched_with_context += 1,
                 (Ok(_), Some(Verdict::Match)) => summary.matched_without_context += 1,
                 (Ok(_), _) => {}

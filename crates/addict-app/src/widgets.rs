@@ -23,7 +23,8 @@ use crate::{
     dictionaries::Indexes,
     view::{
         Binding, FIELD_PLACEHOLDER, Lookup, OnlineTexts, RETRY_LABEL, binding_texts,
-        details_markup, indexes_text, online_markup, senses_markup, sentence_markup, texts,
+        details_markup, indexes_text, online_markup_with_key_path, senses_markup, sentence_markup,
+        texts,
     },
 };
 
@@ -393,8 +394,8 @@ impl View {
     }
 
     /// Shows the blocks of `online`, or hides them when there is none.
-    pub fn render_online(&self, online: &OnlineTexts<'_>) {
-        let markup = online_markup(online);
+    pub fn render_online(&self, online: &OnlineTexts<'_>, key_file: Option<&std::path::Path>) {
+        let markup = online_markup_with_key_path(online, key_file);
         self.online.set_markup(&markup);
         self.online.set_visible(!markup.is_empty());
     }

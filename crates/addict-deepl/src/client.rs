@@ -10,7 +10,10 @@
 //! No timer runs here. A request that gets no answer stays pending until its
 //! future is dropped; the deadline is the caller's.
 
-use std::{path::PathBuf, sync::OnceLock};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use addict_core::translation::{Refusal, Request, Translating, Translator};
 use reqwest::{
@@ -111,6 +114,11 @@ impl DeepL {
         }
     }
 
+    /// The configured path captured when this client was created.
+    pub fn key_file(&self) -> Option<&Path> {
+        self.key_file.as_deref()
+    }
+
     /// The Russian text for the English `request.text`, read in
     /// `request.context` when there is one. The context is not translated.
     pub async fn translate(&self, request: &Request) -> Result<String, Refusal> {
@@ -125,7 +133,7 @@ impl DeepL {
             .post(format!("{base}/v2/translate"))
             .header(AUTHORIZATION, authorization)
             .json(&body);
-        let translated: Translated = answer(sent).await?;
+        let translated: Translated = answer(sent, true).await?;
         let first = translated.translations.into_iter().next();
         let text = first.map(|translation| translation.text.trim().to_owned());
         text.filter(|text| !text.is_empty()).ok_or(Refusal::Other)
@@ -137,7 +145,7 @@ impl DeepL {
         let sent = http
             .get(format!("{base}/v3/languages?resource=translate_text"))
             .header(AUTHORIZATION, authorization);
-        answer(sent).await
+        answer(sent, false).await
     }
 
     /// How much of the quota of the key is used.
@@ -146,7 +154,7 @@ impl DeepL {
         let sent = http
             .get(format!("{base}/v2/usage"))
             .header(AUTHORIZATION, authorization);
-        answer(sent).await
+        answer(sent, false).await
     }
 
     /// What every request needs: the HTTP client, the base URL and the
@@ -154,7 +162,11 @@ impl DeepL {
     /// nothing else is done.
     fn prepared(&self) -> Result<(&reqwest::Client, &str, HeaderValue), Refusal> {
         let key_file = self.key_file.as_deref().ok_or(Refusal::Key)?;
-        let key = key::read(key_file).map_err(|_| Refusal::Key)?;
+        let key = key::read(key_file).map_err(|error| match error {
+            key::KeyError::Missing | key::KeyError::Empty => Refusal::Key,
+            key::KeyError::Unreadable => Refusal::UnreadableKey,
+            key::KeyError::TooOpen => Refusal::UnsafeKey,
+        })?;
         let mut authorization = HeaderValue::from_str(&format!("{AUTH_SCHEME}{}", key.secret()))
             .map_err(|_| Refusal::Key)?;
         // Keeps the key out of the `Debug` output of the request.
@@ -195,10 +207,45 @@ impl Translator for DeepL {
 
 /// Sends `request` once and reads the answer. The error of the HTTP client
 /// is reduced to its kind here and goes no further.
-async fn answer<T: DeserializeOwned>(request: reqwest::RequestBuilder) -> Result<T, Refusal> {
+async fn answer<T: DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    translation: bool,
+) -> Result<T, Refusal> {
     let response = request.send().await.map_err(|error| refusal(&error))?;
     match response.status() {
-        StatusCode::OK => response.json().await.map_err(|error| refusal(&error)),
+        StatusCode::OK => {
+            let body = response.bytes().await.map_err(|_| Refusal::Network)?;
+            serde_json::from_slice(&body).map_err(|_| Refusal::Other)
+        }
+        StatusCode::BAD_REQUEST if translation => {
+            #[derive(Deserialize)]
+            struct ErrorBody {
+                message: String,
+            }
+            let body = response.bytes().await.map_err(|_| Refusal::Network)?;
+            let error = serde_json::from_slice::<ErrorBody>(&body);
+            // Match only recognized language rejection messages. Other bad
+            // parameters and malformed error bodies remain generic.
+            let unsupported = error.is_ok_and(|body| {
+                let message = body
+                    .message
+                    .trim()
+                    .trim_end_matches('.')
+                    .to_ascii_lowercase();
+                matches!(
+                    message.as_str(),
+                    "value for 'source_lang' not supported"
+                        | "value for 'target_lang' not supported"
+                        | "source language not supported"
+                        | "target language not supported"
+                )
+            });
+            Err(if unsupported {
+                Refusal::UnsupportedLanguage
+            } else {
+                Refusal::Other
+            })
+        }
         status => Err(refused(status)),
     }
 }
@@ -213,10 +260,14 @@ fn refused(status: StatusCode) -> Refusal {
     }
 }
 
-/// Every error of the HTTP client is one kind. It sets no timeout, so a
+/// Transport errors are distinct from malformed responses. There is no timeout, so a
 /// request that ran out of time is known only by the caller's deadline.
-fn refusal(_error: &reqwest::Error) -> Refusal {
-    Refusal::Other
+fn refusal(error: &reqwest::Error) -> Refusal {
+    if error.is_connect() || error.is_body() || (error.is_request() && !error.is_builder()) {
+        Refusal::Network
+    } else {
+        Refusal::Other
+    }
 }
 
 #[cfg(test)]

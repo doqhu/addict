@@ -219,11 +219,15 @@ async fn a_key_file_that_is_too_open_sends_nothing() {
         let client = DeepL::with_base_url(dir.key_file(KEY, mode), stub.base_url());
         assert_eq!(
             client.translate(&request()).await,
-            Err(Refusal::Key),
+            Err(Refusal::UnsafeKey),
             "{mode:o}"
         );
-        assert_eq!(client.languages().await, Err(Refusal::Key), "{mode:o}");
-        assert_eq!(client.usage().await, Err(Refusal::Key), "{mode:o}");
+        assert_eq!(
+            client.languages().await,
+            Err(Refusal::UnsafeKey),
+            "{mode:o}"
+        );
+        assert_eq!(client.usage().await, Err(Refusal::UnsafeKey), "{mode:o}");
         assert!(stub.seen().is_empty(), "{mode:o}");
     }
 }
@@ -246,9 +250,12 @@ async fn no_key_file_an_empty_one_and_an_unreadable_one_send_nothing() {
     }
     // A directory in its place.
     let client = DeepL::with_base_url(dir.path(), stub.base_url());
-    assert_eq!(client.translate(&request()).await, Err(Refusal::Key));
-    assert_eq!(client.languages().await, Err(Refusal::Key));
-    assert_eq!(client.usage().await, Err(Refusal::Key));
+    assert_eq!(
+        client.translate(&request()).await,
+        Err(Refusal::UnreadableKey)
+    );
+    assert_eq!(client.languages().await, Err(Refusal::UnreadableKey));
+    assert_eq!(client.usage().await, Err(Refusal::UnreadableKey));
     assert!(stub.seen().is_empty());
 }
 
@@ -259,7 +266,7 @@ async fn a_key_written_after_a_refusal_is_found_by_the_next_request() {
     let client = DeepL::with_base_url(dir.key_path(), stub.base_url());
     assert_eq!(client.translate(&request()).await, Err(Refusal::Key));
     dir.key_file(KEY, 0o644);
-    assert_eq!(client.translate(&request()).await, Err(Refusal::Key));
+    assert_eq!(client.translate(&request()).await, Err(Refusal::UnsafeKey));
     assert!(stub.seen().is_empty());
     dir.key_file(KEY, 0o600);
     assert_eq!(client.translate(&request()).await, Ok("берег".to_owned()));
@@ -277,8 +284,8 @@ async fn a_server_that_is_not_there_is_a_refusal() {
     let address = listener.local_addr().expect("address");
     drop(listener);
     let client = DeepL::with_base_url(dir.key_file(KEY, 0o600), format!("http://{address}/"));
-    assert_eq!(client.translate(&request()).await, Err(Refusal::Other));
-    assert_eq!(client.usage().await, Err(Refusal::Other));
+    assert_eq!(client.translate(&request()).await, Err(Refusal::Network));
+    assert_eq!(client.usage().await, Err(Refusal::Network));
 }
 
 #[tokio::test]
@@ -292,5 +299,102 @@ async fn the_debug_output_of_the_client_and_of_its_refusals_does_not_hold_the_ke
     for shown in [before, after, format!("{refused:?}"), format!("{no_key:?}")] {
         assert!(!shown.contains(KEY), "{shown}");
         assert!(!shown.contains("test-key"), "{shown}");
+    }
+}
+
+#[tokio::test]
+async fn only_recognized_translation_language_errors_have_the_unsupported_kind() {
+    for message in [
+        "Value for 'source_lang' not supported.",
+        "Value for 'target_lang' not supported.",
+        "Source language not supported",
+        "Target language not supported",
+    ] {
+        let body = serde_json::json!({"message": message}).to_string();
+        let (_dir, stub, client) = asking("unsupported", Reply::answer(400, &body));
+        assert_eq!(
+            client.translate(&request()).await,
+            Err(Refusal::UnsupportedLanguage)
+        );
+        assert_eq!(client.languages().await, Err(Refusal::Other));
+        assert_eq!(client.usage().await, Err(Refusal::Other));
+        assert_eq!(stub.seen().len(), 3);
+    }
+    for body in [
+        "not json",
+        "{}",
+        r#"{"message":7}"#,
+        r#"{"message":"Invalid text parameter"}"#,
+        r#"{"message":"Value for 'context' not supported."}"#,
+    ] {
+        let (_dir, stub, client) = asking("bad-parameter", Reply::answer(400, body));
+        assert_eq!(client.translate(&request()).await, Err(Refusal::Other));
+        assert_eq!(stub.seen().len(), 1);
+    }
+}
+
+#[test]
+fn the_configured_key_path_is_captured_without_reading_it() {
+    let dir = TempDir::new("captured-path");
+    let path = dir.key_path();
+    let client = DeepL::with_base_url(&path, "http://127.0.0.1:1");
+    assert_eq!(client.key_file(), Some(path.as_path()));
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn an_interrupted_body_is_a_network_failure_even_when_its_json_is_valid() {
+    use std::io::{Read, Write};
+
+    for (status, body) in [
+        (200, r#"{"translations":[{"text":"берег"}]}"#),
+        (
+            400,
+            r#"{"message":"Value for 'target_lang' not supported."}"#,
+        ),
+    ] {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(DEADLINE))
+                .expect("read timeout");
+            // Consume the full request before sending the deliberately incomplete
+            // response, so the refusal is caused by receiving its body.
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).expect("request header");
+                headers.push(byte[0]);
+            }
+            let headers = String::from_utf8(headers).expect("headers");
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().expect("request length"))
+                })
+                .expect("content length");
+            stream
+                .read_exact(&mut vec![0; length])
+                .expect("request body");
+            write!(stream,
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len() + 16,
+            ).expect("partial response");
+            stream
+                .shutdown(std::net::Shutdown::Both)
+                .expect("close stream");
+        });
+        let dir = TempDir::new("interrupted-body");
+        let client = DeepL::with_base_url(dir.key_file(KEY, 0o600), format!("http://{address}"));
+        assert_eq!(
+            client.translate(&request()).await,
+            Err(Refusal::Network),
+            "{status}"
+        );
+        server.join().expect("server thread");
     }
 }

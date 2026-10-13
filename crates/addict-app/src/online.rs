@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// What one online request is about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Subject {
     /// The word with this index, with the sentence as its context.
     Word(usize),
@@ -73,6 +73,8 @@ pub struct Click {
 pub struct Kept {
     /// The number of the text these belong to.
     text: u64,
+    next_request: u64,
+    pending: BTreeMap<Subject, u64>,
     kind: Kind,
     /// By the index of the word: at most one of them is pending.
     words: BTreeMap<usize, Online>,
@@ -115,6 +117,8 @@ impl Kept {
         self.words
             .retain(|other, state| *other == index || *state != Online::Pending);
         click.gave_up = self.words.len() != before;
+        self.pending
+            .retain(|subject, _| !matches!(subject, Subject::Word(other) if *other != index));
         if is_to_send(self.words.get(&index)) {
             self.words.insert(index, Online::Pending);
             click.ask.push(Subject::Word(index));
@@ -129,6 +133,9 @@ impl Kept {
                 click.ask.push(Subject::Sentence);
             }
         }
+        for subject in &click.ask {
+            self.begin(*subject);
+        }
         click
     }
 
@@ -140,14 +147,31 @@ impl Kept {
             return false;
         }
         self.lone = Some(Online::Pending);
+        self.begin(Subject::Lone);
         true
     }
 
-    /// The request about `subject`, sent for the text with the number `text`,
-    /// ended with `online`. Says whether it is kept: only when the text is
-    /// this one and the request is still pending here.
-    pub fn answer(&mut self, text: u64, subject: Subject, online: Online) -> bool {
-        if text != self.text {
+    /// Assigns a fresh identity whenever a request is started or retried.
+    fn begin(&mut self, subject: Subject) {
+        self.next_request += 1;
+        self.pending.insert(subject, self.next_request);
+    }
+
+    /// The identity of the individual request currently awaited for a subject.
+    pub fn request_number(&self, subject: Subject) -> Option<u64> {
+        self.pending.get(&subject).copied()
+    }
+
+    /// A test convenience: complete the currently awaited request.
+    #[cfg(test)]
+    pub fn answer_current(&mut self, text: u64, subject: Subject, online: Online) -> bool {
+        let number = self.request_number(subject).unwrap_or(0);
+        self.answer(text, subject, number, online)
+    }
+
+    /// Keeps only the outcome of this text and this individual pending request.
+    pub fn answer(&mut self, text: u64, subject: Subject, number: u64, online: Online) -> bool {
+        if text != self.text || self.request_number(subject) != Some(number) {
             return false;
         }
         match subject {
@@ -164,6 +188,7 @@ impl Kept {
                 _ => return false,
             },
         }
+        self.pending.remove(&subject);
         true
     }
 
@@ -217,8 +242,8 @@ mod tests {
     fn answered() -> Kept {
         let mut kept = sentence();
         kept.click(BANK);
-        assert!(kept.answer(TEXT, Subject::Word(BANK), translated("берег")));
-        assert!(kept.answer(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
+        assert!(kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
         kept
     }
 
@@ -261,8 +286,8 @@ mod tests {
                 lone: None,
             }
         );
-        assert!(kept.answer(TEXT, Subject::Word(BANK), translated("берег")));
-        assert!(kept.answer(TEXT, Subject::Sentence, REFUSED));
+        assert!(kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
+        assert!(kept.answer_current(TEXT, Subject::Sentence, REFUSED));
         let refused = Whole::Asked(REFUSED);
         assert_eq!(
             kept.shown(Some(BANK)),
@@ -280,8 +305,8 @@ mod tests {
         kept.click(BANK);
         assert_eq!(kept.click(BANK), Click::default());
         // Still awaited: the answers of the first click are kept.
-        assert!(kept.answer(TEXT, Subject::Word(BANK), translated("берег")));
-        assert!(kept.answer(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
+        assert!(kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
         assert_eq!(kept.click(BANK), Click::default());
         assert_eq!(kept.shown(Some(BANK)).word, Some(&translated("берег")));
     }
@@ -290,7 +315,7 @@ mod tests {
     fn another_word_asks_for_itself_only_and_gives_the_pending_one_up() {
         let mut kept = sentence();
         kept.click(BANK);
-        assert!(kept.answer(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
         assert_eq!(
             kept.click(RIVER),
             Click {
@@ -308,7 +333,7 @@ mod tests {
             }
         );
         // Whatever the request given up still reports is not kept.
-        assert!(!kept.answer(TEXT, Subject::Word(BANK), translated("берег")));
+        assert!(!kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
         assert_eq!(kept.shown(Some(BANK)).word, None);
     }
 
@@ -317,14 +342,14 @@ mod tests {
         let mut kept = sentence();
         kept.click(BANK);
         assert_eq!(kept.click(RIVER).ask, [Subject::Word(RIVER)]);
-        assert!(kept.answer(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
     }
 
     #[test]
     fn back_to_an_answered_word_asks_for_nothing_and_shows_what_was_kept() {
         let mut kept = answered();
         assert_eq!(kept.click(RIVER), asks(&[Subject::Word(RIVER)]));
-        assert!(kept.answer(TEXT, Subject::Word(RIVER), translated("реки")));
+        assert!(kept.answer_current(TEXT, Subject::Word(RIVER), translated("реки")));
         assert_eq!(kept.click(BANK), Click::default());
         assert_eq!(kept.shown(Some(BANK)).word, Some(&translated("берег")));
         assert_eq!(kept.click(RIVER), Click::default());
@@ -371,8 +396,8 @@ mod tests {
         // The word refused, the sentence answered.
         let mut kept = sentence();
         kept.click(BANK);
-        assert!(kept.answer(TEXT, Subject::Word(BANK), REFUSED));
-        assert!(kept.answer(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(kept.answer_current(TEXT, Subject::Word(BANK), REFUSED));
+        assert!(kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
         assert_eq!(kept.shown(Some(BANK)).word, Some(&REFUSED));
         assert_eq!(kept.click(BANK), asks(&[Subject::Word(BANK)]));
         assert_eq!(kept.shown(Some(BANK)).word, Some(&PENDING));
@@ -380,10 +405,10 @@ mod tests {
         // The sentence refused, the word answered: any word click asks again.
         let mut kept = sentence();
         kept.click(BANK);
-        assert!(kept.answer(TEXT, Subject::Word(BANK), translated("берег")));
-        assert!(kept.answer(TEXT, Subject::Sentence, REFUSED));
+        assert!(kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
+        assert!(kept.answer_current(TEXT, Subject::Sentence, REFUSED));
         assert_eq!(kept.click(BANK), asks(&[Subject::Sentence]));
-        assert!(kept.answer(TEXT, Subject::Sentence, REFUSED));
+        assert!(kept.answer_current(TEXT, Subject::Sentence, REFUSED));
         assert_eq!(
             kept.click(RIVER),
             asks(&[Subject::Word(RIVER), Subject::Sentence])
@@ -396,12 +421,12 @@ mod tests {
         assert_eq!(kept.shown(None).sentence, None);
         assert_eq!(kept.click(BANK), asks(&[Subject::Word(BANK)]));
         assert_eq!(kept.shown(Some(BANK)).sentence, Some(&Whole::TooLong));
-        assert!(kept.answer(TEXT, Subject::Word(BANK), translated("берег")));
+        assert!(kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
         assert_eq!(kept.click(BANK), Click::default());
         assert_eq!(kept.click(RIVER), asks(&[Subject::Word(RIVER)]));
         assert_eq!(kept.shown(Some(RIVER)).sentence, Some(&Whole::TooLong));
         // No request of the sentence is awaited.
-        assert!(!kept.answer(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(!kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
     }
 
     #[test]
@@ -409,19 +434,19 @@ mod tests {
         let mut kept = sentence();
         kept.click(BANK);
         for subject in [Subject::Word(BANK), Subject::Sentence] {
-            assert!(!kept.answer(TEXT - 1, subject, translated("старый")));
-            assert!(!kept.answer(TEXT + 1, subject, translated("чужой")));
+            assert!(!kept.answer_current(TEXT - 1, subject, translated("старый")));
+            assert!(!kept.answer_current(TEXT + 1, subject, translated("чужой")));
         }
         assert_eq!(kept.shown(Some(BANK)).word, Some(&PENDING));
 
         // A new text starts with nothing, and ignores what the old one asked.
         let mut next = Kept::of(TEXT + 1, Kind::Sentence { long: false });
         assert_eq!(next.shown(Some(BANK)), OnlineTexts::default());
-        assert!(!next.answer(TEXT, Subject::Word(BANK), translated("берег")));
+        assert!(!next.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
         // Even when the same word is pending in it.
         next.click(BANK);
-        assert!(!next.answer(TEXT, Subject::Word(BANK), translated("берег")));
-        assert!(!next.answer(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(!next.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
+        assert!(!next.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
         assert_eq!(next.shown(Some(BANK)).word, Some(&PENDING));
     }
 
@@ -429,13 +454,13 @@ mod tests {
     fn an_outcome_that_is_not_awaited_is_not_kept() {
         let mut kept = sentence();
         for subject in [Subject::Word(BANK), Subject::Sentence, Subject::Lone] {
-            assert!(!kept.answer(TEXT, subject, translated("ничей")));
+            assert!(!kept.answer_current(TEXT, subject, translated("ничей")));
         }
         assert_eq!(kept.shown(Some(BANK)), OnlineTexts::default());
         // A second outcome for an answered request changes nothing.
         let mut kept = answered();
-        assert!(!kept.answer(TEXT, Subject::Word(BANK), REFUSED));
-        assert!(!kept.answer(TEXT, Subject::Sentence, REFUSED));
+        assert!(!kept.answer_current(TEXT, Subject::Word(BANK), REFUSED));
+        assert!(!kept.answer_current(TEXT, Subject::Sentence, REFUSED));
         assert_eq!(kept.shown(Some(BANK)).word, Some(&translated("берег")));
     }
 
@@ -456,7 +481,7 @@ mod tests {
         );
         // Pending, and answered.
         assert!(!kept.submit());
-        assert!(kept.answer(TEXT, Subject::Lone, translated("банк")));
+        assert!(kept.answer_current(TEXT, Subject::Lone, translated("банк")));
         assert!(!kept.submit());
         assert_eq!(kept.click(0), Click::default());
         assert_eq!(
@@ -473,11 +498,11 @@ mod tests {
     fn a_refused_lone_word_is_asked_for_again_by_the_next_submit() {
         let mut kept = Kept::of(TEXT, Kind::Lone);
         assert!(kept.submit());
-        assert!(kept.answer(TEXT, Subject::Lone, REFUSED));
+        assert!(kept.answer_current(TEXT, Subject::Lone, REFUSED));
         assert_eq!(kept.shown(Some(0)).lone, Some(&REFUSED));
         assert!(kept.submit());
-        assert!(!kept.answer(TEXT + 1, Subject::Lone, translated("банк")));
-        assert!(kept.answer(TEXT, Subject::Lone, translated("банк")));
+        assert!(!kept.answer_current(TEXT + 1, Subject::Lone, translated("банк")));
+        assert!(kept.answer_current(TEXT, Subject::Lone, translated("банк")));
     }
 
     #[test]
@@ -503,5 +528,53 @@ mod tests {
         let mut kept = Kept::of(TEXT, Kind::Empty);
         assert_eq!(kept.click(0), Click::default());
         assert_eq!(kept.shown(Some(0)), OnlineTexts::default());
+    }
+    #[test]
+    fn returning_to_a_pending_word_rejects_its_previous_request() {
+        let mut kept = sentence();
+        kept.click(BANK);
+        let old = kept
+            .request_number(Subject::Word(BANK))
+            .expect("old request");
+        let whole = kept
+            .request_number(Subject::Sentence)
+            .expect("sentence request");
+        kept.click(RIVER);
+        kept.click(BANK);
+        let new = kept
+            .request_number(Subject::Word(BANK))
+            .expect("new request");
+        assert_ne!(old, new);
+        assert!(!kept.answer(TEXT, Subject::Word(BANK), old, translated("старый")));
+        assert_eq!(kept.shown(Some(BANK)).word, Some(&PENDING));
+        assert!(kept.answer(TEXT, Subject::Sentence, whole, translated("Я сидел.")));
+        assert!(kept.answer(TEXT, Subject::Word(BANK), new, translated("берег")));
+    }
+
+    #[test]
+    fn retrying_a_failed_subject_rejects_the_previous_outcome() {
+        for subject in [Subject::Sentence, Subject::Lone] {
+            let mut kept = if subject == Subject::Lone {
+                Kept::of(TEXT, Kind::Lone)
+            } else {
+                sentence()
+            };
+            if subject == Subject::Lone {
+                kept.submit();
+            } else {
+                kept.click(BANK);
+            }
+            let old = kept.request_number(subject).expect("request");
+            assert!(kept.answer(TEXT, subject, old, REFUSED));
+            if subject == Subject::Lone {
+                kept.submit();
+            } else {
+                kept.click(BANK);
+            }
+            let new = kept.request_number(subject).expect("retry");
+            assert_ne!(old, new);
+            assert!(!kept.answer(TEXT, subject, old, translated("старый")));
+            assert!(kept.answer(TEXT, subject, new, translated("новый")));
+        }
     }
 }

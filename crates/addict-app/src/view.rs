@@ -16,7 +16,7 @@
 //! without a display. This module owns no
 //! widget: [`View`](crate::widgets::View) puts the results into its own.
 
-use std::{fmt::Write as _, ops::Range};
+use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 
 use addict_core::{
     dictionary::Article,
@@ -414,8 +414,7 @@ const ONLINE_SENTENCE_LABEL: &str = "Online, the whole sentence:";
 /// The line of an online request that still runs.
 const ONLINE_PENDING: &str = "Translating online…";
 
-/// The line of an online request that gave no translation. It names no
-/// cause: every refusal has this one line.
+/// The fallback line for an unclassified failure.
 const ONLINE_UNAVAILABLE: &str = "Online translation is not available.";
 
 /// The line of a text that is not sent as a sentence because of its length.
@@ -427,20 +426,33 @@ const ONLINE_TOO_LONG: &str = "The text is too long to translate as a sentence."
 /// under it, the pending line, the translation as it came, escaped, the line
 /// of a refusal or the line of a text that is too long. Empty when there is
 /// no block.
+#[cfg(test)]
 pub fn online_markup(texts: &OnlineTexts<'_>) -> String {
+    online_markup_with_key_path(texts, None)
+}
+
+pub fn online_markup_with_key_path(texts: &OnlineTexts<'_>, key_file: Option<&Path>) -> String {
     let mut markup = String::new();
     if let Some(online) = texts.word {
-        push_online_block(&mut markup, ONLINE_WORD_LABEL, online_line(online));
+        push_online_block(
+            &mut markup,
+            ONLINE_WORD_LABEL,
+            &online_line(online, key_file),
+        );
     }
     if let Some(online) = texts.lone {
-        push_online_block(&mut markup, ONLINE_LONE_LABEL, online_line(online));
+        push_online_block(
+            &mut markup,
+            ONLINE_LONE_LABEL,
+            &online_line(online, key_file),
+        );
     }
     if let Some(whole) = texts.sentence {
         let line = match whole {
-            Whole::Asked(online) => online_line(online),
-            Whole::TooLong => ONLINE_TOO_LONG,
+            Whole::Asked(online) => online_line(online, key_file),
+            Whole::TooLong => Cow::Borrowed(ONLINE_TOO_LONG),
         };
-        push_online_block(&mut markup, ONLINE_SENTENCE_LABEL, line);
+        push_online_block(&mut markup, ONLINE_SENTENCE_LABEL, &line);
     }
     markup
 }
@@ -460,23 +472,38 @@ fn push_online_block(markup: &mut String, label: &str, line: &str) {
 /// The line of one online request: the pending line, the translation as it
 /// came or the line of a refusal. No wildcard arm: a new state does not
 /// compile until it is given its line.
-fn online_line(online: &Online) -> &str {
+fn online_line<'a>(online: &'a Online, key_file: Option<&Path>) -> Cow<'a, str> {
     match online {
-        Online::Pending => ONLINE_PENDING,
-        Online::Translated(text) => text,
-        Online::Refused(refusal) => refusal_text(*refusal),
+        Online::Pending => Cow::Borrowed(ONLINE_PENDING),
+        Online::Translated(text) => Cow::Borrowed(text),
+        Online::Refused(refusal) => Cow::Owned(refusal_text(*refusal, key_file)),
     }
 }
 
-/// The line of `refusal`. No wildcard arm: a new kind does not compile until
-/// it is given its line.
-fn refusal_text(refusal: Refusal) -> &'static str {
-    match refusal {
-        Refusal::Key
-        | Refusal::RejectedKey
-        | Refusal::Quota
-        | Refusal::TimedOut
-        | Refusal::Other => ONLINE_UNAVAILABLE,
+fn refusal_text(refusal: Refusal, key_file: Option<&Path>) -> String {
+    let line = match refusal {
+        Refusal::Key => "A DeepL key is required.",
+        Refusal::UnreadableKey => "Cannot read the DeepL key file.",
+        Refusal::UnsafeKey => "The DeepL key file must have permissions 0600.",
+        Refusal::RejectedKey => "DeepL rejected the key.",
+        Refusal::Network => "Cannot connect to DeepL.",
+        Refusal::Quota => "The DeepL quota is exhausted.",
+        Refusal::UnsupportedLanguage => "DeepL does not support EN→RU translation.",
+        Refusal::TimedOut => "Online translation timed out.",
+        Refusal::Other => ONLINE_UNAVAILABLE,
+    };
+    if matches!(
+        refusal,
+        Refusal::Key | Refusal::UnreadableKey | Refusal::UnsafeKey | Refusal::RejectedKey
+    ) {
+        match key_file {
+            Some(path) => format!("{line} Key file: {}", path.display()),
+            None => format!(
+                "{line} Set an absolute XDG_CONFIG_HOME or HOME to locate addict/deepl.key."
+            ),
+        }
+    } else {
+        line.to_owned()
     }
 }
 
@@ -667,15 +694,20 @@ mod tests {
     }
 
     #[test]
-    fn every_refusal_has_the_one_generic_line_under_its_label() {
+    fn every_refusal_has_its_line_under_its_label() {
         assert_eq!(ONLINE_UNAVAILABLE, "Online translation is not available.");
         for refusal in [
             Refusal::Key,
+            Refusal::UnreadableKey,
+            Refusal::UnsafeKey,
+            Refusal::Network,
+            Refusal::UnsupportedLanguage,
             Refusal::RejectedKey,
             Refusal::Quota,
             Refusal::TimedOut,
             Refusal::Other,
         ] {
+            let line = super::refusal_text(refusal, None);
             let refused = Online::Refused(refusal);
             let whole = Whole::Asked(refused.clone());
             assert_eq!(
@@ -686,8 +718,8 @@ mod tests {
                 }),
                 format!(
                     "{}\n\n{}",
-                    block(ONLINE_WORD_LABEL, ONLINE_UNAVAILABLE),
-                    block(ONLINE_SENTENCE_LABEL, ONLINE_UNAVAILABLE)
+                    block(ONLINE_WORD_LABEL, &line),
+                    block(ONLINE_SENTENCE_LABEL, &line)
                 ),
                 "{refusal:?}"
             );
@@ -697,7 +729,7 @@ mod tests {
                     sentence: None,
                     lone: Some(&refused),
                 }),
-                block(ONLINE_LONE_LABEL, ONLINE_UNAVAILABLE),
+                block(ONLINE_LONE_LABEL, &line),
                 "{refusal:?}"
             );
         }
@@ -726,13 +758,13 @@ mod tests {
     }
 
     #[test]
-    fn the_online_lines_are_one_line_each_and_name_no_path() {
+    fn the_non_key_online_lines_are_one_line_each_and_name_no_path() {
         for line in [ONLINE_PENDING, ONLINE_UNAVAILABLE, ONLINE_TOO_LONG] {
             assert_eq!(line.lines().count(), 1, "{line}");
             assert!(!line.contains('/'), "{line}");
             assert!(!line.contains("deepl"), "{line}");
         }
-        let refused = Online::Refused(Refusal::Key);
+        let refused = Online::Refused(Refusal::Other);
         let markup = online_markup(&OnlineTexts {
             word: Some(&refused),
             sentence: None,
@@ -1611,5 +1643,47 @@ mod tests {
             })
             .source
         );
+    }
+    #[test]
+    fn refusal_lines_are_distinct_and_key_paths_are_escaped() {
+        let refusals = [
+            Refusal::Key,
+            Refusal::UnreadableKey,
+            Refusal::UnsafeKey,
+            Refusal::RejectedKey,
+            Refusal::Network,
+            Refusal::Quota,
+            Refusal::UnsupportedLanguage,
+            Refusal::TimedOut,
+            Refusal::Other,
+        ];
+        let mut lines = std::collections::BTreeSet::new();
+        for refusal in refusals {
+            let line = super::refusal_text(refusal, None);
+            assert!(lines.insert(line.clone()), "{line}");
+            let online = Online::Refused(refusal);
+            let markup = super::online_markup_with_key_path(
+                &OnlineTexts {
+                    lone: Some(&online),
+                    ..OnlineTexts::default()
+                },
+                Some(std::path::Path::new("/config/<key>&/deepl.key")),
+            );
+            if matches!(
+                refusal,
+                Refusal::Key | Refusal::UnreadableKey | Refusal::UnsafeKey | Refusal::RejectedKey
+            ) {
+                assert!(
+                    markup.contains("/config/&lt;key&gt;&amp;/deepl.key"),
+                    "{markup}"
+                );
+                assert!(
+                    line.contains("XDG_CONFIG_HOME") && line.contains("HOME"),
+                    "{line}"
+                );
+            } else {
+                assert!(!markup.contains("deepl.key"), "{markup}");
+            }
+        }
     }
 }
