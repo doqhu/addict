@@ -1508,6 +1508,41 @@ mod product_tests {
     }
 
     #[test]
+    fn online_records_among_the_lookups_change_nothing() {
+        let online = |subject: &str, outcome: &str| {
+            row(
+                Origin::Foliate,
+                "online",
+                None,
+                json!({"subject":subject,"outcome":outcome,"elapsed_ms":412,"peak_rss_bytes":141_234_176u64,"pss_bytes":63_012_864u64}),
+            )
+        };
+        let plain = session(Origin::Foliate);
+        let mut rows = Vec::new();
+        for record in &plain {
+            rows.push(record.clone());
+            if record.event == "lookup" {
+                rows.push(online("word", "translated"));
+                rows.push(online("sentence", "quota"));
+            }
+        }
+        // The last of them stands between the lookups and the closing sample.
+        let closing = rows.iter().rposition(|r| r.event == "memory").unwrap();
+        rows.insert(closing, online("definition", "other"));
+        assert_eq!(rows.len(), plain.len() + 2 * PRODUCT_LOOKUPS + 1);
+
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!(s.acceptance, "pass", "{s:?}");
+        assert_eq!((s.warm_attempts, s.valid_latency_samples), (30, 30));
+        assert_eq!(s.lookups, PRODUCT_LOOKUPS);
+        assert_eq!(s.lookup_answers["article"], PRODUCT_LOOKUPS);
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::to_value(product(&plain, Origin::Foliate)).unwrap()
+        );
+    }
+
+    #[test]
     fn one_application_does_not_speak_for_the_other() {
         let rows = session(Origin::Foliate);
         assert_eq!(product(&rows, Origin::Foliate).acceptance, "pass");

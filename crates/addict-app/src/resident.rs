@@ -92,19 +92,23 @@ enum Event {
     /// The user explicitly requested the selected dictionary definition.
     DefinitionAction,
     /// The separate definition job ended with its individual request number.
+    /// `elapsed` is the time the request took, as the worker saw it; taken
+    /// only when evidence is recorded.
     DefinitionTranslated {
         number: u64,
         outcome: Outcome<Translated>,
+        elapsed: Option<evidence::Elapsed>,
     },
     /// The lookup started as number `run` ended.
     Lookup { run: u64, outcome: Outcome<Looked> },
     /// The online request about `subject`, sent for the text with the number
-    /// `text`, ended.
+    /// `text`, ended. `elapsed` is as for a definition.
     Translated {
         text: u64,
         subject: Subject,
         number: u64,
         outcome: Outcome<Translated>,
+        elapsed: Option<evidence::Elapsed>,
     },
     /// The check at the start says where the dictionary indexes stand.
     Indexes(Indexes),
@@ -216,16 +220,19 @@ impl Session {
             Event::Sense(index) => self.sense_chosen(index),
             Event::Submitted => self.submitted(),
             Event::DefinitionAction => self.definition_action(),
-            Event::DefinitionTranslated { number, outcome } => {
-                self.definition_translated(number, outcome)
-            }
+            Event::DefinitionTranslated {
+                number,
+                outcome,
+                elapsed,
+            } => self.definition_translated(number, outcome, elapsed),
             Event::Lookup { run, outcome } => self.looked_up(run, outcome),
             Event::Translated {
                 text,
                 subject,
                 number,
                 outcome,
-            } => self.translated(text, subject, number, outcome),
+                elapsed,
+            } => self.translated(text, subject, number, outcome, elapsed),
             Event::Indexes(indexes) => {
                 self.check = None;
                 self.view.render_indexes(indexes);
@@ -373,17 +380,21 @@ impl Session {
             .input()
             .and_then(|input| manual::request(input, subject));
         let sender = self.sender.clone();
+        let probe = self.probe();
         let started = manual::translate(
             self.work.upgrade().as_deref(),
             self.translator.clone(),
             request,
             move |outcome| {
-                // On the worker: the UI thread wakes for the event.
+                // On the worker: the UI thread wakes for the event, and the
+                // delay is the request's, not the redraw's.
+                let elapsed = probe.ended();
                 let _ = sender.unbounded_send(Event::Translated {
                     text,
                     subject,
                     number,
                     outcome,
+                    elapsed,
                 });
             },
         );
@@ -391,8 +402,27 @@ impl Session {
             // Replaces, and so cancels, the request the slot held.
             Ok(job) => *self.slot(subject) = Some(job),
             Err(online) => {
+                self.record(manual::translation_unstarted(
+                    &online,
+                    subject.into(),
+                    probe,
+                ));
                 self.online.answer(text, subject, number, online);
             }
+        }
+    }
+
+    /// The measuring of an online request that starts now; it measures
+    /// nothing unless evidence is recorded.
+    fn probe(&self) -> evidence::Probe {
+        evidence::Probe::start(self.recording.is_some())
+    }
+
+    /// Writes the `record` of an online request, when there is one. Whether
+    /// there is one is [`manual`]'s to say.
+    fn record(&self, record: Option<evidence::Record>) {
+        if let Some((recording, record)) = self.recording.as_ref().zip(record) {
+            recording.translated_online(&record);
         }
     }
 
@@ -407,17 +437,21 @@ impl Session {
 
     /// An online request ended. Its outcome is kept and shown only when it
     /// belongs to the text the field holds and is still awaited; a cancelled
-    /// one was given up and shows nothing.
+    /// one was given up and shows nothing. Every one that was not given up
+    /// is recorded, shown or not.
     fn translated(
         &mut self,
         text: u64,
         subject: Subject,
         number: u64,
         outcome: Outcome<Translated>,
+        elapsed: Option<evidence::Elapsed>,
     ) {
-        let Some(online) = manual::translation_result(outcome) else {
+        let Some((online, record)) = manual::translation_ended(outcome, subject.into(), elapsed)
+        else {
             return;
         };
+        self.record(record);
         if self.online.answer(text, subject, number, online) {
             *self.slot(subject) = None;
             self.render_online();
@@ -469,26 +503,48 @@ impl Session {
             return;
         };
         let sender = self.sender.clone();
+        let probe = self.probe();
         match manual::translate(
             self.work.upgrade().as_deref(),
             self.translator.clone(),
             Some(request),
             move |outcome| {
-                let _ = sender.unbounded_send(Event::DefinitionTranslated { number, outcome });
+                // On the worker, as for a word.
+                let elapsed = probe.ended();
+                let _ = sender.unbounded_send(Event::DefinitionTranslated {
+                    number,
+                    outcome,
+                    elapsed,
+                });
             },
         ) {
             Ok(job) => self.translating_definition = Some(job),
             Err(online) => {
+                self.record(manual::translation_unstarted(
+                    &online,
+                    evidence::Requested::Definition,
+                    probe,
+                ));
                 self.shown.answer_definition(number, online);
             }
         }
         self.render_shown();
     }
 
-    fn definition_translated(&mut self, number: u64, outcome: Outcome<Translated>) {
-        if let Some(online) = manual::translation_result(outcome)
-            && self.shown.answer_definition(number, online)
-        {
+    /// The definition request ended; it is recorded as a word's is.
+    fn definition_translated(
+        &mut self,
+        number: u64,
+        outcome: Outcome<Translated>,
+        elapsed: Option<evidence::Elapsed>,
+    ) {
+        let Some((online, record)) =
+            manual::translation_ended(outcome, evidence::Requested::Definition, elapsed)
+        else {
+            return;
+        };
+        self.record(record);
+        if self.shown.answer_definition(number, online) {
             self.translating_definition = None;
             self.render_shown();
         }

@@ -13,7 +13,9 @@
 //! [`Subject`]: the word with its sentence as context, the sentence itself,
 //! or a lone word; [`translate`] starts it as a job of its own, with its own
 //! deadline, and [`translation_result`] says what the window shows for its
-//! outcome. Which of them are sent, and when, is [`online`](crate::online)'s.
+//! outcome. [`translation_ended`] and [`translation_unstarted`] say what the
+//! evidence records of a request, before anything decides whether its answer
+//! is shown. Which of them are sent, and when, is [`online`](crate::online)'s.
 //! Putting any of it on the screen is [`resident`](crate::resident)'s.
 
 use std::{ops::Range, sync::Arc, time::Duration};
@@ -27,6 +29,7 @@ use addict_platform::work::{Job, Outcome, Work};
 
 use crate::{
     dictionaries::{Answer, Articles, Indexes, Looked},
+    evidence::{self, Elapsed, Probe, Record, Requested},
     online::{Kind, Subject},
     view::{Lookup, Online},
 };
@@ -285,6 +288,34 @@ pub fn translation_result(outcome: Outcome<Translated>) -> Option<Online> {
     }
 }
 
+/// What the window shows for the `outcome` of an online request for
+/// `requested`, with the record of it for the evidence, or `None` for a
+/// request that was given up: it shows nothing and is not recorded. The
+/// record is there whenever the request was timed, which gives `elapsed`,
+/// whether or not the answer is still awaited: that is asked after this.
+/// Call it on the UI thread: making a record reads the memory of the
+/// process.
+pub fn translation_ended(
+    outcome: Outcome<Translated>,
+    requested: Requested,
+    elapsed: Option<Elapsed>,
+) -> Option<(Online, Option<Record>)> {
+    let online = translation_result(outcome)?;
+    let record = evidence::online_record(requested, &online, elapsed);
+    Some((online, record))
+}
+
+/// The record of a request for `requested` that [`translate`] did not start
+/// and gave back as `online`: no time passed. None when `probe` measures
+/// nothing. As [`translation_ended`], for the UI thread.
+pub fn translation_unstarted(
+    online: &Online,
+    requested: Requested,
+    probe: Probe,
+) -> Option<Record> {
+    evidence::online_record(requested, online, probe.not_started())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -306,13 +337,15 @@ mod tests {
 
     use super::{
         Edit, LOOKUP_LIMIT, Manual, SENTENCE_LIMIT, TRANSLATE_LIMIT, Translated, check_indexes,
-        look_up, lookup_result, request, translate, translate_within, translation_result,
+        look_up, lookup_result, request, translate, translate_within, translation_ended,
+        translation_result, translation_unstarted,
     };
     use crate::{
         dictionaries::{
             Answer, Articles, Indexes, Looked, State,
             tests::{FREEDICT, OEWN, Sampled},
         },
+        evidence::{Elapsed, Probe, Requested},
         online::{Kept, Kind, Subject},
         view::{Lookup, Online, OnlineTexts, Whole},
     };
@@ -1005,6 +1038,144 @@ mod tests {
         fn translate(&self, _request: Request) -> Translating<'_> {
             Box::pin(std::future::pending())
         }
+    }
+
+    /// Sends `request` to `translator` on `work` as the resident does, with
+    /// `probe` ended on the worker, and gives the outcome with the time taken
+    /// there. `give_up` drops the job at once.
+    fn probed(
+        work: &Work,
+        translator: Arc<dyn Translator>,
+        request: Request,
+        probe: Probe,
+        give_up: bool,
+    ) -> (Outcome<Translated>, Option<Elapsed>) {
+        let (sender, receiver) = mpsc::channel();
+        let job = translate(Some(work), translator, Some(request), move |outcome| {
+            let _ = sender.send((outcome, probe.ended()));
+        })
+        .expect("job");
+        if give_up {
+            drop(job);
+        }
+        receiver.recv_timeout(WAIT).expect("outcome")
+    }
+
+    fn bank() -> Request {
+        Request {
+            text: "bank".to_owned(),
+            context: None,
+        }
+    }
+
+    #[test]
+    fn a_request_that_could_not_start_is_recorded_as_other_with_no_delay() {
+        let work = Work::start().expect("runner");
+        let canned = Arc::new(Canned::new(Ok("берег")));
+        let probe = Probe::start(true);
+        // No runner, and then no request.
+        let unstarted = [
+            (
+                translate(None, canned.clone(), Some(bank()), |_| {}),
+                Requested::Word,
+                "word",
+            ),
+            (
+                translate(Some(&work), canned.clone(), None, |_| {}),
+                Requested::Definition,
+                "definition",
+            ),
+        ];
+        for (started, requested, subject) in unstarted {
+            let online = started.expect_err("nothing started");
+            let record = translation_unstarted(&online, requested, probe).expect("a record");
+            assert_eq!(record.event(), "online");
+            let details = record.details();
+            assert_eq!(details["subject"], subject);
+            assert_eq!(details["outcome"], "other");
+            assert_eq!(details["elapsed_ms"], 0);
+            assert!(details["peak_rss_bytes"].is_u64() && details["pss_bytes"].is_u64());
+        }
+        assert!(canned.asked().is_empty());
+    }
+
+    #[test]
+    fn a_request_given_up_writes_no_record() {
+        let work = Work::start().expect("runner");
+        let probe = Probe::start(true);
+        let (outcome, elapsed) = probed(&work, Arc::new(Mute), bank(), probe, true);
+        assert_eq!(outcome, Outcome::Cancelled);
+        // The worker only took the time; nothing is shown and no record is
+        // made of it, so no memory is read for it either.
+        assert!(elapsed.is_some());
+        assert_eq!(translation_ended(outcome, Requested::Word, elapsed), None);
+        // The same request, left to end, is recorded.
+        let canned = Arc::new(Canned::new(Ok("берег")));
+        let (outcome, elapsed) = probed(&work, canned, bank(), probe, false);
+        let (_, record) = translation_ended(outcome, Requested::Word, elapsed).expect("ended");
+        assert!(record.is_some());
+    }
+
+    #[test]
+    fn an_answer_that_is_no_longer_shown_is_recorded_like_one_that_is() {
+        use crate::view::Shown;
+        let work = Work::start().expect("runner");
+        let article = Sample.lookup("bank").expect("article");
+        let mut records = Vec::new();
+        for stale in [false, true] {
+            let canned = Arc::new(Canned::new(Ok("берег")));
+            let mut shown = Shown::default();
+            shown.show(Some(Lookup::Article(article.clone())));
+            shown.choose(0);
+            let (number, request) = shown.request_definition().expect("action");
+            let (outcome, elapsed) = probed(&work, canned, request, Probe::start(true), false);
+            if stale {
+                // Another result is shown before the answer is handled; the
+                // job was not cancelled.
+                shown.show(None);
+            }
+            let (online, record) =
+                translation_ended(outcome, Requested::Definition, elapsed).expect("ended");
+            // The record exists before the window is asked whether it still
+            // awaits the answer, and whatever it says.
+            let record = record.expect("a record");
+            assert_eq!(online, Online::Translated("берег".to_owned()));
+            assert_eq!(shown.answer_definition(number, online), !stale);
+            assert_eq!(record.event(), "online");
+            let details = record.details();
+            assert!(details["elapsed_ms"].is_u64());
+            records.push((details["subject"].clone(), details["outcome"].clone()));
+        }
+        assert_eq!(records[0], ("definition".into(), "translated".into()));
+        assert_eq!(records[1], records[0]);
+    }
+
+    #[test]
+    fn without_the_flag_nothing_is_measured_and_nothing_is_recorded() {
+        let work = Work::start().expect("runner");
+        let probe = Probe::start(false);
+        // No clock was read at the start.
+        assert_eq!(probe.started(), None);
+        // A request that ended: no time was taken on the worker and no
+        // file of /proc was read, and the answer is shown without a record.
+        let canned = Arc::new(Canned::new(Ok("берег")));
+        let (outcome, elapsed) = probed(&work, canned, bank(), probe, false);
+        assert_eq!(elapsed, None);
+        assert_eq!(
+            translation_ended(outcome, Requested::Word, elapsed),
+            Some((Online::Translated("берег".to_owned()), None))
+        );
+        // A refusal, and a request that could not start.
+        let refusing = Arc::new(Canned::new(Err(Refusal::Quota)));
+        let (outcome, elapsed) = probed(&work, refusing.clone(), bank(), probe, false);
+        assert_eq!(elapsed, None);
+        assert_eq!(
+            translation_ended(outcome, Requested::Sentence, elapsed),
+            Some((Online::Refused(Refusal::Quota), None))
+        );
+        let online = translate(None, refusing, Some(bank()), |_| {}).expect_err("nothing started");
+        assert_eq!(probe.not_started(), None);
+        assert_eq!(translation_unstarted(&online, Requested::Word, probe), None);
     }
 
     /// A translator whose every call panics.
