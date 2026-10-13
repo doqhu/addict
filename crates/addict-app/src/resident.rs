@@ -9,7 +9,10 @@
 //! asked once at the start and comes with the outcome of every lookup, and
 //! the window says it whenever one is missing or unreadable. It keeps
 //! the shown result with the sense chosen in it, and a click on a sense only
-//! changes that choice. A click on a word of a sentence also asks online for
+//! changes that choice. Only the explicit definition action sends its
+//! English definition without context; a separate job is cancelled on a
+//! changed sense or replacement article and guards its outcome by request
+//! identity. A click on a word of a sentence also asks online for
 //! the word in the sentence and, once for the text, for the sentence itself;
 //! Enter in the field, or a paste, asks for a lone word. Each request is a
 //! job of its own on the runner, in one of two slots, the word's and the
@@ -86,6 +89,13 @@ enum Event {
     Sense(usize),
     /// The text of the field was submitted, by Enter or by a paste.
     Submitted,
+    /// The user explicitly requested the selected dictionary definition.
+    DefinitionAction,
+    /// The separate definition job ended with its individual request number.
+    DefinitionTranslated {
+        number: u64,
+        outcome: Outcome<Translated>,
+    },
     /// The lookup started as number `run` ended.
     Lookup { run: u64, outcome: Outcome<Looked> },
     /// The online request about `subject`, sent for the text with the number
@@ -179,6 +189,8 @@ struct Session {
     translating_word: Option<Job>,
     /// The same for the request of the sentence.
     translating_sentence: Option<Job>,
+    /// Dropping this separate job cancels the selected definition request.
+    translating_definition: Option<Job>,
     /// The online texts of the text the field holds.
     online: Kept,
     /// The check of the indexes at the start; dropping it cancels the check.
@@ -203,6 +215,10 @@ impl Session {
             Event::Word(index) => self.word_chosen(index),
             Event::Sense(index) => self.sense_chosen(index),
             Event::Submitted => self.submitted(),
+            Event::DefinitionAction => self.definition_action(),
+            Event::DefinitionTranslated { number, outcome } => {
+                self.definition_translated(number, outcome)
+            }
             Event::Lookup { run, outcome } => self.looked_up(run, outcome),
             Event::Translated {
                 text,
@@ -420,6 +436,7 @@ impl Session {
     /// The one place the shown result changes: the sense chosen in the one
     /// before is forgotten.
     fn show_result(&mut self, lookup: Option<Lookup>) {
+        self.translating_definition = None;
         self.shown.show(lookup);
         self.render_shown();
     }
@@ -427,7 +444,7 @@ impl Session {
     /// Shows the result and the sense chosen in it as they are now.
     fn render_shown(&self) {
         self.view
-            .render_result(self.shown.lookup(), self.shown.sense());
+            .render_result(&self.shown, self.key_file.as_deref());
     }
 
     /// A sense was clicked: it is the chosen one when the shown result is an
@@ -435,7 +452,44 @@ impl Session {
     /// chosen sense renders too: GTK keeps a clicked link in the visited
     /// colour until the markup is set again.
     fn sense_chosen(&mut self, index: usize) {
+        let previous = self.shown.sense();
         if self.shown.choose(index) {
+            if previous != self.shown.sense() {
+                self.translating_definition = None;
+            }
+            self.render_shown();
+        }
+    }
+
+    fn definition_action(&mut self) {
+        if self.view.field_text() != self.manual.sentence() {
+            return;
+        }
+        let Some((number, request)) = self.shown.request_definition() else {
+            return;
+        };
+        let sender = self.sender.clone();
+        match manual::translate(
+            self.work.upgrade().as_deref(),
+            self.translator.clone(),
+            Some(request),
+            move |outcome| {
+                let _ = sender.unbounded_send(Event::DefinitionTranslated { number, outcome });
+            },
+        ) {
+            Ok(job) => self.translating_definition = Some(job),
+            Err(online) => {
+                self.shown.answer_definition(number, online);
+            }
+        }
+        self.render_shown();
+    }
+
+    fn definition_translated(&mut self, number: u64, outcome: Outcome<Translated>) {
+        if let Some(online) = manual::translation_result(outcome)
+            && self.shown.answer_definition(number, online)
+        {
+            self.translating_definition = None;
             self.render_shown();
         }
     }
@@ -546,6 +600,10 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     view.connect_word_chosen(move |index| {
         let _ = chosen.unbounded_send(Event::Word(index));
     });
+    let definition = sender.clone();
+    view.connect_definition_action(move || {
+        let _ = definition.unbounded_send(Event::DefinitionAction);
+    });
     let sense = sender.clone();
     view.connect_sense_chosen(move |index| {
         let _ = sense.unbounded_send(Event::Sense(index));
@@ -616,6 +674,7 @@ fn start(
         key_file,
         translating_word: None,
         translating_sentence: None,
+        translating_definition: None,
         online: Kept::default(),
         check,
     };

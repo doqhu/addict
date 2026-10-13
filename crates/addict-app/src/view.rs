@@ -21,7 +21,7 @@ use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 use addict_core::{
     dictionary::Article,
     input::{Source, WindowState},
-    translation::Refusal,
+    translation::{Refusal, Request},
 };
 
 use crate::dictionaries::{IndexFile, Indexes, State};
@@ -258,6 +258,9 @@ const EXPLANATION_MARK: &str = "Short explanation — the dictionary definition 
      it is not checked against the sentence:";
 
 /// What stands before the synonyms of the chosen sense.
+pub(crate) const DEFINITION_ACTION: &str = "Translate definition into Russian";
+const DEFINITION_LABEL: &str = "Online, this definition in Russian:";
+
 const SYNONYMS_LABEL: &str = "Synonyms of this sense:";
 
 /// The line of a chosen sense without synonyms.
@@ -307,10 +310,21 @@ pub fn senses_markup(lookup: &Lookup, chosen: Option<usize>) -> String {
 /// wildcard arm: a new variant does not compile until it is given its text.
 /// The texts of the dictionary and the word are escaped.
 pub fn details_markup(lookup: &Lookup, chosen: Option<usize>) -> String {
+    details_markup_with_definition(lookup, chosen, None, None)
+}
+
+pub fn details_markup_with_definition(
+    lookup: &Lookup,
+    chosen: Option<usize>,
+    definition: Option<&Online>,
+    key_file: Option<&Path>,
+) -> String {
     let mut markup = String::new();
     match lookup {
         Lookup::Pending => push_escaped(&mut markup, PENDING),
-        Lookup::Article(article) => push_article(&mut markup, article, chosen),
+        Lookup::Article(article) => {
+            push_article(&mut markup, article, chosen, definition, key_file)
+        }
         Lookup::NoEntry { word } => {
             push_escaped(&mut markup, NO_ENTRY_BEFORE);
             push_escaped(&mut markup, word);
@@ -334,7 +348,13 @@ pub fn details_markup(lookup: &Lookup, chosen: Option<usize>) -> String {
 
 /// The lines of `article` that stand below its list of senses. A `chosen`
 /// index the article does not have is no choice.
-fn push_article(markup: &mut String, article: &Article, chosen: Option<usize>) {
+fn push_article(
+    markup: &mut String,
+    article: &Article,
+    chosen: Option<usize>,
+    definition: Option<&Online>,
+    key_file: Option<&Path>,
+) {
     let sense = chosen.and_then(|index| article.senses.get(index));
     if article.senses.is_empty() {
         push_escaped(markup, NO_DEFINITIONS);
@@ -343,6 +363,9 @@ fn push_article(markup: &mut String, article: &Article, chosen: Option<usize>) {
         push_escaped(markup, EXPLANATION_MARK);
         markup.push_str("</i>\n");
         push_escaped(markup, &sense.definition);
+        if let Some(online) = definition.filter(|_| !sense.definition.trim().is_empty()) {
+            push_online_block(markup, DEFINITION_LABEL, &online_line(online, key_file));
+        }
         markup.push('\n');
         if sense.synonyms.is_empty() {
             push_escaped(markup, NO_SYNONYMS);
@@ -512,6 +535,8 @@ fn refusal_text(refusal: Refusal, key_file: Option<&Path>) -> String {
 pub struct Shown {
     lookup: Option<Lookup>,
     sense: Option<usize>,
+    definition: Option<(u64, Online)>,
+    next_definition: u64,
 }
 
 impl Shown {
@@ -520,6 +545,7 @@ impl Shown {
     pub fn show(&mut self, lookup: Option<Lookup>) {
         self.lookup = lookup;
         self.sense = None;
+        self.definition = None;
     }
 
     /// Chooses the sense with this index and says whether it is chosen now:
@@ -532,8 +558,54 @@ impl Shown {
         if index >= article.senses.len() {
             return false;
         }
+        if self.sense != Some(index) {
+            self.definition = None;
+        }
         self.sense = Some(index);
         true
+    }
+
+    /// Visibility and sensitivity of the explicit definition action.
+    pub fn definition_action(&self) -> (bool, bool) {
+        let available = self.selected_definition().is_some();
+        let enabled = available && matches!(self.definition(), None | Some(Online::Refused(_)));
+        (available, enabled)
+    }
+
+    fn selected_definition(&self) -> Option<&str> {
+        let Lookup::Article(article) = self.lookup.as_ref()? else {
+            return None;
+        };
+        let text = &article.senses.get(self.sense?)?.definition;
+        (!text.trim().is_empty()).then_some(text.as_str())
+    }
+
+    /// Only the explicit action calls this. Preserve the exact dictionary text.
+    pub fn request_definition(&mut self) -> Option<(u64, Request)> {
+        if !self.definition_action().1 {
+            return None;
+        }
+        let request = Request {
+            text: self.selected_definition()?.to_owned(),
+            context: None,
+        };
+        self.next_definition += 1;
+        let number = self.next_definition;
+        self.definition = Some((number, Online::Pending));
+        Some((number, request))
+    }
+
+    /// Individual request identity guards selection round trips and retries.
+    pub fn answer_definition(&mut self, number: u64, online: Online) -> bool {
+        if !matches!(self.definition, Some((current, Online::Pending)) if current == number) {
+            return false;
+        }
+        self.definition = Some((number, online));
+        true
+    }
+
+    pub fn definition(&self) -> Option<&Online> {
+        self.definition.as_ref().map(|(_, online)| online)
     }
 
     /// The shown result.
@@ -567,6 +639,123 @@ mod tests {
         Indexes, State,
         tests::{FREEDICT, OEWN},
     };
+
+    fn definition_shown() -> Shown {
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(Article {
+            senses: vec![
+                Sense {
+                    definition: "  land <near> & water  ".to_owned(),
+                    synonyms: vec!["shore".to_owned()],
+                },
+                Sense {
+                    definition: "financial institution".to_owned(),
+                    synonyms: vec![],
+                },
+                Sense {
+                    definition: " \n\t ".to_owned(),
+                    synonyms: vec![],
+                },
+            ],
+            translations: vec!["берег".to_owned()],
+        })));
+        shown
+    }
+
+    #[test]
+    fn definition_action_requires_a_selected_nonblank_definition() {
+        let mut shown = Shown::default();
+        assert_eq!(shown.definition_action(), (false, false));
+        assert!(shown.request_definition().is_none());
+        shown = definition_shown();
+        assert_eq!(shown.definition_action(), (false, false));
+        assert!(!shown.choose(99));
+        assert!(shown.choose(2));
+        assert_eq!(shown.definition_action(), (false, false));
+        assert!(shown.request_definition().is_none());
+        assert!(shown.choose(0));
+        assert_eq!(shown.definition_action(), (true, true));
+        let (number, request) = shown.request_definition().expect("explicit action");
+        assert_eq!(request.text, "  land <near> & water  ");
+        assert_eq!(request.context, None);
+        assert_eq!(shown.definition_action(), (true, false));
+        assert!(shown.request_definition().is_none());
+        shown.choose(0);
+        assert_eq!(shown.definition(), Some(&Online::Pending));
+        assert!(shown.answer_definition(number, translated("берег")));
+        assert!(shown.request_definition().is_none());
+        shown.choose(0);
+        assert_eq!(shown.definition(), Some(&translated("берег")));
+    }
+
+    #[test]
+    fn selection_round_trips_retries_and_article_replacement_reject_old_answers() {
+        let mut shown = definition_shown();
+        shown.choose(0);
+        let (old, _) = shown.request_definition().expect("first");
+        shown.choose(1);
+        assert_eq!(shown.definition(), None);
+        shown.choose(0);
+        let (new, _) = shown.request_definition().expect("round trip");
+        assert_ne!(new, old);
+        assert!(!shown.answer_definition(old, translated("stale")));
+        assert!(shown.answer_definition(new, Online::Refused(Refusal::Network)));
+        assert_eq!(shown.definition_action(), (true, true));
+        let (retry, _) = shown.request_definition().expect("retry");
+        assert_ne!(retry, new);
+        assert!(!shown.answer_definition(new, translated("stale retry")));
+        assert!(shown.answer_definition(retry, translated("fresh")));
+        let article = shown.lookup().cloned();
+        shown.show(article);
+        assert_eq!(shown.definition(), None);
+        shown.choose(0);
+        let (replacement, _) = shown.request_definition().expect("new article");
+        assert!(!shown.answer_definition(retry, translated("stale article")));
+        shown.show(None);
+        assert!(!shown.answer_definition(replacement, translated("cleared")));
+        assert_eq!(shown.definition_action(), (false, false));
+    }
+
+    #[test]
+    fn definition_outcomes_are_escaped_and_precede_synonyms_and_dictionary_translations() {
+        let mut shown = definition_shown();
+        shown.choose(0);
+        let path = std::path::Path::new("/key/<file>&");
+        for online in [
+            Online::Pending,
+            translated("<b>русский</b> &"),
+            Online::Refused(Refusal::Key),
+            Online::Refused(Refusal::UnreadableKey),
+            Online::Refused(Refusal::UnsafeKey),
+            Online::Refused(Refusal::RejectedKey),
+            Online::Refused(Refusal::Network),
+            Online::Refused(Refusal::Quota),
+            Online::Refused(Refusal::UnsupportedLanguage),
+            Online::Refused(Refusal::TimedOut),
+            Online::Refused(Refusal::Other),
+        ] {
+            let markup = super::details_markup_with_definition(
+                shown.lookup().expect("article"),
+                shown.sense(),
+                Some(&online),
+                Some(path),
+            );
+            let english = markup
+                .find("land &lt;near&gt; &amp; water")
+                .expect("escaped English");
+            let label = markup.find(super::DEFINITION_LABEL).expect("label");
+            let synonyms = markup.find(SYNONYMS_LABEL).expect("synonyms");
+            let russian = markup.find(RUSSIAN_LABEL).expect("dictionary translations");
+            assert!(english < label && label < synonyms && synonyms < russian);
+            let mut line = String::new();
+            super::push_escaped(&mut line, &super::online_line(&online, Some(path)));
+            assert!(markup.contains(&format!("<i>{}</i>\n{line}", super::DEFINITION_LABEL)));
+            assert!(!markup.contains("/key/<file>"));
+            assert!(!markup.contains("<b>русский</b>"));
+        }
+        let dictionary_only = details_markup(shown.lookup().expect("article"), shown.sense());
+        assert!(!dictionary_only.contains(super::DEFINITION_LABEL));
+    }
 
     const SENTENCE: &str = "I sat on the bank.";
 

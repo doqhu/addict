@@ -317,6 +317,111 @@ mod tests {
         view::{Lookup, Online, OnlineTexts, Whole},
     };
 
+    #[test]
+    fn definition_worker_sends_only_explicit_actions_and_allows_guarded_recovery() {
+        use crate::view::Shown;
+        let work = Work::start().expect("runner");
+        let failure = Arc::new(Canned::new(Err(Refusal::Network)));
+        let success = Arc::new(Canned::new(Ok("берег")));
+        let article = Sample.lookup("bank").expect("article");
+        let definition = article.senses[0].definition.clone();
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(article.clone())));
+        shown.choose(0);
+        shown.choose(0);
+        assert!(failure.asked().is_empty());
+        assert!(success.asked().is_empty());
+        let run = |request, translator: Arc<dyn Translator>| {
+            let (sender, receiver) = mpsc::channel();
+            let caller = thread::current().id();
+            let job = translate(Some(&work), translator, Some(request), move |outcome| {
+                sender
+                    .send((outcome, caller != thread::current().id()))
+                    .expect("receiver");
+            })
+            .expect("job");
+            let (outcome, elsewhere) = receiver.recv_timeout(WAIT).expect("outcome");
+            assert!(elsewhere);
+            drop(job);
+            translation_result(outcome).expect("answer")
+        };
+        let (first, request) = shown.request_definition().expect("action");
+        assert!(shown.request_definition().is_none());
+        assert!(shown.answer_definition(first, run(request, failure.clone())));
+        assert_eq!(
+            failure.asked(),
+            [Request {
+                text: definition.clone(),
+                context: None
+            }]
+        );
+        let (retry, request) = shown.request_definition().expect("retry action");
+        assert!(!shown.answer_definition(first, Online::Translated("old".to_owned())));
+        assert!(shown.answer_definition(retry, run(request, success.clone())));
+        assert_eq!(
+            success.asked(),
+            [Request {
+                text: definition,
+                context: None
+            }]
+        );
+        assert!(shown.request_definition().is_none());
+        assert_eq!(
+            shown.definition(),
+            Some(&Online::Translated("берег".to_owned()))
+        );
+
+        shown.show(Some(Lookup::Article(article.clone())));
+        shown.choose(0);
+        let (old, request) = shown.request_definition().expect("action");
+        let old_answer = run(request, success.clone());
+        shown.show(Some(Lookup::Article(article)));
+        shown.choose(0);
+        let (current, _) = shown.request_definition().expect("new action");
+        assert!(!shown.answer_definition(old, old_answer));
+        // Cancelled outcomes never attach; timeout and panic use shared refusals.
+        assert_eq!(translation_result(Outcome::Cancelled), None);
+        assert_eq!(shown.definition(), Some(&Online::Pending));
+        assert!(shown.answer_definition(
+            current,
+            translation_result(Outcome::TimedOut).expect("timeout")
+        ));
+        let (next, _) = shown.request_definition().expect("explicit retry");
+        assert!(
+            shown.answer_definition(next, translation_result(Outcome::Panicked).expect("panic"))
+        );
+        shown.show(None);
+        assert!(!shown.answer_definition(next, Online::Translated("stale".to_owned())));
+    }
+
+    #[test]
+    fn changing_sense_cancels_a_definition_worker_and_returning_requires_a_new_action() {
+        use crate::view::Shown;
+        let work = Work::start().expect("runner");
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(
+            Sample.lookup("bank").expect("article"),
+        )));
+        shown.choose(0);
+        let (old, request) = shown.request_definition().expect("action");
+        let (sender, receiver) = mpsc::channel();
+        let job = translate(Some(&work), Arc::new(Mute), Some(request), move |outcome| {
+            sender.send(outcome).expect("receiver");
+        })
+        .expect("job");
+        assert!(shown.choose(1));
+        drop(job);
+        assert!(shown.choose(0));
+        assert_eq!(shown.definition(), None);
+        let (new, _) = shown.request_definition().expect("fresh action");
+        assert_ne!(old, new);
+        let outcome = receiver.recv_timeout(WAIT).expect("cancelled outcome");
+        assert_eq!(outcome, Outcome::Cancelled);
+        assert_eq!(translation_result(outcome), None);
+        assert!(!shown.answer_definition(old, Online::Translated("late".to_owned())));
+        assert_eq!(shown.definition(), Some(&Online::Pending));
+    }
+
     const SENTENCE: &str = "I sat on the bank.";
 
     /// How long a test waits for an outcome that must come.

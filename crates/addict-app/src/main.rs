@@ -58,7 +58,10 @@
 //! A click on a word of a sentence also asks DeepL, online, for two Russian
 //! texts: the word translated in that sentence, for which the word and the
 //! sentence as its context are sent, and, once for the text of the field,
-//! the sentence itself, sent without context. Nothing else is sent. Each
+//! the sentence itself, sent without context. A selected nonblank dictionary
+//! definition is sent without context only by Translate definition into Russian.
+//! Its labelled Russian answer appears below English, before synonyms; changing
+//! sense or replacing the article cancels and clears it. Each
 //! stands below the result under a label that says what it is, apart from
 //! the article, which is shown as before and does not wait for them. What
 //! was answered or is still awaited is not asked for again: a second click
