@@ -8,19 +8,22 @@
 //! [`Manual`] is the state and holds no widget, so what an edit or a click
 //! does to it is tested without a display. [`look_up`] starts a lookup on the
 //! work runner and [`lookup_result`] says what the window shows for its
-//! outcome. Putting any of it on the screen is
+//! outcome; [`check_indexes`] asks on the runner where the dictionary indexes
+//! stand. Putting any of it on the screen is
 //! [`resident`](crate::resident)'s.
 
 use std::{ops::Range, sync::Arc, time::Duration};
 
 use addict_core::{
-    dictionary::{Article, Dictionary},
     input::{Input, Source, WindowState, window_state},
     sentence,
 };
 use addict_platform::work::{Job, Outcome, Work};
 
-use crate::view::Lookup;
+use crate::{
+    dictionaries::{Answer, Articles, Indexes, Looked},
+    view::Lookup,
+};
 
 /// How long the lookup of one word may take.
 const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
@@ -121,32 +124,55 @@ impl Manual {
     }
 }
 
-/// Starts the lookup of `word` in `dictionary` on `work`, with a deadline.
+/// Starts the lookup of `word` in `articles` on `work`, with a deadline.
 /// `on_outcome` runs once on the worker thread. Without a runner nothing
 /// starts and the result to show is given back.
 pub fn look_up(
     work: Option<&Work>,
-    dictionary: Arc<dyn Dictionary>,
+    articles: Arc<dyn Articles>,
     word: String,
-    on_outcome: impl FnOnce(Outcome<Option<Article>>) + Send + 'static,
+    on_outcome: impl FnOnce(Outcome<Looked>) + Send + 'static,
 ) -> Result<Job, Lookup> {
     let work = work.ok_or(Lookup::Unfinished)?;
     Ok(work.run(
         LOOKUP_LIMIT,
-        async move { dictionary.lookup(&word) },
+        async move { articles.look_up(&word) },
         on_outcome,
     ))
+}
+
+/// Asks `articles` on `work`, with the deadline of a lookup, where the
+/// indexes stand. `on_indexes` runs on the worker thread when the answer
+/// came, and not at all otherwise. Without a runner nothing starts.
+pub fn check_indexes(
+    work: Option<&Work>,
+    articles: Arc<dyn Articles>,
+    on_indexes: impl FnOnce(Indexes) + Send + 'static,
+) -> Option<Job> {
+    let job = work?.run(
+        LOOKUP_LIMIT,
+        async move { articles.indexes() },
+        move |outcome| {
+            if let Outcome::Finished(indexes) = outcome {
+                on_indexes(indexes);
+            }
+        },
+    );
+    Some(job)
 }
 
 /// What the window shows for the `outcome` of the lookup of `word`, or `None`
 /// when it shows nothing new: a cancelled lookup is always one that was
 /// replaced or dropped. No wildcard arm: a new outcome does not compile until
 /// it is given its result.
-pub fn lookup_result(outcome: Outcome<Option<Article>>, word: &str) -> Option<Lookup> {
+pub fn lookup_result(outcome: Outcome<Looked>, word: &str) -> Option<Lookup> {
+    let word = || word.to_owned();
     match outcome {
-        Outcome::Finished(Some(article)) => Some(Lookup::Article(article)),
-        Outcome::Finished(None) => Some(Lookup::NoEntry {
-            word: word.to_owned(),
+        Outcome::Finished(looked) => Some(match looked.answer {
+            Answer::Article(article) => Lookup::Article(article),
+            Answer::NoEntry => Lookup::NoEntry { word: word() },
+            Answer::NotImported => Lookup::NotImported { word: word() },
+            Answer::Unreadable(file) => Lookup::Unreadable(file),
         }),
         Outcome::TimedOut | Outcome::Panicked => Some(Lookup::Unfinished),
         Outcome::Cancelled => None,
@@ -158,13 +184,19 @@ mod tests {
     use std::{sync::mpsc, thread, time::Duration};
 
     use addict_core::{
-        dictionary::{Article, Dictionary, Sample},
+        dictionary::{Dictionary, Sample},
         input::{Source, WindowState},
     };
     use addict_platform::work::{Outcome, Work};
 
-    use super::{Edit, LOOKUP_LIMIT, Manual, look_up, lookup_result};
-    use crate::view::Lookup;
+    use super::{Edit, LOOKUP_LIMIT, Manual, check_indexes, look_up, lookup_result};
+    use crate::{
+        dictionaries::{
+            Answer, Articles, Indexes, Looked, State,
+            tests::{FREEDICT, OEWN, Sampled},
+        },
+        view::Lookup,
+    };
 
     const SENTENCE: &str = "I sat on the bank.";
 
@@ -195,16 +227,13 @@ mod tests {
 
     /// The outcome of a lookup of `word` that ran on a real runner, and
     /// whether its callback ran on another thread than this one.
-    fn looked_up(
-        dictionary: impl Dictionary + 'static,
-        word: &str,
-    ) -> (Outcome<Option<Article>>, bool) {
+    fn looked_up(articles: impl Articles + 'static, word: &str) -> (Outcome<Looked>, bool) {
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
         let caller = thread::current().id();
         let job = look_up(
             Some(&work),
-            std::sync::Arc::new(dictionary),
+            std::sync::Arc::new(articles),
             word.to_owned(),
             move |outcome| {
                 let _ = sender.send((outcome, thread::current().id() != caller));
@@ -483,7 +512,7 @@ mod tests {
         let run = lone(&mut manual, "bank");
         let word = manual.input().expect("input").word().to_owned();
         assert_eq!(word, "bank");
-        let (outcome, _) = looked_up(Sample, &word);
+        let (outcome, _) = looked_up(Sampled, &word);
         assert!(manual.awaits(run));
         assert_eq!(
             lookup_result(outcome, &word),
@@ -501,7 +530,7 @@ mod tests {
 
     #[test]
     fn a_lookup_runs_off_the_calling_thread_and_finds_the_article() {
-        let (outcome, elsewhere) = looked_up(Sample, "bank");
+        let (outcome, elsewhere) = looked_up(Sampled, "bank");
         assert!(elsewhere);
         let article = Sample.lookup("bank").expect("bank");
         assert_eq!(
@@ -516,14 +545,16 @@ mod tests {
         manual.choose(0).expect("run");
         let word = manual.input().expect("input").word().to_owned();
         assert_eq!(word, "Bank");
-        let (outcome, _) = looked_up(Sample, &word);
-        assert_eq!(outcome, Outcome::Finished(Sample.lookup("bank")));
-        assert!(matches!(outcome, Outcome::Finished(Some(_))));
+        let (outcome, _) = looked_up(Sampled, &word);
+        assert_eq!(
+            lookup_result(outcome, &word),
+            Some(Lookup::Article(Sample.lookup("bank").expect("bank")))
+        );
     }
 
     #[test]
     fn a_word_outside_the_sample_is_named_in_the_result() {
-        let (outcome, _) = looked_up(Sample, "sat");
+        let (outcome, _) = looked_up(Sampled, "sat");
         assert_eq!(
             lookup_result(outcome, "sat"),
             Some(Lookup::NoEntry {
@@ -532,13 +563,110 @@ mod tests {
         );
     }
 
-    /// A dictionary whose lookup panics.
+    /// A source of articles whose every call panics.
     struct Broken;
 
-    impl Dictionary for Broken {
-        fn lookup(&self, _word: &str) -> Option<Article> {
-            panic!("the broken test dictionary");
+    impl Articles for Broken {
+        fn indexes(&self) -> Indexes {
+            panic!("the broken test source");
         }
+
+        fn look_up(&self, _word: &str) -> Looked {
+            panic!("the broken test source");
+        }
+    }
+
+    /// A source of articles that always gives the same answer, with only the
+    /// translations index open.
+    struct Answering(Answer);
+
+    const TRANSLATIONS_ONLY: Indexes = Indexes {
+        definitions: State::Missing,
+        translations: State::Open,
+    };
+
+    impl Articles for Answering {
+        fn indexes(&self) -> Indexes {
+            TRANSLATIONS_ONLY
+        }
+
+        fn look_up(&self, _word: &str) -> Looked {
+            Looked {
+                answer: self.0.clone(),
+                indexes: TRANSLATIONS_ONLY,
+            }
+        }
+    }
+
+    #[test]
+    fn a_word_with_nothing_imported_is_named_with_that_and_did_finish() {
+        let (outcome, elsewhere) = looked_up(Answering(Answer::NotImported), "bank");
+        assert!(elsewhere);
+        assert_eq!(
+            lookup_result(outcome, "bank"),
+            Some(Lookup::NotImported {
+                word: "bank".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn an_index_that_cannot_be_read_is_the_result_and_not_an_unfinished_lookup() {
+        for file in [OEWN, FREEDICT] {
+            let (outcome, _) = looked_up(Answering(Answer::Unreadable(file)), "bank");
+            assert_eq!(
+                lookup_result(outcome, "bank"),
+                Some(Lookup::Unreadable(file))
+            );
+        }
+    }
+
+    #[test]
+    fn the_outcome_of_a_lookup_says_where_the_indexes_stand() {
+        let (outcome, _) = looked_up(Answering(Answer::NoEntry), "bank");
+        let Outcome::Finished(looked) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(looked.indexes, TRANSLATIONS_ONLY);
+    }
+
+    /// What `check_indexes` reported for `articles` on a real runner, and
+    /// whether it reported from another thread; `None` when it reported
+    /// nothing.
+    fn checked(articles: impl Articles + 'static) -> Option<(Indexes, bool)> {
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = mpsc::channel();
+        let caller = thread::current().id();
+        let job = check_indexes(Some(&work), std::sync::Arc::new(articles), move |indexes| {
+            let _ = sender.send((indexes, thread::current().id() != caller));
+        })
+        .expect("job");
+        // The sender is dropped with the callback when nothing is reported.
+        let reported = receiver.recv_timeout(WAIT).ok();
+        drop(job);
+        reported
+    }
+
+    #[test]
+    fn the_indexes_are_checked_off_the_calling_thread() {
+        assert_eq!(
+            checked(Answering(Answer::NoEntry)),
+            Some((TRANSLATIONS_ONLY, true))
+        );
+        assert_eq!(checked(Sampled), Some((Indexes::OPEN, true)));
+    }
+
+    #[test]
+    fn a_check_that_panics_reports_nothing() {
+        assert_eq!(checked(Broken), None);
+    }
+
+    #[test]
+    fn without_a_runner_no_check_starts() {
+        let started = check_indexes(None, std::sync::Arc::new(Sampled), |_| {
+            panic!("reported without a runner");
+        });
+        assert!(started.is_none());
     }
 
     #[test]
@@ -553,7 +681,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         let started = look_up(
             None,
-            std::sync::Arc::new(Sample),
+            std::sync::Arc::new(Sampled),
             "bank".to_owned(),
             move |outcome| {
                 let _ = sender.send(outcome);
@@ -584,8 +712,10 @@ mod tests {
     #[test]
     fn only_a_cancelled_lookup_shows_nothing() {
         for outcome in [
-            Outcome::Finished(Sample.lookup("bank")),
-            Outcome::Finished(None),
+            Outcome::Finished(Sampled.look_up("bank")),
+            Outcome::Finished(Sampled.look_up("sat")),
+            Outcome::Finished(Answering(Answer::NotImported).look_up("bank")),
+            Outcome::Finished(Answering(Answer::Unreadable(OEWN)).look_up("bank")),
             Outcome::Cancelled,
             Outcome::TimedOut,
             Outcome::Panicked,

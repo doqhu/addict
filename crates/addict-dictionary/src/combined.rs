@@ -2,7 +2,9 @@
 //! the other.
 //!
 //! [`Combined`] holds two open [`Index`] values and nothing of their
-//! contents, so its memory is theirs. A lookup asks both:
+//! contents, so its memory is theirs. Either may be absent: an index that was
+//! not opened answers as one that has no word and no exception form. A lookup
+//! asks both:
 //!
 //! - a word the definitions index has gets the senses of that index, and of
 //!   no other;
@@ -17,9 +19,10 @@
 //! of `addict_core::reduction`, each through the exact lookup, and keeps
 //! every one that is a headword of either index. The exception list of the
 //! definitions index serves both. The contract merges what was found into
-//! one article. Nothing is kept between lookups.
+//! one article, and [`Combined::article`] is that article with the error of
+//! an index as a value. Nothing is kept between lookups.
 //!
-//! Opening the two files, and what to do when one was never imported, is the
+//! Opening the two files, and what to say when one was never imported, is the
 //! caller's.
 
 use addict_core::{
@@ -39,11 +42,11 @@ pub struct Found {
     pub article: Article,
 }
 
-/// Two open indexes answering as one dictionary.
-#[derive(Debug)]
+/// Two indexes answering as one dictionary; either may be absent.
+#[derive(Debug, Default)]
 pub struct Combined {
-    definitions: Index,
-    translations: Index,
+    definitions: Option<Index>,
+    translations: Option<Index>,
 }
 
 impl Combined {
@@ -52,27 +55,41 @@ impl Combined {
     /// words `definitions` lacks (FreeDict).
     pub fn new(definitions: Index, translations: Index) -> Self {
         Self {
-            definitions,
-            translations,
+            definitions: Some(definitions),
+            translations: Some(translations),
         }
     }
 
-    /// The index the senses come from first.
-    pub fn definitions(&self) -> &Index {
-        &self.definitions
+    /// The index the senses come from first, when there is one.
+    pub fn definitions(&self) -> Option<&Index> {
+        self.definitions.as_ref()
     }
 
-    /// The index the translations come from.
-    pub fn translations(&self) -> &Index {
-        &self.translations
+    /// The index the translations come from, when there is one.
+    pub fn translations(&self) -> Option<&Index> {
+        self.translations.as_ref()
+    }
+
+    /// `index` is the definitions index from now on.
+    pub fn set_definitions(&mut self, index: Index) {
+        self.definitions = Some(index);
+    }
+
+    /// `index` is the translations index from now on.
+    pub fn set_translations(&mut self, index: Index) {
+        self.translations = Some(index);
     }
 
     /// The article of `word`, which must equal a headword of either index
-    /// byte for byte, or `None`. Both indexes are read: an error of either
-    /// is the error of the lookup.
+    /// byte for byte, or `None`. Every index there is is read: an error of
+    /// either is the error of the lookup.
     pub fn find(&self, word: &str) -> Result<Option<Article>, Error> {
-        let defined = self.definitions.find(word)?;
-        let translated = self.translations.find(word)?;
+        let find = |index: &Option<Index>| match index {
+            Some(index) => index.find(word),
+            None => Ok(None),
+        };
+        let defined = find(&self.definitions)?;
+        let translated = find(&self.translations)?;
         Ok(match (defined, translated) {
             (None, None) => None,
             (None, Some(translated)) => Some(translated),
@@ -86,16 +103,20 @@ impl Combined {
     /// The headwords `word` leads to and their articles, in the order tried:
     /// the word without the punctuation around it, its lowercase, then the
     /// dictionary forms of the lowercase word, the lemmas of the exception
-    /// list of the definitions index first. Every one that is a headword of
-    /// either index is there, once; empty when none is, or when nothing of
-    /// the word is left. An error of either index is the error of the lookup.
+    /// list of the definitions index first; without that index there are no
+    /// such lemmas. Every one that is a headword of either index is there,
+    /// once; empty when none is, or when nothing of the word is left. An
+    /// error of either index is the error of the lookup.
     pub fn find_reduced(&self, word: &str) -> Result<Vec<Found>, Error> {
         let written = reduction::stripped(word);
         if written.is_empty() {
             return Ok(Vec::new());
         }
         let lowercase = reduction::lowercase(written);
-        let lemmas = self.definitions.exception_lemmas(&lowercase)?;
+        let lemmas = match &self.definitions {
+            Some(definitions) => definitions.exception_lemmas(&lowercase)?,
+            None => Vec::new(),
+        };
         let forms = reduction::forms(&lowercase, &lemmas);
         let mut candidates = vec![written.to_owned()];
         for candidate in std::iter::once(lowercase).chain(forms) {
@@ -110,6 +131,14 @@ impl Combined {
             }
         }
         Ok(found)
+    }
+
+    /// The reduced lookup as one article: the senses of the word as written,
+    /// then of each dictionary form in the order tried, and the translations
+    /// joined in the same order. `None` when no form is a headword. An error
+    /// of either index is the error of the lookup, and no article is given.
+    pub fn article(&self, word: &str) -> Result<Option<Article>, Error> {
+        Ok(merged(self.find_reduced(word)?))
     }
 }
 
@@ -146,15 +175,10 @@ fn merged(found: Vec<Found>) -> Option<Article> {
 }
 
 impl Dictionary for Combined {
-    /// The reduced lookup as one article: the senses of the word as written,
-    /// then of each dictionary form in the order tried, and the translations
-    /// joined in the same order. Panics when an index cannot be read, as
+    /// [`Combined::article`]. Panics when an index cannot be read, as
     /// [`Index`] does.
     fn lookup(&self, word: &str) -> Option<Article> {
-        merged(
-            self.find_reduced(word)
-                .unwrap_or_else(|error| panic!("{error}")),
-        )
+        self.article(word).unwrap_or_else(|error| panic!("{error}"))
     }
 }
 
@@ -358,6 +382,7 @@ mod tests {
             article.senses,
             combined
                 .definitions()
+                .expect("definitions")
                 .find("bank")
                 .expect("find")
                 .expect("bank")
@@ -731,6 +756,85 @@ mod tests {
         for word in ["", " ", "..."] {
             assert_eq!(combined.find_reduced(word).expect("find"), Vec::new());
             assert_eq!(combined.lookup(word), None);
+        }
+    }
+
+    #[test]
+    fn the_article_is_the_merged_one_and_an_unreadable_index_is_its_error() {
+        let dir = TempDir::new("combined-article");
+        let (definitions, translations) = paths(&dir);
+        let combined = opened(&dir);
+        assert_eq!(
+            combined.article("banks").expect("article"),
+            combined.lookup("bank")
+        );
+        assert_eq!(combined.article("xyzzy").expect("article"), None);
+        // Each index in turn: the error names the file, and there is no
+        // article of what the other index still has.
+        for damaged in [&translations, &definitions] {
+            let whole = std::fs::read(damaged).expect("read");
+            std::fs::write(damaged, b"").expect("truncate");
+            let error = combined.article("bank").expect_err("unreadable");
+            assert!(
+                matches!(&error, Error::Damaged { path, .. } if path == damaged),
+                "{error}"
+            );
+            std::fs::write(damaged, whole).expect("restore");
+        }
+        assert!(combined.article("bank").expect("article").is_some());
+    }
+
+    #[test]
+    fn the_definitions_index_alone_gives_senses_and_no_translation() {
+        let dir = TempDir::new("combined-definitions-alone");
+        let (definitions, _) = paths(&dir);
+        let mut alone = Combined::default();
+        alone.set_definitions(Index::open(&definitions).expect("open"));
+        assert!(alone.translations().is_none());
+        let both = opened(&dir);
+        for word in ["bank", "banks", "went", "Bank"] {
+            let article = alone.article(word).expect("article").expect(word);
+            let whole = both.article(word).expect("article").expect(word);
+            assert_eq!(article.senses, whole.senses, "{word}");
+            assert!(!article.senses.is_empty(), "{word}");
+            assert_eq!(article.translations, Vec::<String>::new(), "{word}");
+        }
+        // Words only the other index has.
+        for word in ["despite", "webhook", "xyzzy"] {
+            assert_eq!(alone.article(word).expect("article"), None, "{word}");
+        }
+    }
+
+    #[test]
+    fn the_translations_index_alone_gives_its_definitions_and_translations() {
+        let dir = TempDir::new("combined-translations-alone");
+        let (_, translations) = paths(&dir);
+        let mut alone = Combined::default();
+        alone.set_translations(Index::open(&translations).expect("open"));
+        assert!(alone.definitions().is_none());
+        let bank = alone.article("bank").expect("article").expect("bank");
+        assert_eq!(
+            bank.senses,
+            vec![Sense {
+                definition: "An edge of river, lake, or other watercourse.".to_owned(),
+                synonyms: Vec::new(),
+            }]
+        );
+        assert_eq!(bank.translations, texts(&["бе́рег", "брег", "банк"]));
+        // The suffix forms still lead to the dictionary form.
+        assert_eq!(alone.article("banks").expect("article"), Some(bank));
+        assert_eq!(headwords(&alone, "webhooks"), ["webhooks", "webhook"]);
+        // No exception lemmas without the definitions index: `went` is `go`
+        // only through them.
+        assert_eq!(alone.article("went").expect("article"), None);
+        assert_eq!(alone.article("xyzzy").expect("article"), None);
+    }
+
+    #[test]
+    fn without_an_index_there_is_no_article_and_no_error() {
+        let neither = Combined::default();
+        for word in ["bank", "banks", ""] {
+            assert_eq!(neither.article(word).expect("article"), None, "{word:?}");
         }
     }
 }

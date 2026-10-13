@@ -22,6 +22,11 @@ cargo fmt "${PKG_ARGS[@]}" -- --check
 echo "==> clippy"
 cargo clippy "${PKG_ARGS[@]}" --all-targets -- -D warnings
 
+# Without the dev-dependencies and their features: the product must build
+# as it is shipped, where the sample dictionary of the tests does not exist.
+echo "==> product build"
+cargo check "${PKG_ARGS[@]}"
+
 echo "==> test"
 cargo test "${PKG_ARGS[@]}"
 

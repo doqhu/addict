@@ -13,7 +13,6 @@
 //! `freedict.index`. The index replaces the previous one of the same source
 //! and the index of the other source is not touched. The command prints the
 //! path of the index and the counts of its headwords and exception forms.
-//! The resident application does not read the indexes yet.
 //!
 //! With no arguments the process is the resident application: one hidden
 //! window, shown each time the global shortcut is pressed. On each press the
@@ -30,10 +29,17 @@
 //! separates two words. The field is empty when it holds no word: then there
 //! is no input and the window waits for one.
 //!
-//! The input word is looked up in the built-in sample dictionary of a few
-//! words. The lookup runs off the UI thread with a deadline, and the window
-//! shows its outcome: the article, a line saying the dictionary has no entry,
-//! or a line saying the lookup did not finish. Another word, a second click
+//! The input word is looked up in the imported indexes, as written and by
+//! its dictionary forms. The indexes are opened and read off the UI thread,
+//! and a lookup has a deadline. The window shows its outcome: the article, a
+//! line saying the dictionary has no entry, a line saying that nothing is
+//! imported or that an index cannot be read, each with the import command,
+//! or a line saying the lookup did not finish. One index is enough: the
+//! article has what that index gives. Whenever an index is missing or cannot
+//! be read, the window says so in a line of its own from the moment it is
+//! shown, with the file to import. An index imported while the application
+//! runs is found by the next lookup; one imported again over an open index
+//! is read after a restart. Another word, a second click
 //! on the same one or an edit of the field replaces the lookup, and the
 //! outcome of a replaced lookup is never shown.
 //!
@@ -69,9 +75,11 @@
 //! and the focus. Without the flag none of that exists.
 //!
 //! This module owns the command line and what each form of it starts; the
-//! entry commands are [`entries`]'s, the import is `addict_dictionary`'s and
-//! the resident application is [`resident`]'s.
+//! entry commands are [`entries`]'s, the import is `addict_dictionary`'s, the
+//! indexes as a source of articles are [`dictionaries`]'s and the resident
+//! application is [`resident`]'s.
 
+mod dictionaries;
 mod entries;
 mod evidence;
 mod manual;

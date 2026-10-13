@@ -43,7 +43,8 @@ fn the_two_indexes_give_one_article_for_the_target_list() {
         Index::open(&freedict_path).expect("open freedict.index"),
     );
     let after_open = pss_kb();
-    let (oewn, freedict) = (combined.definitions(), combined.translations());
+    let oewn = combined.definitions().expect("the definitions index");
+    let freedict = combined.translations().expect("the translations index");
 
     let list = std::fs::read_to_string(path_from("ADDICT_TARGET_WORDS")).expect("target list");
     let words: BTreeSet<&str> = list

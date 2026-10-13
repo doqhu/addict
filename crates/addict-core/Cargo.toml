@@ -9,3 +9,7 @@ publish.workspace = true
 [lib]
 name = "addict_core"
 path = "src/lib.rs"
+
+[features]
+# The dictionary of a few words, for the tests of the crates that use core.
+sample = []
