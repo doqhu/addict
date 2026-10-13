@@ -295,7 +295,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        format::{HEADER_LEN, encode, tests::header, tests::sample},
+        format::{HEADER_LEN, encode, tests::header, tests::sample, tests::texts},
         testdir::TempDir,
     };
 
@@ -307,10 +307,6 @@ mod tests {
 
     fn opened(dir: &TempDir) -> Index {
         Index::open(&written(dir, &encode(&sample()).expect("encode"))).expect("open")
-    }
-
-    fn texts(words: &[&str]) -> Vec<String> {
-        words.iter().map(|word| (*word).to_owned()).collect()
     }
 
     #[test]

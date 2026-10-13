@@ -192,13 +192,10 @@ mod tests {
     use crate::{
         format::{
             Contents, ExceptionForm, HEADER_LEN, Headword, SenseRecord, encode, tests::sample,
+            tests::texts,
         },
         testdir::TempDir,
     };
-
-    fn texts(words: &[&str]) -> Vec<String> {
-        words.iter().map(|word| (*word).to_owned()).collect()
-    }
 
     /// The sample index with what an Open English WordNet import adds for
     /// the reduced lookup: words alone in their senses, a capitalised

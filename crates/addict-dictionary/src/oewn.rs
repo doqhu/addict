@@ -15,29 +15,22 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fmt,
     io::BufRead,
 };
 
 use quick_xml::{
-    Reader, XmlVersion,
-    escape::resolve_predefined_entity,
+    Reader,
     events::{BytesStart, Event},
 };
 
-use crate::format::{Contents, ExceptionForm, Headword, SenseRecord};
+pub use crate::xml::ParseError;
+use crate::{
+    format::{Contents, ExceptionForm, Headword, SenseRecord},
+    xml,
+};
 
-/// Why a file could not be read as WN-LMF; the text says what and where.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseError(String);
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ParseError {}
+/// What is said about an entity that XML does not predefine.
+const UNKNOWN_ENTITY: &str = "an unknown entity in a definition";
 
 struct Entry {
     id: String,
@@ -154,95 +147,97 @@ impl Parsed {
     }
 }
 
+/// What is open at a place of the stream.
+#[derive(Default)]
+struct Open {
+    entry: Option<Entry>,
+    synset: Option<Synset>,
+    /// The text of the open Definition element.
+    definition: Option<String>,
+    /// How many elements are open: a file cut between two entries is still
+    /// cut.
+    depth: u32,
+}
+
+impl Open {
+    /// The element called `name` ends: an entry or a synset that ends goes
+    /// to `parsed`, a definition to its synset.
+    fn end(&mut self, name: &[u8], parsed: &mut Parsed) -> Result<(), ParseError> {
+        self.depth = self.depth.saturating_sub(1);
+        match name {
+            b"LexicalEntry" => {
+                if let Some(entry) = self.entry.take() {
+                    parsed.entry(entry)?;
+                }
+            }
+            b"Synset" => {
+                if let Some(synset) = self.synset.take() {
+                    parsed.synset(synset)?;
+                }
+            }
+            b"Definition" => {
+                // The first definition with a text is the definition.
+                if let (Some(text), Some(synset)) = (self.definition.take(), self.synset.as_mut())
+                    && synset.definition.is_empty()
+                {
+                    synset.definition = text.trim().to_owned();
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 /// Reads a WN-LMF file into the contents of an index with the source id
 /// `source`. Headwords and exception forms come out sorted by their bytes,
 /// the lemmas of a form alphabetically.
 pub fn parse(input: impl BufRead, source: &str) -> Result<Contents, ParseError> {
     let mut reader = Reader::from_reader(input);
     let mut parsed = Parsed::default();
-    let mut entry: Option<Entry> = None;
-    let mut synset: Option<Synset> = None;
-    // The text of the open Definition element.
-    let mut definition: Option<String> = None;
-    // How many elements are open: a file cut between two entries is still
-    // cut.
-    let mut depth = 0u32;
+    let mut open = Open::default();
     let mut buffer = Vec::new();
     loop {
         buffer.clear();
-        let event = reader.read_event_into(&mut buffer).map_err(|error| {
-            ParseError(format!(
-                "not well-formed XML at byte {}: {error}",
-                reader.error_position()
-            ))
-        })?;
+        let event = xml::read_event(&mut reader, &mut buffer)?;
         match event {
             Event::Start(element) => {
-                depth += 1;
+                open.depth += 1;
                 match element.local_name().as_ref() {
-                    b"LexicalEntry" => entry = Some(new_entry(&element)?),
-                    b"Synset" => synset = Some(new_synset(&element)?),
-                    b"Definition" if synset.is_some() => definition = Some(String::new()),
-                    _ => child(&element, entry.as_mut())?,
+                    b"LexicalEntry" => open.entry = Some(new_entry(&element)?),
+                    b"Synset" => open.synset = Some(new_synset(&element)?),
+                    b"Definition" if open.synset.is_some() => {
+                        open.definition = Some(String::new());
+                    }
+                    _ => child(&element, open.entry.as_mut())?,
                 }
             }
             Event::Empty(element) => match element.local_name().as_ref() {
                 b"LexicalEntry" => parsed.entry(new_entry(&element)?)?,
                 b"Synset" => parsed.synset(new_synset(&element)?)?,
-                _ => child(&element, entry.as_mut())?,
+                _ => child(&element, open.entry.as_mut())?,
             },
-            Event::End(element) => {
-                depth = depth.saturating_sub(1);
-                match element.local_name().as_ref() {
-                    b"LexicalEntry" => {
-                        if let Some(entry) = entry.take() {
-                            parsed.entry(entry)?;
-                        }
-                    }
-                    b"Synset" => {
-                        if let Some(synset) = synset.take() {
-                            parsed.synset(synset)?;
-                        }
-                    }
-                    b"Definition" => {
-                        // The first definition with a text is the definition.
-                        if let (Some(text), Some(synset)) = (definition.take(), synset.as_mut())
-                            && synset.definition.is_empty()
-                        {
-                            synset.definition = text.trim().to_owned();
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            Event::End(element) => open.end(element.local_name().as_ref(), &mut parsed)?,
             Event::Text(text) => {
-                if let Some(definition) = definition.as_mut() {
-                    definition.push_str(&text.xml10_content().map_err(not_text)?);
+                if let Some(definition) = open.definition.as_mut() {
+                    xml::push_content(definition, text.xml10_content(), malformed)?;
                 }
             }
             Event::CData(text) => {
-                if let Some(definition) = definition.as_mut() {
-                    definition.push_str(&text.xml10_content().map_err(not_text)?);
+                if let Some(definition) = open.definition.as_mut() {
+                    xml::push_content(definition, text.xml10_content(), malformed)?;
                 }
             }
             Event::GeneralRef(reference) => {
-                if let Some(definition) = definition.as_mut() {
-                    let unknown = || malformed("an unknown entity in a definition".to_owned());
-                    match reference.resolve_char_ref().map_err(|_| unknown())? {
-                        Some(character) => definition.push(character),
-                        None => {
-                            let name = reference.decode().map_err(not_text)?;
-                            definition
-                                .push_str(resolve_predefined_entity(&name).ok_or_else(unknown)?);
-                        }
-                    }
+                if let Some(definition) = open.definition.as_mut() {
+                    xml::push_reference(definition, &reference, malformed, UNKNOWN_ENTITY)?;
                 }
             }
             Event::Eof => break,
             Event::Comment(_) | Event::Decl(_) | Event::PI(_) | Event::DocType(_) => {}
         }
     }
-    if depth != 0 {
+    if open.depth != 0 {
         return Err(malformed("the file ends inside an element".to_owned()));
     }
     parsed.contents(source)
@@ -295,22 +290,7 @@ fn child(element: &BytesStart<'_>, entry: Option<&mut Entry>) -> Result<(), Pars
 
 /// The value of the attribute `name`, with its entities resolved.
 fn attribute(element: &BytesStart<'_>, name: &str) -> Result<Option<String>, ParseError> {
-    let bad = |error: &dyn fmt::Display| {
-        malformed(format!(
-            "a bad attribute in {}: {error}",
-            String::from_utf8_lossy(element.name().as_ref())
-        ))
-    };
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|error| bad(&error))?;
-        if attribute.key.as_ref() == name.as_bytes() {
-            return attribute
-                .normalized_value(XmlVersion::Implicit1_0)
-                .map(|value| Some(value.into_owned()))
-                .map_err(|error| bad(&error));
-        }
-    }
-    Ok(None)
+    xml::attribute(element, name, malformed)
 }
 
 fn required(element: &BytesStart<'_>, name: &str) -> Result<String, ParseError> {
@@ -323,11 +303,7 @@ fn required(element: &BytesStart<'_>, name: &str) -> Result<String, ParseError> 
 }
 
 fn malformed(what: String) -> ParseError {
-    ParseError(format!("not a WordNet file: {what}"))
-}
-
-fn not_text(error: impl fmt::Display) -> ParseError {
-    malformed(format!("a text cannot be decoded: {error}"))
+    ParseError::new(format!("not a WordNet file: {what}"))
 }
 
 #[cfg(test)]

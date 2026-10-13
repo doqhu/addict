@@ -76,8 +76,9 @@
 //!
 //! This module owns the command line and what each form of it starts; the
 //! entry commands are [`entries`]'s, the import is `addict_dictionary`'s, the
-//! indexes as a source of articles are [`dictionaries`]'s and the resident
-//! application is [`resident`]'s.
+//! indexes as a source of articles are [`dictionaries`]'s, the resident
+//! application is [`resident`]'s, the texts of its window are [`view`]'s and
+//! the widgets of the window are [`widgets`]'s.
 
 mod dictionaries;
 mod entries;
@@ -87,6 +88,7 @@ mod presentation;
 mod recording;
 mod resident;
 mod view;
+mod widgets;
 
 use std::{
     cell::RefCell,
