@@ -13,20 +13,25 @@
 //! English definition without context; a separate job is cancelled on a
 //! changed sense or replacement article and guards its outcome by request
 //! identity. A click on a word of a sentence also asks online for
-//! the word in the sentence and, once for the text, for the sentence itself;
+//! the word in its sentence and, once for that sentence, for the sentence
+//! itself; a typed text is one sentence, while in a recognized one it is the
+//! sentence around the word, and a word that is a sentence alone there asks
+//! nothing online;
 //! Enter in the field, or a paste, asks for a lone word. Each request is a
 //! job of its own on the runner, in one of two slots, the word's and the
 //! sentence's, and comes back as an event with the number of its text: the
 //! article never waits for it, a repeated click leaves it alone, another
-//! word gives up only the word's, and a new text gives up both. What is
+//! word gives up only the word's, another sentence the sentence's too, and a
+//! new text gives up both. What is
 //! asked for and what is kept is [`online`](crate::online)'s. What the
 //! window says is [`view`](crate::view)'s; its widgets and the paste into
 //! its field are [`widgets`](crate::widgets)'s; what an edit or a click does
 //! to the manual input is [`manual`](crate::manual)'s. Capture hides the
 //! window and starts one job on the runner, which takes the screenshot,
 //! recognizes its text and deletes the snapshot; the window comes back in
-//! the reading state once the snapshot is there, and the recognized text
-//! then replaces the field as a new text with the source OCR, which follows
+//! the reading state once the snapshot is there, and the recognized text,
+//! its lines joined by [`sentence::recognized`], then replaces the field as
+//! a new text with the source OCR, which follows
 //! the manual path from there. A capture without text leaves the field as
 //! it was, starts no lookup and no online request, and says why in the
 //! capture line under the status; the line stays, also when the window is
@@ -70,7 +75,7 @@ use crate::{
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
     manual::{self, Edit, Manual},
-    online::{Kept, Subject},
+    online::{self, Kept, Subject},
     recording::Recording,
     style,
     translate::{self, Translated},
@@ -416,7 +421,9 @@ impl Session {
         self.view.set_capture_sensitive(true);
         self.manual.set_reading(false);
         let line = match captured {
-            Captured::Text(text) => sentence::pasted(&text).ok_or(Failure::Ocr(OcrFailure::Empty)),
+            Captured::Text(text) => {
+                sentence::recognized(&text).ok_or(Failure::Ocr(OcrFailure::Empty))
+            }
             Captured::Failed(failure) => Err(failure),
         };
         let line = match line {
@@ -498,7 +505,7 @@ impl Session {
 
     /// A word was clicked: it becomes the input, with its sentence when it
     /// has one, and is looked up. In a sentence, what is not yet known
-    /// online about the word and about the sentence is asked for.
+    /// online about the word and about its sentence is asked for.
     fn word_chosen(&mut self, index: usize) {
         // A click that came before the field's newer text was handled here
         // names a word of a sentence that is no longer shown.
@@ -511,9 +518,19 @@ impl Session {
         self.start_lookup(run);
         // After the lookup: the runner takes its jobs in this order, so the
         // article is read before the key file and the network are touched.
-        let click = self.online.click(index);
+        // A word that is a sentence alone in a recognized text has no
+        // sentence: its article only, nothing sent online.
+        let Some((number, span)) = self.manual.sentence_of(index) else {
+            self.render_online();
+            return;
+        };
+        let long = online::is_long(&self.manual.sentence()[span]);
+        let click = self.online.click(index, number, long);
         if click.gave_up {
             self.translating_word = None;
+        }
+        if click.gave_up_sentence {
+            self.translating_sentence = None;
         }
         for subject in click.ask {
             self.start_translation(subject);
@@ -688,7 +705,7 @@ impl Session {
     fn slot(&mut self, subject: Subject) -> &mut Option<Job> {
         match subject {
             Subject::Word(_) | Subject::Lone => &mut self.translating_word,
-            Subject::Sentence => &mut self.translating_sentence,
+            Subject::Sentence(_) => &mut self.translating_sentence,
         }
     }
 

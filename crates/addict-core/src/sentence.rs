@@ -1,6 +1,6 @@
-//! Splitting a sentence into the words the user can pick, and the two other
-//! text rules of the manual path: the word as the dictionary writes it and a
-//! pasted text as one line.
+//! Splitting a sentence into the words the user can pick, and the other text
+//! rules of the input: the word as the dictionary writes it, a pasted text as
+//! one line, a recognized text as one line and the sentence of a word in it.
 //!
 //! A word is a maximal run of alphabetic characters. Two things continue a
 //! word instead of ending it: an apostrophe, U+0027 or U+2019, that stands
@@ -10,6 +10,19 @@
 //! not cut. Everything else only separates words, a hyphen included:
 //! `well-known` is two words. The ranges are byte ranges of the given text,
 //! so the text itself is kept as it was, punctuation included.
+//!
+//! A text recognized from a screen capture ([`recognized`]) has its lines
+//! joined with one space, an empty line among them being only a line break;
+//! a line that ends in `-` right after a letter, followed by a line that
+//! starts with a lowercase letter, is joined without the hyphen, so `num-`
+//! and `ber` give `number`. Such a text often holds several sentences, and
+//! [`around`] finds the one that holds a word: a sentence ends after a run
+//! of `.`, `!`, `?` or `…`, with any closing `"`, `”`, `’`, `)` or `]` right
+//! after it, when whitespace and then a character that is not a lowercase
+//! letter follow, or the end of the text. A lowercase letter after the
+//! period keeps `e.g. the` in one sentence; there is no list of
+//! abbreviations, so `Mr. Smith` is split. A line without closing
+//! punctuation, such as a heading, belongs to the sentence after it.
 
 use std::ops::Range;
 
@@ -64,10 +77,15 @@ pub fn words(sentence: &str) -> Vec<Range<usize>> {
     words
 }
 
-/// `word` as it is looked up: the typographic apostrophe becomes U+0027, the
-/// one the headwords are written with. Nothing else changes.
+/// The opening single quotation mark, which recognition gives for an
+/// apostrophe at times.
+const OPENING_QUOTE: char = '\u{2018}';
+
+/// `word` as it is looked up: the typographic apostrophe and the opening
+/// single quotation mark become U+0027, the one the headwords are written
+/// with. Nothing else changes.
 pub fn lookup_word(word: &str) -> String {
-    word.replace(TYPOGRAPHIC_APOSTROPHE, "'")
+    word.replace([TYPOGRAPHIC_APOSTROPHE, OPENING_QUOTE], "'")
 }
 
 /// A pasted `text` as the one line the field holds: without the whitespace
@@ -78,9 +96,112 @@ pub fn pasted(text: &str) -> Option<String> {
     (!line.is_empty()).then_some(line)
 }
 
+/// A text recognized from a screen capture, `raw`, as the one line the field
+/// holds. Each line has its runs of whitespace as one space; the lines that
+/// are not blank are joined with one space, or with nothing, the hyphen
+/// dropped, when a line ends in `-` right after a letter and the next one
+/// starts with a lowercase letter. `None` when the text is empty or blank.
+pub fn recognized(raw: &str) -> Option<String> {
+    let mut joined = String::new();
+    for line in raw.lines().filter_map(pasted) {
+        if joined.is_empty() {
+            joined = line;
+            continue;
+        }
+        let hyphenated = joined
+            .strip_suffix('-')
+            .and_then(|before| before.chars().next_back())
+            .is_some_and(is_letter)
+            && line.chars().next().is_some_and(char::is_lowercase);
+        if hyphenated {
+            joined.pop();
+        } else {
+            joined.push(' ');
+        }
+        joined.push_str(&line);
+    }
+    (!joined.is_empty()).then_some(joined)
+}
+
+/// Whether `character` ends a sentence when the rest allows it.
+fn is_terminator(character: char) -> bool {
+    matches!(character, '.' | '!' | '?' | '\u{2026}')
+}
+
+/// Whether `character` may close a sentence right after its terminator.
+fn is_closing(character: char) -> bool {
+    matches!(character, '"' | '\u{201d}' | '\u{2019}' | ')' | ']')
+}
+
+/// `range` of `text` without the whitespace at either end; `None` when
+/// nothing is left.
+fn trimmed(text: &str, range: Range<usize>) -> Option<Range<usize>> {
+    let part = &text[range.clone()];
+    let start = range.start + (part.len() - part.trim_start().len());
+    let end = range.end - (part.len() - part.trim_end().len());
+    (start < end).then_some(start..end)
+}
+
+/// The byte ranges of the sentences of `text`, in order and without the
+/// whitespace around them. A text without a sentence end is one sentence;
+/// a blank text has none.
+pub fn sentences(text: &str) -> Vec<Range<usize>> {
+    let characters: Vec<(usize, char)> = text.char_indices().collect();
+    let at = |index: usize| characters.get(index).map_or(text.len(), |&(at, _)| at);
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index < characters.len() {
+        if !is_terminator(characters[index].1) {
+            index += 1;
+            continue;
+        }
+        let mut after = index;
+        while characters
+            .get(after)
+            .is_some_and(|&(_, c)| is_terminator(c))
+        {
+            after += 1;
+        }
+        while characters.get(after).is_some_and(|&(_, c)| is_closing(c)) {
+            after += 1;
+        }
+        let mut next = after;
+        while characters
+            .get(next)
+            .is_some_and(|&(_, c)| c.is_whitespace())
+        {
+            next += 1;
+        }
+        let ends = match characters.get(next) {
+            None => true,
+            Some(&(_, following)) => next > after && !following.is_lowercase(),
+        };
+        if ends {
+            let end = at(after);
+            sentences.extend(trimmed(text, start..end));
+            start = end;
+        }
+        index = after;
+    }
+    sentences.extend(trimmed(text, start..text.len()));
+    sentences
+}
+
+/// The byte range of the sentence of `text` that holds `word`, a range of a
+/// word of it, without the whitespace around it. The whole text, trimmed,
+/// when no sentence holds the word.
+pub fn around(text: &str, word: Range<usize>) -> Range<usize> {
+    sentences(text)
+        .into_iter()
+        .find(|sentence| sentence.start <= word.start && word.end <= sentence.end)
+        .or_else(|| trimmed(text, 0..text.len()))
+        .unwrap_or(0..text.len())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{lookup_word, pasted, words};
+    use super::{around, lookup_word, pasted, recognized, sentences, words};
 
     /// The words of `sentence` as texts.
     fn texts(sentence: &str) -> Vec<&str> {
@@ -262,6 +383,7 @@ mod tests {
     fn the_looked_up_word_has_the_plain_apostrophe() {
         assert_eq!(lookup_word("don\u{2019}t"), "don't");
         assert_eq!(lookup_word("rock\u{2019}n\u{2019}roll"), "rock'n'roll");
+        assert_eq!(lookup_word("don\u{2018}t"), "don't");
         // Everything else is kept: case, marks and the plain apostrophe.
         for word in ["don't", "Bank", "nai\u{308}ve", "Café"] {
             assert_eq!(lookup_word(word), word);
@@ -286,5 +408,147 @@ mod tests {
         for text in ["", " ", "\n", "\t\r\n ", "\u{a0}", "\u{3000}"] {
             assert_eq!(pasted(text), None, "{text:?}");
         }
+    }
+
+    /// The sentences of `text` as texts.
+    fn sentence_texts(text: &str) -> Vec<&str> {
+        sentences(text)
+            .into_iter()
+            .map(|range| &text[range])
+            .collect()
+    }
+
+    /// The sentence of `text` around the first word that reads `word`.
+    fn sentence_of<'a>(text: &'a str, word: &str) -> &'a str {
+        let range = words(text)
+            .into_iter()
+            .find(|range| &text[range.clone()] == word)
+            .expect("word");
+        &text[around(text, range)]
+    }
+
+    #[test]
+    fn recognized_lines_are_joined_with_one_space() {
+        for (raw, expected) in [
+            ("the cat\nsat  down\n", "the cat sat down"),
+            ("  one line  ", "one line"),
+            ("a\r\nb", "a b"),
+            ("last line\n\u{c}", "last line"),
+        ] {
+            assert_eq!(recognized(raw).as_deref(), Some(expected), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn a_hyphenated_line_break_is_joined_without_the_hyphen() {
+        assert_eq!(
+            recognized("the num-\nber of").as_deref(),
+            Some("the number of")
+        );
+        assert_eq!(
+            recognized("always propor-\ntional to n").as_deref(),
+            Some("always proportional to n")
+        );
+    }
+
+    #[test]
+    fn a_hyphen_before_an_uppercase_letter_or_after_a_digit_stays() {
+        for (raw, expected) in [
+            ("GTK-\nRust", "GTK- Rust"),
+            ("x28-\n43", "x28- 43"),
+            ("a -\nb", "a - b"),
+            ("well-\n", "well-"),
+        ] {
+            assert_eq!(recognized(raw).as_deref(), Some(expected), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_line_inside_is_a_line_break() {
+        assert_eq!(
+            recognized("Firebase\n\nStorage.").as_deref(),
+            Some("Firebase Storage.")
+        );
+        assert_eq!(recognized("num-\n \nber").as_deref(), Some("number"));
+    }
+
+    #[test]
+    fn an_empty_or_blank_recognized_text_is_nothing() {
+        for raw in ["", "\n", " \n\t\n", "\u{c}"] {
+            assert_eq!(recognized(raw), None, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn sentences_end_after_their_punctuation_and_a_capital() {
+        assert_eq!(
+            sentence_texts("I sat. You stood! Did he? Then\u{2026} It ended."),
+            [
+                "I sat.",
+                "You stood!",
+                "Did he?",
+                "Then\u{2026}",
+                "It ended."
+            ]
+        );
+        assert_eq!(sentence_texts("  No end at all  "), ["No end at all"]);
+        assert!(sentences("").is_empty());
+        assert!(sentences(" \n").is_empty());
+    }
+
+    #[test]
+    fn a_closing_quote_stays_with_its_sentence() {
+        assert_eq!(
+            sentence_texts("\"Find your voice.\u{201d} Smaller line"),
+            ["\"Find your voice.\u{201d}", "Smaller line"]
+        );
+        assert_eq!(
+            sentence_texts("(It ended.) Then \"no!\" She left."),
+            ["(It ended.)", "Then \"no!\"", "She left."]
+        );
+    }
+
+    #[test]
+    fn a_lowercase_letter_after_a_period_does_not_end_the_sentence() {
+        for text in [
+            "Open Claude.ai Click here",
+            "\"A little practice.\" followed by more",
+            "Use e.g. the bank and so on.",
+            "Pi is 3.14 or so.",
+        ] {
+            assert_eq!(sentence_texts(text), [text], "{text:?}");
+        }
+        // No list of abbreviations.
+        assert_eq!(sentence_texts("Mr. Smith"), ["Mr.", "Smith"]);
+    }
+
+    #[test]
+    fn the_sentence_around_a_word_is_the_one_that_holds_it() {
+        let text = "I sat. You stood by the bank.";
+        assert_eq!(sentence_of(text, "sat"), "I sat.");
+        assert_eq!(sentence_of(text, "bank"), "You stood by the bank.");
+        assert_eq!(sentence_of("  just words  ", "words"), "just words");
+    }
+
+    /// The text of 21-27-22 of EXP-8 at 2×, psm 6, as Tesseract gave it.
+    const PITFALL: &str = "When we talk about problem size, we have to be careful about which size, or sizes, we\nare talking about. This example demonstrates a pitfall of algorithm analysis: the\ntempting shortcut of counting loops. If there is one loop, the algorithm is often linear.\nIf there are two loops (one nested inside the other), the algorithm is often quadratic.\nBut be careful! You have to think about how many times each loop runs. If the num-\nber of iterations is proportional to n for all loops, you can get away with just counting\nthe loops. But if, as in this example, the number of iterations is not always propor-\ntional to n, you have to give it more thought.";
+
+    /// The text of 21-27-02 of EXP-8 at 2×, psm 6, as Tesseract gave it.
+    const LINEAR: &str = "If we get lucky, we might find the target object right away and return after testing\nonly one element. If we are unlucky, we might have to test all of the elements. On\naverage, we expect to test half of the elements, so this method is considered linear\n(except in the unlikely case that we know the target element is at the beginning of the\narray).";
+
+    #[test]
+    fn a_recognized_text_of_exp_8_gives_the_sentence_of_its_word() {
+        let text = recognized(PITFALL).expect("text");
+        assert!(text.contains("the number of iterations"));
+        assert!(text.contains("always proportional to n"));
+        assert_eq!(
+            sentence_of(&text, "iterations"),
+            "If the number of iterations is proportional to n for all loops, you can get away with just counting the loops."
+        );
+        let text = recognized(LINEAR).expect("text");
+        assert_eq!(
+            sentence_of(&text, "unlikely"),
+            "On average, we expect to test half of the elements, so this method is considered linear (except in the unlikely case that we know the target element is at the beginning of the array)."
+        );
     }
 }

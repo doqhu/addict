@@ -2,13 +2,16 @@
 //! a translator: what was asked for, what was answered and what is asked next.
 //!
 //! [`Kept`] belongs to one text of the field and is replaced with it. A click
-//! on a word of a sentence asks for the word in the sentence and, once for
-//! the text, for the sentence itself; a lone word is asked for only when it is
-//! submitted, by Enter or by a paste. What is answered or still pending is not
-//! asked for again; what was refused or given up is. A sentence longer than
-//! [`SENTENCE_LIMIT`] characters is never asked for as a text. An outcome is
-//! kept only when it carries the number of this text and its request is still
-//! awaited here.
+//! on a word of a sentence asks for the word in its sentence and, once for
+//! that sentence, for the sentence itself; a lone word is asked for only when
+//! it is submitted, by Enter or by a paste. A typed text is one sentence; a
+//! recognized one may hold several, each with its number, and a click in
+//! another sentence gives up the pending request of the one before, as a
+//! click on another word does for the word. What is answered or still
+//! pending is not asked for again; what was refused or given up is. A
+//! sentence longer than [`SENTENCE_LIMIT`] characters is never asked for as
+//! a text. An outcome is kept only when it carries the number of this text
+//! and its request is still awaited here.
 //!
 //! Sending the requests is [`translate`](crate::translate)'s and
 //! [`resident`](crate::resident)'s; the texts shown for the state are
@@ -26,8 +29,8 @@ use crate::{
 pub enum Subject {
     /// The word with this index, with the sentence as its context.
     Word(usize),
-    /// The sentence itself, without context.
-    Sentence,
+    /// The sentence with this number itself, without context.
+    Sentence(usize),
     /// The only word of the text, without context.
     Lone,
 }
@@ -40,23 +43,27 @@ pub enum Kind {
     Empty,
     /// Exactly one word.
     Lone,
-    /// More words. `long` when the text is too long to be translated itself.
-    Sentence { long: bool },
+    /// More words. Whether a sentence is too long to be translated itself is
+    /// judged on the clicked one, by [`is_long`].
+    Sentence,
 }
 
 impl Kind {
-    /// The kind of `text`, which has `words` words. The length is counted in
-    /// characters.
-    pub fn of(text: &str, words: usize) -> Self {
+    /// The kind of a text that has `words` words.
+    pub fn of(words: usize) -> Self {
         match words {
             0 => Self::Empty,
             1 => Self::Lone,
-            // Stops counting one past the limit.
-            _ => Self::Sentence {
-                long: text.chars().nth(SENTENCE_LIMIT).is_some(),
-            },
+            _ => Self::Sentence,
         }
     }
+}
+
+/// Whether `sentence` is too long to be translated itself: longer than
+/// [`SENTENCE_LIMIT`] characters.
+pub fn is_long(sentence: &str) -> bool {
+    // Stops counting one past the limit.
+    sentence.chars().nth(SENTENCE_LIMIT).is_some()
 }
 
 /// What a click on a word asks for.
@@ -66,6 +73,8 @@ pub struct Click {
     pub ask: Vec<Subject>,
     /// Whether the pending request of another word is given up.
     pub gave_up: bool,
+    /// Whether the pending request of another sentence is given up.
+    pub gave_up_sentence: bool,
 }
 
 /// The online texts of one text of the field.
@@ -78,8 +87,10 @@ pub struct Kept {
     kind: Kind,
     /// By the index of the word: at most one of them is pending.
     words: BTreeMap<usize, Online>,
-    /// `None` until a word is clicked.
-    sentence: Option<Whole>,
+    /// By the number of the sentence: at most one of them is pending.
+    sentences: BTreeMap<usize, Whole>,
+    /// The number of the sentence of each clicked word, by its index.
+    sentence_of: BTreeMap<usize, usize>,
     /// `None` until the lone word is submitted.
     lone: Option<Online>,
 }
@@ -103,12 +114,14 @@ impl Kept {
         }
     }
 
-    /// The word with `index` was clicked. In a sentence its request is sent
-    /// unless it is pending or answered, and so is the request of the
-    /// sentence, unless the text is too long; the pending request of another
-    /// word is given up. In any other text nothing happens.
-    pub fn click(&mut self, index: usize) -> Click {
-        let Kind::Sentence { long } = self.kind else {
+    /// The word with `index` of the sentence numbered `sentence` was
+    /// clicked; `long` says whether that sentence is too long to be sent. In
+    /// a text of more words its request is sent unless it is pending or
+    /// answered, and so is the request of its sentence, unless the sentence
+    /// is too long; the pending request of another word, and that of another
+    /// sentence, is given up. In any other text nothing happens.
+    pub fn click(&mut self, index: usize, sentence: usize, long: bool) -> Click {
+        let Kind::Sentence = self.kind else {
             return Click::default();
         };
         let mut click = Click::default();
@@ -123,14 +136,24 @@ impl Kept {
             self.words.insert(index, Online::Pending);
             click.ask.push(Subject::Word(index));
         }
-        match &self.sentence {
+        self.sentence_of.insert(index, sentence);
+        // The same for the sentence: one given up is asked for again.
+        let before = self.sentences.len();
+        self.sentences
+            .retain(|other, state| *other == sentence || *state != Whole::Asked(Online::Pending));
+        click.gave_up_sentence = self.sentences.len() != before;
+        self.pending.retain(
+            |subject, _| !matches!(subject, Subject::Sentence(other) if *other != sentence),
+        );
+        match self.sentences.get(&sentence) {
             Some(Whole::TooLong | Whole::Asked(Online::Pending | Online::Translated(_))) => {}
             Some(Whole::Asked(Online::Refused(_))) | None if long => {
-                self.sentence = Some(Whole::TooLong);
+                self.sentences.insert(sentence, Whole::TooLong);
             }
             Some(Whole::Asked(Online::Refused(_))) | None => {
-                self.sentence = Some(Whole::Asked(Online::Pending));
-                click.ask.push(Subject::Sentence);
+                self.sentences
+                    .insert(sentence, Whole::Asked(Online::Pending));
+                click.ask.push(Subject::Sentence(sentence));
             }
         }
         for subject in &click.ask {
@@ -179,7 +202,7 @@ impl Kept {
                 Some(state @ Online::Pending) => *state = online,
                 _ => return false,
             },
-            Subject::Sentence => match &mut self.sentence {
+            Subject::Sentence(number) => match self.sentences.get_mut(&number) {
                 Some(Whole::Asked(state @ Online::Pending)) => *state = online,
                 _ => return false,
             },
@@ -193,11 +216,13 @@ impl Kept {
     }
 
     /// What the window shows while the word with the index `chosen` is the
-    /// chosen one.
+    /// chosen one: its own texts and those of its sentence.
     pub fn shown(&self, chosen: Option<usize>) -> OnlineTexts<'_> {
         OnlineTexts {
             word: chosen.and_then(|index| self.words.get(&index)),
-            sentence: self.sentence.as_ref(),
+            sentence: chosen
+                .and_then(|index| self.sentence_of.get(&index))
+                .and_then(|number| self.sentences.get(number)),
             lone: self.lone.as_ref(),
         }
     }
@@ -207,7 +232,7 @@ impl Kept {
 mod tests {
     use addict_core::translation::Refusal;
 
-    use super::{Click, Kept, Kind, Subject};
+    use super::{Click, Kept, Kind, Subject, is_long};
     use crate::{
         translate::SENTENCE_LIMIT,
         view::{Online, OnlineTexts, Whole},
@@ -224,7 +249,7 @@ mod tests {
     const REFUSED: Online = Online::Refused(Refusal::Other);
 
     fn sentence() -> Kept {
-        Kept::of(TEXT, Kind::Sentence { long: false })
+        Kept::of(TEXT, Kind::Sentence)
     }
 
     fn translated(text: &str) -> Online {
@@ -234,34 +259,25 @@ mod tests {
     fn asks(ask: &[Subject]) -> Click {
         Click {
             ask: ask.to_vec(),
-            gave_up: false,
+            ..Click::default()
         }
     }
 
     /// `bank` clicked, and both requests answered.
     fn answered() -> Kept {
         let mut kept = sentence();
-        kept.click(BANK);
+        kept.click(BANK, 0, false);
         assert!(kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
-        assert!(kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), translated("Я сидел.")));
         kept
     }
 
     #[test]
-    fn the_kind_of_a_text_follows_its_words_and_its_length() {
-        assert_eq!(Kind::of("", 0), Kind::Empty);
-        assert_eq!(Kind::of(" 12 ", 0), Kind::Empty);
-        assert_eq!(Kind::of(" bank. ", 1), Kind::Lone);
-        assert_eq!(Kind::of("a bank", 2), Kind::Sentence { long: false });
-        // Characters, not bytes: 500 Cyrillic letters are 1000 bytes.
-        let most = format!("a {}", "я".repeat(SENTENCE_LIMIT - 2));
-        assert_eq!(most.chars().count(), 500);
-        assert_eq!(Kind::of(&most, 2), Kind::Sentence { long: false });
-        let over = format!("{most}я");
-        assert_eq!(over.chars().count(), 501);
-        assert_eq!(Kind::of(&over, 2), Kind::Sentence { long: true });
-        // One long word is a lone word, whatever its length.
-        assert_eq!(Kind::of(&"a".repeat(600), 1), Kind::Lone);
+    fn the_kind_of_a_text_follows_its_words() {
+        assert_eq!(Kind::of(0), Kind::Empty);
+        assert_eq!(Kind::of(1), Kind::Lone);
+        assert_eq!(Kind::of(2), Kind::Sentence);
+        assert_eq!(Kind::of(40), Kind::Sentence);
     }
 
     #[test]
@@ -274,8 +290,8 @@ mod tests {
     fn the_first_click_asks_for_the_word_and_then_for_the_sentence() {
         let mut kept = sentence();
         assert_eq!(
-            kept.click(BANK),
-            asks(&[Subject::Word(BANK), Subject::Sentence])
+            kept.click(BANK, 0, false),
+            asks(&[Subject::Word(BANK), Subject::Sentence(0)])
         );
         let pending = Whole::Asked(PENDING);
         assert_eq!(
@@ -287,7 +303,7 @@ mod tests {
             }
         );
         assert!(kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
-        assert!(kept.answer_current(TEXT, Subject::Sentence, REFUSED));
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), REFUSED));
         let refused = Whole::Asked(REFUSED);
         assert_eq!(
             kept.shown(Some(BANK)),
@@ -302,25 +318,26 @@ mod tests {
     #[test]
     fn the_same_word_again_asks_for_nothing_pending_or_answered() {
         let mut kept = sentence();
-        kept.click(BANK);
-        assert_eq!(kept.click(BANK), Click::default());
+        kept.click(BANK, 0, false);
+        assert_eq!(kept.click(BANK, 0, false), Click::default());
         // Still awaited: the answers of the first click are kept.
         assert!(kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
-        assert!(kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
-        assert_eq!(kept.click(BANK), Click::default());
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), translated("Я сидел.")));
+        assert_eq!(kept.click(BANK, 0, false), Click::default());
         assert_eq!(kept.shown(Some(BANK)).word, Some(&translated("берег")));
     }
 
     #[test]
     fn another_word_asks_for_itself_only_and_gives_the_pending_one_up() {
         let mut kept = sentence();
-        kept.click(BANK);
-        assert!(kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
+        kept.click(BANK, 0, false);
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), translated("Я сидел.")));
         assert_eq!(
-            kept.click(RIVER),
+            kept.click(RIVER, 0, false),
             Click {
                 ask: vec![Subject::Word(RIVER)],
                 gave_up: true,
+                gave_up_sentence: false,
             }
         );
         let whole = Whole::Asked(translated("Я сидел."));
@@ -340,39 +357,41 @@ mod tests {
     #[test]
     fn another_word_keeps_a_pending_sentence_pending() {
         let mut kept = sentence();
-        kept.click(BANK);
-        assert_eq!(kept.click(RIVER).ask, [Subject::Word(RIVER)]);
-        assert!(kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
+        kept.click(BANK, 0, false);
+        assert_eq!(kept.click(RIVER, 0, false).ask, [Subject::Word(RIVER)]);
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), translated("Я сидел.")));
     }
 
     #[test]
     fn back_to_an_answered_word_asks_for_nothing_and_shows_what_was_kept() {
         let mut kept = answered();
-        assert_eq!(kept.click(RIVER), asks(&[Subject::Word(RIVER)]));
+        assert_eq!(kept.click(RIVER, 0, false), asks(&[Subject::Word(RIVER)]));
         assert!(kept.answer_current(TEXT, Subject::Word(RIVER), translated("реки")));
-        assert_eq!(kept.click(BANK), Click::default());
+        assert_eq!(kept.click(BANK, 0, false), Click::default());
         assert_eq!(kept.shown(Some(BANK)).word, Some(&translated("берег")));
-        assert_eq!(kept.click(RIVER), Click::default());
+        assert_eq!(kept.click(RIVER, 0, false), Click::default());
         assert_eq!(kept.shown(Some(RIVER)).word, Some(&translated("реки")));
     }
 
     #[test]
     fn back_to_an_answered_word_gives_the_pending_one_up() {
         let mut kept = answered();
-        kept.click(RIVER);
+        kept.click(RIVER, 0, false);
         assert_eq!(
-            kept.click(BANK),
+            kept.click(BANK, 0, false),
             Click {
                 ask: Vec::new(),
                 gave_up: true,
+                gave_up_sentence: false,
             }
         );
         // `river` was not answered: it is asked for again.
         assert_eq!(
-            kept.click(RIVER),
+            kept.click(RIVER, 0, false),
             Click {
                 ask: vec![Subject::Word(RIVER)],
                 gave_up: false,
+                gave_up_sentence: false,
             }
         );
     }
@@ -380,13 +399,14 @@ mod tests {
     #[test]
     fn a_word_given_up_is_asked_for_again() {
         let mut kept = sentence();
-        kept.click(BANK);
-        kept.click(RIVER);
+        kept.click(BANK, 0, false);
+        kept.click(RIVER, 0, false);
         assert_eq!(
-            kept.click(BANK),
+            kept.click(BANK, 0, false),
             Click {
                 ask: vec![Subject::Word(BANK)],
                 gave_up: true,
+                gave_up_sentence: false,
             }
         );
     }
@@ -395,72 +415,72 @@ mod tests {
     fn a_refused_request_is_asked_for_again_and_an_answered_one_is_not() {
         // The word refused, the sentence answered.
         let mut kept = sentence();
-        kept.click(BANK);
+        kept.click(BANK, 0, false);
         assert!(kept.answer_current(TEXT, Subject::Word(BANK), REFUSED));
-        assert!(kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), translated("Я сидел.")));
         assert_eq!(kept.shown(Some(BANK)).word, Some(&REFUSED));
-        assert_eq!(kept.click(BANK), asks(&[Subject::Word(BANK)]));
+        assert_eq!(kept.click(BANK, 0, false), asks(&[Subject::Word(BANK)]));
         assert_eq!(kept.shown(Some(BANK)).word, Some(&PENDING));
 
         // The sentence refused, the word answered: any word click asks again.
         let mut kept = sentence();
-        kept.click(BANK);
+        kept.click(BANK, 0, false);
         assert!(kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
-        assert!(kept.answer_current(TEXT, Subject::Sentence, REFUSED));
-        assert_eq!(kept.click(BANK), asks(&[Subject::Sentence]));
-        assert!(kept.answer_current(TEXT, Subject::Sentence, REFUSED));
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), REFUSED));
+        assert_eq!(kept.click(BANK, 0, false), asks(&[Subject::Sentence(0)]));
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), REFUSED));
         assert_eq!(
-            kept.click(RIVER),
-            asks(&[Subject::Word(RIVER), Subject::Sentence])
+            kept.click(RIVER, 0, false),
+            asks(&[Subject::Word(RIVER), Subject::Sentence(0)])
         );
     }
 
     #[test]
     fn a_long_text_asks_for_the_word_only_and_says_so_with_nothing_to_retry() {
-        let mut kept = Kept::of(TEXT, Kind::Sentence { long: true });
+        let mut kept = Kept::of(TEXT, Kind::Sentence);
         assert_eq!(kept.shown(None).sentence, None);
-        assert_eq!(kept.click(BANK), asks(&[Subject::Word(BANK)]));
+        assert_eq!(kept.click(BANK, 0, true), asks(&[Subject::Word(BANK)]));
         assert_eq!(kept.shown(Some(BANK)).sentence, Some(&Whole::TooLong));
         assert!(kept.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
-        assert_eq!(kept.click(BANK), Click::default());
-        assert_eq!(kept.click(RIVER), asks(&[Subject::Word(RIVER)]));
+        assert_eq!(kept.click(BANK, 0, true), Click::default());
+        assert_eq!(kept.click(RIVER, 0, true), asks(&[Subject::Word(RIVER)]));
         assert_eq!(kept.shown(Some(RIVER)).sentence, Some(&Whole::TooLong));
         // No request of the sentence is awaited.
-        assert!(!kept.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(!kept.answer_current(TEXT, Subject::Sentence(0), translated("Я сидел.")));
     }
 
     #[test]
     fn the_outcome_of_another_text_is_not_kept() {
         let mut kept = sentence();
-        kept.click(BANK);
-        for subject in [Subject::Word(BANK), Subject::Sentence] {
+        kept.click(BANK, 0, false);
+        for subject in [Subject::Word(BANK), Subject::Sentence(0)] {
             assert!(!kept.answer_current(TEXT - 1, subject, translated("старый")));
             assert!(!kept.answer_current(TEXT + 1, subject, translated("чужой")));
         }
         assert_eq!(kept.shown(Some(BANK)).word, Some(&PENDING));
 
         // A new text starts with nothing, and ignores what the old one asked.
-        let mut next = Kept::of(TEXT + 1, Kind::Sentence { long: false });
+        let mut next = Kept::of(TEXT + 1, Kind::Sentence);
         assert_eq!(next.shown(Some(BANK)), OnlineTexts::default());
         assert!(!next.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
         // Even when the same word is pending in it.
-        next.click(BANK);
+        next.click(BANK, 0, false);
         assert!(!next.answer_current(TEXT, Subject::Word(BANK), translated("берег")));
-        assert!(!next.answer_current(TEXT, Subject::Sentence, translated("Я сидел.")));
+        assert!(!next.answer_current(TEXT, Subject::Sentence(0), translated("Я сидел.")));
         assert_eq!(next.shown(Some(BANK)).word, Some(&PENDING));
     }
 
     #[test]
     fn an_outcome_that_is_not_awaited_is_not_kept() {
         let mut kept = sentence();
-        for subject in [Subject::Word(BANK), Subject::Sentence, Subject::Lone] {
+        for subject in [Subject::Word(BANK), Subject::Sentence(0), Subject::Lone] {
             assert!(!kept.answer_current(TEXT, subject, translated("ничей")));
         }
         assert_eq!(kept.shown(Some(BANK)), OnlineTexts::default());
         // A second outcome for an answered request changes nothing.
         let mut kept = answered();
         assert!(!kept.answer_current(TEXT, Subject::Word(BANK), REFUSED));
-        assert!(!kept.answer_current(TEXT, Subject::Sentence, REFUSED));
+        assert!(!kept.answer_current(TEXT, Subject::Sentence(0), REFUSED));
         assert_eq!(kept.shown(Some(BANK)).word, Some(&translated("берег")));
     }
 
@@ -468,7 +488,7 @@ mod tests {
     fn a_lone_word_is_asked_for_by_a_submit_and_never_by_a_click() {
         let mut kept = Kept::of(TEXT, Kind::Lone);
         // Typed, and clicked.
-        assert_eq!(kept.click(0), Click::default());
+        assert_eq!(kept.click(0, 0, false), Click::default());
         assert_eq!(kept.shown(Some(0)), OnlineTexts::default());
         assert!(kept.submit());
         assert_eq!(
@@ -483,7 +503,7 @@ mod tests {
         assert!(!kept.submit());
         assert!(kept.answer_current(TEXT, Subject::Lone, translated("банк")));
         assert!(!kept.submit());
-        assert_eq!(kept.click(0), Click::default());
+        assert_eq!(kept.click(0, 0, false), Click::default());
         assert_eq!(
             kept.shown(Some(0)),
             OnlineTexts {
@@ -507,11 +527,7 @@ mod tests {
 
     #[test]
     fn a_submit_of_an_empty_field_or_a_sentence_asks_for_nothing() {
-        for kind in [
-            Kind::Empty,
-            Kind::Sentence { long: false },
-            Kind::Sentence { long: true },
-        ] {
+        for kind in [Kind::Empty, Kind::Sentence] {
             let mut kept = Kept::of(TEXT, kind);
             assert!(!kept.submit(), "{kind:?}");
             assert_eq!(kept.shown(None), OnlineTexts::default(), "{kind:?}");
@@ -526,34 +542,34 @@ mod tests {
     #[test]
     fn a_click_in_an_empty_text_asks_for_nothing() {
         let mut kept = Kept::of(TEXT, Kind::Empty);
-        assert_eq!(kept.click(0), Click::default());
+        assert_eq!(kept.click(0, 0, false), Click::default());
         assert_eq!(kept.shown(Some(0)), OnlineTexts::default());
     }
     #[test]
     fn returning_to_a_pending_word_rejects_its_previous_request() {
         let mut kept = sentence();
-        kept.click(BANK);
+        kept.click(BANK, 0, false);
         let old = kept
             .request_number(Subject::Word(BANK))
             .expect("old request");
         let whole = kept
-            .request_number(Subject::Sentence)
+            .request_number(Subject::Sentence(0))
             .expect("sentence request");
-        kept.click(RIVER);
-        kept.click(BANK);
+        kept.click(RIVER, 0, false);
+        kept.click(BANK, 0, false);
         let new = kept
             .request_number(Subject::Word(BANK))
             .expect("new request");
         assert_ne!(old, new);
         assert!(!kept.answer(TEXT, Subject::Word(BANK), old, translated("старый")));
         assert_eq!(kept.shown(Some(BANK)).word, Some(&PENDING));
-        assert!(kept.answer(TEXT, Subject::Sentence, whole, translated("Я сидел.")));
+        assert!(kept.answer(TEXT, Subject::Sentence(0), whole, translated("Я сидел.")));
         assert!(kept.answer(TEXT, Subject::Word(BANK), new, translated("берег")));
     }
 
     #[test]
     fn retrying_a_failed_subject_rejects_the_previous_outcome() {
-        for subject in [Subject::Sentence, Subject::Lone] {
+        for subject in [Subject::Sentence(0), Subject::Lone] {
             let mut kept = if subject == Subject::Lone {
                 Kept::of(TEXT, Kind::Lone)
             } else {
@@ -562,19 +578,134 @@ mod tests {
             if subject == Subject::Lone {
                 kept.submit();
             } else {
-                kept.click(BANK);
+                kept.click(BANK, 0, false);
             }
             let old = kept.request_number(subject).expect("request");
             assert!(kept.answer(TEXT, subject, old, REFUSED));
             if subject == Subject::Lone {
                 kept.submit();
             } else {
-                kept.click(BANK);
+                kept.click(BANK, 0, false);
             }
             let new = kept.request_number(subject).expect("retry");
             assert_ne!(old, new);
             assert!(!kept.answer(TEXT, subject, old, translated("старый")));
             assert!(kept.answer(TEXT, subject, new, translated("новый")));
         }
+    }
+
+    /// Words of a recognized text of two sentences: `bank` and `river` in
+    /// the first, `boat` and `oar` in the second.
+    const BOAT: usize = 10;
+    const OAR: usize = 12;
+
+    #[test]
+    fn a_click_in_another_sentence_asks_for_that_sentence() {
+        let mut kept = answered();
+        assert_eq!(
+            kept.click(BOAT, 1, false),
+            asks(&[Subject::Word(BOAT), Subject::Sentence(1)])
+        );
+        assert_eq!(
+            kept.shown(Some(BOAT)).sentence,
+            Some(&Whole::Asked(PENDING))
+        );
+        assert!(kept.answer_current(TEXT, Subject::Word(BOAT), translated("лодка")));
+        assert!(kept.answer_current(TEXT, Subject::Sentence(1), translated("Лодка.")));
+        // Another word of the second sentence asks for itself only.
+        assert_eq!(kept.click(OAR, 1, false), asks(&[Subject::Word(OAR)]));
+        assert_eq!(
+            kept.shown(Some(OAR)).sentence,
+            Some(&Whole::Asked(translated("Лодка.")))
+        );
+    }
+
+    #[test]
+    fn back_to_an_answered_sentence_asks_for_nothing_and_shows_it() {
+        let mut kept = answered();
+        kept.click(BOAT, 1, false);
+        assert!(kept.answer_current(TEXT, Subject::Word(BOAT), translated("лодка")));
+        assert!(kept.answer_current(TEXT, Subject::Sentence(1), translated("Лодка.")));
+        assert_eq!(kept.click(BANK, 0, false), Click::default());
+        assert_eq!(
+            kept.shown(Some(BANK)).sentence,
+            Some(&Whole::Asked(translated("Я сидел.")))
+        );
+        assert_eq!(kept.click(RIVER, 0, false), asks(&[Subject::Word(RIVER)]));
+        assert_eq!(
+            kept.shown(Some(RIVER)).sentence,
+            Some(&Whole::Asked(translated("Я сидел.")))
+        );
+    }
+
+    #[test]
+    fn a_click_in_another_sentence_gives_the_pending_sentence_up() {
+        let mut kept = sentence();
+        kept.click(BANK, 0, false);
+        let first = kept
+            .request_number(Subject::Sentence(0))
+            .expect("first sentence");
+        assert_eq!(
+            kept.click(BOAT, 1, false),
+            Click {
+                ask: vec![Subject::Word(BOAT), Subject::Sentence(1)],
+                gave_up: true,
+                gave_up_sentence: true,
+            }
+        );
+        // Whatever the request given up still reports is not kept.
+        assert!(!kept.answer(TEXT, Subject::Sentence(0), first, translated("Я сидел.")));
+        assert_eq!(kept.shown(Some(BANK)).sentence, None);
+        // Back in the first sentence: it is asked for again, and the second,
+        // still pending, is given up.
+        assert_eq!(
+            kept.click(BANK, 0, false),
+            Click {
+                ask: vec![Subject::Word(BANK), Subject::Sentence(0)],
+                gave_up: true,
+                gave_up_sentence: true,
+            }
+        );
+        assert_ne!(kept.request_number(Subject::Sentence(0)), Some(first));
+        assert_eq!(kept.request_number(Subject::Sentence(1)), None);
+    }
+
+    #[test]
+    fn whether_a_sentence_is_too_long_is_its_own() {
+        let mut kept = sentence();
+        assert_eq!(kept.click(BANK, 0, true), asks(&[Subject::Word(BANK)]));
+        assert_eq!(kept.shown(Some(BANK)).sentence, Some(&Whole::TooLong));
+        assert_eq!(
+            kept.click(BOAT, 1, false),
+            Click {
+                ask: vec![Subject::Word(BOAT), Subject::Sentence(1)],
+                gave_up: true,
+                gave_up_sentence: false,
+            }
+        );
+        assert_eq!(
+            kept.shown(Some(BOAT)).sentence,
+            Some(&Whole::Asked(PENDING))
+        );
+        assert_eq!(kept.shown(Some(BANK)).sentence, Some(&Whole::TooLong));
+    }
+
+    #[test]
+    fn a_word_never_clicked_shows_no_sentence() {
+        let kept = answered();
+        assert_eq!(kept.shown(Some(RIVER)).sentence, None);
+        assert_eq!(kept.shown(None).sentence, None);
+    }
+
+    #[test]
+    fn a_sentence_is_long_past_the_limit_in_characters() {
+        // Characters, not bytes: 500 Cyrillic letters are 1000 bytes.
+        let most = format!("a {}", "я".repeat(SENTENCE_LIMIT - 2));
+        assert_eq!(most.chars().count(), 500);
+        assert!(!is_long(&most));
+        let over = format!("{most}я");
+        assert_eq!(over.chars().count(), 501);
+        assert!(is_long(&over));
+        assert!(!is_long("a bank"));
     }
 }

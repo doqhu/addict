@@ -582,6 +582,7 @@ pub async fn run_in(
                 let params = Params {
                     language: LANGUAGE,
                     page_segmentation: psm,
+                    scale: 1,
                 };
                 let recognition = ocr::recognize(&image, &params, limit).await;
                 let record =

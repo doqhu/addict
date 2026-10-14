@@ -224,7 +224,7 @@ impl From<Subject> for Requested {
     fn from(subject: Subject) -> Self {
         match subject {
             Subject::Word(_) | Subject::Lone => Self::Word,
-            Subject::Sentence => Self::Sentence,
+            Subject::Sentence(_) => Self::Sentence,
         }
     }
 }
@@ -705,7 +705,7 @@ mod tests {
         let kinds = [
             (Requested::from(Subject::Word(3)), "word"),
             (Requested::from(Subject::Lone), "word"),
-            (Requested::from(Subject::Sentence), "sentence"),
+            (Requested::from(Subject::Sentence(0)), "sentence"),
             (Requested::Definition, "definition"),
         ];
         let mut expected = Vec::new();
