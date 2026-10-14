@@ -22,7 +22,14 @@
 //! asked for and what is kept is [`online`](crate::online)'s. What the
 //! window says is [`view`](crate::view)'s; its widgets and the paste into
 //! its field are [`widgets`](crate::widgets)'s; what an edit or a click does
-//! to the manual input is [`manual`](crate::manual)'s; how a request starts
+//! to the manual input is [`manual`](crate::manual)'s. Capture hides the
+//! window and starts one job on the runner, which takes the screenshot,
+//! recognizes its text and deletes the snapshot; the window comes back in
+//! the reading state once the snapshot is there, and the recognized text
+//! then replaces the field as a new text with the source OCR, which follows
+//! the manual path from there. A capture without text leaves the field as
+//! it was and says so in the status. Capture cannot be pressed while one
+//! runs. The job is [`capture`](crate::capture)'s; how a request starts
 //! and ends is [`translate`](crate::translate)'s; what is recorded with
 //! `--evidence` is [`recording`](crate::recording)'s.
 
@@ -37,6 +44,7 @@ use std::{
 use addict_core::{
     APP_ID,
     input::window_state,
+    sentence,
     translation::{Request, Translator},
 };
 use addict_deepl::DeepL;
@@ -49,6 +57,7 @@ use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
+    capture::{self, Captured},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
     manual::{self, Edit, Manual},
@@ -118,6 +127,12 @@ enum Event {
     },
     /// The check at the start says where the dictionary indexes stand.
     Indexes(Indexes),
+    /// Capture was pressed.
+    Capture,
+    /// The capture job has its snapshot and recognizes it now.
+    Captured,
+    /// The capture job ended.
+    Recognized(Outcome<Captured>),
 }
 
 /// Starts one attempt to bind the shortcut; its events go to `sender`. With
@@ -205,6 +220,9 @@ struct Session {
     online: Kept,
     /// The check of the indexes at the start; dropping it cancels the check.
     check: Option<Job>,
+    /// The capture job, from Capture to its end; dropping it cancels the
+    /// job, which deletes its snapshot.
+    capturing: Option<Job>,
 }
 
 impl Session {
@@ -243,7 +261,90 @@ impl Session {
                 self.check = None;
                 self.view.render_indexes(indexes);
             }
+            Event::Capture => self.capture(),
+            Event::Captured => self.snapshot_taken(),
+            Event::Recognized(outcome) => self.recognized(outcome),
         }
+    }
+
+    /// Capture was pressed: the window hides, so it is not in the capture,
+    /// Capture cannot be pressed again and the job starts. One capture at a
+    /// time: a press queued behind another starts nothing.
+    fn capture(&mut self) {
+        if self.capturing.is_some() {
+            return;
+        }
+        self.window.set_visible(false);
+        self.view.set_capture_sensitive(false);
+        let captured = self.sender.clone();
+        let ended = self.sender.clone();
+        let started = capture::start(
+            self.work.upgrade().as_deref(),
+            move || {
+                // On the worker: the UI thread wakes for the event.
+                let _ = captured.unbounded_send(Event::Captured);
+            },
+            move |outcome| {
+                let _ = ended.unbounded_send(Event::Recognized(outcome));
+            },
+        );
+        match started {
+            Ok(job) => self.capturing = Some(job),
+            Err(captured) => self.capture_ended(captured),
+        }
+    }
+
+    /// The snapshot is there and is being recognized: the window comes back
+    /// and says so while there is no input.
+    fn snapshot_taken(&mut self) {
+        if self.capturing.is_none() {
+            return;
+        }
+        self.manual.set_reading(true);
+        self.reveal();
+    }
+
+    /// The capture job ended.
+    fn recognized(&mut self, outcome: Outcome<Captured>) {
+        // A cancelled job was dropped here on purpose and shows nothing.
+        let Some(captured) = capture::captured_result(outcome) else {
+            return;
+        };
+        self.capture_ended(captured);
+    }
+
+    /// The capture is over with `captured`: Capture can be pressed again. A
+    /// text replaces the field as a new text from the capture; anything
+    /// else leaves the field as it was and says that no text was
+    /// recognized. The window is shown either way.
+    fn capture_ended(&mut self, captured: Captured) {
+        self.capturing = None;
+        self.view.set_capture_sensitive(true);
+        self.manual.set_reading(false);
+        let line = match captured {
+            Captured::Text(text) => sentence::pasted(&text),
+            Captured::Failed(failure) => {
+                eprintln!("addict: no text from the capture: {failure:?}");
+                None
+            }
+        };
+        let Some(line) = line else {
+            self.reveal();
+            self.view.render_no_text();
+            return;
+        };
+        let edit = self.manual.recognized(line);
+        self.view.set_field_text(self.manual.sentence());
+        self.text_replaced(edit);
+        self.reveal();
+    }
+
+    /// Shows the window with the state as it is now, the field focused,
+    /// without an activation token.
+    fn reveal(&self) {
+        self.view.render(self.manual.state(), self.manual.source());
+        self.focus();
+        self.window.present();
     }
 
     /// The field takes the keyboard focus, unless Retry is offered: then the
@@ -259,6 +360,13 @@ impl Session {
     /// without context, looked up at once; nothing of it is sent online.
     fn sentence_changed(&mut self, text: String) {
         let edit = self.manual.edit(text);
+        self.text_replaced(edit);
+    }
+
+    /// What follows a new text in the field, typed, pasted or recognized:
+    /// the online texts of the old one are given up, and a lone word is
+    /// looked up at once.
+    fn text_replaced(&mut self, edit: Edit) {
         if edit == Edit::Same {
             return;
         }
@@ -583,7 +691,7 @@ impl Session {
 
     /// Shows the state, the sentence and the chosen word as they are now.
     fn render_manual(&self) {
-        self.view.render(self.manual.state());
+        self.view.render(self.manual.state(), self.manual.source());
         self.view.render_sentence(
             self.manual.sentence(),
             self.manual.words(),
@@ -605,7 +713,7 @@ impl Session {
         receipt_ns: Option<u64>,
     ) {
         // Before `present()`: the first frame has the labels.
-        self.view.render(self.manual.state());
+        self.view.render(self.manual.state(), self.manual.source());
         self.focus();
         // Also before it: the feedback is for the next commit.
         let recorded = self.recording.as_ref().zip(receipt_ns).map(|(r, receipt)| {
@@ -639,7 +747,7 @@ impl Session {
     }
 
     fn launched(&self) {
-        self.view.render(self.manual.state());
+        self.view.render(self.manual.state(), self.manual.source());
         self.focus();
         // No `set_startup_id`: GTK has already applied the
         // token of the launcher, when there was one.
@@ -669,7 +777,8 @@ impl Session {
 }
 
 /// Sends what the user does in the `view` to `sender`: Retry, an edit of the
-/// field, a submit of its text, a click on a word and a click on a sense.
+/// field, a submit of its text, Capture, a click on a word and a click on a
+/// sense.
 fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     let retry = sender.clone();
     view.connect_retry(move || {
@@ -686,6 +795,10 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     let chosen = sender.clone();
     view.connect_word_chosen(move |index| {
         let _ = chosen.unbounded_send(Event::Word(index));
+    });
+    let capture = sender.clone();
+    view.connect_capture(move || {
+        let _ = capture.unbounded_send(Event::Capture);
     });
     let definition = sender.clone();
     view.connect_definition_action(move || {
@@ -780,6 +893,7 @@ fn start(
         translating_definition: None,
         online: Kept::default(),
         check,
+        capturing: None,
     };
     glib::spawn_future_local(async move {
         while let Some(event) = receiver.next().await {

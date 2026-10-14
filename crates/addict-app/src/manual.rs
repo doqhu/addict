@@ -5,6 +5,12 @@
 //! once, with no click, and its input has no sentence. A text of more words is
 //! a sentence, and the clicked word is the input together with it.
 //!
+//! The text comes from the user or from a screen capture. A recognized text
+//! is always a new text with the source OCR, and an edit of it keeps that
+//! source; the source is manual again once the field holds no word. While a
+//! capture is being recognized and there is no input, the window says that
+//! the source is being read.
+//!
 //! [`Manual`] is the state and holds no widget, so what an edit or a click
 //! does to it is tested without a display. [`look_up`] starts a lookup on the
 //! work runner and [`lookup_result`] says what the window shows for its
@@ -42,8 +48,9 @@ pub enum Edit {
     Lone(u64),
 }
 
-/// The text of the field, its words and what was chosen in it.
-#[derive(Debug, Default)]
+/// The text of the field, its words, where it came from and what was chosen
+/// in it.
+#[derive(Debug)]
 pub struct Manual {
     /// The text of the field, as it is shown with its words.
     sentence: String,
@@ -61,6 +68,25 @@ pub struct Manual {
     /// An online outcome that carries another number belongs to an older
     /// text.
     text: u64,
+    /// Where the text came from: the user, or a screen capture.
+    source: Source,
+    /// Whether a capture is being recognized now.
+    reading: bool,
+}
+
+impl Default for Manual {
+    fn default() -> Self {
+        Self {
+            sentence: String::new(),
+            words: Vec::new(),
+            chosen: None,
+            input: None,
+            run: 0,
+            text: 0,
+            source: Source::Manual,
+            reading: false,
+        }
+    }
 }
 
 impl Manual {
@@ -92,20 +118,49 @@ impl Manual {
         Kind::of(&self.sentence, self.words.len())
     }
 
-    /// The window state of this moment: nothing is read from a source, so it
-    /// depends on the input alone.
+    /// Where the text of the field came from.
+    pub fn source(&self) -> Source {
+        self.source
+    }
+
+    /// The window state of this moment: a capture being recognized while
+    /// there is no input, or what the input is.
     pub fn state(&self) -> WindowState {
-        window_state(None, self.input.as_ref())
+        let pending = self.reading.then_some(Source::Ocr);
+        window_state(pending, self.input.as_ref())
+    }
+
+    /// Whether a capture is being recognized now.
+    pub fn set_reading(&mut self, reading: bool) {
+        self.reading = reading;
     }
 
     /// The field holds `text`: its words are rebuilt, and what was chosen in
     /// the old text is gone, with the outcome of its lookup. A text of exactly
-    /// one word has that word chosen at once.
+    /// one word has that word chosen at once. The source stays, unless the
+    /// text has no word: then it is manual again.
     pub fn edit(&mut self, text: String) -> Edit {
         if text == self.sentence {
             return Edit::Same;
         }
+        self.replace(text)
+    }
+
+    /// The field holds `text` recognized from a screen capture: it is always
+    /// a new text, even when it reads as the one held, its source is OCR and
+    /// the reading is over. Never [`Edit::Same`].
+    pub fn recognized(&mut self, text: String) -> Edit {
+        self.reading = false;
+        self.source = Source::Ocr;
+        self.replace(text)
+    }
+
+    /// `text` is a new text of the field.
+    fn replace(&mut self, text: String) -> Edit {
         self.words = sentence::words(&text);
+        if self.words.is_empty() {
+            self.source = Source::Manual;
+        }
         self.sentence = text;
         self.chosen = None;
         self.input = None;
@@ -131,7 +186,7 @@ impl Manual {
             .and_then(|range| self.sentence.get(range.clone()))?;
         // One word is a word without context, whatever stands around it.
         let context = (self.words.len() > 1).then_some(self.sentence.as_str());
-        let input = Input::new(&sentence::lookup_word(word), context, Source::Manual).ok()?;
+        let input = Input::new(&sentence::lookup_word(word), context, self.source).ok()?;
         self.chosen = Some(index);
         self.input = Some(input);
         self.run += 1;
@@ -783,6 +838,118 @@ pub(crate) mod tests {
         assert_eq!(with_sentence(&most).kind(), Kind::Sentence { long: false });
         let over = format!("{most}.");
         assert_eq!(with_sentence(&over).kind(), Kind::Sentence { long: true });
+    }
+
+    const OCR_DICTIONARY: WindowState = WindowState::Dictionary {
+        source: Source::Ocr,
+    };
+
+    #[test]
+    fn a_recognized_sentence_is_a_new_text_from_the_capture() {
+        let mut manual = with_sentence(SENTENCE);
+        manual.choose(4).expect("run");
+        let text = manual.text_number();
+        assert_eq!(
+            manual.recognized("The bank is beside the river.".to_owned()),
+            Edit::Cleared
+        );
+        assert_ne!(manual.text_number(), text);
+        assert_eq!(manual.source(), Source::Ocr);
+        assert_eq!(manual.input(), None);
+        manual.choose(1).expect("run");
+        let input = manual.input().expect("input");
+        assert_eq!(input.word(), "bank");
+        assert_eq!(input.sentence(), Some("The bank is beside the river."));
+        assert_eq!(input.source(), Source::Ocr);
+        assert_eq!(
+            manual.state(),
+            WindowState::Contextual {
+                source: Source::Ocr
+            }
+        );
+    }
+
+    #[test]
+    fn the_same_text_recognized_again_is_still_a_new_text() {
+        let mut manual = with_sentence(SENTENCE);
+        let run = manual.choose(4).expect("run");
+        let text = manual.text_number();
+        assert_eq!(manual.recognized(SENTENCE.to_owned()), Edit::Cleared);
+        assert_ne!(manual.text_number(), text);
+        assert!(!manual.awaits(run));
+        assert_eq!(manual.chosen(), None);
+        assert_eq!(manual.source(), Source::Ocr);
+    }
+
+    #[test]
+    fn a_recognized_lone_word_is_the_input_at_once() {
+        let mut manual = Manual::default();
+        let Edit::Lone(run) = manual.recognized("bank".to_owned()) else {
+            panic!("not a lone word");
+        };
+        assert!(manual.awaits(run));
+        assert_eq!(manual.input().expect("input").source(), Source::Ocr);
+        assert_eq!(manual.state(), OCR_DICTIONARY);
+    }
+
+    #[test]
+    fn an_edit_of_a_recognized_text_keeps_its_source() {
+        let mut manual = Manual::default();
+        manual.recognized("The bank is beside the river.".to_owned());
+        assert_eq!(
+            manual.edit("The bank is beside the road.".to_owned()),
+            Edit::Cleared
+        );
+        assert_eq!(manual.source(), Source::Ocr);
+        manual.choose(1).expect("run");
+        assert_eq!(manual.input().expect("input").source(), Source::Ocr);
+        lone(&mut manual, "bank");
+        assert_eq!(manual.state(), OCR_DICTIONARY);
+    }
+
+    #[test]
+    fn a_field_without_a_word_is_manual_again() {
+        for text in ["", " ", "12 \u{2026}"] {
+            let mut manual = Manual::default();
+            manual.recognized("The bank is beside the river.".to_owned());
+            assert_eq!(manual.edit(text.to_owned()), Edit::Cleared, "{text:?}");
+            assert_eq!(manual.source(), Source::Manual, "{text:?}");
+            assert_eq!(manual.state(), WindowState::Empty, "{text:?}");
+            lone(&mut manual, "bank");
+            assert_eq!(manual.state(), DICTIONARY, "{text:?}");
+        }
+        // A recognized text without a word is manual at once.
+        let mut manual = Manual::default();
+        assert_eq!(manual.recognized("\u{2014} ?!".to_owned()), Edit::Cleared);
+        assert_eq!(manual.source(), Source::Manual);
+    }
+
+    #[test]
+    fn a_capture_being_read_is_the_waiting_state_until_an_input() {
+        let mut manual = Manual::default();
+        manual.set_reading(true);
+        assert_eq!(
+            manual.state(),
+            WindowState::Waiting {
+                source: Source::Ocr
+            }
+        );
+        // An input wins over the reading.
+        let mut chosen = Manual::default();
+        lone(&mut chosen, "bank");
+        chosen.set_reading(true);
+        assert_eq!(chosen.state(), DICTIONARY);
+        // The recognized text ends the reading; with no word chosen yet the
+        // label still names the capture as the source of the text.
+        manual.recognized("The bank is beside the river.".to_owned());
+        assert_eq!(manual.state(), WindowState::Empty);
+        assert_eq!(
+            crate::view::texts(manual.state(), manual.source()).source,
+            "screen capture (OCR)"
+        );
+        manual.set_reading(true);
+        manual.set_reading(false);
+        assert_eq!(manual.state(), WindowState::Empty);
     }
 
     #[test]

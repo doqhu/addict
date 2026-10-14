@@ -1,6 +1,7 @@
 //! The widgets of the window: the source label and the status, below them
 //! the binding row and the line of the dictionary indexes, then the field
-//! for a word or a sentence, the text of the field with its words as links,
+//! for a word or a sentence with the Capture button beside it, the text of
+//! the field with its words as links,
 //! the list of senses, which scrolls, what stands below the list and, last,
 //! the online texts.
 //!
@@ -12,19 +13,27 @@
 //! application reads the clipboard: the user's paste action, and nothing
 //! else, starts one asynchronous read, and the text that comes replaces the
 //! whole field as one line and is submitted, as Enter in the field submits
-//! it.
+//! it. A text recognized in a capture is put into the field without being
+//! reported as an edit of it, and is not submitted.
 
-use std::{cell::Cell, ops::Range, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    ops::Range,
+    rc::Rc,
+};
 
-use addict_core::{input::WindowState, sentence};
+use addict_core::{
+    input::{Source, WindowState},
+    sentence,
+};
 use gtk::{gio, glib, prelude::*};
 
 use crate::{
     dictionaries::Indexes,
     view::{
-        Binding, DEFINITION_ACTION, FIELD_PLACEHOLDER, OnlineTexts, RETRY_LABEL, Shown,
-        binding_texts, details_markup, details_markup_with_definition, indexes_text, online_markup,
-        senses_markup, sentence_markup, texts,
+        Binding, CAPTURE_LABEL, DEFINITION_ACTION, FIELD_PLACEHOLDER, NO_TEXT, OnlineTexts,
+        RETRY_LABEL, Shown, binding_texts, details_markup, details_markup_with_definition,
+        indexes_text, online_markup, senses_markup, sentence_markup, texts,
     },
 };
 
@@ -217,6 +226,11 @@ pub struct View {
     /// What is said about the dictionary indexes; hidden when both are open.
     indexes: gtk::Label,
     field: gtk::Entry,
+    /// The handler that reports the changes of the field; blocked while a
+    /// recognized text is put in.
+    sentence_handler: RefCell<Option<glib::SignalHandlerId>>,
+    /// Beside the field: takes a screen capture.
+    capture: gtk::Button,
     sentence: gtk::Label,
     /// The senses as links, inside `senses_area`.
     senses: gtk::Label,
@@ -258,11 +272,16 @@ impl View {
             .placeholder_text(FIELD_PLACEHOLDER)
             .build();
         replace_on_paste(&field);
+        field.set_hexpand(true);
+        let capture = gtk::Button::builder().label(CAPTURE_LABEL).build();
+        let field_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        field_row.append(&field);
+        field_row.append(&capture);
         let sentence = wrapping(gtk::Label::builder().use_markup(true))
             .visible(false)
             .build();
         let result = result_area();
-        root.append(&field);
+        root.append(&field_row);
         root.append(&sentence);
         root.append(&result.senses_area);
         root.append(&result.details);
@@ -279,6 +298,8 @@ impl View {
             retry: binding_row.retry,
             indexes,
             field,
+            sentence_handler: RefCell::new(None),
+            capture,
             sentence,
             senses: result.senses,
             senses_area: result.senses_area,
@@ -286,7 +307,7 @@ impl View {
             online: result.online,
             definition_action: result.definition_action,
         };
-        view.render(state);
+        view.render(state, Source::Manual);
         view.render_binding(binding);
         view
     }
@@ -296,9 +317,9 @@ impl View {
         &self.root
     }
 
-    /// Shows the texts of `state`.
-    pub fn render(&self, state: WindowState) {
-        let texts = texts(state);
+    /// Shows the texts of `state` for a text from `source`.
+    pub fn render(&self, state: WindowState, source: Source) {
+        let texts = texts(state, source);
         self.source.set_text(texts.source);
         self.status.set_text(texts.status);
     }
@@ -335,10 +356,44 @@ impl View {
         self.retry.connect_clicked(move |_| retry());
     }
 
-    /// Runs `changed` with the text of the field each time it changes.
+    /// Shows that a capture gave no text, in place of the status, until the
+    /// next window state is shown.
+    pub fn render_no_text(&self) {
+        self.status.set_text(NO_TEXT);
+    }
+
+    /// Runs `changed` with the text of the field each time the user changes
+    /// it; [`View::set_field_text`] does not run it. Called once.
     pub fn connect_sentence_changed(&self, changed: impl Fn(&str) + 'static) {
-        self.field
+        let handler = self
+            .field
             .connect_changed(move |field| changed(field.text().as_str()));
+        self.sentence_handler.replace(Some(handler));
+    }
+
+    /// Runs `capture` each time Capture is pressed.
+    pub fn connect_capture(&self, capture: impl Fn() + 'static) {
+        self.capture.connect_clicked(move |_| capture());
+    }
+
+    /// Whether Capture can be pressed.
+    pub fn set_capture_sensitive(&self, sensitive: bool) {
+        self.capture.set_sensitive(sensitive);
+    }
+
+    /// Puts `text` into the field with the caret at its end, without running
+    /// the handler of [`View::connect_sentence_changed`]. The other handlers
+    /// of the field, the paste's count of its changes among them, see it.
+    pub fn set_field_text(&self, text: &str) {
+        let handler = self.sentence_handler.borrow();
+        if let Some(handler) = handler.as_ref() {
+            self.field.block_signal(handler);
+        }
+        self.field.set_text(text);
+        self.field.set_position(-1);
+        if let Some(handler) = handler.as_ref() {
+            self.field.unblock_signal(handler);
+        }
     }
 
     /// Runs `submitted` each time the text of the field is submitted: by

@@ -37,13 +37,14 @@ pub struct Texts {
     pub status: &'static str,
 }
 
-/// The texts of `state`. No wildcard arm: a new state or source does not
-/// compile until it is given its texts.
-pub fn texts(state: WindowState) -> Texts {
+/// The texts of `state`; `source` is where the text of the field came
+/// from, which the label names while there is no input. No wildcard arm: a
+/// new state or source does not compile until it is given its texts.
+pub fn texts(state: WindowState, source: Source) -> Texts {
     match state {
         // Nothing is being read, so the window waits for the user.
         WindowState::Empty => Texts {
-            source: source_label(Source::Manual),
+            source: source_label(source),
             status: "waiting for input",
         },
         WindowState::Waiting { source } => Texts {
@@ -171,6 +172,14 @@ fn unreadable_text(file: IndexFile) -> String {
 
 /// What the empty field says.
 pub(crate) const FIELD_PLACEHOLDER: &str = "Type or paste a word, or a sentence to click a word in";
+
+/// What the button beside the field says: it takes a screen capture and
+/// puts the text recognized in it into the field.
+pub(crate) const CAPTURE_LABEL: &str = "Capture";
+
+/// What the status says when a capture gave no text, whatever the reason;
+/// the next window state replaces it.
+pub(crate) const NO_TEXT: &str = "No text was recognized.";
 
 /// The sentence as Pango markup: the text as given, with each of `words` (byte
 /// ranges of `sentence`, in order) as a link whose target is the index of the
@@ -648,11 +657,12 @@ mod tests {
     };
 
     use super::{
-        Binding, CHOOSE_SENSE, EXPLANATION_MARK, FIELD_PLACEHOLDER, Lookup, NO_DEFINITIONS,
-        NO_SYNONYMS, NO_TRANSLATION, ONLINE_LONE_LABEL, ONLINE_PENDING, ONLINE_SENTENCE_LABEL,
-        ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online, OnlineTexts, PENDING,
-        RUSSIAN_LABEL, SYNONYMS_LABEL, Shown, UNFINISHED, Whole, binding_texts, details_markup,
-        indexes_text, online_markup, senses_markup, sentence_markup, texts,
+        Binding, CAPTURE_LABEL, CHOOSE_SENSE, EXPLANATION_MARK, FIELD_PLACEHOLDER, Lookup,
+        NO_DEFINITIONS, NO_SYNONYMS, NO_TEXT, NO_TRANSLATION, ONLINE_LONE_LABEL, ONLINE_PENDING,
+        ONLINE_SENTENCE_LABEL, ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online,
+        OnlineTexts, PENDING, RUSSIAN_LABEL, SYNONYMS_LABEL, Shown, UNFINISHED, Whole,
+        binding_texts, details_markup, indexes_text, online_markup, senses_markup, sentence_markup,
+        texts,
     };
     use crate::dictionaries::{
         Indexes, State,
@@ -1013,6 +1023,24 @@ mod tests {
         );
         assert_eq!(markup.lines().count(), 2, "{markup}");
         assert!(!markup.contains("deepl"), "{markup}");
+    }
+
+    #[test]
+    fn the_capture_texts_are_one_line_each_and_name_no_cause() {
+        assert_eq!(CAPTURE_LABEL, "Capture");
+        assert_eq!(NO_TEXT, "No text was recognized.");
+        for text in [CAPTURE_LABEL, NO_TEXT] {
+            assert_eq!(text.lines().count(), 1, "{text}");
+        }
+        // The status of a capture being read is the waiting one, from OCR.
+        let waiting = texts(
+            WindowState::Waiting {
+                source: Source::Ocr,
+            },
+            Source::Manual,
+        );
+        assert_eq!(waiting.source, "screen capture (OCR)");
+        assert_ne!(waiting.status, NO_TEXT);
     }
 
     #[test]
@@ -1829,7 +1857,7 @@ mod tests {
     #[test]
     fn both_texts_are_never_empty() {
         for state in every_state() {
-            let texts = texts(state);
+            let texts = texts(state, Source::Manual);
             assert!(!texts.source.trim().is_empty(), "{state:?}");
             assert!(!texts.status.trim().is_empty(), "{state:?}");
         }
@@ -1840,7 +1868,7 @@ mod tests {
         for kind in &KINDS[1..] {
             let labels: Vec<_> = same_kind(*kind, &Source::ALL)
                 .into_iter()
-                .map(|state| texts(state).source)
+                .map(|state| texts(state, Source::Manual).source)
                 .collect();
             for (index, label) in labels.iter().enumerate() {
                 assert!(!labels[..index].contains(label), "{kind:?}: {label}");
@@ -1854,7 +1882,7 @@ mod tests {
             let labels: Vec<_> = KINDS[1..]
                 .iter()
                 .flat_map(|kind| same_kind(*kind, &[source]))
-                .map(|state| texts(state).source)
+                .map(|state| texts(state, Source::Manual).source)
                 .collect();
             assert!(labels.iter().all(|label| *label == labels[0]), "{source:?}");
         }
@@ -1863,25 +1891,35 @@ mod tests {
     #[test]
     fn waiting_status_differs_from_the_other_statuses() {
         for source in Source::ALL {
-            let waiting = texts(WindowState::Waiting { source }).status;
+            let waiting = texts(WindowState::Waiting { source }, Source::Manual).status;
             for state in every_state() {
                 if !matches!(state, WindowState::Waiting { .. }) {
-                    assert_ne!(texts(state).status, waiting, "{state:?}");
+                    assert_ne!(texts(state, Source::Manual).status, waiting, "{state:?}");
                 }
             }
         }
     }
 
     #[test]
+    fn empty_names_the_source_of_the_text() {
+        let empty = texts(WindowState::Empty, Source::Ocr);
+        assert_eq!(empty.source, "screen capture (OCR)");
+        assert_eq!(empty.status, "waiting for input");
+    }
+
+    #[test]
     fn empty_asks_for_manual_input() {
-        let empty = texts(WindowState::Empty);
+        let empty = texts(WindowState::Empty, Source::Manual);
         assert_eq!(empty.source, "manual input");
         assert_eq!(empty.status, "waiting for input");
         assert_eq!(
             empty.source,
-            texts(WindowState::Waiting {
-                source: Source::Manual
-            })
+            texts(
+                WindowState::Waiting {
+                    source: Source::Manual,
+                },
+                Source::Manual,
+            )
             .source
         );
     }
