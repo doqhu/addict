@@ -129,6 +129,8 @@ enum Event {
     Indexes(Indexes),
     /// Capture was pressed.
     Capture,
+    /// The window hidden for a capture is off the screen.
+    Hidden,
     /// The capture job has its snapshot and recognizes it now.
     Captured,
     /// The capture job ended.
@@ -146,6 +148,10 @@ fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandl
         let _ = sender.unbounded_send(Event::Shortcut(event, receipt_ns));
     })
 }
+
+/// How long a hidden window takes to leave the screen: the shell's hide
+/// animation and a frame without the window.
+const HIDE_SETTLE: Duration = Duration::from_millis(300);
 
 /// The height the window starts with, in pixels: an article of a few
 /// senses with one of them chosen fits without scrolling its list.
@@ -223,6 +229,9 @@ struct Session {
     /// The capture job, from Capture to its end; dropping it cancels the
     /// job, which deletes its snapshot.
     capturing: Option<Job>,
+    /// Between Capture and the start of its job, while the window leaves
+    /// the screen.
+    hiding: bool,
 }
 
 impl Session {
@@ -262,20 +271,41 @@ impl Session {
                 self.view.render_indexes(indexes);
             }
             Event::Capture => self.capture(),
+            Event::Hidden => self.start_capture(),
             Event::Captured => self.snapshot_taken(),
             Event::Recognized(outcome) => self.recognized(outcome),
         }
     }
 
     /// Capture was pressed: the window hides, so it is not in the capture,
-    /// Capture cannot be pressed again and the job starts. One capture at a
-    /// time: a press queued behind another starts nothing.
+    /// and Capture cannot be pressed again. The job starts once the hide has
+    /// reached the screen. One capture at a time: a press queued behind
+    /// another starts nothing.
     fn capture(&mut self) {
-        if self.capturing.is_some() {
+        if self.hiding || self.capturing.is_some() {
             return;
         }
+        self.hiding = true;
+        // Hidden, so on Wayland the compositor places the window anew when it
+        // comes back. The opacity of a GTK 4 toplevel is ignored, and making
+        // its children transparent left the window in GNOME's capture.
         self.window.set_visible(false);
         self.view.set_capture_sensitive(false);
+        let hidden = self.sender.clone();
+        // GNOME's capture interface freezes the screen as it opens, and the
+        // shell animates a window that goes away: started at once, the
+        // capture shows the window still there.
+        glib::timeout_add_local_once(HIDE_SETTLE, move || {
+            let _ = hidden.unbounded_send(Event::Hidden);
+        });
+    }
+
+    /// The window is off the screen: the capture job starts.
+    fn start_capture(&mut self) {
+        if !self.hiding {
+            return;
+        }
+        self.hiding = false;
         let captured = self.sender.clone();
         let ended = self.sender.clone();
         let started = capture::start(
@@ -894,6 +924,7 @@ fn start(
         online: Kept::default(),
         check,
         capturing: None,
+        hiding: false,
     };
     glib::spawn_future_local(async move {
         while let Some(event) = receiver.next().await {
