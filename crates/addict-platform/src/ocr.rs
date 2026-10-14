@@ -11,6 +11,11 @@
 //! gives its `ru_maxrss`; `tokio::process` would reap it itself and drop that.
 //! The limit, or dropping the future, kills the child with SIGKILL and reaps
 //! it; the temporary directory is removed in every case.
+//!
+//! A child that ends with another status is a missing language when its
+//! stderr says so, or else when `tesseract --list-langs`, run then with the
+//! same rules and what is left of the limit, does not list the language. A
+//! listing that fails or outlives the limit leaves the failure as it was.
 
 use std::{
     fs,
@@ -36,6 +41,9 @@ const OUTPUT_BASE: &str = "result";
 
 /// Where Tesseract's stderr goes inside the temporary directory.
 const STDERR_FILE: &str = "stderr";
+
+/// Where the output of `--list-langs` goes inside the temporary directory.
+const LANGUAGES_FILE: &str = "languages";
 
 /// The Tesseract program, found on `PATH`.
 const PROGRAM: &str = "tesseract";
@@ -140,6 +148,7 @@ async fn attempt(
     temp_root: &Path,
     started: &mut (dyn FnMut(u32) + Send),
 ) -> Attempt {
+    let begun = Instant::now();
     let failed = |failure| Err((failure, None));
     // Absolute: the child runs in another directory.
     let image = match fs::canonicalize(image) {
@@ -162,9 +171,76 @@ async fn attempt(
         .args(["-l", params.language, "--psm"])
         .arg(params.page_segmentation.to_string())
         .current_dir(&directory.0)
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
+    let mut child = match spawn(&mut command) {
+        Ok(child) => child,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return failed(OcrFailure::TesseractMissing);
+        }
+        Err(e) => return failed(OcrFailure::Failed(format!("spawn tesseract: {e}"))),
+    };
+    started(child.pid as u32);
+
+    let exit = match tokio::time::timeout(limit, child.exited()).await {
+        Ok(Ok(exit)) => exit,
+        Ok(Err(e)) => return failed(OcrFailure::Failed(format!("wait for tesseract: {e}"))),
+        Err(_) => {
+            // Killed and reaped before the outcome is given.
+            drop(child);
+            return failed(OcrFailure::TimedOut);
+        }
+    };
+    let peak = Some(exit.peak_rss_bytes);
+    let exited_well = libc::WIFEXITED(exit.status) && libc::WEXITSTATUS(exit.status) == 0;
+    let result = match outcome(&directory.0, exit.status) {
+        // Only after a failed exit: the recognition itself stays one child.
+        Err(OcrFailure::Failed(detail)) if !exited_well => {
+            let remaining = limit.saturating_sub(begun.elapsed());
+            match listed(program, params.language, &directory.0, remaining).await {
+                Some(false) => Err(OcrFailure::LanguageMissing),
+                Some(true) | None => Err(OcrFailure::Failed(detail)),
+            }
+        }
+        result => result,
+    };
+    match result {
+        Ok(text) => Ok((text, peak)),
+        Err(failure) => Err((failure, peak)),
+    }
+}
+
+/// Whether `language` is a line of what `<program> --list-langs` prints,
+/// run in `directory` for `limit` at most; `None` when the listing did not
+/// end well in time. A listing still running at the limit, or dropped, is
+/// killed and reaped.
+async fn listed(program: &str, language: &str, directory: &Path, limit: Duration) -> Option<bool> {
+    let path = directory.join(LANGUAGES_FILE);
+    let output = fs::File::create(&path).ok()?;
+    let errors = output.try_clone().ok()?;
+    let mut command = Command::new(program);
+    command
+        .arg("--list-langs")
+        .current_dir(directory)
+        // Tesseract prints the list to stdout; old versions to stderr.
+        .stdout(output)
+        .stderr(errors);
+    let mut child = spawn(&mut command).ok()?;
+    let exit = tokio::time::timeout(limit, child.exited())
+        .await
+        .ok()?
+        .ok()?;
+    if !(libc::WIFEXITED(exit.status) && libc::WEXITSTATUS(exit.status) == 0) {
+        return None;
+    }
+    let listing = read_head(&path).ok()?;
+    Some(listing.lines().any(|line| line.trim() == language))
+}
+
+/// Spawns `command` with stdin null and `PR_SET_PDEATHSIG(SIGKILL)`; the
+/// child is reaped by the [`Child`] that is given back, not by `std`.
+fn spawn(command: &mut Command) -> io::Result<Child> {
+    command.stdin(Stdio::null());
     let parent = std::process::id();
     // SAFETY: only async-signal-safe calls between fork and exec.
     unsafe {
@@ -179,31 +255,9 @@ async fn attempt(
             Ok(())
         });
     }
-    let child = match command.spawn() {
-        Ok(child) => child,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return failed(OcrFailure::TesseractMissing);
-        }
-        Err(e) => return failed(OcrFailure::Failed(format!("spawn tesseract: {e}"))),
-    };
-    // The child is reaped here, not by `std`; the handle holds nothing else.
-    let mut child = Child::new(child.id() as libc::pid_t);
-    started(child.pid as u32);
-
-    let exit = match tokio::time::timeout(limit, child.exited()).await {
-        Ok(Ok(exit)) => exit,
-        Ok(Err(e)) => return failed(OcrFailure::Failed(format!("wait for tesseract: {e}"))),
-        Err(_) => {
-            // Killed and reaped before the outcome is given.
-            drop(child);
-            return failed(OcrFailure::TimedOut);
-        }
-    };
-    let peak = Some(exit.peak_rss_bytes);
-    match outcome(&directory.0, exit.status) {
-        Ok(text) => Ok((text, peak)),
-        Err(failure) => Err((failure, peak)),
-    }
+    // The handle holds nothing else: dropping it neither waits nor kills.
+    let child = command.spawn()?;
+    Ok(Child::new(child.id() as libc::pid_t))
 }
 
 /// The text, or the failure, for a child that ended with the wait `status`;
@@ -558,6 +612,140 @@ mod tests {
         assert_eq!(recognition.result, Err(OcrFailure::TesseractMissing));
         assert_eq!(recognition.peak_rss_bytes, None);
         assert!(scratch.leftovers().is_empty());
+    }
+
+    /// A fake `tesseract` in `scratch`, a shell script that fails the
+    /// recognition with `stderr`, verbatim, and runs `listing` for
+    /// `--list-langs`. It writes the pid of each of its runs to `pids`. It
+    /// is given back once it can be run: another test's fork may still hold
+    /// it open for writing for a moment (`ETXTBSY`).
+    fn fake(scratch: &Scratch, stderr: &str, listing: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let pids = scratch.0.join("pids");
+        let path = scratch.0.join("fake-tesseract");
+        let script = format!(
+            "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\necho $$ >> '{pids}'\nif [ \"$1\" = --list-langs ]; then\n{listing}\nfi\ncat >&2 <<'STDERR'\n{stderr}\nSTDERR\nexit 1\n",
+            pids = pids.display()
+        );
+        fs::write(&path, script).expect("script");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("mode");
+        for _ in 0..100 {
+            match std::process::Command::new(&path).arg("--probe").status() {
+                Ok(status) => {
+                    assert!(status.success(), "probe: {status}");
+                    return path;
+                }
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("probe: {e}"),
+            }
+        }
+        panic!("the fake stayed busy");
+    }
+
+    /// Recognizes the fixture with the program at `program`.
+    fn faked(scratch: &Scratch, program: &Path, limit: Duration) -> Recognition {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(run(
+            program.to_str().expect("path"),
+            Path::new(FIXTURE),
+            &Params::ENGLISH,
+            limit,
+            &scratch.0,
+            &mut |_| {},
+        ))
+    }
+
+    /// The pids the fake wrote; each is gone.
+    fn all_gone(scratch: &Scratch, runs: usize) {
+        let pids = fs::read_to_string(scratch.0.join("pids")).expect("pids");
+        let pids: Vec<u32> = pids.lines().map(|p| p.parse().expect("pid")).collect();
+        assert_eq!(pids.len(), runs, "{pids:?}");
+        for pid in pids {
+            assert!(!exists(pid), "{pid} is left");
+        }
+    }
+
+    #[test]
+    fn a_language_that_is_not_listed_is_language_missing() {
+        let scratch = Scratch::new("unlisted");
+        let program = fake(
+            &scratch,
+            "Error opening data file",
+            "echo 'List of available languages (1):'\necho osd\nexit 0",
+        );
+        let recognition = faked(&scratch, &program, LIMIT);
+        assert_eq!(recognition.result, Err(OcrFailure::LanguageMissing));
+        all_gone(&scratch, 2);
+        assert!(scratch.leftovers().is_empty());
+    }
+
+    #[test]
+    fn a_listed_language_leaves_the_failure_with_its_first_stderr_line() {
+        let scratch = Scratch::new("listed");
+        let program = fake(
+            &scratch,
+            "Something else broke",
+            "echo 'List of available languages (2):'\necho eng\necho osd\nexit 0",
+        );
+        let recognition = faked(&scratch, &program, LIMIT);
+        assert_eq!(
+            recognition.result,
+            Err(OcrFailure::Failed(
+                "tesseract exit status 1: Something else broke".to_owned()
+            ))
+        );
+        all_gone(&scratch, 2);
+        assert!(scratch.leftovers().is_empty());
+    }
+
+    #[test]
+    fn a_listing_that_fails_leaves_the_failure() {
+        let scratch = Scratch::new("listfails");
+        let program = fake(&scratch, "Broken", "exit 3");
+        let recognition = faked(&scratch, &program, LIMIT);
+        assert_eq!(
+            recognition.result,
+            Err(OcrFailure::Failed(
+                "tesseract exit status 1: Broken".to_owned()
+            ))
+        );
+        all_gone(&scratch, 2);
+        assert!(scratch.leftovers().is_empty());
+    }
+
+    #[test]
+    fn a_listing_that_hangs_is_killed_at_the_limit() {
+        let scratch = Scratch::new("listhangs");
+        let program = fake(&scratch, "Broken", "exec sleep 30");
+        let limit = Duration::from_millis(500);
+        let recognition = faked(&scratch, &program, limit);
+        assert_eq!(
+            recognition.result,
+            Err(OcrFailure::Failed(
+                "tesseract exit status 1: Broken".to_owned()
+            ))
+        );
+        assert!(recognition.elapsed < limit + Duration::from_secs(2));
+        all_gone(&scratch, 2);
+        assert!(scratch.leftovers().is_empty());
+    }
+
+    #[test]
+    fn the_stderr_marker_is_language_missing_without_a_listing() {
+        let scratch = Scratch::new("marker");
+        let program = fake(
+            &scratch,
+            "Failed loading language 'eng'",
+            "echo eng\nexit 0",
+        );
+        let recognition = faked(&scratch, &program, LIMIT);
+        assert_eq!(recognition.result, Err(OcrFailure::LanguageMissing));
+        all_gone(&scratch, 1);
     }
 
     /// The wait status of a child that exited with `code`.
