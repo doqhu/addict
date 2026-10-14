@@ -91,6 +91,20 @@
 //! only time the clipboard is read: once per paste, without blocking the
 //! window. A clipboard that holds no text changes nothing.
 //!
+//! Capture, beside the field, hides the window and asks the desktop for an
+//! interactive screenshot: the user chooses an area, or cancels. Once the
+//! snapshot is taken the window comes back, saying that the capture is being
+//! read, and Tesseract recognizes its English text off the UI thread, with a
+//! limit; the snapshot and Tesseract's temporary files are deleted whatever
+//! the outcome. The text, as one line, replaces the field, and the source is
+//! "screen capture (OCR)": it is a new text, and from there everything is as
+//! for a typed one, with the whole text as the sentence. It is not submitted:
+//! a lone word is looked up and not sent online. An edit keeps the source;
+//! a field without a word is manual input again. A capture that gives no text,
+//! for any reason, leaves the field as it was and says "No text was
+//! recognized." until the next state is shown. Capture cannot be pressed
+//! while a capture runs.
+//!
 //! The application is unique: a second launch exits at once and makes the
 //! resident instance show its window, as a press of the shortcut does.
 //!
@@ -111,10 +125,12 @@
 //! commands are [`entries`]'s, the import is `addict_dictionary`'s, the indexes
 //! as a source of articles are [`dictionaries`]'s, the online translator is
 //! `addict_deepl`'s, what is asked of it and kept is [`online`]'s, where every
-//! request to it starts is [`translate`]'s, the resident application is
-//! [`resident`]'s, the texts of its window are [`view`]'s and the widgets of
-//! the window are [`widgets`]'s.
+//! request to it starts is [`translate`]'s, the capture job is [`capture`]'s
+//! and its portal and Tesseract adapters are `addict_platform`'s, the
+//! resident application is [`resident`]'s, the texts of its window are
+//! [`view`]'s and the widgets of the window are [`widgets`]'s.
 
+mod capture;
 mod dictionaries;
 mod entries;
 mod evidence;

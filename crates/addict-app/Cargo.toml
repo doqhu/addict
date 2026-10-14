@@ -22,6 +22,7 @@ gdk4-wayland = { version = "=0.11.5", features = ["wayland_crate"] }
 gtk = { package = "gtk4", version = "=0.11.5", features = ["v4_20"] }
 libc = "=0.2.190"
 serde_json = "=1.0.151"
+tokio = { version = "=1.53.2", features = ["time"] }
 wayland-client = "=0.31.15"
 wayland-protocols = { version = "=0.32.13", features = ["client"] }
 
