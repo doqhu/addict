@@ -10,14 +10,14 @@
 //! kept only when it carries the number of this text and its request is still
 //! awaited here.
 //!
-//! Sending the requests is [`manual`](crate::manual)'s and
+//! Sending the requests is [`translate`](crate::translate)'s and
 //! [`resident`](crate::resident)'s; the texts shown for the state are
 //! [`view`](crate::view)'s.
 
 use std::collections::BTreeMap;
 
 use crate::{
-    manual::SENTENCE_LIMIT,
+    translate::SENTENCE_LIMIT,
     view::{Online, OnlineTexts, Whole},
 };
 
@@ -209,7 +209,7 @@ mod tests {
 
     use super::{Click, Kept, Kind, Subject};
     use crate::{
-        manual::SENTENCE_LIMIT,
+        translate::SENTENCE_LIMIT,
         view::{Online, OnlineTexts, Whole},
     };
 
