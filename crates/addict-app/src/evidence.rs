@@ -7,8 +7,10 @@
 //!
 //! The event names and the fields of `details` are the harness's own. The
 //! session start is named `broker-started` because that is the record the
-//! harness splits sessions on. The `online` record is the exception: the
-//! harness reads its line and judges nothing by it.
+//! harness splits sessions on. The `online` and `ocr` records are the
+//! exceptions: the harness reads their lines and counts nothing by them; it
+//! only looks for a `recognized` `ocr` record before the idle sample taken
+//! after an OCR cycle.
 
 use std::{
     fs::{File, OpenOptions},
@@ -18,10 +20,11 @@ use std::{
 };
 
 use addict_core::translation::Refusal;
-use addict_platform::work::Outcome;
+use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure, work::Outcome};
 use serde_json::{Value, json};
 
 use crate::{
+    capture::{Failure, Timing},
     dictionaries::{Answer, Looked},
     online::Subject,
     view::Online,
@@ -389,6 +392,115 @@ fn online(requested: Requested, ended: Ended, measured: Measured) -> Record {
             "elapsed_ms": measured.elapsed_ms,
             "peak_rss_bytes": measured.memory.peak_rss_bytes,
             "pss_bytes": measured.memory.pss_bytes,
+        }),
+    }
+}
+
+/// How a capture ended, as the evidence names it: as the window showed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Read {
+    /// A text with a word was put in the field.
+    Recognized,
+    /// A text without a word, or none, was recognized.
+    Empty,
+    /// The capture gave no snapshot, for the reason its label names.
+    Cancelled,
+    Ended,
+    Unavailable,
+    CaptureFailed,
+    NoImage,
+    /// The user took longer than the capture's limit.
+    CaptureTimedOut,
+    /// The recognition gave no text, for the reason its label names.
+    OcrNoImage,
+    TesseractMissing,
+    LanguageMissing,
+    OcrFailed,
+    OcrTimedOut,
+    /// The job could not start, panicked or was stopped at its deadline.
+    Unfinished,
+}
+
+impl Read {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Recognized => "recognized",
+            Self::Empty => "empty",
+            Self::Cancelled => "cancelled",
+            Self::Ended => "ended",
+            Self::Unavailable => "unavailable",
+            Self::CaptureFailed => "capture-failed",
+            Self::NoImage => "no-image",
+            Self::CaptureTimedOut => "capture-timed-out",
+            Self::OcrNoImage => "ocr-no-image",
+            Self::TesseractMissing => "tesseract-missing",
+            Self::LanguageMissing => "language-missing",
+            Self::OcrFailed => "ocr-failed",
+            Self::OcrTimedOut => "ocr-timed-out",
+            Self::Unfinished => "unfinished",
+        }
+    }
+
+    /// What the evidence says of a capture that showed `failure`. The detail
+    /// of a failure is dropped here. No wildcard arm: a new failure does not
+    /// compile until it is given its label.
+    pub fn failed(failure: &Failure) -> Self {
+        match failure {
+            Failure::Capture(CaptureFailure::Cancelled) => Self::Cancelled,
+            Failure::Capture(CaptureFailure::Ended) => Self::Ended,
+            Failure::Capture(CaptureFailure::Unavailable) => Self::Unavailable,
+            Failure::Capture(CaptureFailure::Failed(_)) => Self::CaptureFailed,
+            Failure::Capture(CaptureFailure::NoImage) => Self::NoImage,
+            Failure::CaptureTimedOut => Self::CaptureTimedOut,
+            Failure::Ocr(OcrFailure::NoImage) => Self::OcrNoImage,
+            Failure::Ocr(OcrFailure::TesseractMissing) => Self::TesseractMissing,
+            Failure::Ocr(OcrFailure::LanguageMissing) => Self::LanguageMissing,
+            Failure::Ocr(OcrFailure::Failed(_)) => Self::OcrFailed,
+            Failure::Ocr(OcrFailure::Empty) => Self::Empty,
+            Failure::Ocr(OcrFailure::TimedOut) => Self::OcrTimedOut,
+            Failure::Unfinished => Self::Unfinished,
+        }
+    }
+}
+
+/// How many child processes this process has now: the pids of
+/// `/proc/self/task/*/children`. `None` when none of those files can be read.
+fn child_processes() -> Option<u64> {
+    let tasks = std::fs::read_dir("/proc/self/task").ok()?;
+    let mut count = None;
+    for task in tasks.flatten() {
+        // A thread may end between the listing and the read.
+        let Ok(children) = std::fs::read_to_string(task.path().join("children")) else {
+            continue;
+        };
+        *count.get_or_insert(0) += children.split_whitespace().count() as u64;
+    }
+    count
+}
+
+/// The record of a capture that the window showed as `read` and that took
+/// `timing`. The memory of this process and its children are read here, on
+/// the UI thread, after the job has reaped its own: the count says what the
+/// capture left behind. Call it only when evidence is recorded.
+pub fn ocr_record(read: Read, timing: &Timing) -> Record {
+    ocr(read, timing, Memory::read(), child_processes())
+}
+
+/// A capture ended. The record says how and what that took, and nothing of
+/// the text, of the snapshot or of a failure's detail. It names no press,
+/// and its event is its own: the harness counts it nowhere.
+fn ocr(read: Read, timing: &Timing, memory: Memory, child_processes: Option<u64>) -> Record {
+    Record {
+        invocation_id: None,
+        event: "ocr",
+        details: json!({
+            "outcome": read.label(),
+            "capture_ms": timing.capture_ms,
+            "recognition_ms": timing.recognition_ms,
+            "child_peak_rss_bytes": timing.child_peak_rss_bytes,
+            "peak_rss_bytes": memory.peak_rss_bytes,
+            "pss_bytes": memory.pss_bytes,
+            "child_processes": child_processes,
         }),
     }
 }
@@ -812,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_with_online_records_summarises_as_one_without() {
+    fn a_session_with_online_and_ocr_records_summarises_as_one_without() {
         let session = |with_online: bool| {
             let file = TempFile::new("online-summary");
             let mut writer = start(&file.0, Origin::Foliate);
@@ -823,6 +935,8 @@ mod tests {
             let online = |writer: &mut Writer, requested| {
                 if with_online {
                     writer.write(&super::online(requested, Ended::Translated, measured));
+                    let read = Read::failed(&Failure::Capture(CaptureFailure::Ended));
+                    writer.write(&ocr(read, &Timing::default(), MEMORY, Some(0)));
                 }
             };
             for count in 1..=5 {
@@ -837,7 +951,7 @@ mod tests {
             read(&file.0)
         };
         let (without, with) = (session(false), session(true));
-        assert_eq!(with.len(), without.len() + 5 + 6);
+        assert_eq!(with.len(), without.len() + 2 * (5 + 6));
         let value = |summary| serde_json::to_value(summary).expect("a summary is JSON");
         for mapping in [None, Some(&mapping())] {
             assert_eq!(
@@ -853,6 +967,151 @@ mod tests {
         assert_eq!(row, product(&without));
         assert_eq!(row[0]["lookups"], 3);
         assert_eq!(row[0]["warm_attempts"], 4);
+    }
+
+    /// Every way a capture ends as the window shows it, with its label.
+    fn reads() -> Vec<(Read, &'static str)> {
+        let capture = |failure| Read::failed(&Failure::Capture(failure));
+        let ocr = |failure| Read::failed(&Failure::Ocr(failure));
+        vec![
+            (Read::Recognized, "recognized"),
+            (ocr(OcrFailure::Empty), "empty"),
+            (capture(CaptureFailure::Cancelled), "cancelled"),
+            (capture(CaptureFailure::Ended), "ended"),
+            (capture(CaptureFailure::Unavailable), "unavailable"),
+            (
+                capture(CaptureFailure::Failed("Response: no".into())),
+                "capture-failed",
+            ),
+            (capture(CaptureFailure::NoImage), "no-image"),
+            (Read::failed(&Failure::CaptureTimedOut), "capture-timed-out"),
+            (ocr(OcrFailure::NoImage), "ocr-no-image"),
+            (ocr(OcrFailure::TesseractMissing), "tesseract-missing"),
+            (ocr(OcrFailure::LanguageMissing), "language-missing"),
+            (ocr(OcrFailure::Failed("exit 1".into())), "ocr-failed"),
+            (ocr(OcrFailure::TimedOut), "ocr-timed-out"),
+            (Read::failed(&Failure::Unfinished), "unfinished"),
+        ]
+    }
+
+    #[test]
+    fn every_capture_end_has_a_label_of_its_own() {
+        let reads = reads();
+        let labels: std::collections::BTreeSet<_> = reads.iter().map(|(r, _)| r.label()).collect();
+        assert_eq!(labels.len(), reads.len());
+        for (read, label) in reads {
+            assert_eq!(read.label(), label);
+        }
+        // The empty text the window refuses is the same end as no text.
+        assert_eq!(Read::Empty.label(), "empty");
+    }
+
+    #[test]
+    fn a_capture_is_recorded_by_its_outcome_times_and_memory_and_nothing_else() {
+        let file = TempFile::new("ocr");
+        let mut writer = start(&file.0, Origin::Foliate);
+        let recognized = Timing {
+            capture_ms: Some(2_300),
+            recognition_ms: Some(640),
+            child_peak_rss_bytes: Some(98_304_000),
+        };
+        let esc = Timing {
+            capture_ms: Some(1_900),
+            ..Timing::default()
+        };
+        // Details that the record must not carry.
+        let failure = Failure::Ocr(OcrFailure::Failed("/tmp/secret-snapshot.png".into()));
+        let records = [
+            (Read::Recognized, recognized, Some(0)),
+            (
+                Read::failed(&Failure::Capture(CaptureFailure::Ended)),
+                esc,
+                Some(0),
+            ),
+            (Read::failed(&failure), recognized, None),
+            (
+                Read::failed(&Failure::Unfinished),
+                Timing::default(),
+                Some(0),
+            ),
+        ];
+        for (read, timing, children) in &records {
+            writer.write(&ocr(*read, timing, MEMORY, *children));
+        }
+        let text = std::fs::read_to_string(&file.0).expect("read the evidence");
+        assert!(!text.contains("secret") && !text.contains(".png"));
+        let rows = read(&file.0);
+        assert_eq!(rows.len(), 1 + records.len());
+        for (row, (read, timing, children)) in rows[1..].iter().zip(&records) {
+            assert_eq!(row.event, "ocr");
+            assert_eq!(row.invocation_id, None);
+            assert_eq!(
+                row.details,
+                json!({
+                    "outcome": read.label(),
+                    "capture_ms": timing.capture_ms,
+                    "recognition_ms": timing.recognition_ms,
+                    "child_peak_rss_bytes": timing.child_peak_rss_bytes,
+                    "peak_rss_bytes": 141_234_176,
+                    "pss_bytes": 63_012_864,
+                    "child_processes": children,
+                })
+            );
+        }
+        assert_eq!(rows[2].details["recognition_ms"], Value::Null);
+        assert_eq!(rows[4].details["capture_ms"], Value::Null);
+    }
+
+    #[test]
+    fn no_child_process_is_left_after_a_recognition() {
+        use addict_platform::{
+            ocr::{self, Params},
+            work::Work,
+        };
+
+        use crate::{
+            capture::{
+                OCR_LIMIT,
+                tests::{FIXTURE, children},
+            },
+            manual::tests::WAIT,
+        };
+
+        let _children = children();
+        // The count sees a child while it runs.
+        let mut sleeper = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        assert!(child_processes().is_some_and(|count| count >= 1));
+        sleeper.kill().expect("kill sleep");
+        sleeper.wait().expect("reap sleep");
+
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _job = work.run(
+            OCR_LIMIT * 2,
+            async { ocr::recognize(Path::new(FIXTURE), &Params::ENGLISH, OCR_LIMIT).await },
+            move |outcome| {
+                let _ = sender.send(outcome);
+            },
+        );
+        let Outcome::Finished(recognition) = receiver.recv_timeout(WAIT).expect("outcome") else {
+            panic!("the recognition finished");
+        };
+        assert!(recognition.result.is_ok());
+        let timing = Timing {
+            capture_ms: None,
+            recognition_ms: Some(1),
+            child_peak_rss_bytes: recognition.peak_rss_bytes,
+        };
+        let record = ocr_record(Read::Recognized, &timing);
+        assert_eq!(record.details["child_processes"], 0);
+        assert!(
+            record.details["pss_bytes"]
+                .as_u64()
+                .is_some_and(|bytes| bytes > 0)
+        );
     }
 
     #[test]

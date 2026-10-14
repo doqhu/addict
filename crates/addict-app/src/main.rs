@@ -119,7 +119,10 @@
 //! and the focus; for each lookup that ended, its answer; and for each online
 //! request that ended, of a word, of the sentence or of a definition, its
 //! kind, its outcome, its delay and the memory of the process, and never its
-//! text. Without the flag none of that exists.
+//! text; for each capture that ended as shown, its outcome, the time to the
+//! snapshot, the time and peak memory of the recognition, the memory of the
+//! process and how many child processes it has, and never the text, the
+//! snapshot or a failure's detail. Without the flag none of that exists.
 //!
 //! This module owns the command line and what each form of it starts; the entry
 //! commands are [`entries`]'s, the import is `addict_dictionary`'s, the indexes

@@ -41,7 +41,9 @@
 //! editing the field, gives up the recognition that runs. Giving up is
 //! dropping the job, which kills the Tesseract child and deletes the
 //! snapshot, and shows nothing. Each capture job has a number, so what a
-//! given-up job had already sent is ignored. The job is
+//! given-up job had already sent is ignored. Every capture end that is
+//! shown, also one that could not start, is recorded with `--evidence` as
+//! it is shown; a given-up one is not. The job is
 //! [`capture`](crate::capture)'s; how a request starts
 //! and ends is [`translate`](crate::translate)'s; what is recorded with
 //! `--evidence` is [`recording`](crate::recording)'s.
@@ -71,7 +73,7 @@ use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
-    capture::{self, Captured, Failure},
+    capture::{self, Capture, Captured, Failure, Timing},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
     manual::{self, Edit, Manual},
@@ -150,7 +152,7 @@ enum Event {
     /// now.
     Captured(u64),
     /// The capture job with this number ended.
-    Recognized(u64, Outcome<Captured>),
+    Recognized(u64, Outcome<Capture>),
 }
 
 /// Starts one attempt to bind the shortcut; its events go to `sender`. With
@@ -370,7 +372,7 @@ impl Session {
         );
         match started {
             Ok(job) => self.capturing = Some(job),
-            Err(captured) => self.capture_ended(captured),
+            Err(capture) => self.capture_ended(capture.captured, &capture.timing),
         }
     }
 
@@ -400,23 +402,24 @@ impl Session {
 
     /// The capture job with `number` ended; one that was given up shows
     /// nothing.
-    fn recognized(&mut self, number: u64, outcome: Outcome<Captured>) {
+    fn recognized(&mut self, number: u64, outcome: Outcome<Capture>) {
         if !self.is_capturing(number) {
             return;
         }
         // A cancelled job was dropped here on purpose and shows nothing.
-        let Some(captured) = capture::captured_result(outcome) else {
+        let Some((captured, timing)) = capture::captured_result(outcome) else {
             return;
         };
-        self.capture_ended(captured);
+        self.capture_ended(captured, &timing);
     }
 
     /// The capture is over with `captured`: Capture can be pressed again. A
     /// text replaces the field as a new text from the capture and the
     /// capture line goes; anything else, a text without a word among it,
     /// leaves the field as it was, starts nothing and says why in the
-    /// capture line. The window is shown either way, the field focused.
-    fn capture_ended(&mut self, captured: Captured) {
+    /// capture line. The window is shown either way, the field focused. With
+    /// `--evidence` the end is recorded as shown, with `timing`.
+    fn capture_ended(&mut self, captured: Captured, timing: &Timing) {
         self.capturing = None;
         self.view.set_capture_sensitive(true);
         self.manual.set_reading(false);
@@ -426,6 +429,13 @@ impl Session {
             }
             Captured::Failed(failure) => Err(failure),
         };
+        if let Some(recording) = &self.recording {
+            let read = match &line {
+                Ok(_) => evidence::Read::Recognized,
+                Err(failure) => evidence::Read::failed(failure),
+            };
+            recording.ocr_ended(&evidence::ocr_record(read, timing));
+        }
         let line = match line {
             Ok(line) => line,
             Err(failure) => {

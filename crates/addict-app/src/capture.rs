@@ -2,8 +2,9 @@
 //! an interactive screenshot, recognizes its text and deletes the snapshot.
 //!
 //! [`start`] starts the job; it tells when the snapshot was taken and ends
-//! with one [`Captured`]. [`captured_result`] says what an outcome of the job
-//! is for the window. The snapshot is deleted after every capture that
+//! with one [`Capture`]: what was [`Captured`] and its [`Timing`], measured
+//! on the worker. [`captured_result`] says what an outcome of the job is for
+//! the window. The snapshot is deleted after every capture that
 //! produced a file, whatever the recognition gave, and also when the job is
 //! cancelled, stopped at its deadline or dropped: the guard that deletes it
 //! lives inside the job. What the window does with the text is
@@ -11,7 +12,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use addict_core::APP_ID;
@@ -54,36 +55,98 @@ pub enum Failure {
     Unfinished,
 }
 
+/// What a capture took, measured on the worker; what was not reached is
+/// `None`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Timing {
+    /// From the start of the job to the snapshot or to the capture's failure:
+    /// the wait for the area is in it.
+    pub capture_ms: Option<u64>,
+    /// The recognition alone, as the adapter measured it; `None` also when
+    /// the adapter found no image to recognize.
+    pub recognition_ms: Option<u64>,
+    /// The peak RSS of the Tesseract child, as the adapter read it.
+    pub child_peak_rss_bytes: Option<u64>,
+}
+
+/// What a capture job ended with, and what it took.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capture {
+    pub captured: Captured,
+    pub timing: Timing,
+}
+
+impl Capture {
+    /// A capture that never started or did not finish: nothing was measured.
+    fn unfinished() -> Self {
+        Self {
+            captured: Captured::Failed(Failure::Unfinished),
+            timing: Timing::default(),
+        }
+    }
+}
+
+/// The milliseconds of `duration`.
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Starts the capture job on `work`. `on_captured` runs on the worker once
 /// the snapshot is there, before its recognition; `on_outcome` runs once on
 /// the worker when the job has ended. Without a runner nothing starts and
-/// the capture's end is given back.
+/// the capture's end is given back, with nothing measured.
 pub fn start(
     work: Option<&Work>,
     on_captured: impl FnOnce() + Send + 'static,
-    on_outcome: impl FnOnce(Outcome<Captured>) + Send + 'static,
-) -> Result<Job, Captured> {
-    let work = work.ok_or(Captured::Failed(Failure::Unfinished))?;
+    on_outcome: impl FnOnce(Outcome<Capture>) + Send + 'static,
+) -> Result<Job, Capture> {
+    let work = work.ok_or_else(Capture::unfinished)?;
     let job = async move {
-        let path = match tokio::time::timeout(CAPTURE_LIMIT, screenshot::capture(APP_ID)).await {
-            Ok(Ok(path)) => path,
-            Ok(Err(failure)) => return Captured::Failed(Failure::Capture(failure)),
-            Err(_) => return Captured::Failed(Failure::CaptureTimedOut),
+        let started = Instant::now();
+        let shot = tokio::time::timeout(CAPTURE_LIMIT, screenshot::capture(APP_ID)).await;
+        let capture_ms = Some(millis(started.elapsed()));
+        let failed = |failure| Capture {
+            captured: Captured::Failed(failure),
+            timing: Timing {
+                capture_ms,
+                ..Timing::default()
+            },
         };
-        recognize_snapshot(path, on_captured).await
+        let path = match shot {
+            Ok(Ok(path)) => path,
+            Ok(Err(failure)) => return failed(Failure::Capture(failure)),
+            Err(_) => return failed(Failure::CaptureTimedOut),
+        };
+        let mut capture = recognize_snapshot(path, on_captured).await;
+        capture.timing.capture_ms = capture_ms;
+        capture
     };
     Ok(work.run(JOB_LIMIT, job, on_outcome))
 }
 
-/// Recognizes the snapshot at `path` and deletes it, however this ends.
-async fn recognize_snapshot(path: PathBuf, on_captured: impl FnOnce()) -> Captured {
+/// Recognizes the snapshot at `path` and deletes it, however this ends. The
+/// timing holds the recognition alone.
+async fn recognize_snapshot(path: PathBuf, on_captured: impl FnOnce()) -> Capture {
     let snapshot = Snapshot(path);
     on_captured();
     let recognition = ocr::recognize(snapshot.path(), &Params::ENGLISH, OCR_LIMIT).await;
     drop(snapshot);
-    match recognition.result {
+    // Without an image nothing was recognized, so nothing was measured.
+    let recognition_ms = match &recognition.result {
+        Err(OcrFailure::NoImage) => None,
+        _ => Some(millis(recognition.elapsed)),
+    };
+    let captured = match recognition.result {
         Ok(text) => Captured::Text(text),
         Err(failure) => Captured::Failed(Failure::Ocr(failure)),
+    };
+    Capture {
+        captured,
+        timing: Timing {
+            capture_ms: None,
+            recognition_ms,
+            child_peak_rss_bytes: recognition.peak_rss_bytes,
+        },
     }
 }
 
@@ -102,23 +165,25 @@ impl Drop for Snapshot {
     }
 }
 
-/// What the window is given for the `outcome` of the job, or `None` when it
-/// was cancelled: then it was dropped on purpose and shows nothing. No
+/// What the window is given for the `outcome` of the job, with what it
+/// took, or `None` when it was cancelled: then it was dropped on purpose and
+/// shows nothing. A job that did not finish has nothing measured. No
 /// wildcard arm: a new outcome does not compile until it is given its end.
-pub fn captured_result(outcome: Outcome<Captured>) -> Option<Captured> {
-    match outcome {
-        Outcome::Finished(captured) => Some(captured),
-        Outcome::TimedOut | Outcome::Panicked => Some(Captured::Failed(Failure::Unfinished)),
-        Outcome::Cancelled => None,
-    }
+pub fn captured_result(outcome: Outcome<Capture>) -> Option<(Captured, Timing)> {
+    let capture = match outcome {
+        Outcome::Finished(capture) => capture,
+        Outcome::TimedOut | Outcome::Panicked => Capture::unfinished(),
+        Outcome::Cancelled => return None,
+    };
+    Some((capture.captured, capture.timing))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         path::PathBuf,
         sync::{
-            Arc,
+            Arc, Mutex, MutexGuard,
             atomic::{AtomicBool, Ordering},
             mpsc,
         },
@@ -131,15 +196,24 @@ mod tests {
     };
 
     use super::{
-        CAPTURE_LIMIT, Captured, Failure, JOB_LIMIT, OCR_LIMIT, captured_result,
+        CAPTURE_LIMIT, Capture, Captured, Failure, JOB_LIMIT, OCR_LIMIT, Timing, captured_result,
         recognize_snapshot, start,
     };
     use crate::manual::tests::WAIT;
 
-    const FIXTURE: &str = concat!(
+    pub(crate) const FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../experiments/exp4/ocr-fixture.png"
     );
+
+    /// Held by every test that starts a child process, so a test that counts
+    /// the children of this process sees none of another test's.
+    pub(crate) fn children() -> MutexGuard<'static, ()> {
+        static CHILDREN: Mutex<()> = Mutex::new(());
+        CHILDREN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     /// A copy of the fixture in a place of its own, as a snapshot would be.
     fn snapshot(name: &str) -> PathBuf {
@@ -153,6 +227,7 @@ mod tests {
 
     #[test]
     fn the_snapshot_is_recognized_and_deleted() {
+        let _children = children();
         let path = snapshot("recognized");
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
@@ -169,16 +244,26 @@ mod tests {
             },
         );
         let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+        let (captured, timing) = captured_result(outcome).expect("shown");
         assert_eq!(
-            captured_result(outcome),
-            Some(Captured::Text("The bank is beside the river.".to_owned()))
+            captured,
+            Captured::Text("The bank is beside the river.".to_owned())
         );
+        // The recognition alone: the capture's own time is the job's.
+        assert_eq!(timing.capture_ms, None);
+        assert!(
+            timing
+                .recognition_ms
+                .is_some_and(|ms| ms < WAIT.as_millis() as u64)
+        );
+        assert!(timing.child_peak_rss_bytes.is_some_and(|bytes| bytes > 0));
         assert!(told.load(Ordering::SeqCst));
         assert!(!path.exists());
     }
 
     #[test]
     fn a_cancelled_recognition_still_deletes_the_snapshot() {
+        let _children = children();
         let path = snapshot("cancelled");
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
@@ -202,6 +287,7 @@ mod tests {
 
     #[test]
     fn a_missing_snapshot_is_no_image() {
+        let _children = children();
         let path = std::env::temp_dir().join("addict-capture-test-absent.png");
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
@@ -209,29 +295,47 @@ mod tests {
             let _ = sender.send(outcome);
         });
         let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+        // Nothing was recognized, so nothing of a recognition is measured.
         assert_eq!(
             captured_result(outcome),
-            Some(Captured::Failed(Failure::Ocr(OcrFailure::NoImage)))
+            Some((
+                Captured::Failed(Failure::Ocr(OcrFailure::NoImage)),
+                Timing::default()
+            ))
         );
     }
 
     #[test]
     fn without_a_runner_nothing_starts() {
         let started = start(None, || panic!("captured"), |_| panic!("ended"));
-        assert_eq!(started.err(), Some(Captured::Failed(Failure::Unfinished)));
+        assert_eq!(
+            started.err(),
+            Some(Capture {
+                captured: Captured::Failed(Failure::Unfinished),
+                timing: Timing::default(),
+            })
+        );
     }
 
     #[test]
     fn every_end_but_a_cancel_is_shown() {
         let failed = Captured::Failed(Failure::Capture(CaptureFailure::Ended));
+        let timing = Timing {
+            capture_ms: Some(1200),
+            ..Timing::default()
+        };
         assert_eq!(
-            captured_result(Outcome::Finished(failed.clone())),
-            Some(failed)
+            captured_result(Outcome::Finished(Capture {
+                captured: failed.clone(),
+                timing,
+            })),
+            Some((failed, timing))
         );
+        // A job that did not finish has nothing measured.
         for outcome in [Outcome::TimedOut, Outcome::Panicked] {
             assert_eq!(
                 captured_result(outcome),
-                Some(Captured::Failed(Failure::Unfinished))
+                Some((Captured::Failed(Failure::Unfinished), Timing::default()))
             );
         }
         assert_eq!(captured_result(Outcome::Cancelled), None);
