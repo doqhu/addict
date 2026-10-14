@@ -23,8 +23,8 @@ use crate::{
     dictionaries::Indexes,
     view::{
         Binding, DEFINITION_ACTION, FIELD_PLACEHOLDER, OnlineTexts, RETRY_LABEL, Shown,
-        binding_texts, details_markup, details_markup_with_definition, indexes_text,
-        online_markup_with_key_path, senses_markup, sentence_markup, texts,
+        binding_texts, details_markup, details_markup_with_definition, indexes_text, online_markup,
+        senses_markup, sentence_markup, texts,
     },
 };
 
@@ -357,6 +357,8 @@ impl View {
         connect_index_link(&self.senses, chosen);
     }
 
+    /// Runs `action` each time the button that translates the definition of
+    /// the chosen sense is clicked.
     pub fn connect_definition_action(&self, action: impl Fn() + 'static) {
         self.definition_action.connect_clicked(move |_| action());
     }
@@ -417,7 +419,7 @@ impl View {
 
     /// Shows the blocks of `online`, or hides them when there is none.
     pub fn render_online(&self, online: &OnlineTexts<'_>, key_file: Option<&std::path::Path>) {
-        let markup = online_markup_with_key_path(online, key_file);
+        let markup = online_markup(online, key_file);
         self.online.set_markup(&markup);
         self.online.set_visible(!markup.is_empty());
     }

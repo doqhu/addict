@@ -22,7 +22,8 @@
 //! asked for and what is kept is [`online`](crate::online)'s. What the
 //! window says is [`view`](crate::view)'s; its widgets and the paste into
 //! its field are [`widgets`](crate::widgets)'s; what an edit or a click does
-//! to the manual input is [`manual`](crate::manual)'s; what is recorded with
+//! to the manual input is [`manual`](crate::manual)'s; how a request starts
+//! and ends is [`translate`](crate::translate)'s; what is recorded with
 //! `--evidence` is [`recording`](crate::recording)'s.
 
 use std::{
@@ -33,7 +34,11 @@ use std::{
     time::Duration,
 };
 
-use addict_core::{APP_ID, input::window_state, translation::Translator};
+use addict_core::{
+    APP_ID,
+    input::window_state,
+    translation::{Request, Translator},
+};
 use addict_deepl::DeepL;
 use addict_platform::{
     shortcut::{self, ShortcutEvent, ShortcutHandle},
@@ -46,10 +51,11 @@ use gtk::{gdk, gio, glib, prelude::*};
 use crate::{
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
-    manual::{self, Edit, Manual, Translated},
+    manual::{self, Edit, Manual},
     online::{Kept, Subject},
     recording::Recording,
-    view::{Binding, Lookup, Shown},
+    translate::{self, Translated},
+    view::{Binding, Lookup, Online, Shown},
     widgets::View,
 };
 
@@ -281,7 +287,7 @@ impl Session {
     fn word_chosen(&mut self, index: usize) {
         // A click that came before the field's newer text was handled here
         // names a word of a sentence that is no longer shown.
-        if self.view.field_text() != self.manual.sentence() {
+        if self.field_is_newer() {
             return;
         }
         let Some(run) = self.manual.choose(index) else {
@@ -305,13 +311,20 @@ impl Session {
     /// changes, and an empty field or a sentence sends nothing.
     fn submitted(&mut self) {
         // As for a click: the field may hold a newer text already.
-        if self.view.field_text() != self.manual.sentence() {
+        if self.field_is_newer() {
             return;
         }
         if self.online.submit() {
             self.start_translation(Subject::Lone);
             self.render_online();
         }
+    }
+
+    /// Whether the field holds a newer text than the one handled here: an
+    /// event that came before that text was handled is about what is no
+    /// longer shown.
+    fn field_is_newer(&self) -> bool {
+        self.view.field_text() != self.manual.sentence()
     }
 
     /// Shows the input that was just chosen and starts its lookup, which has
@@ -378,10 +391,39 @@ impl Session {
         let request = self
             .manual
             .input()
-            .and_then(|input| manual::request(input, subject));
+            .and_then(|input| translate::request(input, subject));
+        let started = self.send_online(request, subject.into(), move |outcome, elapsed| {
+            Event::Translated {
+                text,
+                subject,
+                number,
+                outcome,
+                elapsed,
+            }
+        });
+        match started {
+            // Replaces, and so cancels, the request the slot held.
+            Ok(job) => *self.slot(subject) = Some(job),
+            Err(online) => {
+                self.online.answer(text, subject, number, online);
+            }
+        }
+    }
+
+    /// Starts the online `request` for `requested` as a job; every online
+    /// request of the session starts here. When it ends, `event` makes, on
+    /// the worker, what the UI thread is told from its outcome and the time
+    /// it took. A request that could not start is recorded at once and its
+    /// refusal is given back.
+    fn send_online(
+        &self,
+        request: Option<Request>,
+        requested: evidence::Requested,
+        event: impl FnOnce(Outcome<Translated>, Option<evidence::Elapsed>) -> Event + Send + 'static,
+    ) -> Result<Job, Online> {
         let sender = self.sender.clone();
         let probe = self.probe();
-        let started = manual::translate(
+        let started = translate::translate(
             self.work.upgrade().as_deref(),
             self.translator.clone(),
             request,
@@ -389,27 +431,27 @@ impl Session {
                 // On the worker: the UI thread wakes for the event, and the
                 // delay is the request's, not the redraw's.
                 let elapsed = probe.ended();
-                let _ = sender.unbounded_send(Event::Translated {
-                    text,
-                    subject,
-                    number,
-                    outcome,
-                    elapsed,
-                });
+                let _ = sender.unbounded_send(event(outcome, elapsed));
             },
         );
-        match started {
-            // Replaces, and so cancels, the request the slot held.
-            Ok(job) => *self.slot(subject) = Some(job),
-            Err(online) => {
-                self.record(manual::translation_unstarted(
-                    &online,
-                    subject.into(),
-                    probe,
-                ));
-                self.online.answer(text, subject, number, online);
-            }
+        if let Err(online) = &started {
+            self.record(translate::translation_unstarted(online, requested, probe));
         }
+        started
+    }
+
+    /// What an ended online request for `requested` shows, after its record
+    /// is written when there is one; `None` for a request that was given up:
+    /// it shows nothing and is not recorded.
+    fn online_ended(
+        &self,
+        outcome: Outcome<Translated>,
+        requested: evidence::Requested,
+        elapsed: Option<evidence::Elapsed>,
+    ) -> Option<Online> {
+        let (online, record) = translate::translation_ended(outcome, requested, elapsed)?;
+        self.record(record);
+        Some(online)
     }
 
     /// The measuring of an online request that starts now; it measures
@@ -419,7 +461,7 @@ impl Session {
     }
 
     /// Writes the `record` of an online request, when there is one. Whether
-    /// there is one is [`manual`]'s to say.
+    /// there is one is [`translate`]'s to say.
     fn record(&self, record: Option<evidence::Record>) {
         if let Some((recording, record)) = self.recording.as_ref().zip(record) {
             recording.translated_online(&record);
@@ -447,11 +489,9 @@ impl Session {
         outcome: Outcome<Translated>,
         elapsed: Option<evidence::Elapsed>,
     ) {
-        let Some((online, record)) = manual::translation_ended(outcome, subject.into(), elapsed)
-        else {
+        let Some(online) = self.online_ended(outcome, subject.into(), elapsed) else {
             return;
         };
-        self.record(record);
         if self.online.answer(text, subject, number, online) {
             *self.slot(subject) = None;
             self.render_online();
@@ -495,36 +535,29 @@ impl Session {
         }
     }
 
+    /// "Translate definition into Russian" was pressed: the definition of
+    /// the chosen sense is sent alone, as a job of its own, unless the field
+    /// holds a newer text or the shown result offers no definition to send.
     fn definition_action(&mut self) {
-        if self.view.field_text() != self.manual.sentence() {
+        // As for a click: the field may hold a newer text already.
+        if self.field_is_newer() {
             return;
         }
         let Some((number, request)) = self.shown.request_definition() else {
             return;
         };
-        let sender = self.sender.clone();
-        let probe = self.probe();
-        match manual::translate(
-            self.work.upgrade().as_deref(),
-            self.translator.clone(),
+        let started = self.send_online(
             Some(request),
-            move |outcome| {
-                // On the worker, as for a word.
-                let elapsed = probe.ended();
-                let _ = sender.unbounded_send(Event::DefinitionTranslated {
-                    number,
-                    outcome,
-                    elapsed,
-                });
+            evidence::Requested::Definition,
+            move |outcome, elapsed| Event::DefinitionTranslated {
+                number,
+                outcome,
+                elapsed,
             },
-        ) {
+        );
+        match started {
             Ok(job) => self.translating_definition = Some(job),
             Err(online) => {
-                self.record(manual::translation_unstarted(
-                    &online,
-                    evidence::Requested::Definition,
-                    probe,
-                ));
                 self.shown.answer_definition(number, online);
             }
         }
@@ -538,12 +571,10 @@ impl Session {
         outcome: Outcome<Translated>,
         elapsed: Option<evidence::Elapsed>,
     ) {
-        let Some((online, record)) =
-            manual::translation_ended(outcome, evidence::Requested::Definition, elapsed)
+        let Some(online) = self.online_ended(outcome, evidence::Requested::Definition, elapsed)
         else {
             return;
         };
-        self.record(record);
         if self.shown.answer_definition(number, online) {
             self.translating_definition = None;
             self.render_shown();
@@ -678,6 +709,30 @@ fn start_work() -> Option<Rc<Work>> {
     }
 }
 
+/// Starts the check of the indexes in `articles` on `work`; where they stand
+/// comes to `sender` as an event.
+fn start_check(
+    work: Option<&Work>,
+    articles: Arc<dyn Articles>,
+    sender: &UnboundedSender<Event>,
+) -> Option<Job> {
+    let checked = sender.clone();
+    manual::check_indexes(work, articles, move |indexes| {
+        // On the worker: the UI thread wakes for the event.
+        let _ = checked.unbounded_send(Event::Indexes(indexes));
+    })
+}
+
+/// The online translator and the key file it reads, for the window to name.
+/// Nothing is read or connected here: the key file and the network are the
+/// runner's, at the first click on a word of a sentence or the first submit
+/// of a lone word.
+fn online_translator() -> (Arc<dyn Translator>, Option<std::path::PathBuf>) {
+    let translator = DeepL::new();
+    let key_file = translator.key_file().map(std::path::Path::to_owned);
+    (Arc::new(translator), key_file)
+}
+
 /// Builds the hidden window, starts the first attempt to bind the shortcut
 /// and the event loop. Runs once, in the primary instance.
 fn start(
@@ -703,13 +758,8 @@ fn start(
     // Nothing is opened here: the indexes are files, and files are the
     // runner's.
     let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());
-    let checked = sender.clone();
-    let check = manual::check_indexes(work.as_deref(), articles.clone(), move |indexes| {
-        // On the worker: the UI thread wakes for the event.
-        let _ = checked.unbounded_send(Event::Indexes(indexes));
-    });
-    let translator = DeepL::new();
-    let key_file = translator.key_file().map(std::path::Path::to_owned);
+    let check = start_check(work.as_deref(), articles.clone(), &sender);
+    let (translator, key_file) = online_translator();
     let mut session = Session {
         binding,
         view,
@@ -723,10 +773,7 @@ fn start(
         shown: Shown::default(),
         work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),
         articles: articles.clone(),
-        // Nothing is read or connected here: the key file and the network
-        // are the runner's, at the first click on a word of a sentence or
-        // the first submit of a lone word.
-        translator: Arc::new(translator),
+        translator,
         key_file,
         translating_word: None,
         translating_sentence: None,

@@ -107,13 +107,13 @@
 //! kind, its outcome, its delay and the memory of the process, and never its
 //! text. Without the flag none of that exists.
 //!
-//! This module owns the command line and what each form of it starts; the
-//! entry commands are [`entries`]'s, the import is `addict_dictionary`'s, the
-//! indexes as a source of articles are [`dictionaries`]'s, the online
-//! translator is `addict_deepl`'s, what is asked of it and kept is
-//! [`online`]'s, the resident
-//! application is [`resident`]'s, the texts of its window are [`view`]'s and
-//! the widgets of the window are [`widgets`]'s.
+//! This module owns the command line and what each form of it starts; the entry
+//! commands are [`entries`]'s, the import is `addict_dictionary`'s, the indexes
+//! as a source of articles are [`dictionaries`]'s, the online translator is
+//! `addict_deepl`'s, what is asked of it and kept is [`online`]'s, where every
+//! request to it starts is [`translate`]'s, the resident application is
+//! [`resident`]'s, the texts of its window are [`view`]'s and the widgets of
+//! the window are [`widgets`]'s.
 
 mod dictionaries;
 mod entries;
@@ -123,6 +123,7 @@ mod online;
 mod presentation;
 mod recording;
 mod resident;
+mod translate;
 mod view;
 mod widgets;
 
