@@ -102,6 +102,11 @@ impl Recording {
         self.writer.borrow_mut().write(record);
     }
 
+    /// A capture ended as shown; `record` is what the evidence says of it.
+    pub fn ocr_ended(&self, record: &evidence::Record) {
+        self.writer.borrow_mut().write(record);
+    }
+
     /// The window was shown with no press behind it.
     pub fn shown_without_press(&self) {
         self.shown.set(true);

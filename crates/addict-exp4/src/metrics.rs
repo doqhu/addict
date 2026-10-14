@@ -598,9 +598,9 @@ fn ocr_precedes(rows: &[&Evidence], sample_index: usize) -> bool {
 
 /// The product is one process: the GTK4 resident cell, pressed from these.
 pub const PRODUCT_ORIGINS: [Origin; 2] = [Origin::Foliate, Origin::AndroidStudio];
-/// The idle states the memory threshold is judged on. The state after an OCR
-/// cycle belongs to the OCR epic and is reported as not measured.
-pub const PRODUCT_PHASES: [&str; 2] = ["before-invocation", "after-close"];
+/// The idle states the memory threshold is judged on: before the first warm
+/// press, after closing the result, and after an OCR cycle.
+pub const PRODUCT_PHASES: [&str; 3] = ["before-invocation", "after-close", "after-ocr"];
 /// The `lookup` records of the session that must lie between its trial and
 /// its closing sample: "after closing the result" is a state in which words
 /// were looked up.
@@ -619,7 +619,7 @@ pub struct ProductSummary {
     pub p95_ms: Option<f64>,
     pub max_ms: Option<f64>,
     pub latency_status: String,
-    /// The range over the samples that count, both idle states together.
+    /// The range over the samples that count, all idle states together.
     pub pss_min_bytes: Option<u64>,
     pub pss_max_bytes: Option<u64>,
     pub memory_status: String,
@@ -640,9 +640,11 @@ pub struct ProductSummary {
 }
 /// The acceptance of the product, one row per application, from its latest
 /// session. Unlike [`summarize`]: Android Studio has a row, one process is the
-/// whole inventory, two idle states are judged, any idle CPU fails, no
+/// whole inventory, three idle states are judged, any idle CPU fails, no
 /// `human-scenarios` record is needed, the closing sample counts only after
-/// [`PRODUCT_LOOKUPS`] lookups, and the data sets must be recorded.
+/// [`PRODUCT_LOOKUPS`] lookups, the sample after an OCR cycle only after a
+/// `recognized` `ocr` record, and the data sets must be recorded. The `ocr`
+/// and `online` records are counted nowhere else.
 pub fn summarize_product(
     records: &[Evidence],
     mapping: Option<&ClockMapping>,
@@ -690,6 +692,15 @@ pub fn summarize_product(
                 let from = trial_end.map_or(rows.len(), |end| end + 1).min(index);
                 rows[from..index].iter().filter(|r| r.event == "lookup")
             };
+            // A recognized capture between the trial and the row `index`: the
+            // state after an OCR cycle is one in which a text was recognized.
+            let recognized_before = |index: usize| {
+                trial_end.is_some_and(|end| {
+                    rows[end + 1..index]
+                        .iter()
+                        .any(|r| r.event == "ocr" && r.details["outcome"] == "recognized")
+                })
+            };
 
             let (mut memory_status, mut cpu_status) = ("pass", "pass");
             let mut pss = Vec::new();
@@ -711,11 +722,17 @@ pub fn summarize_product(
                         && sample["processes"]
                             .as_array()
                             .is_some_and(|all| all.iter().any(|p| p["pid"].as_u64() == pid))
-                        && if phase == "before-invocation" {
-                            first_warm.is_none_or(|first| index < first)
-                        } else {
-                            trial_end.is_some_and(|end| index > end)
-                                && lookups_before(index).count() >= PRODUCT_LOOKUPS
+                        && match phase {
+                            "before-invocation" => first_warm.is_none_or(|first| index < first),
+                            "after-close" => {
+                                trial_end.is_some_and(|end| index > end)
+                                    && lookups_before(index).count() >= PRODUCT_LOOKUPS
+                            }
+                            "after-ocr" => {
+                                trial_end.is_some_and(|end| index > end) && recognized_before(index)
+                            }
+                            // A phase with no rule of its own counts nothing.
+                            _ => false,
                         };
                     let sample_pss = sample["pss_bytes"].as_u64().filter(|_| counts);
                     let sample_cpu = sample["cpu_percent_one_core"].as_f64().filter(|_| counts);
@@ -751,8 +768,7 @@ pub fn summarize_product(
                 .rev()
                 .find(|r| r.event == "gpu")
                 .map(|r| r.details.clone());
-            let mut not_measured =
-                vec!["memory after an OCR cycle: left to the OCR epic".to_owned()];
+            let mut not_measured = Vec::new();
             if gpu
                 .as_ref()
                 .is_none_or(|g| g["gpu_bytes"].as_u64().is_none())
@@ -1465,7 +1481,19 @@ mod product_tests {
             None,
             json!({"cards":[],"processes":[],"gpu_bytes":null,"status":"not measured","notes":[]}),
         ));
+        rows.push(ocr(origin, "ended"));
+        rows.push(ocr(origin, "recognized"));
+        rows.push(memory(origin, "after-ocr", 40_000_000, 0.0));
         rows
+    }
+    /// An `ocr` record as the product writes it.
+    fn ocr(origin: Origin, outcome: &str) -> Evidence {
+        row(
+            origin,
+            "ocr",
+            None,
+            json!({"outcome":outcome,"capture_ms":2300,"recognition_ms":640,"child_peak_rss_bytes":98_304_000u64,"peak_rss_bytes":141_234_176u64,"pss_bytes":63_012_864u64,"child_processes":0}),
+        )
     }
     fn product(rows: &[Evidence], origin: Origin) -> ProductSummary {
         summarize_product(rows, Some(&mapping()))
@@ -1503,7 +1531,7 @@ mod product_tests {
             );
             assert_eq!(s.idle_cpu_percent_max, Some(0.0));
             assert_eq!(s.gpu.unwrap()["status"], "not measured");
-            assert_eq!(s.not_measured.len(), 2);
+            assert_eq!(s.not_measured, ["GPU memory of the process"]);
         }
     }
 
@@ -1540,6 +1568,105 @@ mod product_tests {
             serde_json::to_value(&s).unwrap(),
             serde_json::to_value(product(&plain, Origin::Foliate)).unwrap()
         );
+    }
+
+    #[test]
+    fn ocr_records_among_the_lookups_change_nothing() {
+        let plain = session(Origin::Foliate);
+        let mut rows = Vec::new();
+        for record in &plain {
+            rows.push(record.clone());
+            if record.event == "lookup" {
+                rows.push(ocr(Origin::Foliate, "recognized"));
+                rows.push(ocr(Origin::Foliate, "ended"));
+            }
+        }
+        // Also among the presses and before the closing sample.
+        let warm = rows
+            .iter()
+            .position(|r| r.event == "invocation" && r.details["cold"] == false)
+            .unwrap();
+        rows.insert(warm + 1, ocr(Origin::Foliate, "empty"));
+        let closing = rows
+            .iter()
+            .position(|r| r.event == "memory" && r.details["phase"] == "after-close")
+            .unwrap();
+        rows.insert(closing, ocr(Origin::Foliate, "unfinished"));
+        assert_eq!(rows.len(), plain.len() + 2 * PRODUCT_LOOKUPS + 2);
+
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!(s.acceptance, "pass", "{s:?}");
+        assert_eq!((s.warm_attempts, s.valid_latency_samples), (30, 30));
+        assert_eq!(s.lookups, PRODUCT_LOOKUPS);
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::to_value(product(&plain, Origin::Foliate)).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_sample_after_an_ocr_cycle_is_judged_like_the_others() {
+        let s = product(&session(Origin::Foliate), Origin::Foliate);
+        assert_eq!(
+            (s.memory_status.as_str(), s.acceptance.as_str()),
+            ("pass", "pass")
+        );
+
+        let mut rows = session(Origin::Foliate);
+        sample_mut(&mut rows, "after-ocr")["pss_bytes"] = json!(MEMORY_LIMIT + 1);
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!(
+            (s.memory_status.as_str(), s.acceptance.as_str()),
+            ("fail", "fail")
+        );
+        assert_eq!(s.pss_max_bytes, Some(MEMORY_LIMIT + 1));
+
+        let mut rows = session(Origin::Foliate);
+        sample_mut(&mut rows, "after-ocr")["cpu_percent_one_core"] = json!(0.5);
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!(
+            (s.idle_cpu_status.as_str(), s.acceptance.as_str()),
+            ("fail", "fail")
+        );
+    }
+
+    #[test]
+    fn the_sample_after_an_ocr_cycle_needs_a_recognized_capture_before_it() {
+        // An older session, with no such sample, is incomplete.
+        let mut rows = session(Origin::Foliate);
+        rows.retain(|r| !(r.event == "memory" && r.details["phase"] == "after-ocr"));
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!(
+            (s.memory_status.as_str(), s.acceptance.as_str()),
+            ("incomplete", "incomplete")
+        );
+        assert!(s.not_measured.iter().all(|note| !note.contains("OCR")));
+
+        // A capture that ended without text is no OCR cycle; values over the
+        // limit in a sample that does not count are not a failure.
+        let mut rows = session(Origin::Foliate);
+        rows.retain(|r| !(r.event == "ocr" && r.details["outcome"] == "recognized"));
+        sample_mut(&mut rows, "after-ocr")["pss_bytes"] = json!(MEMORY_LIMIT + 1);
+        let s = product(&rows, Origin::Foliate);
+        assert_eq!(
+            (s.memory_status.as_str(), s.acceptance.as_str()),
+            ("incomplete", "incomplete")
+        );
+        assert_eq!(s.pss_max_bytes, Some(MEMORY_LIMIT));
+
+        // Nor does a recognized one after the sample, or one before the
+        // trial ended.
+        let mut rows = session(Origin::Foliate);
+        let recognized = rows
+            .iter()
+            .position(|r| r.event == "ocr" && r.details["outcome"] == "recognized")
+            .unwrap();
+        let moved = rows.remove(recognized);
+        rows.push(moved.clone());
+        assert_eq!(product(&rows, Origin::Foliate).acceptance, "incomplete");
+        rows.pop();
+        rows.insert(3, moved);
+        assert_eq!(product(&rows, Origin::Foliate).acceptance, "incomplete");
     }
 
     #[test]
