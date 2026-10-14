@@ -1,0 +1,258 @@
+/* The look of the window: a quiet ground, one surface for the list of
+ * senses, one accent. The palette is the window's own, light and dark, so
+ * the window looks the same under any GTK theme; the widgets carry the
+ * classes that `widgets.rs` and `resident.rs` give them. Needs GTK 4.20:
+ * custom properties and the color-scheme media query. */
+
+:root {
+  --bg: #f6f6f8;
+  --surface: #ffffff;
+  --head: #ededf1;
+  --line: #e2e2e8;
+  --fg: #1b1b21;
+  --muted: #5b5b68;
+  --chip: #f0f0f4;
+  --accent: #2f5bd3;
+  --accent-soft: #eef2fc;
+  --on-accent: #ffffff;
+  --warn-bg: #fdf1e3;
+  --warn: #8a4b0c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c20;
+    --surface: #26262b;
+    --head: #2d2d33;
+    --line: #3a3a42;
+    --fg: #ececf0;
+    --muted: #a6a6b2;
+    --chip: #33333a;
+    --accent: #8aa8ff;
+    --accent-soft: #2a3150;
+    --on-accent: #10131f;
+    --warn-bg: #3a2c1d;
+    --warn: #f3c38a;
+  }
+}
+
+window.addict {
+  background-color: var(--bg);
+  color: var(--fg);
+}
+
+/* The header bar: the name beside an accent mark, a hairline below. */
+window.addict headerbar {
+  background: var(--head);
+  color: var(--fg);
+  box-shadow: inset 0 -1px var(--line);
+  min-height: 46px;
+}
+
+window.addict .brand-mark {
+  min-width: 14px;
+  min-height: 14px;
+  border-radius: 5px;
+  background: var(--accent);
+}
+
+window.addict .brand-name {
+  font-weight: 600;
+}
+
+/* Where the text came from and what the window does: one dim line. */
+window.addict .meta {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+/* The binding row and the line of the indexes: a soft warning block. */
+window.addict .banner {
+  background: var(--warn-bg);
+  color: var(--warn);
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+
+window.addict .banner label {
+  color: var(--warn);
+}
+
+/* The field and Capture: one height, one radius. */
+window.addict entry.lookup {
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: none;
+  outline: none;
+}
+
+window.addict entry.lookup:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+window.addict entry.lookup > text > placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+window.addict button.capture {
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: none;
+  font-weight: 500;
+}
+
+window.addict button.capture:hover {
+  background: var(--chip);
+}
+
+/* The sentence: larger, its words plain; the chosen one is bold. */
+window.addict label.sentence {
+  font-size: 1.15em;
+  padding: 2px 4px;
+}
+
+/* The words are the label's own colour, not the theme's link blue: a
+ * link takes `inherit`, which needs no custom property on the link node.
+ * No underline in any state: GTK keeps a link's hover after a click. */
+window.addict label.sentence > link,
+window.addict label.sentence > link:link,
+window.addict label.sentence > link:visited,
+window.addict label.sentence > link:hover {
+  color: inherit;
+  text-decoration: none;
+}
+
+window.addict scrolledwindow.result > viewport {
+  background: transparent;
+}
+
+/* The card of the word: the one raised surface of the window. */
+window.addict .article-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 18px 20px;
+}
+
+window.addict label.headword {
+  font-family: "Newsreader", "Source Serif 4", "Noto Serif", Georgia, serif;
+  font-size: 2.3em;
+  font-weight: 600;
+}
+
+window.addict .section-label {
+  color: var(--muted);
+  font-size: 0.75em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+window.addict .hint {
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+/* Pills: the translations, and the synonyms in outline. */
+window.addict label.pill {
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--chip);
+}
+
+window.addict wrap.pills > label.pill:first-child:not(.outline) {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+window.addict label.pill.outline {
+  padding: 2px 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  font-size: 0.9em;
+}
+
+/* The online texts: tinted with the accent, so they read as the other
+ * source. */
+window.addict label.online,
+window.addict .online-definition {
+  background: var(--accent-soft);
+  border-radius: 14px;
+  padding: 12px 16px;
+  line-height: 1.5;
+}
+
+/* The senses: a quiet row each, a number in a circle, the chosen one
+ * tinted. */
+window.addict button.sense {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--fg);
+  font-weight: normal;
+}
+
+window.addict button.sense:hover {
+  background: var(--chip);
+}
+
+window.addict button.sense.chosen {
+  background: var(--accent-soft);
+}
+
+window.addict label.number {
+  min-width: 22px;
+  min-height: 22px;
+  border-radius: 11px;
+  background: var(--chip);
+  color: var(--muted);
+  font-size: 0.8em;
+  font-weight: 600;
+}
+
+window.addict button.sense.chosen label.number {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+window.addict label.mark {
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+window.addict .explained {
+  padding: 4px 12px 10px 46px;
+}
+
+window.addict button.definition {
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 9px;
+  border: none;
+  background: var(--chip);
+  color: var(--fg);
+  box-shadow: none;
+  font-weight: 500;
+}
+
+window.addict button.definition:hover {
+  background: var(--line);
+}
+
+window.addict label:selected,
+window.addict label > selection {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
