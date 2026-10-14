@@ -1,1 +1,145 @@
-[]
+[
+  {
+    "file": "Screenshot From 2026-10-14 21-25-52.png",
+    "sha256": "6a598b85307806493d4481bbd1da41758799e66f020033e3430f1e61d8041876",
+    "source": {
+      "application": "Claude (inferred), chat reply",
+      "material": "assistant reply about designing a GTK 4 UI"
+    },
+    "display_scale": 1,
+    "word": "judging",
+    "sentence": "For now I’m assuming it’s the “addict” app, judging by recent commits about screen capture and text recognition, and I’ll look at the code once the canvas is open."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-26-00.png",
+    "sha256": "4468129550934e9d96ffa3c8f547a7a69e5527130f1b394726a3a8d21437211d",
+    "source": {
+      "application": "Claude (inferred), chat reply",
+      "material": "assistant reply about the EN→RU popup UI"
+    },
+    "display_scale": 1,
+    "word": "synonyms",
+    "sentence": "I’ll build out the popup EN→RU translator UI, including the header bar, clickable sentence words, article, senses with synonyms, and DeepL lines—starting on the canvas now."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-26-11.png",
+    "sha256": "4500820b91a274eb3bb0c45abce58afd776a7899bd84adba7cbf6ac515ce4d30",
+    "source": {
+      "application": "unknown (inferred: browser text area)",
+      "material": "image-generation prompt for an Eloqo LinkedIn cover, variant 1"
+    },
+    "display_scale": 1,
+    "word": "cropped",
+    "sentence": "IMPORTANT compose all text and logo in a thin horizontal band covering only the middle 26 percent of canvas height, so top and bottom can be cropped for a very panoramic banner."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-26-17.png",
+    "sha256": "5b824f18ac2fa1a67b5cd6a934d133d7c2200cfeb2279d01b6fe17ec1f0da22c",
+    "source": {
+      "application": "unknown (inferred: browser text area)",
+      "material": "image-generation prompt for an Eloqo LinkedIn banner, variant 2"
+    },
+    "display_scale": 1,
+    "word": "monogram",
+    "sentence": "Use attached approved eq monogram as exact brand reference, preserve open e and teal q tail."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-26-23.png",
+    "sha256": "6d49119e3b04a188e961f1bf9079624c21e02588b3662a4b4c663d2baa5ab70e",
+    "source": {
+      "application": "unknown (inferred: browser text area)",
+      "material": "image-generation prompt for an Eloqo LinkedIn banner, variant 3"
+    },
+    "display_scale": 1,
+    "word": "faithfully",
+    "sentence": "At x80-92 percent a compact white eq monogram with teal q tail based faithfully on attached logo, exact smaller white wordmark \"Eloqo\" below."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-26-31.png",
+    "sha256": "f8e2a0ee76dcd37a3b856d9de47af6bff8f3b0cbccaac2861e811af845d2d0af",
+    "source": {
+      "application": "unknown (inferred: terminal, monospace)",
+      "material": "change summary of publish_narration.py"
+    },
+    "display_scale": 1,
+    "word": "reliability",
+    "sentence": "The `publish_narration.py` scripts have been refactored to introduce thread safety and parallel processing for I/O operations, improving performance and reliability when interacting with Google Cloud Storage and Firebase Storage."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-26-51.png",
+    "sha256": "e35565ca7717f80b21a3c053247d90427bb941f84569e6e4a5a40f027ad357a7",
+    "source": {
+      "application": "unknown (inferred: e-book reader)",
+      "material": "Think Data Structures (inferred), preface"
+    },
+    "display_scale": 1,
+    "word": "Framework",
+    "sentence": "Starting with the structures in the Java Collections Framework (JCF), you will learn how to use data structures like lists and maps, and you will see how they work."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-27-02.png",
+    "sha256": "e8a9e10e3158e43d49ff364090f6c7e7dad5cab9fc524b4175cdacffe26f3aa2",
+    "source": {
+      "application": "unknown (inferred: e-book reader)",
+      "material": "Think Data Structures (inferred), linear search"
+    },
+    "display_scale": 1,
+    "word": "unlikely",
+    "sentence": "On average, we expect to test half of the elements, so this method is considered linear (except in the unlikely case that we know the target element is at the beginning of the array)."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-27-09.png",
+    "sha256": "e9c667a5292564b3cb6e9d24c612cd2685ebffd60e8b82b67dbfca80b92d8fe1",
+    "source": {
+      "application": "unknown (inferred: e-book reader)",
+      "material": "Think Data Structures (inferred), classifying indexOf"
+    },
+    "display_scale": 1,
+    "word": "classify",
+    "sentence": "Each time through the loop, indexOf invokes equals, so we have to classify equals first."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-27-22.png",
+    "sha256": "0a2e7ab13dfc1e3e2f20abd6a1a240d331a99766c3f9c467e58665da8e7bea0b",
+    "source": {
+      "application": "unknown (inferred: e-book reader)",
+      "material": "Think Data Structures (inferred), problem size"
+    },
+    "display_scale": 1,
+    "word": "iterations",
+    "sentence": "If the number of iterations is proportional to n for all loops, you can get away with just counting the loops."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-27-42.png",
+    "sha256": "5dda3ea7710c7526d3f59401cde56043c288ae80d76db8ed5906945017176364",
+    "source": {
+      "application": "unknown (inferred: browser)",
+      "material": "Claude.ai sign-in page"
+    },
+    "display_scale": 1,
+    "word": "expires",
+    "sentence": "This link expires in 10 minutes."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-27-52.png",
+    "sha256": "24ecb1d59fe672d1f430efb9407850625a36d30ef5f5e8d948b37403fe4b58b5",
+    "source": {
+      "application": "unknown (inferred: browser or mail)",
+      "material": "Avenga job-alert notice"
+    },
+    "display_scale": 1,
+    "word": "openings",
+    "sentence": "Since you have Connected to Avenga, you will always be updated with the latest job openings that fit your profile."
+  },
+  {
+    "file": "Screenshot From 2026-10-14 21-28-11.png",
+    "sha256": "ab75f0a4bf2cac4384776e3b98ead02a83583bfe5fdbb7475a96c9d75d7f58d5",
+    "source": {
+      "application": "unknown (inferred: job portal)",
+      "material": "Allianz job description preview"
+    },
+    "display_scale": 1,
+    "word": "holistic",
+    "sentence": "We implement market requirements from a holistic perspective with high quality and create a motivating work environment that lives with agile values."
+  }
+]
