@@ -533,7 +533,7 @@ const ONLINE_PENDING: &str = "Translating online…";
 const ONLINE_UNAVAILABLE: &str = "Online translation is not available.";
 
 /// The line of a text that is not sent as a sentence because of its length.
-const ONLINE_TOO_LONG: &str = "The text is too long to translate as a sentence.";
+const ONLINE_TOO_LONG: &str = "The sentence is too long to translate.";
 
 /// The online texts as Pango markup: a block for the word in its sentence,
 /// one for the word without a sentence and one for the sentence, in this
@@ -1070,10 +1070,7 @@ mod tests {
 
     #[test]
     fn a_text_that_is_too_long_says_so_under_the_label_of_the_sentence() {
-        assert_eq!(
-            ONLINE_TOO_LONG,
-            "The text is too long to translate as a sentence."
-        );
+        assert_eq!(ONLINE_TOO_LONG, "The sentence is too long to translate.");
         assert_ne!(ONLINE_TOO_LONG, ONLINE_UNAVAILABLE);
         let word = translated("берег");
         assert_eq!(

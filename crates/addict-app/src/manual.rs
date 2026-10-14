@@ -2,8 +2,11 @@
 //! chosen in it, the [`Input`] built from them and the lookup of the word.
 //!
 //! A text of exactly one word is that word without context: it is chosen at
-//! once, with no click, and its input has no sentence. A text of more words is
-//! a sentence, and the clicked word is the input together with it.
+//! once, with no click, and its input has no sentence. A typed or pasted text
+//! of more words is a sentence, and the clicked word is the input together
+//! with it. A recognized text often holds several sentences: the clicked word
+//! goes with the sentence around it only, and with none when that sentence
+//! is the word alone.
 //!
 //! The text comes from the user or from a screen capture. A recognized text
 //! is always a new text with the source OCR, and an edit of it keeps that
@@ -113,9 +116,9 @@ impl Manual {
     }
 
     /// What the text is for the online requests: no word, a lone word or a
-    /// sentence, which may be too long to be sent itself.
+    /// text of more words.
     pub fn kind(&self) -> Kind {
-        Kind::of(&self.sentence, self.words.len())
+        Kind::of(self.words.len())
     }
 
     /// Where the text of the field came from.
@@ -183,22 +186,51 @@ impl Manual {
     }
 
     /// The word with `index` is chosen, by a click or as the only word of the
-    /// text: it becomes the input, written as it is looked up, with the text
-    /// as its sentence when the text has another word. Gives the number of
-    /// the lookup to start, which replaces any earlier one, or `None` when
-    /// there is no such word.
+    /// text: it becomes the input, written as it is looked up, with its
+    /// sentence when it has one (see [`Manual::sentence_of`]). Gives the
+    /// number of the lookup to start, which replaces any earlier one, or
+    /// `None` when there is no such word.
     pub fn choose(&mut self, index: usize) -> Option<u64> {
         let word = self
             .words
             .get(index)
             .and_then(|range| self.sentence.get(range.clone()))?;
-        // One word is a word without context, whatever stands around it.
-        let context = (self.words.len() > 1).then_some(self.sentence.as_str());
+        let context = self
+            .sentence_of(index)
+            .and_then(|(_, span)| self.sentence.get(span));
         let input = Input::new(&sentence::lookup_word(word), context, self.source).ok()?;
         self.chosen = Some(index);
         self.input = Some(input);
         self.run += 1;
         Some(self.run)
+    }
+
+    /// The sentence of the word with `index`: its number in the text and its
+    /// byte range, or `None` when the word has none. A text of more than one
+    /// word that was not recognized is one sentence, the whole text, numbered
+    /// 0. In a recognized text it is the sentence around the word, numbered
+    /// in the order of the text, and only when it has another word: a word
+    /// that is a sentence alone has no context.
+    pub fn sentence_of(&self, index: usize) -> Option<(usize, Range<usize>)> {
+        let word = self.words.get(index)?;
+        match self.source {
+            Source::Manual | Source::AtSpi => {
+                (self.words.len() > 1).then_some((0, 0..self.sentence.len()))
+            }
+            Source::Ocr => {
+                let span = sentence::around(&self.sentence, word.clone());
+                let words = self
+                    .words
+                    .iter()
+                    .filter(|other| span.start <= other.start && other.end <= span.end)
+                    .count();
+                let number = sentence::sentences(&self.sentence)
+                    .iter()
+                    .take_while(|other| other.end <= span.start)
+                    .count();
+                (words > 1).then_some((number, span))
+            }
+        }
     }
 
     /// Whether `run` is the last started lookup and its word is still chosen.
@@ -840,12 +872,11 @@ pub(crate) mod tests {
     fn the_kind_of_the_text_is_counted_on_the_field_as_it_is() {
         assert_eq!(Manual::default().kind(), Kind::Empty);
         assert_eq!(with_sentence(" bank. ").kind(), Kind::Lone);
-        assert_eq!(with_sentence(RIVER).kind(), Kind::Sentence { long: false });
+        assert_eq!(with_sentence(RIVER).kind(), Kind::Sentence);
+        // However long: whether it is too long is judged on a sentence.
         assert_eq!(SENTENCE_LIMIT, 500);
-        let most = text_at_the_limit();
-        assert_eq!(with_sentence(&most).kind(), Kind::Sentence { long: false });
-        let over = format!("{most}.");
-        assert_eq!(with_sentence(&over).kind(), Kind::Sentence { long: true });
+        let over = format!("{}.", text_at_the_limit());
+        assert_eq!(with_sentence(&over).kind(), Kind::Sentence);
     }
 
     const OCR_DICTIONARY: WindowState = WindowState::Dictionary {
@@ -887,6 +918,68 @@ pub(crate) mod tests {
         assert!(!manual.awaits(run));
         assert_eq!(manual.chosen(), None);
         assert_eq!(manual.source(), Source::Ocr);
+    }
+
+    /// The index of the first word of `manual` that reads `word`.
+    fn index_of(manual: &Manual, word: &str) -> usize {
+        manual
+            .words()
+            .iter()
+            .position(|range| &manual.sentence()[range.clone()] == word)
+            .expect("word")
+    }
+
+    #[test]
+    fn a_word_of_a_recognized_text_goes_with_its_sentence_only() {
+        let mut manual = Manual::default();
+        let text = "I sat on the bank. The river was wide.";
+        manual.recognized(text.to_owned());
+        let river = index_of(&manual, "river");
+        manual.choose(river).expect("run");
+        let input = manual.input().expect("input");
+        assert_eq!(input.word(), "river");
+        assert_eq!(input.sentence(), Some("The river was wide."));
+        assert_eq!(input.source(), Source::Ocr);
+        assert_eq!(manual.sentence_of(river), Some((1, 19..text.len())));
+        let bank = index_of(&manual, "bank");
+        assert_eq!(manual.sentence_of(bank), Some((0, 0..18)));
+        manual.choose(bank).expect("run");
+        assert_eq!(
+            manual.input().expect("input").sentence(),
+            Some("I sat on the bank.")
+        );
+    }
+
+    #[test]
+    fn a_word_that_is_a_recognized_sentence_alone_has_no_sentence() {
+        let mut manual = Manual::default();
+        manual.recognized("Contents. I sat on the bank.".to_owned());
+        let contents = index_of(&manual, "Contents");
+        assert_eq!(manual.sentence_of(contents), None);
+        manual.choose(contents).expect("run");
+        let input = manual.input().expect("input");
+        assert_eq!(input.word(), "Contents");
+        assert_eq!(input.sentence(), None);
+        assert_eq!(
+            manual.state(),
+            WindowState::Dictionary {
+                source: Source::Ocr
+            }
+        );
+    }
+
+    #[test]
+    fn a_word_of_a_typed_text_of_sentences_goes_with_the_whole_text() {
+        let text = "A b. C d.";
+        let mut manual = with_sentence(text);
+        assert_eq!(manual.sentence_of(2), Some((0, 0..text.len())));
+        manual.choose(2).expect("run");
+        assert_eq!(manual.input().expect("input").sentence(), Some(text));
+        // A lone word has no sentence.
+        let mut manual = Manual::default();
+        lone(&mut manual, "bank");
+        assert_eq!(manual.sentence_of(0), None);
+        assert_eq!(manual.sentence_of(1), None);
     }
 
     #[test]

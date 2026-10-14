@@ -52,7 +52,7 @@ pub fn request(input: &Input, subject: Subject) -> Option<Request> {
             text: input.word().to_owned(),
             context: Some(sentence?),
         }),
-        Subject::Sentence => Some(Request {
+        Subject::Sentence(_) => Some(Request {
             text: sentence?,
             context: None,
         }),
@@ -165,7 +165,7 @@ pub(crate) mod tests {
             Edit, LOOKUP_LIMIT, Manual, look_up, lookup_result,
             tests::{WAIT, is_shown, lone, with_sentence},
         },
-        online::{Kept, Subject},
+        online::{Kept, Subject, is_long},
         view::{Lookup, Online, OnlineTexts, Whole},
     };
 
@@ -531,7 +531,10 @@ pub(crate) mod tests {
         let manual = bank_of_the_river();
         let input = manual.input().expect("input");
         assert_eq!(request(input, Subject::Word(BANK)), Some(bank_request()));
-        assert_eq!(request(input, Subject::Sentence), Some(sentence_request()));
+        assert_eq!(
+            request(input, Subject::Sentence(0)),
+            Some(sentence_request())
+        );
         // A word of a sentence is not sent without it.
         assert_eq!(request(input, Subject::Lone), None);
 
@@ -541,7 +544,7 @@ pub(crate) mod tests {
         assert_eq!(request(input, Subject::Lone), Some(lone_request("Bank")));
         // A lone word has no sentence to send, as text or as context.
         assert_eq!(request(input, Subject::Word(0)), None);
-        assert_eq!(request(input, Subject::Sentence), None);
+        assert_eq!(request(input, Subject::Sentence(0)), None);
     }
 
     /// The manual path as the resident drives it, without a window: an edit
@@ -587,9 +590,14 @@ pub(crate) mod tests {
             self.submit();
         }
 
+        /// A click on the word with `index`, as the resident handles it.
         fn click(&mut self, index: usize) {
             self.manual.choose(index).expect("run");
-            for subject in self.kept.click(index).ask {
+            let Some((number, span)) = self.manual.sentence_of(index) else {
+                return;
+            };
+            let long = is_long(&self.manual.sentence()[span]);
+            for subject in self.kept.click(index, number, long).ask {
                 self.send(subject);
             }
         }
@@ -652,6 +660,62 @@ pub(crate) mod tests {
                 sentence: Some(&whole),
                 lone: None,
             }
+        );
+    }
+
+    /// The text of 21-27-22 of EXP-8 at 2×, psm 6, as Tesseract gave it.
+    const PITFALL: &str = "When we talk about problem size, we have to be careful about which size, or sizes, we\nare talking about. This example demonstrates a pitfall of algorithm analysis: the\ntempting shortcut of counting loops. If there is one loop, the algorithm is often linear.\nIf there are two loops (one nested inside the other), the algorithm is often quadratic.\nBut be careful! You have to think about how many times each loop runs. If the num-\nber of iterations is proportional to n for all loops, you can get away with just counting\nthe loops. But if, as in this example, the number of iterations is not always propor-\ntional to n, you have to give it more thought.";
+
+    #[test]
+    fn a_word_of_a_recognized_text_sends_its_sentence_only() {
+        let mut desk = Desk::new(Ok("число"));
+        let text = addict_core::sentence::recognized(PITFALL).expect("text");
+        assert_ne!(desk.manual.recognized(text), Edit::Same);
+        desk.kept = Kept::of(desk.manual.text_number(), desk.manual.kind());
+        // The field is over the limit; the sentence is not.
+        assert!(is_long(desk.manual.sentence()));
+        let iterations = desk
+            .manual
+            .words()
+            .iter()
+            .position(|range| &desk.manual.sentence()[range.clone()] == "iterations")
+            .expect("word");
+        desk.click(iterations);
+        let sentence = "If the number of iterations is proportional to n for all loops, you can get away with just counting the loops.";
+        assert_eq!(
+            desk.asked(),
+            [
+                Request {
+                    text: "iterations".to_owned(),
+                    context: Some(sentence.to_owned()),
+                },
+                Request {
+                    text: sentence.to_owned(),
+                    context: None,
+                },
+            ]
+        );
+        // A word of another sentence sends that sentence.
+        let pitfall = desk
+            .manual
+            .words()
+            .iter()
+            .position(|range| &desk.manual.sentence()[range.clone()] == "pitfall")
+            .expect("word");
+        desk.click(pitfall);
+        let other = "This example demonstrates a pitfall of algorithm analysis: the tempting shortcut of counting loops.";
+        assert_eq!(
+            desk.asked()[2..],
+            [
+                Request {
+                    text: "pitfall".to_owned(),
+                    context: Some(other.to_owned()),
+                },
+                Request {
+                    text: other.to_owned(),
+                    context: None,
+                },
+            ]
         );
     }
 
@@ -753,7 +817,7 @@ pub(crate) mod tests {
         desk.edit(edited);
         assert_eq!(desk.shown(), OnlineTexts::default());
         // A late outcome of the old text is not kept.
-        for subject in [Subject::Word(BANK), Subject::Sentence] {
+        for subject in [Subject::Word(BANK), Subject::Sentence(0)] {
             assert!(!desk.kept.answer_current(old, subject, online("старый")));
         }
         assert_eq!(desk.shown(), OnlineTexts::default());
@@ -1015,8 +1079,8 @@ pub(crate) mod tests {
         )
         .expect("job");
         let mut kept = Kept::of(manual.text_number(), manual.kind());
-        let asked = kept.click(BANK).ask;
-        assert_eq!(asked, [Subject::Word(BANK), Subject::Sentence]);
+        let asked = kept.click(BANK, 0, false).ask;
+        assert_eq!(asked, [Subject::Word(BANK), Subject::Sentence(0)]);
         let translations: Vec<_> = asked
             .into_iter()
             .map(|subject| {

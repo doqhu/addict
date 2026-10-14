@@ -4,6 +4,13 @@
 //! text or one [`OcrFailure`] comes out, with the time the recognition took
 //! and the peak memory of the child.
 //!
+//! With a [`Params::scale`] above 1 the image is first upscaled that many
+//! times with Catmull-Rom, off the async thread, and written as PNG into
+//! the temporary directory, which Tesseract then reads; nothing else is done
+//! to it. An image that is not a PNG or JPEG, or does not decode, is
+//! [`OcrFailure::Failed`] and runs no child. An image whose upscaled size
+//! would be over [`MAX_SCALED_PIXELS`] is recognized as it is.
+//!
 //! The child runs as `tesseract <image> result -l <language> --psm <mode>`
 //! with its working directory in a fresh `0700` temporary directory, stdin
 //! null and `PR_SET_PDEATHSIG(SIGKILL)`. Its exit is awaited through a pidfd,
@@ -26,10 +33,14 @@ use std::{
     },
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
+use image::{ImageFormat, ImageReader, imageops::FilterType};
 use tokio::io::{Interest, unix::AsyncFd};
 
 /// The most text a recognition may give, in bytes; more is a failure.
@@ -48,6 +59,15 @@ const LANGUAGES_FILE: &str = "languages";
 /// The Tesseract program, found on `PATH`.
 const PROGRAM: &str = "tesseract";
 
+/// Where the upscaled image goes inside the temporary directory.
+const SCALED_FILE: &str = "scaled.png";
+
+/// The most pixels an upscaled image may have; a larger one is recognized
+/// at its own size. At the cap the upscale holds about 13 bytes per scaled
+/// pixel at its peak, about 52 MB: the `f32` RGBA intermediate of the
+/// resize, the RGBA output and the source.
+pub const MAX_SCALED_PIXELS: u64 = 4_000_000;
+
 /// The prefix of every temporary directory.
 pub const TEMP_PREFIX: &str = "addict-ocr-";
 
@@ -61,13 +81,17 @@ pub struct Params {
     pub language: &'static str,
     /// The `--psm` page segmentation mode.
     pub page_segmentation: u8,
+    /// How many times the image is upscaled before the recognition; 1 is
+    /// the image as it is.
+    pub scale: u8,
 }
 
 impl Params {
-    /// English, one uniform block of text.
+    /// English, one uniform block of text, upscaled twice (EXP-8).
     pub const ENGLISH: Params = Params {
         language: "eng",
         page_segmentation: 6,
+        scale: 2,
     };
 }
 
@@ -148,18 +172,32 @@ async fn attempt(
     temp_root: &Path,
     started: &mut (dyn FnMut(u32) + Send),
 ) -> Attempt {
-    let begun = Instant::now();
     let failed = |failure| Err((failure, None));
     // Absolute: the child runs in another directory.
     let image = match fs::canonicalize(image) {
         Ok(image) if image.is_file() => image,
         _ => return failed(OcrFailure::NoImage),
     };
-    // Declared first, so it is removed after the child is gone.
+    // Declared first, so it is removed after the child is gone. Shared with
+    // the upscale, so a recognition dropped during it leaves nothing behind.
     let directory = match TempDir::create(temp_root) {
-        Ok(directory) => directory,
+        Ok(directory) => Arc::new(directory),
         Err(e) => return failed(OcrFailure::Failed(format!("temporary directory: {e}"))),
     };
+    let image = if params.scale > 1 {
+        let shared = directory.clone();
+        let scale = params.scale;
+        let upscaled = tokio::task::spawn_blocking(move || upscale(&image, scale, &shared.0)).await;
+        match upscaled {
+            Ok(Ok(image)) => image,
+            Ok(Err(detail)) => return failed(OcrFailure::Failed(detail)),
+            Err(e) => return failed(OcrFailure::Failed(format!("upscale: {e}"))),
+        }
+    } else {
+        image
+    };
+    // After the upscale: the limit is the child's own.
+    let begun = Instant::now();
     let stderr = match fs::File::create(directory.0.join(STDERR_FILE)) {
         Ok(file) => file,
         Err(e) => return failed(OcrFailure::Failed(format!("stderr file: {e}"))),
@@ -208,6 +246,37 @@ async fn attempt(
         Ok(text) => Ok((text, peak)),
         Err(failure) => Err((failure, peak)),
     }
+}
+
+/// `image` upscaled `scale` times with Catmull-Rom and written as PNG into
+/// `directory`, or `image` itself when the upscaled size would be over
+/// [`MAX_SCALED_PIXELS`]. Only a PNG or JPEG is read; the size comes from its
+/// header, so a large image is not decoded at all. The error is the detail
+/// of the failure: `decode: …` when the image cannot be read.
+fn upscale(image: &Path, scale: u8, directory: &Path) -> Result<PathBuf, String> {
+    let decode = |e: &dyn std::fmt::Display| format!("decode: {e}");
+    let reader = || -> Result<ImageReader<io::BufReader<fs::File>>, String> {
+        let reader = ImageReader::open(image)
+            .and_then(ImageReader::with_guessed_format)
+            .map_err(|e| decode(&e))?;
+        match reader.format() {
+            Some(ImageFormat::Png | ImageFormat::Jpeg) => Ok(reader),
+            _ => Err(decode(&"not a PNG or JPEG image")),
+        }
+    };
+    let (width, height) = reader()?.into_dimensions().map_err(|e| decode(&e))?;
+    let scale = u32::from(scale);
+    let pixels = u64::from(width) * u64::from(height) * u64::from(scale * scale);
+    if pixels > MAX_SCALED_PIXELS {
+        return Ok(image.to_owned());
+    }
+    let source = reader()?.decode().map_err(|e| decode(&e))?;
+    let scaled = source.resize_exact(width * scale, height * scale, FilterType::CatmullRom);
+    let path = directory.join(SCALED_FILE);
+    scaled
+        .save_with_format(&path, ImageFormat::Png)
+        .map_err(|e| format!("write the upscaled image: {e}"))?;
+    Ok(path)
 }
 
 /// Whether `language` is a line of what `<program> --list-langs` prints,
@@ -434,7 +503,8 @@ mod tests {
     };
 
     use super::{
-        OUTPUT_LIMIT, OcrFailure, PROGRAM, Params, Recognition, TEMP_PREFIX, outcome, run,
+        MAX_SCALED_PIXELS, OUTPUT_LIMIT, OcrFailure, PROGRAM, Params, Recognition, TEMP_PREFIX,
+        outcome, run, upscale,
     };
 
     const FIXTURE: &str = concat!(
@@ -535,11 +605,98 @@ mod tests {
         assert!(scratch.leftovers().is_empty());
     }
 
+    /// English as the app asks for it, without the upscale.
+    const AS_IT_IS: Params = Params {
+        scale: 1,
+        ..Params::ENGLISH
+    };
+
+    #[test]
+    fn the_app_upscales_twice() {
+        assert_eq!(Params::ENGLISH.scale, 2);
+        assert_eq!(Params::ENGLISH.page_segmentation, 6);
+        assert_eq!(Params::ENGLISH.language, "eng");
+    }
+
+    #[test]
+    fn the_fixture_gives_its_sentence_as_it_is_too() {
+        let scratch = Scratch::new("fixture1");
+        let (recognition, pid) = recognized(&scratch, Path::new(FIXTURE), AS_IT_IS, LIMIT);
+        assert_eq!(
+            recognition.result.as_deref(),
+            Ok("The bank is beside the river.")
+        );
+        assert!(!exists(pid.expect("pid")));
+        assert!(scratch.leftovers().is_empty());
+    }
+
+    #[test]
+    fn an_undecodable_image_to_upscale_is_failed_and_runs_nothing() {
+        let scratch = Scratch::new("undecodable");
+        for (name, bytes) in [
+            ("text.png", b"not an image at all".to_vec()),
+            ("broken.png", b"\x89PNG\r\n\x1a\n broken".to_vec()),
+        ] {
+            let image = scratch.0.join(name);
+            fs::write(&image, bytes).expect("image");
+            let (recognition, pid) = recognized(&scratch, &image, Params::ENGLISH, LIMIT);
+            assert!(
+                matches!(&recognition.result, Err(OcrFailure::Failed(detail)) if detail.starts_with("decode: ")),
+                "{name}: {:?}",
+                recognition.result
+            );
+            assert_eq!(pid, None, "{name}");
+            assert_eq!(recognition.peak_rss_bytes, None, "{name}");
+            assert!(scratch.leftovers().is_empty(), "{name}");
+        }
+        // A PGM is read by Tesseract, but not upscaled.
+        let image = blank_image(&scratch);
+        let (recognition, pid) = recognized(&scratch, &image, Params::ENGLISH, LIMIT);
+        assert_eq!(
+            recognition.result,
+            Err(OcrFailure::Failed(
+                "decode: not a PNG or JPEG image".to_owned()
+            ))
+        );
+        assert_eq!(pid, None);
+    }
+
+    #[test]
+    fn an_image_too_large_to_upscale_is_recognized_as_it_is() {
+        let scratch = Scratch::new("large");
+        // 2× would be 4 400 000 pixels.
+        let (width, height) = (1100, 1000);
+        assert!(u64::from(width * height * 4) > MAX_SCALED_PIXELS);
+        let image = scratch.0.join("large.png");
+        image::GrayImage::from_pixel(width, height, image::Luma([255]))
+            .save(&image)
+            .expect("image");
+        let directory = scratch.0.join("upscale");
+        fs::create_dir(&directory).expect("directory");
+        assert_eq!(upscale(&image, 2, &directory), Ok(image.clone()));
+        assert_eq!(fs::read_dir(&directory).expect("directory").count(), 0);
+        // 100 columns fewer fits, and is upscaled.
+        let small = scratch.0.join("small.png");
+        image::GrayImage::from_pixel(1000, 1000, image::Luma([255]))
+            .save(&small)
+            .expect("image");
+        let scaled = upscale(&small, 2, &directory).expect("upscaled");
+        assert_eq!(scaled, directory.join("scaled.png"));
+        assert_eq!(
+            image::image_dimensions(&scaled).expect("size"),
+            (2000, 2000)
+        );
+        let (recognition, pid) = recognized(&scratch, &image, Params::ENGLISH, LIMIT);
+        assert_eq!(recognition.result, Err(OcrFailure::Empty));
+        assert!(!exists(pid.expect("pid")));
+        assert!(scratch.leftovers().is_empty());
+    }
+
     #[test]
     fn a_blank_image_is_empty() {
         let scratch = Scratch::new("blank");
         let image = blank_image(&scratch);
-        let (recognition, _) = recognized(&scratch, &image, Params::ENGLISH, LIMIT);
+        let (recognition, _) = recognized(&scratch, &image, AS_IT_IS, LIMIT);
         assert_eq!(recognition.result, Err(OcrFailure::Empty));
         assert!(scratch.leftovers().is_empty());
     }
@@ -550,6 +707,7 @@ mod tests {
         let params = Params {
             language: "addict_none",
             page_segmentation: 6,
+            scale: 1,
         };
         let (recognition, _) = recognized(&scratch, Path::new(FIXTURE), params, LIMIT);
         assert_eq!(recognition.result, Err(OcrFailure::LanguageMissing));
@@ -583,7 +741,7 @@ mod tests {
             let recognition = run(
                 PROGRAM,
                 Path::new(FIXTURE),
-                &Params::ENGLISH,
+                &AS_IT_IS,
                 LIMIT,
                 &scratch.0,
                 &mut started,
@@ -592,6 +750,33 @@ mod tests {
             let _ = tokio::time::timeout(Duration::from_millis(20), recognition).await;
         });
         assert!(!exists(pid.expect("pid")));
+        assert!(scratch.leftovers().is_empty());
+    }
+
+    #[test]
+    fn a_recognition_dropped_during_the_upscale_leaves_nothing() {
+        let scratch = Scratch::new("droppedscale");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let mut pid = None;
+        runtime.block_on(async {
+            let mut started = |p| pid = Some(p);
+            let recognition = run(
+                PROGRAM,
+                Path::new(FIXTURE),
+                &Params::ENGLISH,
+                LIMIT,
+                &scratch.0,
+                &mut started,
+            );
+            // Dropped before the upscale can end.
+            let _ = tokio::time::timeout(Duration::from_micros(1), recognition).await;
+        });
+        // Waits for the upscale, which then removes the directory.
+        drop(runtime);
+        assert_eq!(pid, None);
         assert!(scratch.leftovers().is_empty());
     }
     #[test]
@@ -653,7 +838,7 @@ mod tests {
         runtime.block_on(run(
             program.to_str().expect("path"),
             Path::new(FIXTURE),
-            &Params::ENGLISH,
+            &AS_IT_IS,
             limit,
             &scratch.0,
             &mut |_| {},
