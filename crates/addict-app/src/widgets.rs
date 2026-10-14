@@ -1,5 +1,6 @@
 //! The widgets of the window: the source label and the status on one line,
-//! below them the binding row and the line of the dictionary indexes, then
+//! right under them the capture line, then the binding row and the line of
+//! the dictionary indexes, then
 //! the field for a word or a sentence with the Capture button beside it,
 //! the text of the field with its words as links and, last, the result,
 //! which scrolls: the card of the word with its translations as pills, the
@@ -32,7 +33,7 @@ use gtk::{gio, glib, prelude::*};
 use crate::{
     dictionaries::Indexes,
     view::{
-        Binding, CAPTURE_LABEL, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, Listed, NO_TEXT,
+        Binding, CAPTURE_LABEL, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, Listed,
         OnlineTexts, RETRY_LABEL, SENSES_LABEL, SenseText, Shown, binding_texts, indexes_text,
         online_markup, result_texts, sentence_markup, texts,
     },
@@ -381,7 +382,8 @@ fn result_area() -> ResultArea {
     }
 }
 
-/// The source label and the status on one line, then the binding row: its
+/// The source label and the status on one line, the capture line when a
+/// capture gave no text, then the binding row: its
 /// line, the detail and Retry; the line of the indexes when there is
 /// something to say about them; then the field for a word or a sentence,
 /// the text of the field with its words as links, and the result, which
@@ -391,6 +393,9 @@ pub struct View {
     root: gtk::Box,
     source: gtk::Label,
     status: gtk::Label,
+    /// Why the last capture gave no text; hidden until one did, and again
+    /// once something new happens in the window.
+    capture_failure: gtk::Label,
     binding: gtk::Box,
     binding_text: gtk::Label,
     binding_detail: gtk::Label,
@@ -436,6 +441,14 @@ impl View {
         meta.append(&status);
         root.append(&meta);
 
+        // Wraps, so an install command fits. Not selectable, like the line
+        // of the indexes: it must not take the focus from the field.
+        let capture_failure = wrapping(gtk::Label::builder())
+            .css_classes(["banner"])
+            .visible(false)
+            .build();
+        root.append(&capture_failure);
+
         let binding_row = binding_row();
         root.append(&binding_row.row);
 
@@ -473,6 +486,7 @@ impl View {
             root,
             source,
             status,
+            capture_failure,
             binding: binding_row.row,
             binding_text: binding_row.text,
             binding_detail: binding_row.detail,
@@ -495,7 +509,8 @@ impl View {
         &self.root
     }
 
-    /// Shows the texts of `state` for a text from `source`.
+    /// Shows the texts of `state` for a text from `source`. The capture line
+    /// is left as it is: showing the window again keeps it.
     pub fn render(&self, state: WindowState, source: Source) {
         let texts = texts(state, source);
         self.source.set_text(texts.source);
@@ -534,10 +549,18 @@ impl View {
         self.retry.connect_clicked(move |_| retry());
     }
 
-    /// Shows that a capture gave no text, in place of the status, until the
-    /// next window state is shown.
-    pub fn render_no_text(&self) {
-        self.status.set_text(NO_TEXT);
+    /// Shows `line`, why a capture gave no text, under the source and the
+    /// status. [`View::render`] leaves it; [`View::clear_capture_failure`]
+    /// hides it.
+    pub fn render_capture_failure(&self, line: &str) {
+        self.capture_failure.set_text(line);
+        self.capture_failure.set_visible(true);
+    }
+
+    /// Hides the capture line.
+    pub fn clear_capture_failure(&self) {
+        self.capture_failure.set_visible(false);
+        self.capture_failure.set_text("");
     }
 
     /// Runs `changed` with the text of the field each time the user changes

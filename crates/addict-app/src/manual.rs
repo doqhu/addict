@@ -131,6 +131,11 @@ impl Manual {
     }
 
     /// Whether a capture is being recognized now.
+    pub fn reading(&self) -> bool {
+        self.reading
+    }
+
+    /// Sets whether a capture is being recognized now.
     pub fn set_reading(&mut self, reading: bool) {
         self.reading = reading;
     }
@@ -138,8 +143,11 @@ impl Manual {
     /// The field holds `text`: its words are rebuilt, and what was chosen in
     /// the old text is gone, with the outcome of its lookup. A text of exactly
     /// one word has that word chosen at once. The source stays, unless the
-    /// text has no word: then it is manual again.
+    /// text has no word: then it is manual again. An edit ends the reading
+    /// of a capture, even one that leaves the text as it was: the user's
+    /// text wins over the one being recognized.
     pub fn edit(&mut self, text: String) -> Edit {
+        self.reading = false;
         if text == self.sentence {
             return Edit::Same;
         }
@@ -950,6 +958,25 @@ pub(crate) mod tests {
         manual.set_reading(true);
         manual.set_reading(false);
         assert_eq!(manual.state(), WindowState::Empty);
+    }
+
+    #[test]
+    fn an_edit_ends_the_reading() {
+        let mut manual = Manual::default();
+        manual.set_reading(true);
+        assert!(manual.reading());
+        assert!(matches!(manual.edit("river".to_owned()), Edit::Lone(_)));
+        assert!(!manual.reading());
+        assert_eq!(manual.state(), DICTIONARY);
+        // Also an edit that leaves the text as it was.
+        let mut same = with_sentence("The bank is beside the river.");
+        same.set_reading(true);
+        assert_eq!(
+            same.edit("The bank is beside the river.".to_owned()),
+            Edit::Same
+        );
+        assert!(!same.reading());
+        assert_eq!(same.state(), WindowState::Empty);
     }
 
     #[test]

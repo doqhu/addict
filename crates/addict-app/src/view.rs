@@ -1,6 +1,7 @@
 //! What the window says about its state: the source label and the status,
-//! below them the binding row when the shortcut is not bound and the line of
-//! the dictionary indexes when one is missing or unreadable, then the field
+//! right under them the capture line when a capture gave no text, then the
+//! binding row when the shortcut is not bound and the line of the
+//! dictionary indexes when one is missing or unreadable, then the field
 //! for a word or a sentence, the text of the field with its words as links
 //! and the result of the lookup of the chosen word: what is said about the
 //! word, its translations among it, and the senses of the word in a list,
@@ -11,7 +12,7 @@
 //! translated without a sentence.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
-//! [`binding_texts`], [`indexes_text`], [`sentence_markup`],
+//! [`binding_texts`], [`indexes_text`], [`failure_text`], [`sentence_markup`],
 //! [`result_texts`] and [`online_markup`] are pure, and
 //! so is [`Shown`], the result with the sense chosen in it; they are tested
 //! without a display. This module owns no
@@ -25,7 +26,12 @@ use addict_core::{
     translation::{Refusal, Request},
 };
 
-use crate::dictionaries::{IndexFile, Indexes, State};
+use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
+
+use crate::{
+    capture::Failure,
+    dictionaries::{IndexFile, Indexes, State},
+};
 
 /// The two texts of one window state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,9 +182,47 @@ pub(crate) const FIELD_PLACEHOLDER: &str = "Type or paste a word, or a sentence 
 /// puts the text recognized in it into the field.
 pub(crate) const CAPTURE_LABEL: &str = "Capture";
 
-/// What the status says when a capture gave no text, whatever the reason;
-/// the next window state replaces it.
-pub(crate) const NO_TEXT: &str = "No text was recognized.";
+/// The command that installs Tesseract with its English data.
+pub(crate) const INSTALL_TESSERACT: &str = "sudo dnf install tesseract tesseract-langpack-eng";
+
+/// The command that installs the English data of Tesseract.
+pub(crate) const INSTALL_ENGLISH: &str = "sudo dnf install tesseract-langpack-eng";
+
+/// What the capture line says when the snapshot file is not there, whether
+/// the capture or the recognition found it missing.
+const NO_SNAPSHOT_FILE: &str = "The snapshot file was not found.";
+
+/// What the capture line says for `failure`, a capture that gave no text.
+/// The portal's code 2, which GNOME also gives for Esc, claims no cause; a
+/// missing Tesseract or missing English data names the command that
+/// installs it. No wildcard arm: a new failure does not compile until it
+/// is given its line.
+pub fn failure_text(failure: &Failure) -> Cow<'static, str> {
+    match failure {
+        Failure::Capture(failure) => match failure {
+            CaptureFailure::Cancelled => "The capture was cancelled.".into(),
+            CaptureFailure::Ended => "No snapshot was taken.".into(),
+            CaptureFailure::Unavailable => "Screen capture is not available here.".into(),
+            CaptureFailure::Failed(detail) => format!("The screen capture failed: {detail}").into(),
+            CaptureFailure::NoImage => NO_SNAPSHOT_FILE.into(),
+        },
+        Failure::CaptureTimedOut => "No area was chosen in time.".into(),
+        Failure::Ocr(failure) => match failure {
+            OcrFailure::NoImage => NO_SNAPSHOT_FILE.into(),
+            OcrFailure::TesseractMissing => {
+                format!("Tesseract is not installed. Install it with: {INSTALL_TESSERACT}").into()
+            }
+            OcrFailure::LanguageMissing => {
+                format!("English OCR data is not installed. Install it with: {INSTALL_ENGLISH}")
+                    .into()
+            }
+            OcrFailure::Failed(detail) => format!("Text recognition failed: {detail}").into(),
+            OcrFailure::Empty => "No text was recognized.".into(),
+            OcrFailure::TimedOut => "Text recognition took too long.".into(),
+        },
+        Failure::Unfinished => "The capture did not finish.".into(),
+    }
+}
 
 /// The sentence as Pango markup: the text as given, with each of `words` (byte
 /// ranges of `sentence`, in order) as a link whose target is the index of the
@@ -687,14 +731,20 @@ mod tests {
 
     use super::{
         Binding, CAPTURE_LABEL, CHOOSE_SENSE, EXPLANATION_MARK, FIELD_PLACEHOLDER, Listed, Lookup,
-        NO_DEFINITIONS, NO_SYNONYMS, NO_TEXT, NO_TRANSLATION, ONLINE_LONE_LABEL, ONLINE_PENDING,
+        NO_DEFINITIONS, NO_SYNONYMS, NO_TRANSLATION, ONLINE_LONE_LABEL, ONLINE_PENDING,
         ONLINE_SENTENCE_LABEL, ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online,
         OnlineTexts, PENDING, RUSSIAN_LABEL, ResultTexts, SYNONYMS_LABEL, Shown, UNFINISHED, Whole,
         binding_texts, indexes_text, online_markup, result_texts, sentence_markup, texts,
     };
-    use crate::dictionaries::{
-        Indexes, State,
-        tests::{FREEDICT, OEWN},
+    use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
+
+    use super::{INSTALL_ENGLISH, INSTALL_TESSERACT, failure_text};
+    use crate::{
+        capture::Failure,
+        dictionaries::{
+            Indexes, State,
+            tests::{FREEDICT, OEWN},
+        },
     };
 
     fn definition_shown() -> Shown {
@@ -1066,8 +1116,9 @@ mod tests {
     #[test]
     fn the_capture_texts_are_one_line_each_and_name_no_cause() {
         assert_eq!(CAPTURE_LABEL, "Capture");
-        assert_eq!(NO_TEXT, "No text was recognized.");
-        for text in [CAPTURE_LABEL, NO_TEXT] {
+        let empty = failure_text(&Failure::Ocr(OcrFailure::Empty));
+        assert_eq!(empty, "No text was recognized.");
+        for text in [CAPTURE_LABEL, &empty] {
             assert_eq!(text.lines().count(), 1, "{text}");
         }
         // The status of a capture being read is the waiting one, from OCR.
@@ -1078,7 +1129,103 @@ mod tests {
             Source::Manual,
         );
         assert_eq!(waiting.source, "screen capture (OCR)");
-        assert_ne!(waiting.status, NO_TEXT);
+        assert_ne!(waiting.status, empty);
+    }
+
+    /// Every failure of a capture, each once.
+    fn every_failure() -> Vec<Failure> {
+        vec![
+            Failure::Capture(CaptureFailure::Cancelled),
+            Failure::Capture(CaptureFailure::Ended),
+            Failure::Capture(CaptureFailure::Unavailable),
+            Failure::Capture(CaptureFailure::Failed("no portal answer".to_owned())),
+            Failure::Capture(CaptureFailure::NoImage),
+            Failure::CaptureTimedOut,
+            Failure::Ocr(OcrFailure::NoImage),
+            Failure::Ocr(OcrFailure::TesseractMissing),
+            Failure::Ocr(OcrFailure::LanguageMissing),
+            Failure::Ocr(OcrFailure::Failed(
+                "tesseract exit status 1: bad".to_owned(),
+            )),
+            Failure::Ocr(OcrFailure::Empty),
+            Failure::Ocr(OcrFailure::TimedOut),
+            Failure::Unfinished,
+        ]
+    }
+
+    #[test]
+    fn the_capture_lines_are_as_agreed() {
+        let lines: Vec<String> = every_failure()
+            .iter()
+            .map(|failure| failure_text(failure).into_owned())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "The capture was cancelled.",
+                "No snapshot was taken.",
+                "Screen capture is not available here.",
+                "The screen capture failed: no portal answer",
+                "The snapshot file was not found.",
+                "No area was chosen in time.",
+                "The snapshot file was not found.",
+                "Tesseract is not installed. Install it with: sudo dnf install tesseract tesseract-langpack-eng",
+                "English OCR data is not installed. Install it with: sudo dnf install tesseract-langpack-eng",
+                "Text recognition failed: tesseract exit status 1: bad",
+                "No text was recognized.",
+                "Text recognition took too long.",
+                "The capture did not finish.",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_capture_failure_has_a_line_of_its_own() {
+        let failures = every_failure();
+        for (i, a) in failures.iter().enumerate() {
+            for b in &failures[i + 1..] {
+                // The missing snapshot file is one line, whoever found it.
+                let same_file = matches!(
+                    (a, b),
+                    (
+                        Failure::Capture(CaptureFailure::NoImage),
+                        Failure::Ocr(OcrFailure::NoImage)
+                    )
+                );
+                if !same_file {
+                    assert_ne!(failure_text(a), failure_text(b), "{a:?} and {b:?}");
+                }
+            }
+        }
+        for failure in &failures {
+            let text = failure_text(failure);
+            assert_eq!(text.lines().count(), 1, "{text}");
+            assert!(!text.is_empty());
+        }
+    }
+
+    #[test]
+    fn code_2_claims_no_cause() {
+        let ended = failure_text(&Failure::Capture(CaptureFailure::Ended)).to_lowercase();
+        assert!(!ended.contains("cancel"), "{ended}");
+        assert!(!ended.contains("esc"), "{ended}");
+    }
+
+    #[test]
+    fn the_install_commands_stand_only_in_their_lines() {
+        for failure in every_failure() {
+            let text = failure_text(&failure);
+            assert_eq!(
+                text.contains(INSTALL_TESSERACT),
+                failure == Failure::Ocr(OcrFailure::TesseractMissing),
+                "{text}"
+            );
+            assert_eq!(
+                text.contains(INSTALL_ENGLISH),
+                failure == Failure::Ocr(OcrFailure::LanguageMissing),
+                "{text}"
+            );
+        }
     }
 
     #[test]

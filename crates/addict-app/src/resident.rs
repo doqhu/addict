@@ -28,8 +28,16 @@
 //! the reading state once the snapshot is there, and the recognized text
 //! then replaces the field as a new text with the source OCR, which follows
 //! the manual path from there. A capture without text leaves the field as
-//! it was and says so in the status. Capture cannot be pressed while one
-//! runs. The job is [`capture`](crate::capture)'s; how a request starts
+//! it was, starts no lookup and no online request, and says why in the
+//! capture line under the status; the line stays, also when the window is
+//! shown again, until the field is edited, Capture is pressed or a text is
+//! recognized. Capture cannot be pressed while the area is being chosen;
+//! once the snapshot is there it can, and it is the retry: pressing it, or
+//! editing the field, gives up the recognition that runs. Giving up is
+//! dropping the job, which kills the Tesseract child and deletes the
+//! snapshot, and shows nothing. Each capture job has a number, so what a
+//! given-up job had already sent is ignored. The job is
+//! [`capture`](crate::capture)'s; how a request starts
 //! and ends is [`translate`](crate::translate)'s; what is recorded with
 //! `--evidence` is [`recording`](crate::recording)'s.
 
@@ -49,6 +57,7 @@ use addict_core::{
 };
 use addict_deepl::DeepL;
 use addict_platform::{
+    ocr::OcrFailure,
     shortcut::{self, ShortcutEvent, ShortcutHandle},
     work::{Job, Outcome, Work},
 };
@@ -57,7 +66,7 @@ use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
-    capture::{self, Captured},
+    capture::{self, Captured, Failure},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
     manual::{self, Edit, Manual},
@@ -65,7 +74,7 @@ use crate::{
     recording::Recording,
     style,
     translate::{self, Translated},
-    view::{Binding, Lookup, Online, Shown},
+    view::{Binding, Lookup, Online, Shown, failure_text},
     widgets::View,
 };
 
@@ -132,10 +141,11 @@ enum Event {
     Capture,
     /// The window hidden for a capture is off the screen.
     Hidden,
-    /// The capture job has its snapshot and recognizes it now.
-    Captured,
-    /// The capture job ended.
-    Recognized(Outcome<Captured>),
+    /// The capture job with this number has its snapshot and recognizes it
+    /// now.
+    Captured(u64),
+    /// The capture job with this number ended.
+    Recognized(u64, Outcome<Captured>),
 }
 
 /// Starts one attempt to bind the shortcut; its events go to `sender`. With
@@ -247,8 +257,12 @@ struct Session {
     /// The check of the indexes at the start; dropping it cancels the check.
     check: Option<Job>,
     /// The capture job, from Capture to its end; dropping it cancels the
-    /// job, which deletes its snapshot.
+    /// job, which kills its Tesseract child and deletes its snapshot.
     capturing: Option<Job>,
+    /// The number of the last started capture job. An event that carries
+    /// another number, or comes when no job runs, is from a job that was
+    /// given up.
+    capture_number: u64,
     /// Between Capture and the start of its job, while the window leaves
     /// the screen.
     hiding: bool,
@@ -292,19 +306,28 @@ impl Session {
             }
             Event::Capture => self.capture(),
             Event::Hidden => self.start_capture(),
-            Event::Captured => self.snapshot_taken(),
-            Event::Recognized(outcome) => self.recognized(outcome),
+            Event::Captured(number) => self.snapshot_taken(number),
+            Event::Recognized(number, outcome) => self.recognized(number, outcome),
         }
     }
 
     /// Capture was pressed: the window hides, so it is not in the capture,
-    /// and Capture cannot be pressed again. The job starts once the hide has
-    /// reached the screen. One capture at a time: a press queued behind
-    /// another starts nothing.
+    /// and Capture cannot be pressed again until the snapshot is there. The
+    /// job starts once the hide has reached the screen. A press while a
+    /// snapshot is being recognized gives that recognition up and starts a
+    /// new capture; a press queued behind one whose area is being chosen
+    /// starts nothing. The capture line goes.
     fn capture(&mut self) {
-        if self.hiding || self.capturing.is_some() {
+        if self.hiding {
             return;
         }
+        if self.capturing.is_some() {
+            if !self.manual.reading() {
+                return;
+            }
+            self.give_up_capture();
+        }
+        self.view.clear_capture_failure();
         self.hiding = true;
         // Hidden, so on Wayland the compositor places the window anew when it
         // comes back. The opacity of a GTK 4 toplevel is ignored, and making
@@ -326,16 +349,18 @@ impl Session {
             return;
         }
         self.hiding = false;
+        self.capture_number += 1;
+        let number = self.capture_number;
         let captured = self.sender.clone();
         let ended = self.sender.clone();
         let started = capture::start(
             self.work.upgrade().as_deref(),
             move || {
                 // On the worker: the UI thread wakes for the event.
-                let _ = captured.unbounded_send(Event::Captured);
+                let _ = captured.unbounded_send(Event::Captured(number));
             },
             move |outcome| {
-                let _ = ended.unbounded_send(Event::Recognized(outcome));
+                let _ = ended.unbounded_send(Event::Recognized(number, outcome));
             },
         );
         match started {
@@ -344,18 +369,36 @@ impl Session {
         }
     }
 
-    /// The snapshot is there and is being recognized: the window comes back
-    /// and says so while there is no input.
-    fn snapshot_taken(&mut self) {
-        if self.capturing.is_none() {
+    /// Whether the capture job with `number` is the one that runs.
+    fn is_capturing(&self, number: u64) -> bool {
+        self.capturing.is_some() && number == self.capture_number
+    }
+
+    /// Gives up the capture job: dropping it kills its Tesseract child and
+    /// deletes its snapshot; it shows nothing.
+    fn give_up_capture(&mut self) {
+        self.capturing = None;
+        self.manual.set_reading(false);
+    }
+
+    /// The snapshot of the job with `number` is there and is being
+    /// recognized: the window comes back and says so while there is no
+    /// input, and Capture can be pressed again, as the retry.
+    fn snapshot_taken(&mut self, number: u64) {
+        if !self.is_capturing(number) {
             return;
         }
         self.manual.set_reading(true);
+        self.view.set_capture_sensitive(true);
         self.reveal();
     }
 
-    /// The capture job ended.
-    fn recognized(&mut self, outcome: Outcome<Captured>) {
+    /// The capture job with `number` ended; one that was given up shows
+    /// nothing.
+    fn recognized(&mut self, number: u64, outcome: Outcome<Captured>) {
+        if !self.is_capturing(number) {
+            return;
+        }
         // A cancelled job was dropped here on purpose and shows nothing.
         let Some(captured) = capture::captured_result(outcome) else {
             return;
@@ -364,25 +407,28 @@ impl Session {
     }
 
     /// The capture is over with `captured`: Capture can be pressed again. A
-    /// text replaces the field as a new text from the capture; anything
-    /// else leaves the field as it was and says that no text was
-    /// recognized. The window is shown either way.
+    /// text replaces the field as a new text from the capture and the
+    /// capture line goes; anything else, a text without a word among it,
+    /// leaves the field as it was, starts nothing and says why in the
+    /// capture line. The window is shown either way, the field focused.
     fn capture_ended(&mut self, captured: Captured) {
         self.capturing = None;
         self.view.set_capture_sensitive(true);
         self.manual.set_reading(false);
         let line = match captured {
-            Captured::Text(text) => sentence::pasted(&text),
-            Captured::Failed(failure) => {
+            Captured::Text(text) => sentence::pasted(&text).ok_or(Failure::Ocr(OcrFailure::Empty)),
+            Captured::Failed(failure) => Err(failure),
+        };
+        let line = match line {
+            Ok(line) => line,
+            Err(failure) => {
                 eprintln!("addict: no text from the capture: {failure:?}");
-                None
+                self.reveal();
+                self.view.render_capture_failure(&failure_text(&failure));
+                return;
             }
         };
-        let Some(line) = line else {
-            self.reveal();
-            self.view.render_no_text();
-            return;
-        };
+        self.view.clear_capture_failure();
         let edit = self.manual.recognized(line);
         self.view.set_field_text(self.manual.sentence());
         self.text_replaced(edit);
@@ -408,9 +454,20 @@ impl Session {
     /// The field holds another text: what was chosen in the old one is gone,
     /// and so is every online text of it. A text of one word is that word
     /// without context, looked up at once; nothing of it is sent online.
+    ///
+    /// The capture line goes. A snapshot being recognized is given up: the
+    /// user's text wins, and the state no longer says the capture is read.
     fn sentence_changed(&mut self, text: String) {
+        self.view.clear_capture_failure();
+        let gave_up = self.capturing.is_some() && self.manual.reading();
+        if gave_up {
+            self.give_up_capture();
+        }
         let edit = self.manual.edit(text);
         self.text_replaced(edit);
+        if gave_up {
+            self.view.render(self.manual.state(), self.manual.source());
+        }
     }
 
     /// What follows a new text in the field, typed, pasted or recognized:
@@ -945,6 +1002,7 @@ fn start(
         online: Kept::default(),
         check,
         capturing: None,
+        capture_number: 0,
         hiding: false,
     };
     glib::spawn_future_local(async move {
