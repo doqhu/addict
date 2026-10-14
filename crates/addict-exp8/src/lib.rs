@@ -695,7 +695,7 @@ impl Drop for TempDir {
     }
 }
 
-/// `time` as `2026-10-13T18:22:05Z`.
+/// `time` as `2026-10-13T18:42:05Z`.
 fn utc(time: SystemTime) -> String {
     let seconds = time
         .duration_since(UNIX_EPOCH)
