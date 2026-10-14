@@ -139,9 +139,11 @@ mod online;
 mod presentation;
 mod recording;
 mod resident;
+mod style;
 mod translate;
 mod view;
 mod widgets;
+mod wrap;
 
 use std::{
     cell::RefCell,

@@ -63,6 +63,7 @@ use crate::{
     manual::{self, Edit, Manual},
     online::{Kept, Subject},
     recording::Recording,
+    style,
     translate::{self, Translated},
     view::{Binding, Lookup, Online, Shown},
     widgets::View,
@@ -157,6 +158,23 @@ const HIDE_SETTLE: Duration = Duration::from_millis(300);
 /// senses with one of them chosen fits without scrolling its list.
 const WINDOW_HEIGHT: i32 = 480;
 
+/// The header bar: the name of the application beside its accent mark, and
+/// the window's buttons.
+pub(crate) fn header_bar() -> gtk::HeaderBar {
+    let mark = gtk::Box::builder()
+        .valign(gtk::Align::Center)
+        .css_classes(["brand-mark"])
+        .build();
+    let name = gtk::Label::builder()
+        .label("Addict")
+        .css_classes(["brand-name"])
+        .build();
+    let title = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    title.append(&mark);
+    title.append(&name);
+    gtk::HeaderBar::builder().title_widget(&title).build()
+}
+
 /// The hidden window around the `view`: closing it hides it, and so does Esc.
 fn build_window(application: &gtk::Application, view: &View) -> gtk::ApplicationWindow {
     let window = gtk::ApplicationWindow::builder()
@@ -165,6 +183,8 @@ fn build_window(application: &gtk::Application, view: &View) -> gtk::Application
         .default_width(480)
         .default_height(WINDOW_HEIGHT)
         .child(view.root())
+        .css_classes(["addict"])
+        .titlebar(&header_bar())
         .build();
     // Closing hides; the process and this window stay.
     window.connect_close_request(|window| {
@@ -887,6 +907,7 @@ fn start(
 
     // The first attempt starts below, with the window still hidden.
     let binding = Binding::Attempting;
+    style::install();
     let view = View::new(window_state(None, None), &binding);
     connect_view(&view, &sender);
     let window = build_window(application, &view);
