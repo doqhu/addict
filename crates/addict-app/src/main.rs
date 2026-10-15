@@ -116,6 +116,15 @@
 //! field empty. A new press, an edit of the field or a capture gives up a
 //! read that runs.
 //!
+//! The application has an icon in the top bar, a StatusNotifierItem, with a
+//! menu of Show, Settings and Exit, which a click on the icon opens. Show shows
+//! the window as a repeated launch does, without a read. Settings shows a window
+//! with the trigger of the shortcut, the file of the DeepL key and the state
+//! it is in, never the key, and a button that asks the portal for its dialog
+//! to change the shortcut; the line there says when it cannot. Exit ends the
+//! application. A session with no StatusNotifierHost says so once on stderr
+//! and goes on without the icon.
+//!
 //! The application is unique: a second launch exits at once and makes the
 //! resident instance show its window as it is, without a read.
 //!
@@ -146,7 +155,8 @@
 //! request to it starts is [`translate`]'s, the capture job is [`capture`]'s,
 //! the accessibility read is [`context`]'s,
 //! and its portal, accessibility and Tesseract adapters are `addict_platform`'s, the
-//! resident application is [`resident`]'s, the texts of its window are
+//! resident application is [`resident`]'s, the Settings window is
+//! [`settings`]'s, the texts of its window are
 //! [`view`]'s and the widgets of the window are [`widgets`]'s.
 
 mod capture;
@@ -159,6 +169,7 @@ mod online;
 mod presentation;
 mod recording;
 mod resident;
+mod settings;
 mod style;
 mod translate;
 mod view;

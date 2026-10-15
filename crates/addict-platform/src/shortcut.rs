@@ -14,13 +14,15 @@ use ashpd::{
     AppID,
     desktop::{
         CreateSessionOptions, Session,
-        global_shortcuts::{BindShortcutsOptions, GlobalShortcuts, NewShortcut},
+        global_shortcuts::{
+            BindShortcutsOptions, ConfigureShortcutsOptions, GlobalShortcuts, NewShortcut,
+        },
     },
     zbus,
     zvariant::{self, OwnedObjectPath, OwnedValue},
 };
 use futures_util::StreamExt;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 /// The id of the single shortcut bound inside the session.
 pub const SHORTCUT_ID: &str = "invoke";
@@ -30,8 +32,13 @@ const SHORTCUT_DESCRIPTION: &str = "Show Addict";
 /// How long closing the session may take when the worker stops.
 const CLOSE_LIMIT: Duration = Duration::from_secs(1);
 
+/// How long the portal may take to take the request for its dialog; presses
+/// wait for it.
+const CONFIGURE_LIMIT: Duration = Duration::from_secs(5);
+
 /// What the worker reports, in order: at most one `Bound` followed by any
-/// number of `Activated`; `Failed` is always the last event.
+/// number of `Activated` and of `ConfigureEnded`; `Failed` is always the last
+/// event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShortcutEvent {
     /// The portal bound the shortcut; `trigger` is its own description of the
@@ -43,6 +50,10 @@ pub enum ShortcutEvent {
         activation_token: Option<String>,
         timestamp_ms: u64,
     },
+    /// The portal answered a [`ShortcutHandle::configure`]: `message` is one
+    /// line saying why the dialog for the shortcut could not be asked for,
+    /// and `None` when it was.
+    ConfigureEnded { message: Option<String> },
     /// The shortcut is not available. `message` is one line: either the step
     /// that failed with the portal's own error text, or, when the attempt ran
     /// out of time, the limit alone with no portal text. It does not say why.
@@ -53,8 +64,24 @@ pub enum ShortcutEvent {
 /// session, and waits for the thread; that takes at most about one second.
 #[derive(Debug)]
 pub struct ShortcutHandle {
+    commands: mpsc::UnboundedSender<Command>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
+}
+
+/// What the owner of the handle asks of the worker.
+enum Command {
+    Configure,
+}
+
+impl ShortcutHandle {
+    /// Asks the portal for its dialog to change the shortcut. The answer is
+    /// a [`ShortcutEvent::ConfigureEnded`]. A request made before the
+    /// shortcut is bound waits for it, and one made after the worker has
+    /// failed is not answered.
+    pub fn configure(&self) {
+        let _ = self.commands.send(Command::Configure);
+    }
 }
 
 impl Drop for ShortcutHandle {
@@ -81,6 +108,7 @@ pub fn start(
     on_event: impl Fn(ShortcutEvent) + Send + 'static,
 ) -> ShortcutHandle {
     let (stop, stopped) = oneshot::channel();
+    let (commands, requests) = mpsc::unbounded_channel();
     // The callback travels over a channel so that it is still here to report
     // a thread that could not be spawned.
     let (hand_over, handed_over) = std::sync::mpsc::channel::<Callback>();
@@ -95,7 +123,9 @@ pub fn start(
                 .enable_all()
                 .build()
             {
-                Ok(runtime) => runtime.block_on(run(&app_id, &trigger, limit, &*on_event, stopped)),
+                Ok(runtime) => {
+                    runtime.block_on(run(&app_id, &trigger, limit, &*on_event, stopped, requests))
+                }
                 Err(e) => on_event(failed("shortcut worker runtime", &e)),
             }
         });
@@ -105,6 +135,7 @@ pub fn start(
             // The worker is waiting for exactly this message.
             let _ = hand_over.send(on_event);
             ShortcutHandle {
+                commands,
                 stop: Some(stop),
                 thread: Some(thread),
             }
@@ -112,6 +143,7 @@ pub fn start(
         Err(e) => {
             on_event(failed("shortcut worker thread", &e));
             ShortcutHandle {
+                commands,
                 stop: None,
                 thread: None,
             }
@@ -132,6 +164,7 @@ async fn run(
     limit: Duration,
     on_event: &(dyn Fn(ShortcutEvent) + Send),
     stopped: oneshot::Receiver<()>,
+    mut requests: mpsc::UnboundedReceiver<Command>,
 ) {
     let mut session = None;
     // The limit covers the attempt only: once bound, presses are awaited
@@ -146,7 +179,7 @@ async fn run(
     let failure = tokio::select! {
         // Resolves on the signal and when the handle is gone without one.
         _ = stopped => None,
-        result = serve(app_id, trigger, &report, &mut session) => {
+        result = serve(app_id, trigger, &report, &mut session, &mut requests) => {
             let Err(event) = result;
             Some(event)
         }
@@ -177,6 +210,7 @@ async fn serve(
     trigger: &str,
     on_event: &dyn Fn(ShortcutEvent),
     session_slot: &mut Option<ShortcutSession>,
+    requests: &mut mpsc::UnboundedReceiver<Command>,
 ) -> Result<std::convert::Infallible, ShortcutEvent> {
     let connection = zbus::Connection::session()
         .await
@@ -228,14 +262,41 @@ async fn serve(
         trigger: own.trigger_description().to_owned(),
     });
 
-    while let Some(signal) = activations.next().await {
-        if signal.session_handle().as_str() == session_path.as_str()
-            && signal.shortcut_id() == SHORTCUT_ID
-        {
-            on_event(ShortcutEvent::Activated {
-                activation_token: activation_token(signal.options()),
-                timestamp_ms: u64::try_from(signal.timestamp().as_millis()).unwrap_or(u64::MAX),
-            });
+    loop {
+        tokio::select! {
+            signal = activations.next() => {
+                let Some(signal) = signal else { break };
+                if signal.session_handle().as_str() == session_path.as_str()
+                    && signal.shortcut_id() == SHORTCUT_ID
+                {
+                    on_event(ShortcutEvent::Activated {
+                        activation_token: activation_token(signal.options()),
+                        timestamp_ms: u64::try_from(signal.timestamp().as_millis())
+                            .unwrap_or(u64::MAX),
+                    });
+                }
+            }
+            // Disabled once the handle is gone; the stop signal ends the
+            // worker then.
+            Some(Command::Configure) = requests.recv() => {
+                let asked = tokio::time::timeout(
+                    CONFIGURE_LIMIT,
+                    portal.configure_shortcuts(
+                        session,
+                        None,
+                        ConfigureShortcutsOptions::default(),
+                    ),
+                )
+                .await;
+                let message = match asked {
+                    Ok(Ok(())) => None,
+                    Ok(Err(e)) => Some(one_line("changing the shortcut", &e)),
+                    Err(_) => Some(format!(
+                        "changing the shortcut: no result within {CONFIGURE_LIMIT:?}"
+                    )),
+                };
+                on_event(ShortcutEvent::ConfigureEnded { message });
+            }
         }
     }
     Err(ShortcutEvent::Failed {
@@ -263,10 +324,14 @@ fn activation_token(options: &HashMap<String, OwnedValue>) -> Option<String> {
 
 /// One line: the step that failed and the error text as given.
 fn failed(step: &str, error: &dyn std::fmt::Display) -> ShortcutEvent {
-    let text = format!("{step}: {error}");
     ShortcutEvent::Failed {
-        message: text.split_whitespace().collect::<Vec<_>>().join(" "),
+        message: one_line(step, error),
     }
+}
+
+fn one_line(step: &str, error: &dyn std::fmt::Display) -> String {
+    let text = format!("{step}: {error}");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The failure of an attempt that ran out of time: it names the limit and
