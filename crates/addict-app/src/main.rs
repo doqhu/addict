@@ -2,7 +2,9 @@
 //!
 //! `addict install` writes the desktop entry twice: into the applications
 //! directory, where the portal needs it, and into the autostart directory,
-//! which starts the application at login. `addict uninstall` removes both.
+//! which starts the application at login. It also writes the app icon, four
+//! sizes, into the user icon theme, where the entry's `Icon` finds it.
+//! `addict uninstall` removes all of them.
 //!
 //! `addict import <FILE>` turns a dictionary file the user has downloaded
 //! into an index in the data directory, `$XDG_DATA_HOME/addict` or
@@ -189,10 +191,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Write the desktop entries: the portal recognises the application and
-    /// the session starts it at login
+    /// Write the desktop entries and the app icons: the portal recognises the
+    /// application, the session starts it at login and the shell shows its icon
     Install,
-    /// Remove the desktop entries that install wrote
+    /// Remove the desktop entries and the icons that install wrote
     Uninstall,
     /// Build the dictionary index from a downloaded dictionary file
     Import {

@@ -1,8 +1,10 @@
-//! The product's desktop entry. The host Registry accepts an app id only when
-//! a matching `.desktop` file is installed, so registration needs this entry;
-//! the same entry in the autostart directory starts the application at login.
-//! `install` overwrites and `uninstall` removes only a file `install` wrote,
-//! and neither follows a symlink.
+//! The product's desktop entry and icons. The host Registry accepts an app id
+//! only when a matching `.desktop` file is installed, so registration needs
+//! this entry; the same entry in the autostart directory starts the
+//! application at login. The entry names the app id as its icon, which the
+//! shell looks up in the user `hicolor` theme: one PNG per size, written by
+//! `install_icon`. Every `install` overwrites and every `uninstall` removes
+//! only a file the product wrote, and neither follows a symlink.
 
 use std::{
     ffi::OsString,
@@ -15,6 +17,20 @@ use std::{
 /// The line that marks a desktop entry as written by Addict.
 pub const MARKER: &str = "X-Addict=true";
 
+/// The line of a PNG icon that marks it as written by Addict: the text chunk
+/// `X-Addict` = `true`, from its chunk type to its value.
+pub const ICON_MARKER: &[u8] = b"tEXtX-Addict\0true";
+
+/// The user data directory: `$XDG_DATA_HOME` when the variable is an absolute
+/// path, else `$HOME/.local/share`.
+fn data_home_from(data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    match data_home.map(PathBuf::from) {
+        Some(data) if data.is_absolute() => Some(data),
+        // The base directory specification says to ignore a relative value.
+        _ => Some(PathBuf::from(home.filter(|home| !home.is_empty())?).join(".local/share")),
+    }
+}
+
 /// The user applications directory: `$XDG_DATA_HOME/applications` when the
 /// variable is an absolute path, else `$HOME/.local/share/applications`.
 pub fn applications_dir() -> Option<PathBuf> {
@@ -22,12 +38,17 @@ pub fn applications_dir() -> Option<PathBuf> {
 }
 
 fn applications_dir_from(data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    let data = match data_home.map(PathBuf::from) {
-        Some(data) if data.is_absolute() => data,
-        // The base directory specification says to ignore a relative value.
-        _ => PathBuf::from(home.filter(|home| !home.is_empty())?).join(".local/share"),
-    };
-    Some(data.join("applications"))
+    Some(data_home_from(data_home, home)?.join("applications"))
+}
+
+/// The user icons directory: `$XDG_DATA_HOME/icons` when the variable is an
+/// absolute path, else `$HOME/.local/share/icons`.
+pub fn icons_dir() -> Option<PathBuf> {
+    icons_dir_from(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
+}
+
+fn icons_dir_from(data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    Some(data_home_from(data_home, home)?.join("icons"))
 }
 
 /// The user autostart directory: `$XDG_CONFIG_HOME/autostart` when the
@@ -51,6 +72,12 @@ fn autostart_dir_from(config_home: Option<OsString>, home: Option<OsString>) -> 
 /// Where the entry for `app_id` lives inside `dir`.
 pub fn entry_path(dir: &Path, app_id: &str) -> PathBuf {
     dir.join(format!("{app_id}.desktop"))
+}
+
+/// Where the icon of `size` pixels for `app_id` lives inside the icons
+/// directory `dir`.
+pub fn icon_path(dir: &Path, app_id: &str, size: u32) -> PathBuf {
+    dir.join(format!("hicolor/{size}x{size}/apps/{app_id}.png"))
 }
 
 /// An app id that is safe as a file name and a key-file comment: reverse-DNS,
@@ -99,6 +126,7 @@ pub fn entry_text(app_id: &str, exec: &Path) -> String {
          [Desktop Entry]\n\
          Type=Application\n\
          Name=Addict\n\
+         Icon={app_id}\n\
          Exec={exec}\n\
          Terminal=false\n\
          NoDisplay=true\n\
@@ -117,14 +145,83 @@ fn with_path(path: &Path, error: io::Error) -> io::Error {
     io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }
 
-/// What stands where the entry for an app id would be, when `install` and
-/// `uninstall` may touch it.
+/// What stands where the entry or the icon of an app id would be, when
+/// `install` and `uninstall` may touch it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     /// Nothing of that name.
     Absent,
-    /// A regular file carrying [`MARKER`].
+    /// A regular file carrying [`MARKER`], or [`ICON_MARKER`] for an icon.
     Ours,
+}
+
+fn check_app_id(app_id: &str) -> io::Result<()> {
+    if is_valid_app_id(app_id) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not a valid app id: {app_id:?}"),
+        ))
+    }
+}
+
+/// An entry is ours when it is text with a [`MARKER`] line. Not readable as
+/// text counts as not ours.
+fn entry_is_ours(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes).is_ok_and(|text| text.lines().any(|line| line.trim() == MARKER))
+}
+
+fn icon_is_ours(bytes: &[u8]) -> bool {
+    bytes
+        .windows(ICON_MARKER.len())
+        .any(|window| window == ICON_MARKER)
+}
+
+/// Classifies `path` without changing anything: anything there that is not a
+/// regular file `is_ours` accepts, a symlink included, is the refusal.
+fn classify(path: &Path, is_ours: fn(&[u8]) -> bool) -> io::Result<Target> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_file() => {
+            Err(refusal(path, "exists and is not a regular file"))
+        }
+        Ok(_) => match std::fs::read(path) {
+            Ok(bytes) if is_ours(&bytes) => Ok(Target::Ours),
+            _ => Err(refusal(path, "exists and was not written by addict")),
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Target::Absent),
+        Err(e) => Err(with_path(path, e)),
+    }
+}
+
+fn remove(path: PathBuf, is_ours: fn(&[u8]) -> bool) -> io::Result<Option<PathBuf>> {
+    if classify(&path, is_ours)? == Target::Absent {
+        return Ok(None);
+    }
+    // Unlinking removes the name itself: a symlink swapped in after the check
+    // is not followed.
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(Some(path)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(with_path(&path, e)),
+    }
+}
+
+fn write(path: PathBuf, is_ours: fn(&[u8]) -> bool, content: &[u8]) -> io::Result<PathBuf> {
+    classify(&path, is_ours)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| with_path(dir, e))?;
+    }
+    // O_NOFOLLOW: a symlink swapped in after the check above is not followed.
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .and_then(|mut file| file.write_all(content))
+        .map_err(|e| with_path(&path, e))?;
+    Ok(path)
 }
 
 /// Classifies the entry for `app_id` in `dir` without changing anything.
@@ -135,30 +232,8 @@ pub enum Target {
 /// targets runs it on all of them first, so that a refusal leaves all as they
 /// were.
 pub fn check(dir: &Path, app_id: &str) -> io::Result<Target> {
-    if !is_valid_app_id(app_id) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("not a valid app id: {app_id:?}"),
-        ));
-    }
-    let path = entry_path(dir, app_id);
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if !metadata.is_file() => {
-            Err(refusal(&path, "exists and is not a regular file"))
-        }
-        Ok(_) => {
-            // Not readable as text counts as not ours.
-            let ours = std::fs::read_to_string(&path)
-                .is_ok_and(|text| text.lines().any(|line| line.trim() == MARKER));
-            if ours {
-                Ok(Target::Ours)
-            } else {
-                Err(refusal(&path, "exists and was not written by addict"))
-            }
-        }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Target::Absent),
-        Err(e) => Err(with_path(&path, e)),
-    }
+    check_app_id(app_id)?;
+    classify(&entry_path(dir, app_id), entry_is_ours)
 }
 
 /// Removes the entry for `app_id` from `dir` and returns its path, or `None`
@@ -166,17 +241,8 @@ pub fn check(dir: &Path, app_id: &str) -> io::Result<Target> {
 /// anything else of that name, a symlink included, is refused untouched. The
 /// directory stays. Every error names the path.
 pub fn uninstall(dir: &Path, app_id: &str) -> io::Result<Option<PathBuf>> {
-    if check(dir, app_id)? == Target::Absent {
-        return Ok(None);
-    }
-    let path = entry_path(dir, app_id);
-    // Unlinking removes the name itself: a symlink swapped in after the check
-    // is not followed.
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(Some(path)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(with_path(&path, e)),
-    }
+    check_app_id(app_id)?;
+    remove(entry_path(dir, app_id), entry_is_ours)
 }
 
 /// Writes the entry for `app_id` into `dir` and returns its path. An existing
@@ -184,19 +250,37 @@ pub fn uninstall(dir: &Path, app_id: &str) -> io::Result<Option<PathBuf>> {
 /// anything else of that name, a symlink included, is refused untouched. Every
 /// error names the path.
 pub fn install(dir: &Path, app_id: &str, exec: &Path) -> io::Result<PathBuf> {
-    check(dir, app_id)?;
-    let path = entry_path(dir, app_id);
-    std::fs::create_dir_all(dir).map_err(|e| with_path(dir, e))?;
-    // O_NOFOLLOW: a symlink swapped in after the check above is not followed.
-    OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)
-        .and_then(|mut file| file.write_all(entry_text(app_id, exec).as_bytes()))
-        .map_err(|e| with_path(&path, e))?;
-    Ok(path)
+    check_app_id(app_id)?;
+    write(
+        entry_path(dir, app_id),
+        entry_is_ours,
+        entry_text(app_id, exec).as_bytes(),
+    )
+}
+
+/// [`check`] for the icon of `size` pixels, with [`ICON_MARKER`].
+pub fn check_icon(dir: &Path, app_id: &str, size: u32) -> io::Result<Target> {
+    check_app_id(app_id)?;
+    classify(&icon_path(dir, app_id, size), icon_is_ours)
+}
+
+/// [`uninstall`] for the icon of `size` pixels. The directories stay.
+pub fn uninstall_icon(dir: &Path, app_id: &str, size: u32) -> io::Result<Option<PathBuf>> {
+    check_app_id(app_id)?;
+    remove(icon_path(dir, app_id, size), icon_is_ours)
+}
+
+/// [`install`] for the icon of `size` pixels. `png` must carry
+/// [`ICON_MARKER`]: a file `uninstall_icon` would refuse is not written.
+pub fn install_icon(dir: &Path, app_id: &str, size: u32, png: &[u8]) -> io::Result<PathBuf> {
+    check_app_id(app_id)?;
+    if !icon_is_ours(png) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the icon does not carry the Addict marker",
+        ));
+    }
+    write(icon_path(dir, app_id, size), icon_is_ours, png)
 }
 
 #[cfg(test)]
@@ -291,6 +375,7 @@ mod tests {
                 "[Desktop Entry]",
                 "Type=Application",
                 "Name=Addict",
+                "Icon=dev.addict.Test",
                 "Exec=\"/usr/bin/addict\"",
                 "Terminal=false",
                 "NoDisplay=true",
@@ -464,5 +549,91 @@ mod tests {
         let temp = TempDir::new("remove-id");
         let error = uninstall(&temp.0, "../evil").expect_err("rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// A stand-in PNG: only the marker matters to the file rules.
+    fn icon_bytes(tag: &str) -> Vec<u8> {
+        [
+            b"\x89PNG-".as_slice(),
+            tag.as_bytes(),
+            b"\0",
+            ICON_MARKER,
+            b"\0end",
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn icons_dir_follows_the_data_home_rule() {
+        assert_eq!(
+            icons_dir_from(Some("/data".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/data/icons"))
+        );
+        assert_eq!(
+            icons_dir_from(Some("relative".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.local/share/icons"))
+        );
+        assert_eq!(icons_dir_from(None, Some("".into())), None);
+    }
+
+    #[test]
+    fn icon_lives_in_the_hicolor_directory_of_its_size() {
+        assert_eq!(
+            icon_path(Path::new("/d/icons"), APP_ID, 128),
+            PathBuf::from("/d/icons/hicolor/128x128/apps/dev.addict.Test.png")
+        );
+    }
+
+    #[test]
+    fn install_icon_writes_and_overwrites_its_own_icon() {
+        let temp = TempDir::new("icon");
+        let first = icon_bytes("one");
+        let path = install_icon(&temp.0, APP_ID, 64, &first).expect("install");
+        assert_eq!(path, icon_path(&temp.0, APP_ID, 64));
+        assert_eq!(std::fs::read(&path).expect("read"), first);
+        assert_eq!(check_icon(&temp.0, APP_ID, 64).expect("ours"), Target::Ours);
+        let second = icon_bytes("two");
+        install_icon(&temp.0, APP_ID, 64, &second).expect("overwrite");
+        assert_eq!(std::fs::read(&path).expect("read"), second);
+    }
+
+    #[test]
+    fn install_icon_refuses_a_foreign_file_and_a_symlink() {
+        let temp = TempDir::new("icon-foreign");
+        let path = icon_path(&temp.0, APP_ID, 64);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        std::fs::write(&path, b"someone else's icon").expect("write foreign");
+        let error = install_icon(&temp.0, APP_ID, 64, &icon_bytes("x")).expect_err("refused");
+        assert!(error.to_string().contains(&path.display().to_string()));
+        assert_eq!(std::fs::read(&path).expect("read"), b"someone else's icon");
+
+        std::fs::remove_file(&path).expect("remove");
+        let target = temp.0.join("target.png");
+        std::fs::write(&target, icon_bytes("ours")).expect("write target");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink");
+        install_icon(&temp.0, APP_ID, 64, &icon_bytes("x")).expect_err("refused");
+        uninstall_icon(&temp.0, APP_ID, 64).expect_err("refused");
+        assert_eq!(std::fs::read(&target).expect("read"), icon_bytes("ours"));
+    }
+
+    #[test]
+    fn install_icon_refuses_bytes_without_the_marker() {
+        let temp = TempDir::new("icon-unmarked");
+        let error = install_icon(&temp.0, APP_ID, 64, b"\x89PNG").expect_err("refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read_dir(&temp.0).expect("list").count(), 0);
+    }
+
+    #[test]
+    fn uninstall_icon_removes_its_own_and_keeps_the_directories() {
+        let temp = TempDir::new("icon-remove");
+        let path = install_icon(&temp.0, APP_ID, 64, &icon_bytes("x")).expect("install");
+        assert_eq!(
+            uninstall_icon(&temp.0, APP_ID, 64).expect("uninstall"),
+            Some(path.clone())
+        );
+        assert!(!path.exists());
+        assert!(path.parent().expect("parent").is_dir());
+        assert_eq!(uninstall_icon(&temp.0, APP_ID, 64).expect("absent"), None);
     }
 }

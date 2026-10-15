@@ -63,6 +63,15 @@ pub fn text(bytes: &[u8]) -> String {
 
 pub const ENTRY: &str = "dev.addict.Addict.desktop";
 
+pub const ICON_SIZES: [u32; 4] = [64, 128, 256, 512];
+
+/// The icon of `size` pixels in the data directory `data`.
+pub fn icon_in(data: &Path, size: u32) -> PathBuf {
+    data.join(format!(
+        "icons/hicolor/{size}x{size}/apps/dev.addict.Addict.png"
+    ))
+}
+
 /// The private directories an entry command runs against. All three are set
 /// on every run: a variable left to the caller's environment would let the
 /// command write under the real home directory.
@@ -88,6 +97,17 @@ impl Homes {
 
     pub fn autostart_entry(&self) -> PathBuf {
         self.config_home.join("autostart").join(ENTRY)
+    }
+
+    /// The icon of `size` pixels, under the data home.
+    pub fn icon(&self, size: u32) -> PathBuf {
+        icon_in(&self.data_home, size)
+    }
+
+    /// The four icons, smallest first: the order of the output after the
+    /// entries.
+    pub fn icons(&self) -> [PathBuf; 4] {
+        ICON_SIZES.map(|size| self.icon(size))
     }
 
     /// Runs `addict <subcommand>` with no display and no session bus.

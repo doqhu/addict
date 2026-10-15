@@ -25,7 +25,7 @@ fn replace(path: &Path, content: &str) {
 }
 
 #[test]
-fn removes_both_entries_and_prints_their_paths() {
+fn removes_the_entries_and_icons_and_prints_their_paths() {
     let temp = TempDir::new("uninstall");
     let homes = Homes::inside(temp.path());
     let [applications, autostart] = entries(&homes);
@@ -33,14 +33,68 @@ fn removes_both_entries_and_prints_their_paths() {
 
     let output = homes.run("uninstall");
     assert!(output.status.success(), "{}", text(&output.stderr));
-    assert_eq!(
-        lines(&output.stdout),
-        [shown(&applications), shown(&autostart)]
-    );
-    for entry in [&applications, &autostart] {
-        assert!(!entry.exists(), "{} is still there", entry.display());
+    let mut printed = vec![shown(&applications), shown(&autostart)];
+    printed.extend(homes.icons().iter().map(|icon| shown(icon)));
+    assert_eq!(lines(&output.stdout), printed);
+    for path in [&applications, &autostart]
+        .into_iter()
+        .chain(&homes.icons())
+    {
+        assert!(!path.exists(), "{} is still there", path.display());
         // The directories are not removed.
-        assert!(entry.parent().expect("parent").is_dir());
+        assert!(path.parent().expect("parent").is_dir());
+    }
+}
+
+/// An install of before the icons: its entries are removed, no icon is
+/// missed.
+#[test]
+fn entries_without_icons_are_not_an_error() {
+    let temp = TempDir::new("uninstall-no-icons");
+    let homes = Homes::inside(temp.path());
+    let entries = entries(&homes);
+    installed(&homes);
+    std::fs::remove_dir_all(homes.data_home.join("icons")).expect("remove icons");
+
+    let output = homes.run("uninstall");
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert_eq!(lines(&output.stdout), entries.map(|entry| shown(&entry)));
+}
+
+/// A foreign file or a symlink at an icon path: nothing is removed.
+#[test]
+fn refuses_a_foreign_or_linked_icon_and_removes_nothing() {
+    for link in [false, true] {
+        let temp = TempDir::new("uninstall-icon");
+        let homes = Homes::inside(temp.path());
+        installed(&homes);
+        let icon = homes.icon(256);
+        let kept: Vec<PathBuf> = entries(&homes)
+            .into_iter()
+            .chain(homes.icons().into_iter().filter(|other| *other != icon))
+            .collect();
+        if link {
+            let target = temp.path().join("target.png");
+            std::fs::rename(&icon, &target).expect("move icon");
+            std::os::unix::fs::symlink(&target, &icon).expect("symlink");
+        } else {
+            std::fs::write(&icon, b"someone else's icon").expect("write foreign");
+        }
+
+        let output = homes.run("uninstall");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = text(&output.stderr);
+        assert!(stderr.contains(&shown(&icon)), "{stderr}");
+        for path in &kept {
+            assert!(path.is_file(), "{} was removed", path.display());
+        }
+        assert_eq!(
+            std::fs::symlink_metadata(&icon)
+                .expect("metadata")
+                .is_symlink(),
+            link
+        );
     }
 }
 
@@ -68,7 +122,10 @@ fn removes_the_one_entry_that_is_present() {
 
         let output = homes.run("uninstall");
         assert!(output.status.success(), "{}", text(&output.stderr));
-        assert_eq!(lines(&output.stdout), [shown(&entries[present_at])]);
+        // The entry that is present, then the icons.
+        let mut printed = vec![shown(&entries[present_at])];
+        printed.extend(homes.icons().iter().map(|icon| shown(icon)));
+        assert_eq!(lines(&output.stdout), printed);
         assert!(!entries[present_at].exists());
     }
 }
@@ -139,8 +196,9 @@ fn relative_or_empty_config_home_falls_back_to_home() {
 
         let output = homes.run("uninstall");
         assert!(output.status.success(), "{}", text(&output.stderr));
+        assert_eq!(lines(&output.stdout).len(), 6);
         assert_eq!(
-            lines(&output.stdout),
+            lines(&output.stdout)[..2],
             [shown(&applications), shown(&autostart)]
         );
         assert!(!applications.exists());
