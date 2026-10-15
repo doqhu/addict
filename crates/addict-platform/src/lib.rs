@@ -8,7 +8,8 @@
 //! the accessibility bus which application was activated last, so that
 //! [`atspi`] reads text only when that was Android Studio; [`ocr`] recognizes
 //! the text of an image in a Tesseract child with a limit; [`work`] runs slow
-//! jobs off the caller's thread; [`desktop`] writes the desktop entries.
+//! jobs off the caller's thread; [`desktop`] writes the desktop entries;
+//! [`tray`] puts the icon and its menu in the top bar.
 //!
 //! This crate is GTK-free; it must never depend on `gtk4`, `gdk4*`, `gio` or
 //! `glib`. Adapters run off the UI thread and report to the application.
@@ -19,4 +20,5 @@ pub mod foreground;
 pub mod ocr;
 pub mod screenshot;
 pub mod shortcut;
+pub mod tray;
 pub mod work;

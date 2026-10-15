@@ -128,6 +128,7 @@ use addict_platform::{
     foreground::{self, Accessibility, Foreground, Probe, Source as Foregrounded},
     ocr::OcrFailure,
     shortcut::{self, ShortcutEvent, ShortcutHandle},
+    tray::{self, TrayEvent, TrayHandle},
     work::{Job, Outcome, Work},
 };
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -142,6 +143,7 @@ use crate::{
     manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
     online::{self, Kept, Subject},
     recording::Recording,
+    settings::{self, KeyState, Settings},
     style,
     translate::{self, Translated},
     view::{Binding, Held, Lookup, Online, Shown, failure_text, read_failure_text, too_long_text},
@@ -172,6 +174,8 @@ struct Resident {
     /// The listener of the application in front; the session asks it at
     /// each press.
     _foreground: Rc<Foreground>,
+    /// The icon in the top bar and its menu.
+    _tray: TrayHandle,
 }
 
 /// Everything the worker threads tell the UI thread, over one channel.
@@ -232,6 +236,13 @@ enum Event {
     Context(u64, Outcome<Read>, Option<evidence::Elapsed>),
     /// The window became active.
     Active,
+    /// A choice of the tray's menu, or its end.
+    Tray(TrayEvent),
+    /// Change shortcut was pressed in the Settings window.
+    ChangeShortcut,
+    /// The state of the key file, as the runner read it for the Settings
+    /// window.
+    KeyFile(KeyState),
     /// The read of the clipboard with this number ended: the line of its
     /// text, or why there is none.
     Clipboard(u64, Result<String, Missed>),
@@ -334,6 +345,12 @@ struct Session {
     /// What a word or a sentence is translated by online.
     translator: Arc<dyn Translator>,
     key_file: Option<std::path::PathBuf>,
+    /// The Settings window, which the tray shows.
+    settings: Settings,
+    /// The trigger the portal bound, for the Settings window.
+    trigger: Option<String>,
+    /// The read of the key file's state; dropping it gives it up.
+    key_job: Option<Job>,
     /// The online request of a word, in its sentence or alone, whose outcome
     /// is awaited; dropping it cancels the request.
     translating_word: Option<Job>,
@@ -439,6 +456,13 @@ impl Session {
                 receipt_ns,
             ) => self.activated(activation_token.as_deref(), timestamp_ms, receipt_ns),
             Event::Shortcut(ShortcutEvent::Failed { message }, _) => self.failed(message),
+            Event::Shortcut(ShortcutEvent::ConfigureEnded { message }, _) => {
+                self.settings
+                    .say(&settings::change_text(message.as_deref()));
+            }
+            Event::Tray(event) => self.tray(event),
+            Event::ChangeShortcut => self.change_shortcut(),
+            Event::KeyFile(state) => self.settings.render_key(Some(state)),
             Event::Launched => self.launched(),
             Event::Retry => self.retry(),
             Event::Sentence(text) => self.sentence_changed(text),
@@ -1271,7 +1295,10 @@ impl Session {
     fn bound(&mut self, trigger: &str) {
         eprintln!("addict: shortcut bound to {trigger}");
         self.binding = Binding::Bound;
+        self.trigger = Some(trigger.to_owned());
         self.view.render_binding(&self.binding);
+        self.settings
+            .render_binding(&self.binding, self.trigger.as_deref());
     }
 
     /// The shortcut was pressed: the application in front is taken first,
@@ -1335,7 +1362,9 @@ impl Session {
     fn failed(&mut self, message: String) {
         eprintln!("addict: shortcut unavailable: {message}");
         self.binding = Binding::NotBound { detail: message };
+        self.trigger = None;
         self.view.render_binding(&self.binding);
+        self.settings.render_binding(&self.binding, None);
         // No press stands behind this, so there is no token.
         self.forget_source();
         if let Some(recording) = &self.recording {
@@ -1365,6 +1394,67 @@ impl Session {
         self.window.present();
     }
 
+    /// A choice of the tray. Show is a repeated launch: the window as it is,
+    /// no read. Settings reads the state of the key file on the runner and
+    /// shows the window; Exit ends the application through its shutdown. A
+    /// tray that cannot be had is said once and changes nothing.
+    fn tray(&mut self, event: TrayEvent) {
+        match event {
+            TrayEvent::Show => self.launched(),
+            TrayEvent::Settings => self.show_settings(),
+            TrayEvent::Exit => {
+                if let Some(application) = self.window.application() {
+                    application.quit();
+                }
+            }
+            TrayEvent::Unavailable { message } => {
+                eprintln!("addict: no tray icon: {message}");
+            }
+        }
+    }
+
+    fn show_settings(&mut self) {
+        self.settings
+            .render_binding(&self.binding, self.trigger.as_deref());
+        self.settings.say("");
+        self.settings.render_key(None);
+        let sender = self.sender.clone();
+        let path = self.key_file.clone();
+        self.key_job = self.work.upgrade().map(|work| {
+            work.run(
+                manual::LOOKUP_LIMIT,
+                async move { KeyState::of(path.as_deref()) },
+                move |outcome| {
+                    let state = match outcome {
+                        Outcome::Finished(state) => state,
+                        Outcome::TimedOut | Outcome::Panicked => KeyState::Unknown,
+                        // Replaced by the next press of Settings.
+                        Outcome::Cancelled => return,
+                    };
+                    let _ = sender.unbounded_send(Event::KeyFile(state));
+                },
+            )
+        });
+        if self.key_job.is_none() {
+            self.settings.render_key(Some(KeyState::Unknown));
+        }
+        self.settings.present();
+    }
+
+    /// Change shortcut was pressed: the portal is asked for its dialog
+    /// through the worker that holds the session.
+    fn change_shortcut(&mut self) {
+        if !matches!(self.binding, Binding::Bound) {
+            self.settings.say(settings::CHANGE_UNBOUND);
+            return;
+        }
+        if let Some(current) = self.current.upgrade()
+            && let Some(handle) = current.borrow().as_ref()
+        {
+            handle.configure();
+        }
+    }
+
     fn retry(&mut self) {
         // One attempt at a time: a press that was queued
         // behind another one starts nothing.
@@ -1376,6 +1466,7 @@ impl Session {
         };
         self.binding = Binding::Attempting;
         self.view.render_binding(&self.binding);
+        self.settings.render_binding(&self.binding, None);
         // `Failed` is the last act of the old worker, sent
         // after its session was closed: joining it does not
         // wait.
@@ -1556,6 +1647,10 @@ fn start(
     let listener = Rc::new(foreground::watch(|_| {}));
     let check = start_check(work.as_deref(), articles.clone(), &sender);
     let (translator, key_file) = online_translator();
+    let change = sender.clone();
+    let settings = Settings::new(&window, key_file.as_deref(), move || {
+        let _ = change.unbounded_send(Event::ChangeShortcut);
+    });
     let session = Session {
         binding,
         view,
@@ -1571,6 +1666,9 @@ fn start(
         articles: articles.clone(),
         translator,
         key_file,
+        settings,
+        trigger: None,
+        key_job: None,
         translating_word: None,
         translating_sentence: None,
         translating_definition: None,
@@ -1583,6 +1681,11 @@ fn start(
         kept: Foregrounded::Unknown,
     };
     serve(session, receiver);
+    let told = events.clone();
+    let tray = tray::start(APP_ID, move |event| {
+        // On the worker: the UI thread wakes for the event.
+        let _ = told.unbounded_send(Event::Tray(event));
+    });
     Resident {
         _hold: application.hold(),
         _shortcut: handle,
@@ -1590,6 +1693,7 @@ fn start(
         _work: work,
         _articles: articles,
         _foreground: listener,
+        _tray: tray,
     }
 }
 
