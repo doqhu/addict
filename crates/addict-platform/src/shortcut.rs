@@ -288,14 +288,7 @@ async fn serve(
                     ),
                 )
                 .await;
-                let message = match asked {
-                    Ok(Ok(())) => None,
-                    Ok(Err(e)) => Some(one_line("changing the shortcut", &e)),
-                    Err(_) => Some(format!(
-                        "changing the shortcut: no result within {CONFIGURE_LIMIT:?}"
-                    )),
-                };
-                on_event(ShortcutEvent::ConfigureEnded { message });
+                on_event(configure_ended(asked.ok()));
             }
         }
     }
@@ -332,6 +325,19 @@ fn failed(step: &str, error: &dyn std::fmt::Display) -> ShortcutEvent {
 fn one_line(step: &str, error: &dyn std::fmt::Display) -> String {
     let text = format!("{step}: {error}");
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The answer to a request for the portal's dialog: its result, or `None`
+/// when [`CONFIGURE_LIMIT`] ran out first.
+fn configure_ended(answer: Option<Result<(), impl std::fmt::Display>>) -> ShortcutEvent {
+    let message = match answer {
+        Some(Ok(())) => None,
+        Some(Err(e)) => Some(one_line("changing the shortcut", &e)),
+        None => Some(format!(
+            "changing the shortcut: no result within {CONFIGURE_LIMIT:?}"
+        )),
+    };
+    ShortcutEvent::ConfigureEnded { message }
 }
 
 /// The failure of an attempt that ran out of time: it names the limit and
@@ -427,6 +433,26 @@ mod tests {
             event,
             ShortcutEvent::Failed {
                 message: "binding the shortcut: first line second line".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_configure_answer_says_nothing_only_when_the_portal_took_it() {
+        assert_eq!(
+            configure_ended(Some(Ok::<(), &str>(()))),
+            ShortcutEvent::ConfigureEnded { message: None }
+        );
+        assert_eq!(
+            configure_ended(Some(Err("Requested version 2\nbut 1"))),
+            ShortcutEvent::ConfigureEnded {
+                message: Some("changing the shortcut: Requested version 2 but 1".to_owned())
+            }
+        );
+        assert_eq!(
+            configure_ended(None::<Result<(), &str>>),
+            ShortcutEvent::ConfigureEnded {
+                message: Some("changing the shortcut: no result within 5s".to_owned())
             }
         );
     }

@@ -7,12 +7,15 @@
 //! window. The texts are plain functions of the state, so that they can be
 //! tested without a display.
 
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use addict_deepl::key::{self, KeyError};
 use gtk::{glib, prelude::*};
 
 use crate::view::Binding;
+
+/// How long reading the state of the key file may take.
+pub const KEY_CHECK_LIMIT: Duration = Duration::from_secs(2);
 
 /// Where the DeepL key stands, as the window says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +57,7 @@ pub fn key_text(state: Option<KeyState>) -> &'static str {
             "No place for the key file: set an absolute XDG_CONFIG_HOME or HOME."
         }
         Some(KeyState::Free) => "A DeepL key of the Free plan is set.",
-        Some(KeyState::Pro) => "A DeepL key is set.",
+        Some(KeyState::Pro) => "A DeepL key of the Pro plan is set.",
         Some(KeyState::Refused(KeyError::Missing)) => "There is no key file.",
         Some(KeyState::Refused(KeyError::Unreadable)) => "The key file cannot be read.",
         Some(KeyState::Refused(KeyError::TooOpen)) => {
@@ -72,7 +75,7 @@ pub fn trigger_text(binding: &Binding, trigger: Option<&str>) -> String {
         (Binding::Bound, Some(trigger)) => trigger.to_owned(),
         (Binding::Bound, None) => "Bound.".to_owned(),
         (Binding::Attempting, _) => "Binding the shortcut…".to_owned(),
-        (Binding::NotBound { .. }, _) => "Not bound.".to_owned(),
+        (Binding::NotBound { detail }, _) => format!("Not bound: {detail}"),
     }
 }
 
@@ -235,19 +238,39 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_key_is_never_in_its_state() {
+    /// The state of a key file written with `content` and `mode`.
+    fn state_of(name: &str, content: &str, mode: u32) -> KeyState {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("addict-settings-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("addict-settings-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("deepl.key");
-        std::fs::write(&path, "secret-key:fx\n").expect("write");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("mode");
+        std::fs::write(&path, content).expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
         let state = KeyState::of(Some(&path));
         std::fs::remove_dir_all(&dir).expect("cleanup");
+        state
+    }
+
+    #[test]
+    fn the_key_is_never_in_its_state() {
+        let state = state_of("free", "secret-key:fx\n", 0o600);
         assert_eq!(state, KeyState::Free);
         assert!(!format!("{state:?}").contains("secret"));
         assert!(!key_text(Some(state)).contains("secret"));
+    }
+
+    #[test]
+    fn a_state_of_each_kind_of_file() {
+        assert_eq!(state_of("pro", "secret-key\n", 0o600), KeyState::Pro);
+        assert_eq!(
+            state_of("open", "secret-key:fx\n", 0o644),
+            KeyState::Refused(KeyError::TooOpen)
+        );
+        assert_eq!(
+            state_of("empty", " \n", 0o600),
+            KeyState::Refused(KeyError::Empty)
+        );
     }
 
     #[test]
@@ -260,7 +283,7 @@ mod tests {
             trigger_text(&Binding::Attempting, Some("Super+Q")),
             "Binding the shortcut…"
         );
-        assert_eq!(trigger_text(&not_bound, Some("Super+Q")), "Not bound.");
+        assert_eq!(trigger_text(&not_bound, Some("Super+Q")), "Not bound: x");
     }
 
     #[test]
