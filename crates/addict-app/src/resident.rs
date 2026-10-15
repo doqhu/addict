@@ -93,9 +93,10 @@
 //! it is one word, and nothing is asked online; the line is not shown. When
 //! neither gives a line (empty, blank, not text, too long, unreadable or
 //! late), why is written to stderr, and the empty state stays with the line
-//! of the read. The read has a number and is given up like the read it
-//! follows, by a press, an edit and a capture; what it reports later is
-//! ignored. Retry, a launch and a capture read no clipboard.
+//! of the read; when one of them was too long, the line says that instead,
+//! the selection's before the clipboard's. The read has a number and is given
+//! up like the read it follows, by a press, an edit and a capture; what it
+//! reports later is ignored. Retry, a launch and a capture read no clipboard.
 //!
 //! What is asked for and what is kept is [`online`](crate::online)'s. What
 //! the window says is [`view`](crate::view)'s; its widgets and the paste
@@ -135,12 +136,12 @@ use crate::{
     context::{self, Read, Reading},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
-    manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual},
+    manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
     online::{self, Kept, Subject},
     recording::Recording,
     style,
     translate::{self, Translated},
-    view::{Binding, Lookup, Online, Shown, failure_text, read_failure_text},
+    view::{Binding, Held, Lookup, Online, Shown, failure_text, read_failure_text, too_long_text},
     widgets::View,
 };
 
@@ -228,7 +229,7 @@ enum Event {
     Active,
     /// The read of the clipboard with this number ended: the line of its
     /// text, or why there is none.
-    Clipboard(u64, Result<String, String>),
+    Clipboard(u64, Result<String, Missed>),
 }
 
 /// Starts one attempt to bind the shortcut; its events go to `sender`. With
@@ -386,6 +387,9 @@ struct ClipboardRead {
     /// Cancels the read of the clipboard; `None` while the window is not yet
     /// active and nothing is read.
     cancellable: Option<gio::Cancellable>,
+    /// Set when the selection was too long, with its length, so that a read
+    /// of the clipboard that runs out of time still says so.
+    selection: Rc<Cell<Option<(Held, usize)>>>,
 }
 
 impl Copying {
@@ -397,6 +401,7 @@ impl Copying {
         self.read = Some(ClipboardRead {
             line,
             cancellable: None,
+            selection: Rc::default(),
         });
         self.number
     }
@@ -736,7 +741,9 @@ impl Session {
         glib::timeout_add_local_once(CLIPBOARD_LIMIT, move || {
             let _ = late.unbounded_send(Event::Clipboard(
                 number,
-                Err(format!("no answer within {CLIPBOARD_LIMIT:?}")),
+                Err(Missed::because(format!(
+                    "no answer within {CLIPBOARD_LIMIT:?}"
+                ))),
             ));
         });
         if self.window.is_active() {
@@ -765,20 +772,28 @@ impl Session {
         }
         let cancellable = gio::Cancellable::new();
         read.cancellable = Some(cancellable.clone());
+        let too_long = read.selection.clone();
         let sender = self.sender.clone();
         let display = WidgetExt::display(&self.window);
         let clipboard = display.clipboard();
         read_line(
             &display.primary_clipboard(),
+            Held::Selection,
             &cancellable.clone(),
             move |primary| {
                 let Err(selection) = primary else {
                     let _ = sender.unbounded_send(Event::Clipboard(number, primary));
                     return;
                 };
-                read_line(&clipboard, &cancellable, move |copied| {
-                    let line = copied
-                        .map_err(|copied| format!("selection: {selection}; clipboard: {copied}"));
+                too_long.set(selection.too_long);
+                read_line(&clipboard, Held::Clipboard, &cancellable, move |copied| {
+                    let line = copied.map_err(|copied| Missed {
+                        reason: format!(
+                            "selection: {}; clipboard: {}",
+                            selection.reason, copied.reason
+                        ),
+                        too_long: copied.too_long,
+                    });
                     let _ = sender.unbounded_send(Event::Clipboard(number, line));
                 });
             },
@@ -786,11 +801,12 @@ impl Session {
     }
 
     /// The read of the primary selection and the clipboard with `number`
-    /// ended; one that was given up shows nothing. A `line` replaces the field as a new text with the
-    /// source clipboard; nothing is asked online. Without one, the reason is
-    /// logged, the waiting ends and the source line of the failed read of
-    /// the bus says why.
-    fn copied(&mut self, number: u64, line: Result<String, String>) {
+    /// ended; one that was given up shows nothing. A `line` replaces the
+    /// field as a new text with the source clipboard; nothing is asked
+    /// online. Without one, the reason is logged, the waiting ends and the
+    /// source line says that a text was too long, when one was, or else why
+    /// the read of the bus gave nothing.
+    fn copied(&mut self, number: u64, line: Result<String, Missed>) {
         if !self.copying.is_running(number) {
             return;
         }
@@ -803,13 +819,17 @@ impl Session {
                 self.view.set_field_text(self.manual.sentence());
                 self.text_replaced(edit);
             }
-            Err(reason) => {
-                eprintln!("addict: no text from the selection or the clipboard: {reason}");
+            Err(missed) => {
+                eprintln!(
+                    "addict: no text from the selection or the clipboard: {}",
+                    missed.reason
+                );
                 if self.manual.reading() == Some(Source::Clipboard) {
                     self.manual.set_reading(None);
                 }
                 self.view.render(self.manual.state(), self.manual.source());
-                self.view.render_source_failure(&read.line);
+                let line = missed_line(read.line, read.selection.get(), missed.too_long);
+                self.view.render_source_failure(&line);
             }
         }
     }
@@ -1314,20 +1334,57 @@ impl Session {
     }
 }
 
-/// Reads the text of `clipboard` once and gives `done` its line, of at most
-/// [`CLIPBOARD_MAX_CHARS`] characters, or why there is none.
+/// Why the selection and the clipboard gave no line: the reason for stderr,
+/// and where a text too long to take was held, with its length.
+#[derive(Debug)]
+struct Missed {
+    reason: String,
+    too_long: Option<(Held, usize)>,
+}
+
+impl Missed {
+    /// Missed for `reason`, with no text too long.
+    fn because(reason: String) -> Self {
+        Self {
+            reason,
+            too_long: None,
+        }
+    }
+}
+
+/// The source line when neither the selection nor the clipboard gave a
+/// line: that the selection was too long, when it was, else that the
+/// clipboard was, else `read`, why the read of the bus gave nothing.
+fn missed_line(
+    read: String,
+    selection: Option<(Held, usize)>,
+    clipboard: Option<(Held, usize)>,
+) -> String {
+    selection.or(clipboard).map_or(read, |(held, chars)| {
+        too_long_text(held, chars, CLIPBOARD_MAX_CHARS)
+    })
+}
+
+/// Reads the text of `clipboard`, which holds what is `held`, once and
+/// gives `done` its line, of at most [`CLIPBOARD_MAX_CHARS`] characters, or
+/// why there is none.
 fn read_line(
     clipboard: &gdk::Clipboard,
+    held: Held,
     cancellable: &gio::Cancellable,
-    done: impl FnOnce(Result<String, String>) + 'static,
+    done: impl FnOnce(Result<String, Missed>) + 'static,
 ) {
     clipboard.read_text_async(Some(cancellable), move |read| {
         done(match read {
-            Ok(Some(text)) => manual::clipboard_line(&text).ok_or_else(|| {
-                format!("blank or longer than {CLIPBOARD_MAX_CHARS} characters as one line")
+            Ok(Some(text)) => manual::clipboard_line(&text).map_err(|no_line| match no_line {
+                NoLine::Blank => Missed::because("blank".to_owned()),
+                NoLine::TooLong(chars) => Missed {
+                    reason: format!("{chars} characters, over {CLIPBOARD_MAX_CHARS}"),
+                    too_long: Some((held, chars)),
+                },
             }),
-            Ok(None) => Err("no text".to_owned()),
-            Err(e) => Err(e.to_string()),
+            Ok(None) => Err(Missed::because("no text".to_owned())),
+            Err(e) => Err(Missed::because(e.to_string())),
         });
     });
 }
@@ -1562,7 +1619,8 @@ pub fn run(evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
 mod tests {
     use gtk::{gio, prelude::*};
 
-    use super::{CLIPBOARD_LIMIT, Copying};
+    use super::{CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, Copying, missed_line};
+    use crate::view::{Held, too_long_text};
 
     #[test]
     fn only_the_last_clipboard_read_is_the_one_that_runs() {
@@ -1597,6 +1655,22 @@ mod tests {
         let read = copying.end().expect("read");
         assert!(read.cancellable.is_none());
         assert!(!copying.is_running(number));
+    }
+
+    #[test]
+    fn a_too_long_selection_is_named_before_the_clipboard() {
+        let read = || "Android Studio line".to_owned();
+        let selection = Some((Held::Selection, 1200));
+        let clipboard = Some((Held::Clipboard, 54828));
+        let selected = too_long_text(Held::Selection, 1200, CLIPBOARD_MAX_CHARS);
+        let copied = too_long_text(Held::Clipboard, 54828, CLIPBOARD_MAX_CHARS);
+        assert_eq!(missed_line(read(), selection, clipboard), selected);
+        // The clipboard ran out of time: the selection still says so.
+        assert_eq!(missed_line(read(), selection, None), selected);
+        // The selection was blank.
+        assert_eq!(missed_line(read(), None, clipboard), copied);
+        // Neither was too long.
+        assert_eq!(missed_line(read(), None, None), read());
     }
 
     #[test]

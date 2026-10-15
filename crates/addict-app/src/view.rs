@@ -13,7 +13,7 @@
 //! translated without a sentence.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
-//! [`binding_texts`], [`indexes_text`], [`failure_text`], [`read_failure_text`],
+//! [`binding_texts`], [`indexes_text`], [`failure_text`], [`read_failure_text`], [`too_long_text`],
 //! [`sentence_markup`],
 //! [`result_texts`] and [`online_markup`] are pure, and
 //! so is [`Shown`], the result with the sense chosen in it; they are tested
@@ -273,6 +273,28 @@ pub fn read_failure_text(failure: &ContextFailure) -> Cow<'static, str> {
         }
     };
     format!("{cause}{TYPE_OR_PASTE}").into()
+}
+
+/// Where a text too long to take was held after a press without context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    /// Selected, the primary selection.
+    Selection,
+    /// Copied, the clipboard.
+    Clipboard,
+}
+
+/// The source line for a text that was `held` and has `chars` characters as
+/// one line, more than `limit`: what was too long, and how to give less.
+pub fn too_long_text(held: Held, chars: usize, limit: usize) -> String {
+    let (what, verb) = match held {
+        Held::Selection => ("selected", "Select"),
+        Held::Clipboard => ("copied", "Copy"),
+    };
+    format!(
+        "The {what} text is too long ({chars} characters; the limit is {limit}). \
+         {verb} one sentence, or type it."
+    )
 }
 
 /// The sentence as Pango markup: the text as given, with each of `words` (byte
@@ -790,7 +812,8 @@ mod tests {
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
     use super::{
-        INSTALL_ENGLISH, INSTALL_TESSERACT, TURN_ON_ACCESSIBILITY, failure_text, read_failure_text,
+        Held, INSTALL_ENGLISH, INSTALL_TESSERACT, TURN_ON_ACCESSIBILITY, failure_text,
+        read_failure_text, too_long_text,
     };
     use crate::{
         capture::Failure,
@@ -2278,5 +2301,19 @@ mod tests {
                 assert!(!markup.contains("deepl.key"), "{markup}");
             }
         }
+    }
+
+    #[test]
+    fn a_too_long_text_names_where_it_was_and_its_length() {
+        assert_eq!(
+            too_long_text(Held::Selection, 1234, 1000),
+            "The selected text is too long (1234 characters; the limit is 1000). \
+             Select one sentence, or type it."
+        );
+        assert_eq!(
+            too_long_text(Held::Clipboard, 54828, 1000),
+            "The copied text is too long (54828 characters; the limit is 1000). \
+             Copy one sentence, or type it."
+        );
     }
 }
