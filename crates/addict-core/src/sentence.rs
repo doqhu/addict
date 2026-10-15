@@ -208,7 +208,9 @@ pub fn around(text: &str, word: Range<usize>) -> Range<usize> {
 /// The sentence a selection lies in, cut out of the text read around it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selected {
-    /// The sentence, without the whitespace around it.
+    /// The sentence, without the whitespace around it; for the first sentence
+    /// of a comment line also without the `//` marker and the whitespace
+    /// after it.
     pub text: String,
     /// The selected characters, as a byte range of `text`.
     pub word: Range<usize>,
@@ -290,10 +292,55 @@ fn breaks(characters: &[char]) -> Vec<(usize, usize)> {
     found
 }
 
-/// Whether the trimmed sentence `from..to` of `characters` lies in the area
-/// where the sentence of an editor is known to be right: a later sentence of
-/// a whole-line `//` comment that ends in its line with a stop.
-fn in_area(characters: &[char], from: usize, to: usize) -> bool {
+/// The index of the first non-whitespace character of `start..end`, or `end`.
+fn content_start(characters: &[char], start: usize, end: usize) -> usize {
+    characters[start..end]
+        .iter()
+        .position(|character| !character.is_whitespace())
+        .map_or(end, |index| start + index)
+}
+
+/// Whether `start..end` holds a `//` anywhere: a whole-line comment, or one
+/// trailing after code. A `//` inside a string counts too, which only ever
+/// keeps a sentence out.
+fn has_comment(characters: &[char], start: usize, end: usize) -> bool {
+    characters[start..end]
+        .windows(2)
+        .any(|pair| pair == ['/', '/'])
+}
+
+/// Whether the comment of the line that starts at `line_start` starts there:
+/// the line before it lies whole in `characters`, a line break before it
+/// too, and holds no `//`, so no comment there can go on into this line. A
+/// line before that the text cuts, or none at all, could be a comment and so
+/// does not count.
+fn comment_starts_here(characters: &[char], line_start: usize) -> bool {
+    let Some(mut previous_end) = line_start.checked_sub(1) else {
+        return false;
+    };
+    // `\r\n` is one break, not an empty line between two.
+    if characters[previous_end] == '\n' && previous_end > 0 && characters[previous_end - 1] == '\r'
+    {
+        previous_end -= 1;
+    }
+    let Some(previous_start) = characters[..previous_end]
+        .iter()
+        .rposition(|&character| is_line_break(character))
+        .map(|index| index + 1)
+    else {
+        return false;
+    };
+    !has_comment(characters, previous_start, previous_end)
+}
+
+/// Where the text of the trimmed sentence `from..to` of `characters` starts
+/// when it lies in the area where the sentence of an editor is known to be
+/// right, `None` otherwise. The area is a sentence of a whole-line `//`
+/// comment that ends in its line with a stop: a later sentence of the line,
+/// or the first one when the comment starts on this line
+/// ([`comment_starts_here`]). The first sentence's text starts after the
+/// `/` marker and the whitespace that follows it.
+fn in_area(characters: &[char], from: usize, to: usize) -> Option<usize> {
     let line_start = characters[..from]
         .iter()
         .rposition(|&character| is_line_break(character))
@@ -302,17 +349,28 @@ fn in_area(characters: &[char], from: usize, to: usize) -> bool {
         .iter()
         .position(|&character| is_line_break(character))
         .map_or(characters.len(), |index| from + index);
-    let mut content = line_start;
-    while content < line_end && characters[content].is_whitespace() {
-        content += 1;
-    }
+    let content = content_start(characters, line_start, line_end);
     let is_comment = characters[content..line_end].starts_with(&['/', '/']);
     let mut last = to;
     while last > from && is_closer(characters[last - 1]) {
         last -= 1;
     }
     let ends_with_stop = last > from && is_stop(characters[last - 1]);
-    is_comment && from > content && to <= line_end && ends_with_stop
+    if !(is_comment && to <= line_end && ends_with_stop) {
+        return None;
+    }
+    if from > content {
+        return Some(from);
+    }
+    if !comment_starts_here(characters, line_start) {
+        return None;
+    }
+    let mut text = from;
+    while text < to && characters[text] == '/' {
+        text += 1;
+    }
+    let text = content_start(characters, text, to);
+    (text < to).then_some(text)
 }
 
 /// The sentence of `wider` around the selected characters `start..end`,
@@ -328,10 +386,12 @@ fn in_area(characters: &[char], from: usize, to: usize) -> bool {
 /// Only a sentence of the confirmed area is given, anything else is `None`:
 /// its line, the run of `wider` between line breaks, starts with `//` after
 /// its leading whitespace; the sentence starts after a sentence break inside
-/// that line, so the first sentence of a line, which takes the `//` marker,
-/// is left out; and it ends in the line with a stop, closers after it
-/// allowed. A string literal, a trailing comment after code and a sentence
-/// wrapped by hand over several comment lines are thus outside the area.
+/// that line, or it is the first sentence of the line and the comment starts
+/// on this line: the line before it is whole in `wider` and holds no `//`;
+/// and it ends in the line with a stop, closers after it allowed. The
+/// first sentence's text leaves out the `//` marker and the whitespace after
+/// it. A string literal, a trailing comment after code and a sentence wrapped
+/// by hand over several comment lines are thus outside the area.
 pub fn of_selection(wider: &str, start: usize, end: usize) -> Option<Selected> {
     let characters: Vec<char> = wider.chars().collect();
     let count = characters.len();
@@ -357,8 +417,9 @@ pub fn of_selection(wider: &str, start: usize, end: usize) -> Option<Selected> {
     while to > from && characters[to - 1].is_whitespace() {
         to -= 1;
     }
+    let from = in_area(&characters, from, to)?;
     let (word_from, word_to) = (start.max(from), end.min(to));
-    if word_from >= word_to || !in_area(&characters, from, to) {
+    if word_from >= word_to {
         return None;
     }
     let bytes = |upto: usize| -> usize {
@@ -748,7 +809,8 @@ mod tests {
         assert_eq!(&found.text[found.word.clone()], "bank");
         // The second occurrence, not the first.
         assert_eq!(found.word, 14..18);
-        // The first sentence of the line takes the `//` marker.
+        // The first sentence of the line, with no line before it to show
+        // that the comment starts here.
         assert_eq!(selected(text, "bank", 0), None);
     }
 
@@ -811,7 +873,8 @@ mod tests {
 
     #[test]
     fn a_text_without_a_break_is_one_sentence_outside_the_area() {
-        // One sentence, so the first of its line, and without a stop.
+        // Not a comment and without a stop; then a comment with no line
+        // before it to show that it starts there.
         let text = "  the bank of the river  ";
         assert_eq!(selected(text, "bank", 0), None);
         let text = "  // the bank of the river.  ";
@@ -854,7 +917,7 @@ val message = \"The charge will appear on your next statement. Keep the receipt.
             fixture_sentence("charge", 0).as_deref(),
             Some("We could not charge the card.")
         );
-        // The first sentence of a comment line.
+        // The first sentence of the first line, with no line before it.
         assert_eq!(fixture_sentence("bank", 0), None);
         // J3: after and before a character outside the BMP.
         let j3 = "It\u{2019}s a \u{201c}mean\u{201d} value \u{2014} not the median \u{1f642} \u{2014} and that is the issue.";
@@ -868,6 +931,61 @@ val message = \"The charge will appear on your next statement. Keep the receipt.
         assert_eq!(fixture_sentence("ends", 0), None);
         // A sentence that ends in its line after the wrap.
         assert_eq!(fixture_sentence("Next", 0).as_deref(), Some("Next one."));
+    }
+
+    #[test]
+    fn the_first_sentence_of_a_comment_that_starts_on_its_line_is_given() {
+        // Read from Android Studio on 2026-10-15.
+        let text = "    val sync: SettingsSyncRepository = koinInject()\n    val source: TwisterAudioSource = koinInject()\n    // Created in this dialog's composition, never shared with an exercise player's listeners.\n    val player = koinInject()";
+        let found = selected(text, "dialog", 0).expect("sentence");
+        assert_eq!(
+            found.text,
+            "Created in this dialog's composition, never shared with an exercise player's listeners."
+        );
+        assert_eq!(&found.text[found.word], "dialog");
+        // The first of two sentences, and the second as before.
+        let text = "}\nx\n// First one. Second one.";
+        let found = selected(text, "First", 0).expect("sentence");
+        assert_eq!(found.text, "First one.");
+        assert_eq!(found.word, 0..5);
+        assert_eq!(
+            selected(text, "Second", 0).expect("sentence").text,
+            "Second one."
+        );
+        // A blank line before, and `\r\n` breaks.
+        let found = selected("a\n\n// Blank above.\n", "above", 0).expect("sentence");
+        assert_eq!(found.text, "Blank above.");
+        let found = selected("}\r\nx\r\n// One here.\r\nnext", "here", 0).expect("sentence");
+        assert_eq!(found.text, "One here.");
+        // Any run of `/`, with or without a space after it.
+        let found = selected("}\nx\n/// Docs here.", "Docs", 0).expect("sentence");
+        assert_eq!(found.text, "Docs here.");
+        let found = selected("}\nx\n//No space here.", "No", 0).expect("sentence");
+        assert_eq!(found.text, "No space here.");
+    }
+
+    #[test]
+    fn the_first_sentence_is_not_given_when_the_comment_may_start_earlier() {
+        // Wrapped by hand: the line before is a comment too.
+        let text = "}\nx\n// The player is released when the dialog\n// leaves the composition.\n";
+        assert_eq!(selected(text, "leaves", 0), None);
+        // Its first line does not end with a stop.
+        assert_eq!(selected(text, "dialog", 0), None);
+        let text = "}\r\nx\r\n// A wrapped\r\n// line.";
+        assert_eq!(selected(text, "line", 0), None);
+        // No line before, or one the window cuts, may be a comment.
+        assert_eq!(selected("// One sentence here.\n", "One", 0), None);
+        assert_eq!(selected("ment tail\n// One here.", "One", 0), None);
+        // Only the marker is selected.
+        assert_eq!(selected("}\nx\n// One here.", "//", 0), None);
+        // A trailing comment wrapped by hand onto the next line, and a `//`
+        // in a string above.
+        let text = "}\nval x = 1 // a trailing note that\n// continues here.";
+        assert_eq!(selected(text, "continues", 0), None);
+        let text = "}\nval u = \"http://x\"\n// One here.";
+        assert_eq!(selected(text, "One", 0), None);
+        // A trailing comment after code is not a whole-line comment.
+        assert_eq!(selected("}\nx\nf() // One here.", "One", 0), None);
     }
 
     #[test]
