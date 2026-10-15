@@ -13,10 +13,12 @@
 //! The field's paste is taken over here: the user's paste action starts one
 //! asynchronous read of the clipboard, and the text that comes replaces the
 //! whole field as one line and is submitted, as Enter in the field submits
-//! it. The only other read of the clipboard is the one after a press of the
-//! shortcut that gave no context, which is [`resident`](crate::resident)'s.
-//! A text recognized in a capture, or read that way, is put into the field
-//! without being reported as an edit of it, and is not submitted.
+//! it. The only other read of the clipboard, and the only read of the primary
+//! selection by addict (the middle-button paste stays GTK's), is the one
+//! after a press of the shortcut that gave no context, which is
+//! [`resident`](crate::resident)'s. A text recognized in a capture, or read
+//! that way, is put into the field without being reported as an edit of it,
+//! and is not submitted.
 
 use std::{
     cell::{Cell, RefCell},
