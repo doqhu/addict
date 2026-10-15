@@ -30,6 +30,8 @@ use addict_platform::{
 };
 use tokio::time::timeout;
 
+use crate::evidence;
+
 /// How long the whole read may take: the registry, the walk of the tree and
 /// the text. The window is up before it starts and does not wait for it.
 pub const CONTEXT_LIMIT: Duration = Duration::from_secs(2);
@@ -46,6 +48,16 @@ pub const PROBE_WAIT: Duration = Duration::from_secs(1);
 /// What a read ended with: the selection, or why there is none.
 pub type Read = Result<Context, ContextFailure>;
 
+/// What a read was started with, for its record: the measuring of its time,
+/// what the listener said of accessibility at the press and the application
+/// in front, as the press took it and then as the job settled on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Started {
+    pub probe: evidence::Probe,
+    pub accessibility: Accessibility,
+    pub source: Source,
+}
+
 /// Where the read of the window stands; at first no read runs. Each read has
 /// a number, so what a given-up read still reports is told from the report of
 /// the one that runs.
@@ -55,14 +67,17 @@ pub struct Reading {
     job: Option<Job>,
     /// The number of the last started read.
     number: u64,
+    /// What the last started read was started with.
+    started: Option<Started>,
 }
 
 impl Reading {
     /// A new read starts: the one that ran is given up, and the number of
     /// the new one is given back.
-    pub fn begin(&mut self) -> u64 {
+    pub fn begin(&mut self, started: Started) -> u64 {
         self.job = None;
         self.number += 1;
+        self.started = Some(started);
         self.number
     }
 
@@ -76,6 +91,21 @@ impl Reading {
     /// that was given up.
     pub fn is_running(&self, number: u64) -> bool {
         self.job.is_some() && number == self.number
+    }
+
+    /// What the read that runs was started with; none when no read runs.
+    pub fn running(&self) -> Option<Started> {
+        self.job.as_ref().and(self.started)
+    }
+
+    /// The read with `number` settled on `source`; one that was given up
+    /// changes nothing.
+    pub fn settle(&mut self, number: u64, source: Source) {
+        if self.is_running(number)
+            && let Some(started) = self.started.as_mut()
+        {
+            started.source = source;
+        }
     }
 
     /// The read ended. Whether one ran.
@@ -218,10 +248,10 @@ mod tests {
     };
 
     use super::{
-        CONTEXT_LIMIT, MARGIN, PROBE_WAIT, Press, Read, Reading, choose_source, read_result,
-        resolve, settle, start, start_at,
+        CONTEXT_LIMIT, MARGIN, PROBE_WAIT, Press, Read, Reading, Started, choose_source,
+        read_result, resolve, settle, start, start_at,
     };
-    use crate::manual::tests::WAIT;
+    use crate::{evidence, manual::tests::WAIT};
 
     /// A press without a probe: the window was active.
     fn press(accessibility: Accessibility, source: Source) -> Press<Probe> {
@@ -425,9 +455,15 @@ mod tests {
         let mut reading = Reading::default();
         assert!(!reading.is_running(0));
         assert!(!reading.end());
+        assert_eq!(reading.running(), None);
 
         let (sender, receiver) = mpsc::channel();
-        let first = reading.begin();
+        let started = Started {
+            probe: evidence::Probe::start(true),
+            accessibility: Accessibility::On,
+            source: Source::Unknown,
+        };
+        let first = reading.begin(started);
         reading.run(work.run(
             Duration::from_secs(30),
             std::future::pending::<()>(),
@@ -436,18 +472,20 @@ mod tests {
             },
         ));
         assert!(reading.is_running(first));
+        assert_eq!(reading.running(), Some(started));
 
         // A new read gives the first up: it is cancelled and is no longer
         // the one that runs, though it still reports.
-        let second = reading.begin();
+        let second = reading.begin(started);
         assert_eq!(
             receiver.recv_timeout(WAIT).expect("outcome"),
             Outcome::Cancelled
         );
         assert_ne!(first, second);
         assert!(!reading.is_running(first));
-        // Between `begin` and the job no read runs.
+        // Between `begin` and the job no read runs, and it has nothing to give.
         assert!(!reading.is_running(second));
+        assert_eq!(reading.running(), None);
         reading.run(work.run(
             Duration::from_secs(30),
             std::future::pending::<()>(),
@@ -456,8 +494,17 @@ mod tests {
         assert!(reading.is_running(second));
         assert!(!reading.is_running(first));
 
+        // A given-up read does not settle; the one that runs does.
+        reading.settle(first, Source::Other);
+        assert_eq!(reading.running(), Some(started));
+        reading.settle(second, Source::AndroidStudio);
+        assert_eq!(
+            reading.running().map(|started| started.source),
+            Some(Source::AndroidStudio)
+        );
         assert!(reading.end());
         assert!(!reading.is_running(second));
+        assert_eq!(reading.running(), None);
         assert!(!reading.end());
     }
 

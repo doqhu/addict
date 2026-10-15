@@ -7,9 +7,9 @@
 //!
 //! The event names and the fields of `details` are the harness's own. The
 //! session start is named `broker-started` because that is the record the
-//! harness splits sessions on. The `online` and `ocr` records are the
-//! exceptions: the harness reads their lines and counts nothing by them; it
-//! only looks for a `recognized` `ocr` record before the idle sample taken
+//! harness splits sessions on. The `online`, `ocr` and `context` records are
+//! the exceptions: the harness reads their lines and counts nothing by them;
+//! it only looks for a `recognized` `ocr` record before the idle sample taken
 //! after an OCR cycle.
 
 use std::{
@@ -20,7 +20,13 @@ use std::{
 };
 
 use addict_core::translation::Refusal;
-use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure, work::Outcome};
+use addict_platform::{
+    atspi::{Context, ContextFailure},
+    foreground::{Accessibility, Source},
+    ocr::OcrFailure,
+    screenshot::CaptureFailure,
+    work::Outcome,
+};
 use serde_json::{Value, json};
 
 use crate::{
@@ -501,6 +507,123 @@ fn ocr(read: Read, timing: &Timing, memory: Memory, child_processes: Option<u64>
             "peak_rss_bytes": memory.peak_rss_bytes,
             "pss_bytes": memory.pss_bytes,
             "child_processes": child_processes,
+        }),
+    }
+}
+
+/// How a read of the accessibility bus ended, as the evidence names it. No
+/// wildcard arm anywhere it is matched: a new failure does not compile until
+/// it is given its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextEnd {
+    /// The selected word came with its sentence.
+    Sentence,
+    /// The selected word came with no sentence: outside the confirmed area.
+    WordOnly,
+    AccessibilityOff,
+    NotFromStudio,
+    AppNotFound,
+    NoSelection,
+    Ambiguous,
+    TimedOut,
+    Unavailable,
+    /// The read failed, panicked or could not start.
+    Failed,
+    /// The read was given up for a new press, an edit or a capture.
+    Cancelled,
+}
+
+impl ContextEnd {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sentence => "sentence",
+            Self::WordOnly => "word-only",
+            Self::AccessibilityOff => "accessibility-off",
+            Self::NotFromStudio => "not-from-studio",
+            Self::AppNotFound => "app-not-found",
+            Self::NoSelection => "no-selection",
+            Self::Ambiguous => "ambiguous",
+            Self::TimedOut => "timed-out",
+            Self::Unavailable => "unavailable",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// What the evidence says of a read that gave `read`. The word, the
+    /// sentence and the detail of a failure are dropped here.
+    pub fn of(read: &crate::context::Read) -> Self {
+        match read {
+            Ok(Context {
+                sentence: Some(_), ..
+            }) => Self::Sentence,
+            Ok(Context { sentence: None, .. }) => Self::WordOnly,
+            Err(ContextFailure::AccessibilityOff) => Self::AccessibilityOff,
+            Err(ContextFailure::NotFromStudio(_)) => Self::NotFromStudio,
+            Err(ContextFailure::AppNotFound) => Self::AppNotFound,
+            Err(ContextFailure::NoSelection) => Self::NoSelection,
+            Err(ContextFailure::Ambiguous(_)) => Self::Ambiguous,
+            Err(ContextFailure::TimedOut) => Self::TimedOut,
+            Err(ContextFailure::Unavailable(_)) => Self::Unavailable,
+            Err(ContextFailure::Failed(_)) => Self::Failed,
+        }
+    }
+}
+
+/// The application in front that a read settled on, as the evidence names it.
+fn source_label(source: Source) -> &'static str {
+    match source {
+        Source::AndroidStudio => "android-studio",
+        Source::Other => "other",
+        Source::Unknown => "unknown",
+    }
+}
+
+/// Whether accessibility was on at the press, as the evidence names it.
+fn accessibility_label(accessibility: Accessibility) -> &'static str {
+    match accessibility {
+        Accessibility::On => "on",
+        Accessibility::Off => "off",
+        Accessibility::Unknown => "unknown",
+    }
+}
+
+/// The record of a read of the accessibility bus that ended as `end`, took
+/// `elapsed`, settled on `source` and found accessibility as `accessibility`
+/// at the press. None without a time: evidence is not recorded then. The
+/// memory is read here, on the UI thread, and only for a record that is made.
+pub fn context_record(
+    end: ContextEnd,
+    source: Source,
+    accessibility: Accessibility,
+    elapsed: Option<Elapsed>,
+) -> Option<Record> {
+    let Elapsed(read_ms) = elapsed?;
+    Some(context(end, source, accessibility, read_ms, Memory::read()))
+}
+
+/// A read of the accessibility bus ended. The record says how, what that took
+/// apart from the window, what the read settled on and whether accessibility
+/// was on, and nothing of the word, of the sentence or of a failure's
+/// detail. It names no press, and its event is its own: the harness counts
+/// it nowhere.
+fn context(
+    end: ContextEnd,
+    source: Source,
+    accessibility: Accessibility,
+    read_ms: u64,
+    memory: Memory,
+) -> Record {
+    Record {
+        invocation_id: None,
+        event: "context",
+        details: json!({
+            "outcome": end.label(),
+            "read_ms": read_ms,
+            "source": source_label(source),
+            "accessibility": accessibility_label(accessibility),
+            "peak_rss_bytes": memory.peak_rss_bytes,
+            "pss_bytes": memory.pss_bytes,
         }),
     }
 }
@@ -1060,6 +1183,162 @@ mod tests {
         }
         assert_eq!(rows[2].details["recognition_ms"], Value::Null);
         assert_eq!(rows[4].details["capture_ms"], Value::Null);
+    }
+
+    /// Every way a read of the bus ends, with its label. The word, the
+    /// sentence and the details are ones the record must not carry.
+    fn context_ends() -> Vec<(ContextEnd, &'static str)> {
+        let chosen = |sentence| -> crate::context::Read {
+            Ok(Context {
+                word: "secret-word".into(),
+                sentence,
+            })
+        };
+        let with = Some(addict_core::sentence::Selected {
+            text: "A secret sentence.".into(),
+            word: 2..8,
+        });
+        let failed = |failure| ContextEnd::of(&Err(failure));
+        vec![
+            (ContextEnd::of(&chosen(with)), "sentence"),
+            (ContextEnd::of(&chosen(None)), "word-only"),
+            (
+                failed(ContextFailure::AccessibilityOff),
+                "accessibility-off",
+            ),
+            (
+                failed(ContextFailure::NotFromStudio(Source::Other)),
+                "not-from-studio",
+            ),
+            (failed(ContextFailure::AppNotFound), "app-not-found"),
+            (failed(ContextFailure::NoSelection), "no-selection"),
+            (failed(ContextFailure::Ambiguous(3)), "ambiguous"),
+            (failed(ContextFailure::TimedOut), "timed-out"),
+            (
+                failed(ContextFailure::Unavailable("secret-bus".into())),
+                "unavailable",
+            ),
+            (
+                failed(ContextFailure::Failed("secret-detail".into())),
+                "failed",
+            ),
+            (ContextEnd::Cancelled, "cancelled"),
+        ]
+    }
+
+    #[test]
+    fn every_read_end_has_a_label_of_its_own() {
+        let ends = context_ends();
+        let labels: std::collections::BTreeSet<_> = ends.iter().map(|(e, _)| e.label()).collect();
+        assert_eq!(labels.len(), ends.len());
+        for (end, label) in ends {
+            assert_eq!(end.label(), label);
+        }
+    }
+
+    #[test]
+    fn a_read_is_recorded_by_its_outcome_time_source_and_memory_and_nothing_else() {
+        let file = TempFile::new("context");
+        let mut writer = start(&file.0, Origin::AndroidStudio);
+        let ends = context_ends();
+        let sources = [Source::AndroidStudio, Source::Other, Source::Unknown];
+        let states = [
+            Accessibility::On,
+            Accessibility::Off,
+            Accessibility::Unknown,
+        ];
+        for (index, (end, _)) in ends.iter().enumerate() {
+            let record = context(
+                *end,
+                sources[index % 3],
+                states[index % 3],
+                (index as u64 + 1) * 100,
+                MEMORY,
+            );
+            writer.write(&record);
+        }
+        let text = std::fs::read_to_string(&file.0).expect("read the evidence");
+        assert!(!text.contains("secret"));
+        let rows = read(&file.0);
+        assert_eq!(rows.len(), 1 + ends.len());
+        let (source_labels, state_labels) = (
+            ["android-studio", "other", "unknown"],
+            ["on", "off", "unknown"],
+        );
+        for (index, (row, (_, label))) in rows[1..].iter().zip(&ends).enumerate() {
+            assert_eq!(row.event, "context");
+            assert_eq!(row.invocation_id, None);
+            assert_eq!(
+                row.details,
+                json!({
+                    "outcome": label,
+                    "read_ms": (index as u64 + 1) * 100,
+                    "source": source_labels[index % 3],
+                    "accessibility": state_labels[index % 3],
+                    "peak_rss_bytes": 141_234_176,
+                    "pss_bytes": 63_012_864,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn a_read_without_a_time_is_not_recorded_and_one_with_a_time_reads_the_memory() {
+        let (source, accessibility) = (Source::AndroidStudio, Accessibility::On);
+        assert_eq!(
+            context_record(ContextEnd::Cancelled, source, accessibility, None),
+            None
+        );
+        let record = context_record(
+            ContextEnd::Sentence,
+            source,
+            accessibility,
+            Some(Elapsed(212)),
+        )
+        .expect("a record");
+        assert_eq!(record.details["read_ms"], 212);
+        assert!(
+            record.details["pss_bytes"]
+                .as_u64()
+                .is_some_and(|bytes| bytes > 0)
+        );
+    }
+
+    #[test]
+    fn a_session_with_context_records_summarises_as_one_without() {
+        let session = |with_context: bool| {
+            let file = TempFile::new("context-summary");
+            let mut writer = start(&file.0, Origin::Foliate);
+            let note = |writer: &mut Writer, end| {
+                if with_context {
+                    let record = context(end, Source::Other, Accessibility::On, 230, MEMORY);
+                    writer.write(&record);
+                }
+            };
+            for count in 1..=5 {
+                press(&mut writer, count, true, true);
+                note(&mut writer, ContextEnd::NotFromStudio);
+            }
+            for _ in 0..3 {
+                writer.write(&lookup(Answered::Article));
+                note(&mut writer, ContextEnd::Cancelled);
+            }
+            read(&file.0)
+        };
+        let (without, with) = (session(false), session(true));
+        assert_eq!(with.len(), without.len() + 5 + 3);
+        let value = |summary| serde_json::to_value(summary).expect("a summary is JSON");
+        for mapping in [None, Some(&mapping())] {
+            assert_eq!(
+                value(foliate(&with, mapping)),
+                value(foliate(&without, mapping))
+            );
+        }
+        let product = |rows: &[Evidence]| {
+            let all = metrics::summarize_product(rows, Some(&mapping()));
+            serde_json::to_value(all).expect("a summary is JSON")
+        };
+        assert_eq!(product(&with), product(&without));
     }
 
     #[test]

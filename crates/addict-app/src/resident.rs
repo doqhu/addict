@@ -75,7 +75,10 @@
 //! the field is edited, Capture or the shortcut is pressed.
 //! Each read has a number; a new press, an edit of the field and a capture
 //! give up the read that runs, and whatever it reports later is ignored and
-//! shows no line. A press also gives up a running capture. The job is
+//! shows no line. A press also gives up a running capture. Every end of
+//! the read of the bus, also a given-up one and one that could not start, is
+//! recorded with `--evidence` as one `context` record, timed on the worker;
+//! the read of the clipboard after it is not. The job is
 //! [`context`](crate::context)'s.
 //!
 //! A read of the press that ends without context, for any cause, is written
@@ -223,8 +226,10 @@ enum Event {
     /// The read of the accessibility bus with this number settled on this
     /// application in front, before it reads.
     ContextSource(u64, Foregrounded),
-    /// The read of the accessibility bus with this number ended.
-    Context(u64, Outcome<Read>),
+    /// The read of the accessibility bus with this number ended. The time is
+    /// the read's, as the worker saw it; taken only when evidence is
+    /// recorded.
+    Context(u64, Outcome<Read>, Option<evidence::Elapsed>),
     /// The window became active.
     Active,
     /// The read of the clipboard with this number ended: the line of its
@@ -463,7 +468,7 @@ impl Session {
             Event::Captured(number) => self.snapshot_taken(number),
             Event::Recognized(number, outcome) => self.recognized(number, outcome),
             Event::ContextSource(number, source) => self.context_source(number, source),
-            Event::Context(number, outcome) => self.context_read(number, outcome),
+            Event::Context(number, outcome, elapsed) => self.context_read(number, outcome, elapsed),
             Event::Active => self.window_active(),
             Event::Clipboard(number, line) => self.copied(number, line),
         }
@@ -610,7 +615,16 @@ impl Session {
     /// cancelled, and whatever they report later is ignored. Whether a read
     /// ran.
     fn give_up_read(&mut self) -> bool {
+        let running = self.reading.running();
         let ran = self.reading.end();
+        // A read given up is an outcome too: it ran for as long as this.
+        if let Some(started) = running {
+            self.record_context(
+                evidence::ContextEnd::Cancelled,
+                started,
+                started.probe.ended(),
+            );
+        }
         let copied = self.copying.end().is_some();
         if matches!(
             self.manual.reading(),
@@ -665,7 +679,12 @@ impl Session {
         source: Foregrounded,
         probe: Option<Probe>,
     ) {
-        let number = self.reading.begin();
+        let begun = context::Started {
+            probe: evidence::Probe::start(self.recording.is_some()),
+            accessibility,
+            source,
+        };
+        let number = self.reading.begin(begun);
         let settled = self.sender.clone();
         let sender = self.sender.clone();
         let started = context::start(
@@ -678,13 +697,34 @@ impl Session {
                 let _ = settled.unbounded_send(Event::ContextSource(number, source));
             },
             move |outcome| {
-                // On the worker: the UI thread wakes for the event.
-                let _ = sender.unbounded_send(Event::Context(number, outcome));
+                // On the worker: the UI thread wakes for the event, and the
+                // time is the read's, not the redraw's.
+                let elapsed = begun.probe.ended();
+                let _ = sender.unbounded_send(Event::Context(number, outcome, elapsed));
             },
         );
         match started {
             Ok(job) => self.reading.run(job),
-            Err(failure) => self.read_failed(&failure),
+            Err(failure) => {
+                // No time passed: the read could not start.
+                let end = evidence::ContextEnd::of(&Err(failure.clone()));
+                self.record_context(end, begun, begun.probe.not_started());
+                self.read_failed(&failure);
+            }
+        }
+    }
+
+    /// Writes the record of a read of the accessibility bus that ended as
+    /// `end`, when evidence is recorded and there is a time for it.
+    fn record_context(
+        &self,
+        end: evidence::ContextEnd,
+        started: context::Started,
+        elapsed: Option<evidence::Elapsed>,
+    ) {
+        let record = evidence::context_record(end, started.source, started.accessibility, elapsed);
+        if let Some((recording, record)) = self.recording.as_ref().zip(record) {
+            recording.context_ended(&record);
         }
     }
 
@@ -694,6 +734,7 @@ impl Session {
     fn context_source(&mut self, number: u64, source: Foregrounded) {
         if self.reading.is_running(number) {
             self.kept = source;
+            self.reading.settle(number, source);
         }
     }
 
@@ -701,15 +742,24 @@ impl Session {
     /// The context replaces the field as a new text with the selected word
     /// chosen and its lookup starts, nothing is asked online; a failure
     /// leaves the field as it is and starts the read of the clipboard.
-    fn context_read(&mut self, number: u64, outcome: Outcome<Read>) {
+    fn context_read(
+        &mut self,
+        number: u64,
+        outcome: Outcome<Read>,
+        elapsed: Option<evidence::Elapsed>,
+    ) {
         if !self.reading.is_running(number) {
             return;
         }
+        let started = self.reading.running();
         self.reading.end();
         // A cancelled job was dropped here on purpose and shows nothing.
         let Some(read) = context::read_result(outcome) else {
             return;
         };
+        if let Some(started) = started {
+            self.record_context(evidence::ContextEnd::of(&read), started, elapsed);
+        }
         match read {
             Ok(context) => {
                 let edit = self.manual.arrived(context);

@@ -4,21 +4,24 @@
 #   acceptance.sh calibrate                  ten presses -> clock certificate of this boot
 #   acceptance.sh <foliate|android-studio>   one session: cold press, 60 s idle sample,
 #                                            30 warm presses, 30 lookups, online requests of
-#                                            a word, of a sentence and of a definition,
-#                                            60 s idle sample, GPU record, an OCR cycle (a
-#                                            cancelled capture, then a recognized one), 60 s
-#                                            idle sample, online and OCR digests, summary
+#                                            a word, of a sentence and of a definition, in
+#                                            Android Studio context reads (a sentence, a word
+#                                            only, a refusal), 60 s idle sample, GPU record,
+#                                            an OCR cycle (a cancelled capture, then a
+#                                            recognized one), 60 s idle sample, online, OCR
+#                                            and context digests, summary
 # A session is of the product with both dictionary indexes imported and records them; it
 # sends text to DeepL and does not start without the key file, nor without Tesseract's
 # English data. Calibration sends nothing. The certificate lives in the output directory,
-# so this directory needs its own calibration.
+# so this directory needs its own calibration. The idle samples are of the process with
+# its resident listener of the application in front, which the product always starts.
 # Exit 0 only when the certificate was written or the session's row is `pass`.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 action=${1:-}
 app="$root/target/release/addict"
 exp="$root/target/release/addict-exp4"
-out="$root/_bmad-output/initiative-linux-rust-translator/acceptance-capture-ocr"
+out="$root/_bmad-output/initiative-linux-rust-translator/acceptance-android-studio-context"
 results="$out/results.jsonl"
 calibration="$out/calibration.jsonl"
 boot=$(cat /proc/sys/kernel/random/boot_id)
@@ -95,13 +98,15 @@ trap cleanup EXIT
 
 # Prints "<session started> <cold frames> <warm frames> <frames without a time> <presses>
 # <lookups> <online: of a word> <of a sentence> <of a definition> <captures: recognized>
-# <ended otherwise>" of the process this script started.
+# <ended otherwise> <context reads: with a sentence> <with a word only> <refused> <given up>"
+# of the process this script started.
 progress() {
   python3 - "$file" "$pid" <<'EOF'
 import json, os, sys
 started = cold = warm = untimed = presses = lookups = 0
 online = {'word': 0, 'sentence': 0, 'definition': 0}
 recognized = other = 0
+reads = {'sentence': 0, 'word-only': 0, 'refused': 0, 'cancelled': 0}
 mine = False
 flags = {}
 if os.path.exists(sys.argv[1]):
@@ -116,6 +121,7 @@ if os.path.exists(sys.argv[1]):
                 started = 1
                 lookups = recognized = other = 0
                 online = dict.fromkeys(online, 0)
+                reads = dict.fromkeys(reads, 0)
         elif row['event'] == 'lookup' and mine:
             lookups += 1
         elif row['event'] == 'ocr' and mine:
@@ -125,6 +131,10 @@ if os.path.exists(sys.argv[1]):
                 other += 1
         elif row['event'] == 'online' and mine and row['details'].get('subject') in online:
             online[row['details']['subject']] += 1
+        elif row['event'] == 'context' and mine:
+            outcome = row['details'].get('outcome')
+            # Every other outcome is a refusal: the read gave no word.
+            reads[outcome if outcome in reads else 'refused'] += 1
         identifier = row.get('invocation_id') or ''
         if not identifier.startswith(sys.argv[2] + '-'):
             continue
@@ -138,7 +148,8 @@ if os.path.exists(sys.argv[1]):
                 warm += 1
             if row['details'].get('time_ns') is None:
                 untimed += 1
-print(started, cold, warm, untimed, presses, lookups, *online.values(), recognized, other)
+print(started, cold, warm, untimed, presses, lookups, *online.values(), recognized, other,
+      *reads.values())
 EOF
 }
 alive() { kill -0 "$pid" 2>/dev/null || { echo; echo 'addict exited; see its message above' >&2; exit 1; }; }
@@ -159,6 +170,7 @@ presses() { local values; read -r -a values <<<"$(progress)"; echo "${values[4]}
 looked() { local values; read -r -a values <<<"$(progress)"; echo "${values[5]}"; }
 asked() { local values; read -r -a values <<<"$(progress)"; echo "${values[@]:6:3}"; }
 captured() { local values; read -r -a values <<<"$(progress)"; echo "${values[@]:9:2}"; }
+contexts() { local values; read -r -a values <<<"$(progress)"; echo "${values[@]:11:4}"; }
 wait_online() { # waits until, since the step began, a request of each kind has ended
   local values first word sentence definition
   # A request of the last click of the step before, still pending, would be counted here.
@@ -176,15 +188,15 @@ wait_online() { # waits until, since the step began, a request of each kind has 
 sample() { # <phase>: 60 s idle, then PSS, RSS and CPU of the process over one second
   local before
   read -r -p 'Make sure the window is closed (Esc), then press Enter here. '
-  before="$(presses) $(looked) $(asked) $(captured)"
+  before="$(presses) $(looked) $(asked) $(captured) $(contexts)"
   echo "Hands off for 60 s: idle sample ($1)."
   "$exp" sample --backend gtk4 --mode resident --origin "$origin" --roots "$pid" \
     --phase "$1" --idle-seconds 60 --inventory-complete --results "$results" >/dev/null
   alive
-  # A press, a lookup, an online request or a capture during the wait means the process
-  # was not idle: the sample is not one.
-  [[ "$(presses) $(looked) $(asked) $(captured)" == "$before" ]] \
-    || { echo 'A press, a lookup, an online request or a capture arrived during the idle wait; repeat the session' >&2; exit 1; }
+  # A press, a lookup, an online request, a capture or the end of a context read during the
+  # wait means the process was not idle: the sample is not one.
+  [[ "$(presses) $(looked) $(asked) $(captured) $(contexts)" == "$before" ]] \
+    || { echo 'A press, a lookup, an online request, a capture or a context read arrived during the idle wait; repeat the session' >&2; exit 1; }
 }
 
 "$app" --evidence "$file" --origin "$origin" &
@@ -228,9 +240,27 @@ echo '   the word and of the sentence. Then click a sense of the article and pre
 echo '   "Translate definition into Russian". A refusal counts as an answer.'
 wait_online
 echo 'Stop clicking and wait until every online line has its answer.'
+if [[ $action == android-studio ]]; then
+  echo '5. Context reads, in Android Studio with accessibility on. Each Super+Q below is measured too,'
+  echo '   as an extra attempt; close the window with Esc after each.'
+  echo '   a) Select a word of a later sentence of a whole-line // comment and press Super+Q; the'
+  echo '      sentence arrives after the window.'
+  base=$(contexts | awk '{print $1}')
+  wait_for 'reads with a sentence' 1 11
+  echo '   b) Select a word in a string literal and press Super+Q; the window shows the word alone.'
+  base=$(contexts | awk '{print $2}')
+  wait_for 'reads with a word only' 1 12
+  echo '   c) Press Super+Q from another application (Foliate); the window says it was not Android Studio.'
+  base=$(contexts | awk '{print $3}')
+  wait_for 'refused reads' 1 13
+  base=0
+  echo '   Optional, not waited for: press Super+Q twice in a row; the read the second press gives up'
+  echo '   is recorded as cancelled.'
+  echo 'Stop pressing.'
+fi
 sample after-close
 "$exp" gpu --results "$results" --roots "$pid"
-echo "5. OCR cycle. Super+Q (this press is measured too, as an extra attempt), press Capture"
+echo "6. OCR cycle. Super+Q (this press is measured too, as an extra attempt), press Capture"
 echo '   and cancel the choice of the area with Esc; the window comes back saying no snapshot was'
 echo '   taken (or that the capture was cancelled).'
 # Only a capture of this step counts.
@@ -311,6 +341,40 @@ for d in rows:
 left = sys.argv[3].split()
 print('child processes after the cycle (pgrep -P {}): {}'.format(
     sys.argv[2], 'none' if not left else ' '.join(left)))
+EOF
+
+# A reading aid of the context reads of this session, like the digests above.
+python3 - "$results" "$pid" <<'EOF' | tee "$out/context-$origin-$boot-$pid.txt" \
+  || echo 'The digest of the context records failed; the evidence file still holds them' >&2
+import collections, json, statistics, sys
+mine = False
+rows = []
+for line in open(sys.argv[1]):
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    if row['event'] == 'broker-started':
+        mine = str(row['details'].get('pid')) == sys.argv[2]
+        if mine:
+            rows = []
+    elif row['event'] == 'context' and mine:
+        rows.append(row['details'])
+megabytes = lambda value: '-' if value is None else '{:.1f}'.format(value / 1e6)
+layout = '{:<18} {:<15} {:<14} {:>8} {:>11} {:>8}'
+print('== context reads: {} =='.format(len(rows)))
+print(layout.format('outcome', 'source', 'accessibility', 'read ms', 'peak RSS MB', 'PSS MB'))
+for d in rows:
+    print(layout.format(d['outcome'], d['source'], d['accessibility'], d['read_ms'],
+                        megabytes(d['peak_rss_bytes']), megabytes(d['pss_bytes'])))
+counts = collections.Counter(d['outcome'] for d in rows)
+print('outcomes: ' + (', '.join('{} {}'.format(k, v) for k, v in sorted(counts.items())) or 'none'))
+times = sorted(d['read_ms'] for d in rows if d['outcome'] == 'sentence')
+spread = 'no sentence'
+if times:
+    spread = '{}..{} ms, median {:g}'.format(times[0], times[-1], statistics.median(times))
+print('reads with a sentence: {}'.format(spread))
+values = [d['pss_bytes'] for d in rows if d['pss_bytes'] is not None]
+print('highest PSS: {} MB'.format(megabytes(max(values, default=None))))
 EOF
 
 summary=$("$exp" summarize --product --results "$results" --clock-mapping "$certificate")
