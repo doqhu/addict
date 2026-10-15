@@ -4,7 +4,13 @@
 //! press.
 //!
 //! [`start`] starts the job with the [`Accessibility`] the listener read and
-//! the [`Source`] the press settled on ([`choose_source`]); it ends with one
+//! the [`Source`] the press settled on ([`choose_source`]). When the product's
+//! window was not active at the press, the listener's probe of Android
+//! Studio's frames goes with it: the job first waits for its answer, for at
+//! most [`PROBE_WAIT`], and an active frame makes the source Android Studio
+//! ([`resolve`]); any other answer, none or a dropped probe leaves the
+//! source as observed. The job tells the source it settled on before it
+//! reads, so that the session keeps it. The job ends with one
 //! [`Read`], what the adapter gave, or why it gave nothing: accessibility
 //! that is off ends it at once as `AccessibilityOff`, another application in
 //! front as `NotFromStudio`, and an unknown one as `NotFromStudio`,
@@ -15,13 +21,14 @@
 //! on the bus is [`addict_platform::atspi`]'s, and what was in front is
 //! [`addict_platform::foreground`]'s.
 
-use std::time::Duration;
+use std::{fmt::Debug, future::Future, time::Duration};
 
 use addict_platform::{
     atspi::{self, Context, ContextFailure, Locate},
-    foreground::{Accessibility, Source},
+    foreground::{Accessibility, Probe, Source},
     work::{Job, Outcome, Work},
 };
+use tokio::time::timeout;
 
 /// How long the whole read may take: the registry, the walk of the tree and
 /// the text. The window is up before it starts and does not wait for it.
@@ -30,6 +37,11 @@ pub const CONTEXT_LIMIT: Duration = Duration::from_secs(2);
 /// What the deadline of the job has over the read's own limit, so that the
 /// adapter's [`ContextFailure::TimedOut`] is what a slow bus ends in.
 const MARGIN: Duration = Duration::from_secs(1);
+
+/// How long the job waits for the probe of Android Studio's frames: the
+/// listener answers within the adapter's call limit of 500 ms once it takes
+/// the probe; the rest is for the probe's queue.
+pub const PROBE_WAIT: Duration = Duration::from_secs(1);
 
 /// What a read ended with: the selection, or why there is none.
 pub type Read = Result<Context, ContextFailure>;
@@ -80,39 +92,102 @@ pub fn choose_source(window_active: bool, kept: Source, observed: Source) -> Sou
     if window_active { kept } else { observed }
 }
 
+/// What the job takes as the application in front: Android Studio when the
+/// probe found one of its frames active, else what the press `observed`.
+pub fn resolve(observed: Source, studio_active: bool) -> Source {
+    if studio_active {
+        Source::AndroidStudio
+    } else {
+        observed
+    }
+}
+
+/// The source after the answer of `probe`, waited for at most
+/// [`PROBE_WAIT`]; without a probe, `observed`. A probe that is dropped or
+/// late leaves `observed`: nothing is read on a guess.
+async fn settle<P, E>(observed: Source, probe: Option<P>) -> Source
+where
+    P: Future<Output = Result<bool, E>>,
+    E: Debug,
+{
+    let Some(probe) = probe else {
+        return observed;
+    };
+    let active = match timeout(PROBE_WAIT, probe).await {
+        Ok(Ok(active)) => active,
+        Ok(Err(e)) => {
+            eprintln!("addict: the probe of Android Studio was dropped: {e:?}");
+            false
+        }
+        Err(_) => {
+            eprintln!("addict: the probe of Android Studio did not answer within {PROBE_WAIT:?}");
+            false
+        }
+    };
+    resolve(observed, active)
+}
+
 /// Starts the read of the session's accessibility bus on `work`, with
-/// `accessibility` as the listener read it and `source` in front.
-/// `on_outcome` runs once on the worker when the job has ended. Without a
-/// runner nothing starts and the failure is given back.
+/// `accessibility` as the listener read it, `source` in front and the
+/// `probe` taken at the press, if any. `on_source` runs once on the worker
+/// with the source the job settled on, before the read; `on_outcome` runs
+/// once on the worker when the job has ended. Without a runner nothing
+/// starts and the failure is given back.
 pub fn start(
     work: Option<&Work>,
     accessibility: Accessibility,
     source: Source,
+    probe: Option<Probe>,
+    on_source: impl FnOnce(Source) + Send + 'static,
     on_outcome: impl FnOnce(Outcome<Read>) + Send + 'static,
 ) -> Result<Job, ContextFailure> {
     start_at(
         work,
         Locate::Session,
-        accessibility,
-        source,
+        Press {
+            accessibility,
+            source,
+            probe,
+        },
         CONTEXT_LIMIT,
+        on_source,
         on_outcome,
     )
 }
 
-/// [`start`] on the bus `locate` with the deadline `limit` for the read.
-fn start_at(
-    work: Option<&Work>,
-    locate: Locate,
+/// What a press gives the job.
+struct Press<P> {
     accessibility: Accessibility,
     source: Source,
+    probe: Option<P>,
+}
+
+/// [`start`] on the bus `locate` with the deadline `limit` for the read.
+fn start_at<P, E>(
+    work: Option<&Work>,
+    locate: Locate,
+    press: Press<P>,
     limit: Duration,
+    on_source: impl FnOnce(Source) + Send + 'static,
     on_outcome: impl FnOnce(Outcome<Read>) + Send + 'static,
-) -> Result<Job, ContextFailure> {
+) -> Result<Job, ContextFailure>
+where
+    P: Future<Output = Result<bool, E>> + Send + 'static,
+    E: Debug,
+{
     let work = work.ok_or_else(|| ContextFailure::Failed("no work runner".to_owned()))?;
+    let Press {
+        accessibility,
+        source,
+        probe,
+    } = press;
     Ok(work.run(
-        limit.saturating_add(MARGIN),
-        async move { atspi::read(&locate, accessibility, source, limit).await },
+        limit.saturating_add(PROBE_WAIT).saturating_add(MARGIN),
+        async move {
+            let source = settle(source, probe).await;
+            on_source(source);
+            atspi::read(&locate, accessibility, source, limit).await
+        },
         on_outcome,
     ))
 }
@@ -133,23 +208,43 @@ pub fn read_result(outcome: Outcome<Read>) -> Option<Read> {
 mod tests {
     use std::{sync::mpsc, thread, time::Duration};
 
+    use std::future::{self, Ready};
+
     use addict_core::sentence::Selected;
     use addict_platform::{
         atspi::{Context, ContextFailure, Locate},
-        foreground::{Accessibility, Source},
+        foreground::{Accessibility, Probe, Source},
         work::{Outcome, Work},
     };
 
     use super::{
-        CONTEXT_LIMIT, MARGIN, Read, Reading, choose_source, read_result, start, start_at,
+        CONTEXT_LIMIT, MARGIN, PROBE_WAIT, Press, Read, Reading, choose_source, read_result,
+        resolve, settle, start, start_at,
     };
     use crate::manual::tests::WAIT;
 
+    /// A press without a probe: the window was active.
+    fn press(accessibility: Accessibility, source: Source) -> Press<Probe> {
+        Press {
+            accessibility,
+            source,
+            probe: None,
+        }
+    }
+
+    /// A probe that has its answer already.
+    type Answered = Ready<Result<bool, ()>>;
+
     #[test]
     fn without_a_runner_nothing_starts() {
-        let started = start(None, Accessibility::On, Source::AndroidStudio, |_| {
-            panic!("ended")
-        });
+        let started = start(
+            None,
+            Accessibility::On,
+            Source::AndroidStudio,
+            None,
+            |_| panic!("settled"),
+            |_| panic!("ended"),
+        );
         assert!(matches!(started, Err(ContextFailure::Failed(_))));
     }
 
@@ -162,9 +257,9 @@ mod tests {
         let job = start_at(
             Some(&work),
             Locate::Address(format!("unix:path={}", missing.display())),
-            Accessibility::On,
-            Source::AndroidStudio,
+            press(Accessibility::On, Source::AndroidStudio),
             CONTEXT_LIMIT,
+            |_| {},
             move |outcome| {
                 let _ = sender.send((outcome, thread::current().id() != caller));
             },
@@ -187,9 +282,9 @@ mod tests {
         let job = start_at(
             Some(work),
             Locate::Address(format!("unix:path={}", missing.display())),
-            accessibility,
-            source,
+            press(accessibility, source),
             CONTEXT_LIMIT,
+            |_| {},
             move |outcome| {
                 let _ = sender.send(outcome);
             },
@@ -237,6 +332,91 @@ mod tests {
         assert_eq!(choose_source(false, AndroidStudio, Other), Other);
         assert_eq!(choose_source(false, Unknown, AndroidStudio), AndroidStudio);
         assert_eq!(choose_source(false, AndroidStudio, Unknown), Unknown);
+    }
+
+    #[test]
+    fn an_active_frame_of_studio_makes_studio_the_source() {
+        use Source::{AndroidStudio, Other, Unknown};
+        for observed in [AndroidStudio, Other, Unknown] {
+            assert_eq!(resolve(observed, true), AndroidStudio);
+            assert_eq!(resolve(observed, false), observed);
+        }
+    }
+
+    /// What `settle` gives for `observed` and `probe`, run on a runner.
+    fn settled<P>(observed: Source, probe: Option<P>) -> Source
+    where
+        P: std::future::Future<Output = Result<bool, ()>> + Send + 'static,
+    {
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = mpsc::channel();
+        let _job = work.run(WAIT, settle(observed, probe), move |outcome| {
+            let _ = sender.send(outcome);
+        });
+        match receiver.recv_timeout(WAIT).expect("outcome") {
+            Outcome::Finished(source) => source,
+            outcome => panic!("{outcome:?}"),
+        }
+    }
+
+    #[test]
+    fn the_probe_decides_only_when_it_says_true() {
+        use Source::{AndroidStudio, Other, Unknown};
+        assert_eq!(
+            settled(Unknown, Some(future::ready(Ok(true)))),
+            AndroidStudio
+        );
+        assert_eq!(settled(Other, Some(future::ready(Ok(true)))), AndroidStudio);
+        assert_eq!(settled(Unknown, Some(future::ready(Ok(false)))), Unknown);
+        assert_eq!(settled(Other, Some(future::ready(Ok(false)))), Other);
+        // Dropped: the listener is gone.
+        assert_eq!(settled(Other, Some(future::ready(Err(())))), Other);
+        // No probe: the window was active.
+        assert_eq!(settled(Unknown, None::<Answered>), Unknown);
+    }
+
+    #[test]
+    fn a_probe_that_does_not_answer_leaves_the_observed_source() {
+        let started = std::time::Instant::now();
+        let probe = future::pending::<Result<bool, ()>>();
+        assert_eq!(settled(Source::Other, Some(probe)), Source::Other);
+        assert!(started.elapsed() >= PROBE_WAIT);
+    }
+
+    #[test]
+    fn the_job_reads_as_studio_and_says_so_when_the_probe_found_it() {
+        let work = Work::start().expect("runner");
+        let missing = std::env::temp_dir().join("addict-context-test-no-such-bus-probe");
+        let (sender, receiver) = mpsc::channel();
+        let (settled, settled_to) = mpsc::channel();
+        let job = start_at(
+            Some(&work),
+            Locate::Address(format!("unix:path={}", missing.display())),
+            Press {
+                accessibility: Accessibility::On,
+                source: Source::Other,
+                probe: Some(future::ready(Ok::<_, ()>(true))),
+            },
+            CONTEXT_LIMIT,
+            move |source| {
+                let _ = settled.send(source);
+            },
+            move |outcome| {
+                let _ = sender.send(outcome);
+            },
+        )
+        .expect("job");
+        assert_eq!(
+            settled_to.recv_timeout(WAIT).expect("source"),
+            Source::AndroidStudio
+        );
+        // Read as Android Studio's: the bus is opened, and it is absent.
+        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+        drop(job);
+        assert!(matches!(
+            read_result(outcome),
+            Some(Err(ContextFailure::Unavailable(_)))
+        ));
     }
 
     #[test]
@@ -313,5 +493,7 @@ mod tests {
     fn the_limit_is_short_and_the_job_outlives_it() {
         assert_eq!(CONTEXT_LIMIT.as_secs(), 2);
         assert!(!MARGIN.is_zero());
+        // The listener's probe ends within its call limit of 500 ms.
+        assert!(PROBE_WAIT >= Duration::from_millis(500));
     }
 }

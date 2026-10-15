@@ -20,6 +20,10 @@
 //! adapter never asks the application for a sentence, whose answers were wrong
 //! in every EXP-2 scenario.
 //!
+//! For the listener of [`crate::foreground`], `studio_active` asks on its
+//! connection whether a frame of Android Studio is `ACTIVE` now, from
+//! `GetState` of the children of its root; it reads no text either.
+//!
 //! The adapter only reads: it changes no setting of the application or of
 //! the session. The whole read is bounded by its deadline; a part of the
 //! tree that does not answer is skipped, and a bus that is silent ends the
@@ -27,13 +31,15 @@
 //! runner and never runs on the UI thread.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    cell::RefCell,
+    collections::{HashMap, HashSet, VecDeque},
+    future::Future,
     time::Duration,
 };
 
 use crate::foreground::{Accessibility, Source};
 use addict_core::sentence::{self, Selected};
-use futures_util::future::join_all;
+use futures_util::{StreamExt, future::join_all, stream::FuturesUnordered};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::time::timeout;
 use zbus::{
@@ -65,6 +71,9 @@ const NODE_LIMIT: Duration = Duration::from_millis(500);
 
 /// Time an application gets to give its name, and an object its selection.
 pub(crate) const CALL_LIMIT: Duration = Duration::from_millis(500);
+
+/// The bit of the state `ACTIVE` in the first word that `GetState` gives.
+const STATE_ACTIVE: u32 = 1 << 1;
 
 /// Where the accessibility bus is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +178,20 @@ impl Object {
         T::try_from(value).map_err(|e| e.to_string())
     }
 
+    /// Children as `GetChildren` lists them, and nothing else is asked.
+    async fn listed(&self) -> Result<Vec<Object>, String> {
+        let pairs: Vec<(String, OwnedObjectPath)> =
+            self.call(ACCESSIBLE, "GetChildren", &()).await?;
+        Ok(self.objects(pairs))
+    }
+
+    fn objects(&self, pairs: Vec<(String, OwnedObjectPath)>) -> Vec<Object> {
+        pairs
+            .into_iter()
+            .map(|(bus_name, path)| Object::new(&self.connection, &bus_name, path.as_str()))
+            .collect()
+    }
+
     /// Children as the object lists them; falls back to asking one index at
     /// a time when `GetChildren` is not answered.
     async fn children(&self) -> Result<Vec<Object>, String> {
@@ -192,10 +215,30 @@ impl Object {
                 pairs
             }
         };
-        Ok(pairs
-            .into_iter()
-            .map(|(bus_name, path)| Object::new(&self.connection, &bus_name, path.as_str()))
-            .collect())
+        Ok(self.objects(pairs))
+    }
+}
+
+/// The names of Android Studio that application roots gave, by bus name and
+/// path, so that such a name is asked once. A unique bus name is never given
+/// to another connection, so a name kept for it stays true while its bus
+/// lives. Other names are not kept: an application may give another name
+/// while it starts, and they would only grow the map.
+#[derive(Debug, Default)]
+pub(crate) struct Names(RefCell<HashMap<(String, String), String>>);
+
+impl Names {
+    fn get(&self, root: &Object) -> Option<String> {
+        self.0
+            .borrow()
+            .get(&(root.bus_name.clone(), root.path.clone()))
+            .cloned()
+    }
+
+    fn put(&self, root: &Object, name: &str) {
+        self.0
+            .borrow_mut()
+            .insert((root.bus_name.clone(), root.path.clone()), name.to_owned());
     }
 }
 
@@ -301,8 +344,7 @@ async fn session_address() -> Result<String, ContextFailure> {
 /// [`ContextFailure::AppNotFound`], or [`ContextFailure::TimedOut`] when an
 /// application did not give its name: its silence is not proof of absence.
 async fn applications(connection: &Connection) -> Result<Vec<Object>, ContextFailure> {
-    let registry = Object::new(connection, REGISTRY_NAME, ROOT_PATH);
-    let roots = registry
+    let roots = registry(connection)
         .children()
         .await
         .map_err(|e| ContextFailure::Unavailable(format!("registry: {e}")))?;
@@ -329,20 +371,99 @@ async fn applications(connection: &Connection) -> Result<Vec<Object>, ContextFai
     }
 }
 
+/// The registry's root, whose children are the roots of the registered
+/// applications.
+fn registry(connection: &Connection) -> Object {
+    Object::new(connection, REGISTRY_NAME, ROOT_PATH)
+}
+
+/// The registered name of the application at `root`: from `names` when it
+/// was given before, else asked, and kept there when it is Android Studio's.
+async fn name_of(root: &Object, names: &Names) -> Result<String, String> {
+    if let Some(name) = names.get(root) {
+        return Ok(name);
+    }
+    let name = root.property::<String>(ACCESSIBLE, "Name").await?;
+    if is_android_studio(&name) {
+        names.put(root, &name);
+    }
+    Ok(name)
+}
+
+/// Whether a frame of Android Studio is `ACTIVE` now, asked on `connection`:
+/// the registry's `GetChildren`, the `Name` of each root that `names` does
+/// not have, `GetChildren` of each root of Android Studio and `GetState` of
+/// each of its children. No text is read. True as soon as one frame says
+/// it is active; without Android Studio, or with none of its frames active,
+/// false; an error of Android Studio is given back when no frame said true.
+/// An application that gives no name is not Android Studio here. Bounded
+/// by the caller: a silent application keeps this pending.
+pub(crate) async fn studio_active(connection: &Connection, names: &Names) -> Result<bool, String> {
+    let roots = registry(connection)
+        .listed()
+        .await
+        .map_err(|e| format!("registry: {e}"))?;
+    any_true(roots.iter().map(|root| root_active(root, names))).await
+}
+
+/// Whether `root` is Android Studio with an `ACTIVE` child.
+async fn root_active(root: &Object, names: &Names) -> Result<bool, String> {
+    let Ok(name) = name_of(root, names).await else {
+        return Ok(false);
+    };
+    if !is_android_studio(&name) {
+        return Ok(false);
+    }
+    let frames = root
+        .listed()
+        .await
+        .map_err(|e| format!("{name}: GetChildren: {e}"))?;
+    any_true(frames.iter().map(|frame| async {
+        let state: Vec<u32> = frame
+            .call(ACCESSIBLE, "GetState", &())
+            .await
+            .map_err(|e| format!("{name} {}: GetState: {e}", frame.path))?;
+        Ok(state.first().is_some_and(|word| word & STATE_ACTIVE != 0))
+    }))
+    .await
+}
+
+/// True as soon as one of `checks` gives true, without waiting for the
+/// others; else the first error, or false when there was none.
+async fn any_true<F>(checks: impl IntoIterator<Item = F>) -> Result<bool, String>
+where
+    F: Future<Output = Result<bool, String>>,
+{
+    let mut pending: FuturesUnordered<F> = checks.into_iter().collect();
+    let mut failed = None;
+    while let Some(checked) = pending.next().await {
+        match checked {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(e) => {
+                failed.get_or_insert(e);
+            }
+        }
+    }
+    failed.map_or(Ok(false), Err)
+}
+
 /// Whether an application of this registered name is Android Studio:
 /// the name contains `Android Studio`, compared without case.
 pub(crate) fn is_android_studio(name: &str) -> bool {
     name.to_lowercase().contains(APPLICATION)
 }
 
-/// The registered name of the application at `bus_name`, from its root; none
-/// when it does not give it within [`CALL_LIMIT`].
-pub(crate) async fn application_name(connection: &Connection, bus_name: &str) -> Option<String> {
+/// The registered name of the application at `bus_name`, from its root, or
+/// from `names` when it gave it before; none when it does not give it within
+/// [`CALL_LIMIT`].
+pub(crate) async fn application_name(
+    connection: &Connection,
+    bus_name: &str,
+    names: &Names,
+) -> Option<String> {
     let root = Object::new(connection, bus_name, ROOT_PATH);
-    timeout(CALL_LIMIT, root.property::<String>(ACCESSIBLE, "Name"))
-        .await
-        .ok()?
-        .ok()
+    timeout(CALL_LIMIT, name_of(&root, names)).await.ok()?.ok()
 }
 
 /// A Text object that reports a selection.

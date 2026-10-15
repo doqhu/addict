@@ -120,6 +120,10 @@ pub struct FakeNode {
     pub hang: bool,
     /// Never answer the `Name` property.
     pub silent_name: bool,
+    /// `GetState` says `ACTIVE`; [`World::set_active`] changes it.
+    pub active: bool,
+    /// Never answer `GetState`.
+    pub silent_state: bool,
 }
 
 fn node_path(id: usize) -> OwnedObjectPath {
@@ -127,6 +131,10 @@ fn node_path(id: usize) -> OwnedObjectPath {
 }
 
 const STATUS_PATH: &str = "/org/a11y/bus";
+
+/// The role `frame` and the state `ACTIVE`, as AT-SPI numbers them.
+const ROLE_FRAME: u32 = 23;
+const STATE_ACTIVE: u32 = 1;
 const REGISTRY_PATH: &str = "/org/a11y/atspi/registry";
 
 struct Accessible {
@@ -169,6 +177,23 @@ impl Accessible {
     #[zbus(property)]
     async fn child_count(&self) -> i32 {
         self.node.children.len() as i32
+    }
+
+    async fn get_role(&self) -> u32 {
+        ROLE_FRAME
+    }
+
+    /// The two words of the state set: `ACTIVE` is bit 1 of the first.
+    async fn get_state(&self) -> Vec<u32> {
+        if self.node.silent_state {
+            std::future::pending::<()>().await;
+        }
+        let first = if self.node.active {
+            1 << STATE_ACTIVE
+        } else {
+            0
+        };
+        vec![first, 0]
     }
 }
 
@@ -481,6 +506,34 @@ impl World {
                 .is_enabled_changed(status.signal_emitter())
                 .await
                 .unwrap();
+        });
+    }
+
+    /// Gives the node with `id` another `Name`, as an application does once
+    /// it has started; no signal is sent.
+    pub fn set_name(&self, id: usize, name: &'static str) {
+        self.runtime.block_on(async {
+            let node = self
+                .connection
+                .object_server()
+                .interface::<_, Accessible>(node_path(id))
+                .await
+                .expect("a node of this world");
+            node.get_mut().await.node.name = name;
+        });
+    }
+
+    /// Sets whether the node with `id` says `ACTIVE`; no signal is sent, as
+    /// Android Studio sends none.
+    pub fn set_active(&self, id: usize, active: bool) {
+        self.runtime.block_on(async {
+            let node = self
+                .connection
+                .object_server()
+                .interface::<_, Accessible>(node_path(id))
+                .await
+                .expect("a node of this world");
+            node.get_mut().await.node.active = active;
         });
     }
 

@@ -12,12 +12,15 @@ use addict_platform::{
     atspi::Locate,
     foreground::{Accessibility, Foreground, Source, watch_at},
 };
-use fake_bus::{Address, World, status_world, world};
+use fake_bus::{Address, World, editor, selected, status_world, world};
 
 const STUDIO: &str = "demo - Android Studio";
 const WAIT: Duration = Duration::from_secs(5);
 /// How long nothing is expected to happen.
 const QUIET: Duration = Duration::from_millis(300);
+/// What a probe may take when Android Studio is silent: the adapter's
+/// limit of one call, 500 ms, and some slack.
+const PROBE_BOUND: Duration = Duration::from_millis(1500);
 
 /// A bus with the accessibility registry and the status, accessibility on.
 fn a11y(name: &str) -> World {
@@ -293,4 +296,124 @@ fn dropping_the_listener_stops_it_and_closes_its_connection() {
         assert!(started.elapsed() < WAIT, "the connection was kept");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+// ------------------------------------------------------------- the probe
+
+/// The answer of one probe, and how long it took; an unanswered probe is
+/// a failure of the test.
+fn probe(foreground: &Foreground) -> (bool, Duration) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let started = Instant::now();
+    let answer = runtime
+        .block_on(async { tokio::time::timeout(WAIT, foreground.probe()).await })
+        .expect("the probe was answered")
+        .expect("the probe was not dropped");
+    (answer, started.elapsed())
+}
+
+/// Android Studio (0) with one frame (1) that holds a selected text (2).
+fn studio_world(name: &str, application: &'static str) -> World {
+    let nodes = editor(
+        application,
+        vec![selected("// the bank of the river.", "bank", 0)],
+    );
+    world(name, Address::Launcher, nodes, &[0])
+}
+
+#[test]
+fn an_active_frame_of_studio_is_in_front_without_any_event() {
+    let world = studio_world("fg-probe-active", STUDIO);
+    world.set_active(1, true);
+    let (foreground, receiver) = listen(&world);
+    subscribed(&world);
+    assert!(probe(&foreground).0);
+    // Asked, not heard: the observed source is unchanged, and no text was
+    // read.
+    quiet(&receiver);
+    assert_eq!(foreground.source(), Source::Unknown);
+    assert_eq!(world.text_calls(), 0);
+}
+
+#[test]
+fn studio_in_the_back_is_not_in_front() {
+    let world = studio_world("fg-probe-back", STUDIO);
+    let (foreground, _receiver) = listen(&world);
+    subscribed(&world);
+    assert!(!probe(&foreground).0);
+    // It follows the state at each press.
+    world.set_active(1, true);
+    assert!(probe(&foreground).0);
+    world.set_active(1, false);
+    assert!(!probe(&foreground).0);
+    assert_eq!(world.text_calls(), 0);
+}
+
+#[test]
+fn without_studio_an_active_frame_is_not_studio() {
+    let world = studio_world("fg-probe-absent", "foliate");
+    world.set_active(1, true);
+    let (foreground, _receiver) = listen(&world);
+    subscribed(&world);
+    assert!(!probe(&foreground).0);
+    assert_eq!(world.text_calls(), 0);
+}
+
+#[test]
+fn with_accessibility_off_the_probe_is_answered_false_at_once() {
+    let status = status_world("fg-probe-status", false);
+    let a11y = studio_world("fg-probe-off", STUDIO);
+    a11y.set_active(1, true);
+    let (foreground, _receiver) = listen_with(Some(&status.bus.address), &a11y);
+    accessibility_is(&foreground, Accessibility::Off);
+    let (active, took) = probe(&foreground);
+    assert!(!active);
+    assert!(took < QUIET, "the probe took {took:?}");
+    // On: the same frame is asked on the connection.
+    status.set_enabled(true);
+    subscribed(&a11y);
+    assert!(probe(&foreground).0);
+}
+
+#[test]
+fn without_a_status_the_probe_is_answered_false() {
+    // Nothing owns `org.a11y.Bus`: the worker gives up.
+    let world = world("fg-probe-none", Address::Plain, Vec::new(), &[]);
+    let (foreground, receiver) = listen(&world);
+    assert_eq!(
+        receiver.recv_timeout(WAIT),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    );
+    let (active, took) = probe(&foreground);
+    assert!(!active);
+    assert!(took < QUIET, "the probe took {took:?}");
+}
+
+#[test]
+fn a_silent_studio_is_not_in_front_within_the_limit() {
+    let mut nodes = editor(STUDIO, vec![selected("// the bank.", "bank", 0)]);
+    nodes[1].active = true;
+    nodes[1].silent_state = true;
+    let world = world("fg-probe-silent", Address::Launcher, nodes, &[0]);
+    let (foreground, _receiver) = listen(&world);
+    subscribed(&world);
+    let (active, took) = probe(&foreground);
+    assert!(!active);
+    assert!(took < PROBE_BOUND, "the probe took {took:?}");
+    assert_eq!(world.text_calls(), 0);
+}
+
+#[test]
+fn a_name_given_while_studio_starts_is_asked_again() {
+    let world = studio_world("fg-probe-renamed", "loading");
+    world.set_active(1, true);
+    let (foreground, _receiver) = listen(&world);
+    subscribed(&world);
+    assert!(!probe(&foreground).0);
+    world.set_name(0, STUDIO);
+    assert!(probe(&foreground).0);
+    assert_eq!(world.text_calls(), 0);
 }

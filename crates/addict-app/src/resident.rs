@@ -48,14 +48,22 @@
 //! Android Studio. The press first takes the source: the application the
 //! listener of [`addict_platform::foreground`] saw activated last, or, when the
 //! product's own window is active at the press, the source kept from the press
-//! that opened it. It also takes whether accessibility is on, as the listener
-//! last read it; that is a property of the session and is not kept. The
-//! window is shown at once, in the waiting state with the source AT-SPI and
-//! the field cleared (the lookup and the online requests of the old text are
-//! given up), and one job on the runner asks the accessibility bus for the
-//! selected word and its sentence; nothing waits for it before the window is
-//! presented. With accessibility off, or with another source or none, the job
-//! ends without reading text. The sentence replaces the field as a new text
+//! that opened it. When the window is not active, the press also asks the
+//! listener, at once and before anything of the window changes, to probe
+//! whether a frame of Android Studio is active: Android Studio sends no
+//! activation, but its frame's state follows the focus. The job waits for
+//! that answer, and an active frame makes the source Android Studio; any
+//! other answer leaves the observed source. The job tells the source it
+//! settled on, and the session keeps it for the press of the running read,
+//! so a later press in the window keeps Android Studio. The press also takes
+//! whether accessibility is on, as the listener last read it; that is a
+//! property of the session and is not kept. The window is shown at once, in
+//! the waiting state with the source AT-SPI and the field cleared (the lookup
+//! and the online requests of the old text are given up), and one job on the
+//! runner asks the accessibility bus for the selected word and its sentence;
+//! nothing waits for it, nor for the probe, before the window is presented.
+//! With accessibility off, or with another source or none, the job ends
+//! without reading text. The sentence replaces the field as a new text
 //! with that word chosen, and the lookup of the word starts; as the click of a
 //! word it is the click path, but it asks nothing online: the online texts are
 //! asked when a word is clicked. A read that gives nothing ends the waiting,
@@ -92,7 +100,7 @@ use addict_core::{
 use addict_deepl::DeepL;
 use addict_platform::{
     atspi::ContextFailure,
-    foreground::{self, Accessibility, Foreground, Source as Foregrounded},
+    foreground::{self, Accessibility, Foreground, Probe, Source as Foregrounded},
     ocr::OcrFailure,
     shortcut::{self, ShortcutEvent, ShortcutHandle},
     work::{Job, Outcome, Work},
@@ -186,6 +194,9 @@ enum Event {
     Captured(u64),
     /// The capture job with this number ended.
     Recognized(u64, Outcome<Capture>),
+    /// The read of the accessibility bus with this number settled on this
+    /// application in front, before it reads.
+    ContextSource(u64, Foregrounded),
     /// The read of the accessibility bus with this number ended.
     Context(u64, Outcome<Read>),
 }
@@ -364,6 +375,7 @@ impl Session {
             Event::Hidden => self.start_capture(),
             Event::Captured(number) => self.snapshot_taken(number),
             Event::Recognized(number, outcome) => self.recognized(number, outcome),
+            Event::ContextSource(number, source) => self.context_source(number, source),
             Event::Context(number, outcome) => self.context_read(number, outcome),
         }
     }
@@ -527,15 +539,19 @@ impl Session {
     }
 
     /// What the press takes as the application in front, and keeps for the
-    /// next press that finds the window active.
-    fn take_source(&mut self) -> Foregrounded {
-        let observed = self
-            .foreground
-            .upgrade()
-            .map_or(Foregrounded::Unknown, |listener| listener.source());
-        let source = context::choose_source(self.window.is_active(), self.kept, observed);
+    /// next press that finds the window active; with the probe of Android
+    /// Studio's frames when the window is not active, asked first.
+    fn take_source(&mut self) -> (Foregrounded, Option<Probe>) {
+        let listener = self.foreground.upgrade();
+        let window_active = self.window.is_active();
+        let probe = listener
+            .as_ref()
+            .filter(|_| !window_active)
+            .map(|listener| listener.probe());
+        let observed = listener.map_or(Foregrounded::Unknown, |listener| listener.source());
+        let source = context::choose_source(window_active, self.kept, observed);
         self.kept = source;
-        source
+        (source, probe)
     }
 
     /// Whether accessibility is on, as the listener last read it. Taken at
@@ -547,14 +563,25 @@ impl Session {
     }
 
     /// Starts the read of the accessibility bus as the next number, with
-    /// `accessibility` and `source` in front.
-    fn start_read(&mut self, accessibility: Accessibility, source: Foregrounded) {
+    /// `accessibility`, `source` in front and the `probe` of the press.
+    fn start_read(
+        &mut self,
+        accessibility: Accessibility,
+        source: Foregrounded,
+        probe: Option<Probe>,
+    ) {
         let number = self.reading.begin();
+        let settled = self.sender.clone();
         let sender = self.sender.clone();
         let started = context::start(
             self.work.upgrade().as_deref(),
             accessibility,
             source,
+            probe,
+            move |source| {
+                // On the worker: the UI thread wakes for the event.
+                let _ = settled.unbounded_send(Event::ContextSource(number, source));
+            },
             move |outcome| {
                 // On the worker: the UI thread wakes for the event.
                 let _ = sender.unbounded_send(Event::Context(number, outcome));
@@ -563,6 +590,15 @@ impl Session {
         match started {
             Ok(job) => self.reading.run(job),
             Err(failure) => self.read_failed(&failure),
+        }
+    }
+
+    /// The read with `number` settled on `source`: when it is the one that
+    /// runs, that is the source its press keeps, for a later press in the
+    /// window. One that was given up changes nothing.
+    fn context_source(&mut self, number: u64, source: Foregrounded) {
+        if self.reading.is_running(number) {
+            self.kept = source;
         }
     }
 
@@ -1003,13 +1039,14 @@ impl Session {
         receipt_ns: Option<u64>,
     ) {
         // Before anything of the window changes: the window's own activity
-        // and the listener are what they were at the press.
-        let source = self.take_source();
+        // and the listener are what they were at the press, and the probe
+        // starts before the window can take the focus.
+        let (source, probe) = self.take_source();
         let accessibility = self.accessibility();
         self.give_up_press();
         self.clear_for_read();
         // Started, not awaited: the window is presented below.
-        self.start_read(accessibility, source);
+        self.start_read(accessibility, source, probe);
         // Before `present()`: the first frame has the labels.
         self.view.render(self.manual.state(), self.manual.source());
         self.focus();

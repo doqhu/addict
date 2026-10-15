@@ -18,6 +18,17 @@
 //! [`Foreground::accessibility`] whether accessibility is on, as the worker
 //! last read `IsEnabled`. The product's own window needs no identification
 //! here: it is another application, [`Source::Other`].
+//!
+//! Android Studio on Wayland sends neither of these signals, but the
+//! `ACTIVE` state of its frame follows the focus. [`Foreground::probe`] asks
+//! the worker, once, whether a frame of Android Studio is `ACTIVE` now: on
+//! the connection it holds, with the names of Android Studio it has kept,
+//! by the registry's `GetChildren`, `Name`, the `GetChildren` of Android
+//! Studio's root and `GetState`, never a text, within `CALL_LIMIT`. It is
+//! asked at a press only, never on a timer. Without a connection, while it
+//! still subscribes, with accessibility off or not known, it answers false
+//! at once; so it does when the probe fails or Android Studio is silent,
+//! which is logged.
 
 use std::{
     cell::Cell,
@@ -32,10 +43,13 @@ use futures_util::{
     future::join_all,
     stream::{self, SelectAll},
 };
-use tokio::{sync::oneshot, time::timeout};
+use tokio::{
+    sync::{mpsc, oneshot},
+    time::timeout,
+};
 use zbus::{Connection, MatchRule, MessageStream, zvariant::OwnedValue};
 
-use crate::atspi::{self, A11Y_BUS_NAME, A11Y_BUS_PATH, CALL_LIMIT, Locate, REGISTRY_NAME};
+use crate::atspi::{self, A11Y_BUS_NAME, A11Y_BUS_PATH, CALL_LIMIT, Locate, Names, REGISTRY_NAME};
 
 const STATUS: &str = "org.a11y.Status";
 const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
@@ -209,12 +223,21 @@ impl Observer {
     }
 }
 
+/// The answer of one [`Foreground::probe`]: whether a frame of Android
+/// Studio was `ACTIVE`. An error is a probe that was dropped unanswered: the
+/// worker is gone.
+pub type Probe = oneshot::Receiver<bool>;
+
+/// Where the worker takes the probes: each is the sender of its answer.
+type Probes = mpsc::UnboundedReceiver<oneshot::Sender<bool>>;
+
 /// Keeps the worker alive. Dropping it stops the worker and waits for the
 /// thread; nothing in the worker blocks, so that is at once.
 #[derive(Debug)]
 pub struct Foreground {
     shared: Arc<Mutex<Shared>>,
     stop: Option<oneshot::Sender<()>>,
+    probes: mpsc::UnboundedSender<oneshot::Sender<bool>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -234,6 +257,19 @@ impl Foreground {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .accessibility
+    }
+
+    /// Asks the worker once whether a frame of Android Studio is `ACTIVE`
+    /// now, and returns at once; the answer comes within 500 ms, the call
+    /// limit of the adapter, of the worker taking the probe. False when it
+    /// cannot be asked: no worker, no connection, accessibility off or not
+    /// known.
+    pub fn probe(&self) -> Probe {
+        let (reply, answer) = oneshot::channel();
+        if let Err(mpsc::error::SendError(reply)) = self.probes.send(reply) {
+            let _ = reply.send(false);
+        }
+        answer
     }
 }
 
@@ -265,6 +301,7 @@ pub fn watch_at(
 ) -> Foreground {
     let shared = Arc::new(Mutex::new(Shared::default()));
     let (stop, stopped) = oneshot::channel();
+    let (probes, mut asked) = mpsc::unbounded_channel();
     let observer = Observer {
         shared: shared.clone(),
         last: Cell::new(Source::Unknown),
@@ -288,7 +325,7 @@ pub fn watch_at(
                 tokio::select! {
                     // Resolves on the signal and when the handle is gone.
                     _ = stopped => {}
-                    () = serve(status_bus.as_deref(), &locate, &observer) => {
+                    () = serve(status_bus.as_deref(), &locate, &observer, &mut asked) => {
                         // The status can no longer be had.
                         observer.set_accessibility(Accessibility::Unknown);
                     }
@@ -299,6 +336,7 @@ pub fn watch_at(
         Ok(thread) => Foreground {
             shared,
             stop: Some(stop),
+            probes,
             thread: Some(thread),
         },
         Err(e) => {
@@ -306,6 +344,7 @@ pub fn watch_at(
             Foreground {
                 shared,
                 stop: None,
+                probes,
                 thread: None,
             }
         }
@@ -324,12 +363,33 @@ async fn status_connection(status_bus: Option<&str>) -> Result<Connection, Strin
     }
 }
 
+/// Runs `future` and answers every probe false meanwhile: no accessibility
+/// connection is held.
+async fn refusing<F: Future>(probes: &mut Probes, future: F) -> F::Output {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            output = &mut future => return output,
+            Some(reply) = probes.recv() => {
+                let _ = reply.send(false);
+            }
+        }
+    }
+}
+
 /// Follows `IsEnabled` and listens while it is true; each read of it is
 /// what [`Foreground::accessibility`] gives. Returns only when the status
 /// cannot be had at all; the source stays unknown then, and the caller sets
-/// the accessibility to unknown.
-async fn serve(status_bus: Option<&str>, locate: &Locate, observer: &Observer) {
-    let connection = match status_connection(status_bus).await {
+/// the accessibility to unknown. A probe is answered by [`listen`] once it
+/// follows the events on the accessibility connection, and false at once
+/// otherwise.
+async fn serve(
+    status_bus: Option<&str>,
+    locate: &Locate,
+    observer: &Observer,
+    probes: &mut Probes,
+) {
+    let connection = match refusing(probes, status_connection(status_bus)).await {
         Ok(connection) => connection,
         Err(e) => return eprintln!("addict: foreground listener, session bus: {e}"),
     };
@@ -340,19 +400,24 @@ async fn serve(status_bus: Option<&str>, locate: &Locate, observer: &Observer) {
         Ok(rule) => rule,
         Err(e) => return eprintln!("addict: foreground listener, status rule: {e}"),
     };
-    let mut changes = match MessageStream::for_match_rule(rule, &connection, None).await {
+    let mut changes = match refusing(
+        probes,
+        MessageStream::for_match_rule(rule, &connection, None),
+    )
+    .await
+    {
         Ok(changes) => changes,
         Err(e) => return eprintln!("addict: foreground listener, status subscription: {e}"),
     };
     let status = atspi::Object::new(&connection, A11Y_BUS_NAME, A11Y_BUS_PATH);
     loop {
         // Read after the subscription: a change in between is not lost.
-        let enabled =
-            match timeout(STATUS_LIMIT, status.property::<bool>(STATUS, "IsEnabled")).await {
-                Ok(Ok(enabled)) => enabled,
-                Ok(Err(e)) => return eprintln!("addict: foreground listener, IsEnabled: {e}"),
-                Err(_) => return eprintln!("addict: foreground listener, IsEnabled: no answer"),
-            };
+        let read = timeout(STATUS_LIMIT, status.property::<bool>(STATUS, "IsEnabled"));
+        let enabled = match refusing(probes, read).await {
+            Ok(Ok(enabled)) => enabled,
+            Ok(Err(e)) => return eprintln!("addict: foreground listener, IsEnabled: {e}"),
+            Err(_) => return eprintln!("addict: foreground listener, IsEnabled: no answer"),
+        };
         observer.set_accessibility(if enabled {
             Accessibility::On
         } else {
@@ -361,7 +426,7 @@ async fn serve(status_bus: Option<&str>, locate: &Locate, observer: &Observer) {
         let mut ended = false;
         if enabled {
             tokio::select! {
-                () = listen(locate, observer) => ended = true,
+                () = listen(locate, observer, probes) => ended = true,
                 changed = status_changed(&mut changes) => {
                     if !changed {
                         return;
@@ -372,7 +437,7 @@ async fn serve(status_bus: Option<&str>, locate: &Locate, observer: &Observer) {
         // Whatever was seen belongs to a connection that is gone or never
         // was.
         observer.with(Tracker::clear);
-        if (ended || !enabled) && !status_changed(&mut changes).await {
+        if (ended || !enabled) && !refusing(probes, status_changed(&mut changes)).await {
             return;
         }
     }
@@ -409,28 +474,79 @@ async fn status_changed(changes: &mut MessageStream) -> bool {
 }
 
 /// Holds the accessibility connection and tracks what it hears, until the
-/// connection ends or fails.
-async fn listen(locate: &Locate, observer: &Observer) {
-    let connection = match atspi::open(locate).await {
+/// connection ends or fails; meanwhile it answers the probes on it, each on
+/// its own, beside the events.
+async fn listen(locate: &Locate, observer: &Observer, probes: &mut Probes) {
+    let connection = match refusing(probes, atspi::open(locate)).await {
         Ok(connection) => connection,
         Err(e) => return eprintln!("addict: foreground listener: {e:?}"),
     };
+    // Until the events are followed, a probe is answered false at once.
+    let Some(mut streams) = refusing(probes, subscribe(&connection)).await else {
+        return;
+    };
+    // Of this connection only: a new one may be another bus.
+    let names = Names::default();
+    let answering = stream::poll_fn(|context| probes.poll_recv(context))
+        .for_each_concurrent(None, |reply| answer(&connection, &names, reply));
+    tokio::select! {
+        () = follow(&connection, &names, observer, &mut streams) => {}
+        () = answering => {
+            // The handle is gone: the worker stops with it.
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Subscribes to the signals on `connection` and asks the registry for them;
+/// none when a subscription fails.
+async fn subscribe(connection: &Connection) -> Option<SelectAll<MessageStream>> {
     let opened = join_all(RULES.iter().map(|rule| async {
         let rule = MatchRule::try_from(*rule)?;
-        MessageStream::for_match_rule(rule, &connection, None).await
+        MessageStream::for_match_rule(rule, connection, None).await
     }))
     .await;
     let mut streams: SelectAll<MessageStream> = stream::select_all(Vec::new());
     for opened in opened {
         match opened {
             Ok(stream) => streams.push(stream),
-            Err(e) => return eprintln!("addict: foreground listener, subscription: {e}"),
+            Err(e) => {
+                eprintln!("addict: foreground listener, subscription: {e}");
+                return None;
+            }
         }
     }
     // After the rules: the first event an application sends is heard.
     for event in REGISTERED {
-        register(&connection, event).await;
+        register(connection, event).await;
     }
+    Some(streams)
+}
+
+/// Answers one probe on `connection`: whether a frame of Android Studio is
+/// `ACTIVE`, false when that cannot be had within [`CALL_LIMIT`].
+async fn answer(connection: &Connection, names: &Names, reply: oneshot::Sender<bool>) {
+    let active = match timeout(CALL_LIMIT, atspi::studio_active(connection, names)).await {
+        Ok(Ok(active)) => active,
+        Ok(Err(e)) => {
+            eprintln!("addict: foreground probe: {e}");
+            false
+        }
+        Err(_) => {
+            eprintln!("addict: foreground probe: no answer within {CALL_LIMIT:?}");
+            false
+        }
+    };
+    let _ = reply.send(active);
+}
+
+/// Tracks what `streams` hear on `connection`, until they end.
+async fn follow(
+    connection: &Connection,
+    names: &Names,
+    observer: &Observer,
+    streams: &mut SelectAll<MessageStream>,
+) {
     while let Some(message) = streams.next().await {
         let Ok(message) = message else { continue };
         let header = message.header();
@@ -457,7 +573,7 @@ async fn listen(locate: &Locate, observer: &Observer) {
                     continue;
                 }
                 observer.with(|tracker| tracker.activate(bus_name));
-                let source = source_of(&connection, bus_name).await;
+                let source = source_of(connection, names, bus_name).await;
                 observer.with(|tracker| tracker.name(bus_name, source));
             }
         }
@@ -496,8 +612,8 @@ async fn register(connection: &Connection, event: &str) {
 }
 
 /// What the application behind `bus_name` is, from the name of its root.
-async fn source_of(connection: &Connection, bus_name: &str) -> Source {
-    match atspi::application_name(connection, bus_name).await {
+async fn source_of(connection: &Connection, names: &Names, bus_name: &str) -> Source {
+    match atspi::application_name(connection, bus_name, names).await {
         Some(name) if atspi::is_android_studio(&name) => Source::AndroidStudio,
         Some(_) => Source::Other,
         None => Source::Unknown,
