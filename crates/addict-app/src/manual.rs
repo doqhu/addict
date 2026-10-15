@@ -43,6 +43,7 @@ use addict_platform::{
 use crate::{
     dictionaries::{Answer, Articles, Indexes, Looked},
     online::Kind,
+    translate::SENTENCE_LIMIT,
     view::Lookup,
 };
 
@@ -50,8 +51,9 @@ use crate::{
 pub(crate) const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
 
 /// The most characters a selected or copied text may have, as one line, to
-/// become the field's text: a paragraph passes, a copied file or log does not.
-pub(crate) const CLIPBOARD_MAX_CHARS: usize = 1000;
+/// become the field's text: the most whose sentence is still sent for
+/// translation, so a copied file or log does not pass.
+pub(crate) const CLIPBOARD_MAX_CHARS: usize = SENTENCE_LIMIT;
 
 /// Why a selected or copied text gives no line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1425,15 +1427,15 @@ pub(crate) mod tests {
         for blank in ["", "  ", "\n\t"] {
             assert_eq!(clipboard_line(blank), Err(NoLine::Blank), "{blank:?}");
         }
-        assert_eq!(CLIPBOARD_MAX_CHARS, 1000);
+        assert_eq!(CLIPBOARD_MAX_CHARS, 500);
         // Counted in characters after joining, not in bytes or as copied.
         let at_the_limit = "я".repeat(CLIPBOARD_MAX_CHARS);
         assert_eq!(clipboard_line(&at_the_limit), Ok(at_the_limit.clone()));
-        let spread = format!("{}\n\n  ", "a ".repeat(500));
-        assert_eq!(clipboard_line(&spread).map(|l| l.chars().count()), Ok(999));
+        let spread = format!("{}\n\n  ", "a ".repeat(250));
+        assert_eq!(clipboard_line(&spread).map(|l| l.chars().count()), Ok(499));
         assert_eq!(
             clipboard_line(&format!("{at_the_limit}я")),
-            Err(NoLine::TooLong(1001))
+            Err(NoLine::TooLong(501))
         );
     }
 
