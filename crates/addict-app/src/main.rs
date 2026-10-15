@@ -105,8 +105,17 @@
 //! recognized." until the next state is shown. Capture cannot be pressed
 //! while a capture runs.
 //!
+//! The shortcut also reads the focused editor: the window shows at once, empty
+//! and saying that the source, "accessibility (AT-SPI)", is being read, and an
+//! off-thread read asks the accessibility bus for the word selected in Android
+//! Studio and the sentence around it, with a limit. The sentence replaces the
+//! field, with the selected word chosen, and the article is looked up; nothing
+//! is sent online until a word is clicked. A read that gives nothing leaves the
+//! field empty. A new press, an edit of the field or a capture gives up a
+//! read that runs.
+//!
 //! The application is unique: a second launch exits at once and makes the
-//! resident instance show its window, as a press of the shortcut does.
+//! resident instance show its window as it is, without a read.
 //!
 //! An attempt to bind the shortcut that ends without one, for any reason or
 //! for none within `resident::BIND_LIMIT`, shows the window by itself with a
@@ -128,12 +137,14 @@
 //! commands are [`entries`]'s, the import is `addict_dictionary`'s, the indexes
 //! as a source of articles are [`dictionaries`]'s, the online translator is
 //! `addict_deepl`'s, what is asked of it and kept is [`online`]'s, where every
-//! request to it starts is [`translate`]'s, the capture job is [`capture`]'s
-//! and its portal and Tesseract adapters are `addict_platform`'s, the
+//! request to it starts is [`translate`]'s, the capture job is [`capture`]'s,
+//! the accessibility read is [`context`]'s,
+//! and its portal, accessibility and Tesseract adapters are `addict_platform`'s, the
 //! resident application is [`resident`]'s, the texts of its window are
 //! [`view`]'s and the widgets of the window are [`widgets`]'s.
 
 mod capture;
+mod context;
 mod dictionaries;
 mod entries;
 mod evidence;

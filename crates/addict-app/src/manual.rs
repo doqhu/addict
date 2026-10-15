@@ -8,11 +8,13 @@
 //! goes with the sentence around it only, and with none when that sentence
 //! is the word alone.
 //!
-//! The text comes from the user or from a screen capture. A recognized text
-//! is always a new text with the source OCR, and an edit of it keeps that
-//! source; the source is manual again once the field holds no word. While a
-//! capture is being recognized and there is no input, the window says that
-//! the source is being read.
+//! The text comes from the user, from a screen capture or from the
+//! accessibility bus. A recognized text is always a new text with the source
+//! OCR, and an edit of it keeps that source; the source is manual again once
+//! the field holds no word. A text that arrived from the bus ([`Manual::arrived`])
+//! is the sentence around the selected word, with that word chosen, and its
+//! source is AT-SPI; it is one sentence, as a typed text is. While a source is
+//! being read and there is no input, the window says that it is being read.
 //!
 //! [`Manual`] is the state and holds no widget, so what an edit or a click
 //! does to it is tested without a display. [`look_up`] starts a lookup on the
@@ -28,7 +30,10 @@ use addict_core::{
     input::{Input, Source, WindowState, window_state},
     sentence,
 };
-use addict_platform::work::{Job, Outcome, Work};
+use addict_platform::{
+    atspi::Context,
+    work::{Job, Outcome, Work},
+};
 
 use crate::{
     dictionaries::{Answer, Articles, Indexes, Looked},
@@ -49,6 +54,9 @@ pub enum Edit {
     /// The text is new and holds exactly one word, which is now the input.
     /// The lookup to start has this number.
     Lone(u64),
+    /// The text is new and a word of it, one of several, was chosen with it:
+    /// it is now the input. The lookup to start has this number.
+    Chosen(u64),
 }
 
 /// The text of the field, its words, where it came from and what was chosen
@@ -73,8 +81,9 @@ pub struct Manual {
     text: u64,
     /// Where the text came from: the user, or a screen capture.
     source: Source,
-    /// Whether a capture is being recognized now.
-    reading: bool,
+    /// The source being read now, if one is: a capture being recognized, or
+    /// the focused application being asked over the accessibility bus.
+    reading: Option<Source>,
 }
 
 impl Default for Manual {
@@ -87,7 +96,7 @@ impl Default for Manual {
             run: 0,
             text: 0,
             source: Source::Manual,
-            reading: false,
+            reading: None,
         }
     }
 }
@@ -126,20 +135,19 @@ impl Manual {
         self.source
     }
 
-    /// The window state of this moment: a capture being recognized while
-    /// there is no input, or what the input is.
+    /// The window state of this moment: a source being read while there is
+    /// no input, or what the input is.
     pub fn state(&self) -> WindowState {
-        let pending = self.reading.then_some(Source::Ocr);
-        window_state(pending, self.input.as_ref())
+        window_state(self.reading, self.input.as_ref())
     }
 
-    /// Whether a capture is being recognized now.
-    pub fn reading(&self) -> bool {
+    /// The source being read now, if one is.
+    pub fn reading(&self) -> Option<Source> {
         self.reading
     }
 
-    /// Sets whether a capture is being recognized now.
-    pub fn set_reading(&mut self, reading: bool) {
+    /// Sets the source being read now; `None` when none is.
+    pub fn set_reading(&mut self, reading: Option<Source>) {
         self.reading = reading;
     }
 
@@ -147,10 +155,10 @@ impl Manual {
     /// the old text is gone, with the outcome of its lookup. A text of exactly
     /// one word has that word chosen at once. The source stays, unless the
     /// text has no word: then it is manual again. An edit ends the reading
-    /// of a capture, even one that leaves the text as it was: the user's
-    /// text wins over the one being recognized.
+    /// of a source, even one that leaves the text as it was: the user's text
+    /// wins over the one being read.
     pub fn edit(&mut self, text: String) -> Edit {
-        self.reading = false;
+        self.reading = None;
         if text == self.sentence {
             return Edit::Same;
         }
@@ -161,9 +169,45 @@ impl Manual {
     /// a new text, even when it reads as the one held, its source is OCR and
     /// the reading is over. Never [`Edit::Same`].
     pub fn recognized(&mut self, text: String) -> Edit {
-        self.reading = false;
+        self.reading = None;
         self.source = Source::Ocr;
         self.replace(text)
+    }
+
+    /// The accessibility bus gave the `context` of a selection: the field
+    /// holds the sentence around the selected word, or the word alone when
+    /// there is none, as a new text with the source AT-SPI, and the reading
+    /// is over. The selected word is the one chosen: the word of the text
+    /// whose range is the selection's, or else the only one the selection
+    /// touches, so a word that stands twice in the sentence is the right
+    /// one. A text of one word has that word chosen, as always; when no word
+    /// is, nothing is chosen until a click. Never [`Edit::Same`].
+    pub fn arrived(&mut self, context: Context) -> Edit {
+        self.reading = None;
+        self.source = Source::AtSpi;
+        let Some(selected) = context.sentence else {
+            // A selection of several lines is one line.
+            return self.replace(sentence::pasted(&context.word).unwrap_or_default());
+        };
+        let edit = self.replace(selected.text);
+        if edit != Edit::Cleared {
+            return edit;
+        }
+        let range = selected.word;
+        let touching: Vec<usize> = (0..self.words.len())
+            .filter(|&index| {
+                let word = &self.words[index];
+                word.start < range.end && range.start < word.end
+            })
+            .collect();
+        let index = self
+            .words
+            .iter()
+            .position(|word| *word == range)
+            .or_else(|| (touching.len() == 1).then(|| touching[0]));
+        index
+            .and_then(|index| self.choose(index))
+            .map_or(Edit::Cleared, Edit::Chosen)
     }
 
     /// `text` is a new text of the field.
@@ -301,8 +345,12 @@ pub(crate) mod tests {
     use addict_core::{
         dictionary::{Dictionary, Sample},
         input::{Source, WindowState},
+        sentence,
     };
-    use addict_platform::work::{Outcome, Work};
+    use addict_platform::{
+        atspi::Context,
+        work::{Outcome, Work},
+    };
 
     use super::{Edit, LOOKUP_LIMIT, Manual, check_indexes, look_up, lookup_result};
     use crate::{
@@ -1028,7 +1076,7 @@ pub(crate) mod tests {
     #[test]
     fn a_capture_being_read_is_the_waiting_state_until_an_input() {
         let mut manual = Manual::default();
-        manual.set_reading(true);
+        manual.set_reading(Some(Source::Ocr));
         assert_eq!(
             manual.state(),
             WindowState::Waiting {
@@ -1038,7 +1086,7 @@ pub(crate) mod tests {
         // An input wins over the reading.
         let mut chosen = Manual::default();
         lone(&mut chosen, "bank");
-        chosen.set_reading(true);
+        chosen.set_reading(Some(Source::Ocr));
         assert_eq!(chosen.state(), DICTIONARY);
         // The recognized text ends the reading; with no word chosen yet the
         // label still names the capture as the source of the text.
@@ -1048,28 +1096,193 @@ pub(crate) mod tests {
             crate::view::texts(manual.state(), manual.source()).source,
             "screen capture (OCR)"
         );
-        manual.set_reading(true);
-        manual.set_reading(false);
+        manual.set_reading(Some(Source::Ocr));
+        manual.set_reading(None);
         assert_eq!(manual.state(), WindowState::Empty);
     }
 
     #[test]
     fn an_edit_ends_the_reading() {
         let mut manual = Manual::default();
-        manual.set_reading(true);
-        assert!(manual.reading());
+        manual.set_reading(Some(Source::Ocr));
+        assert_eq!(manual.reading(), Some(Source::Ocr));
         assert!(matches!(manual.edit("river".to_owned()), Edit::Lone(_)));
-        assert!(!manual.reading());
+        assert_eq!(manual.reading(), None);
         assert_eq!(manual.state(), DICTIONARY);
         // Also an edit that leaves the text as it was.
         let mut same = with_sentence("The bank is beside the river.");
-        same.set_reading(true);
+        same.set_reading(Some(Source::Ocr));
         assert_eq!(
             same.edit("The bank is beside the river.".to_owned()),
             Edit::Same
         );
-        assert!(!same.reading());
+        assert_eq!(same.reading(), None);
         assert_eq!(same.state(), WindowState::Empty);
+    }
+
+    /// The context of the `nth` `needle` of `text`, as the bus adapter gives
+    /// it: the word and its sentence, cut by the core rule.
+    fn context(text: &str, needle: &str, nth: usize) -> Context {
+        let byte = text.match_indices(needle).nth(nth).expect("needle").0;
+        let start = text[..byte].chars().count();
+        let end = start + needle.chars().count();
+        Context {
+            word: needle.to_owned(),
+            sentence: sentence::of_selection(text, start, end),
+        }
+    }
+
+    /// The word of the field that is chosen.
+    fn chosen_word(manual: &Manual) -> Option<&str> {
+        manual
+            .chosen()
+            .map(|index| &manual.sentence()[manual.words()[index].clone()])
+    }
+
+    #[test]
+    fn an_arrived_selection_is_its_sentence_with_the_word_chosen() {
+        let mut manual = Manual::default();
+        manual.set_reading(Some(Source::AtSpi));
+        let text = "// The bank was closed. We sat on the bank of the river.";
+        let Edit::Chosen(run) = manual.arrived(context(text, "bank", 1)) else {
+            panic!("chosen");
+        };
+        assert_eq!(manual.sentence(), "We sat on the bank of the river.");
+        // The second `bank` of the text is the fifth word of this sentence.
+        assert_eq!(manual.chosen(), Some(4));
+        assert_eq!(chosen_word(&manual), Some("bank"));
+        let input = manual.input().expect("input");
+        assert_eq!(input.word(), "bank");
+        assert_eq!(input.sentence(), Some("We sat on the bank of the river."));
+        assert_eq!(input.source(), Source::AtSpi);
+        assert_eq!(
+            manual.state(),
+            WindowState::Contextual {
+                source: Source::AtSpi
+            }
+        );
+        assert_eq!(manual.source(), Source::AtSpi);
+        assert_eq!(manual.reading(), None);
+        assert!(manual.awaits(run));
+    }
+
+    #[test]
+    fn the_occurrence_that_was_selected_is_the_one_chosen() {
+        let text = "The bank by the bank.";
+        for (nth, index) in [(0, 1), (1, 4)] {
+            let mut manual = Manual::default();
+            assert_eq!(
+                manual.arrived(context(text, "bank", nth)),
+                Edit::Chosen(manual.run)
+            );
+            assert_eq!(manual.chosen(), Some(index), "{nth}");
+        }
+    }
+
+    #[test]
+    fn an_arrived_text_is_always_a_new_text_and_drops_what_was_chosen() {
+        let mut manual = with_sentence(SENTENCE);
+        let old = manual.choose(4).expect("run");
+        let number = manual.text_number();
+        let edit = manual.arrived(context(SENTENCE, "bank", 0));
+        // The same text again is still new.
+        let Edit::Chosen(run) = edit else {
+            panic!("{edit:?}");
+        };
+        assert_ne!(run, old);
+        assert!(!manual.awaits(old));
+        assert!(manual.awaits(run));
+        assert_ne!(manual.text_number(), number);
+    }
+
+    #[test]
+    fn an_arrived_word_without_a_sentence_is_a_dictionary_input() {
+        let mut manual = Manual::default();
+        let word = Context {
+            word: "bank".to_owned(),
+            sentence: None,
+        };
+        let Edit::Lone(run) = manual.arrived(word) else {
+            panic!("lone");
+        };
+        assert_eq!(manual.sentence(), "bank");
+        assert_eq!(manual.input().expect("input").sentence(), None);
+        assert_eq!(manual.input().expect("input").source(), Source::AtSpi);
+        assert_eq!(
+            manual.state(),
+            WindowState::Dictionary {
+                source: Source::AtSpi
+            }
+        );
+        assert!(manual.awaits(run));
+    }
+
+    #[test]
+    fn an_arrived_sentence_that_is_the_word_alone_is_a_dictionary_input() {
+        let mut manual = Manual::default();
+        let edit = manual.arrived(context("One.\nbank\nTwo.", "bank", 0));
+        assert!(matches!(edit, Edit::Lone(_)), "{edit:?}");
+        assert_eq!(manual.input().expect("input").sentence(), None);
+        assert_eq!(manual.source(), Source::AtSpi);
+    }
+
+    #[test]
+    fn an_arrived_selection_of_several_words_without_a_sentence_chooses_none() {
+        let mut manual = Manual::default();
+        let words = Context {
+            word: "the\n  bank".to_owned(),
+            sentence: None,
+        };
+        assert_eq!(manual.arrived(words), Edit::Cleared);
+        assert_eq!(manual.sentence(), "the bank");
+        assert_eq!(manual.chosen(), None);
+        assert_eq!(manual.input(), None);
+        assert_eq!(manual.state(), WindowState::Empty);
+        assert_eq!(manual.source(), Source::AtSpi);
+    }
+
+    #[test]
+    fn a_part_of_a_word_or_a_wider_selection_chooses_what_it_touches() {
+        let text = "We sat on the bank of the river.";
+        let mut manual = Manual::default();
+        // `ban` is a part of `bank` only.
+        assert!(matches!(
+            manual.arrived(context(text, "ban", 0)),
+            Edit::Chosen(_)
+        ));
+        assert_eq!(chosen_word(&manual), Some("bank"));
+        // `the bank` touches two words: none is chosen, the text is there.
+        assert_eq!(manual.arrived(context(text, "the bank", 0)), Edit::Cleared);
+        assert_eq!(manual.sentence(), text);
+        assert_eq!(manual.chosen(), None);
+        assert_eq!(manual.state(), WindowState::Empty);
+    }
+
+    #[test]
+    fn a_text_of_an_arrived_selection_that_has_no_word_is_manual() {
+        let mut manual = Manual::default();
+        let digits = Context {
+            word: "42".to_owned(),
+            sentence: sentence::of_selection("42", 0, 2),
+        };
+        assert_eq!(manual.arrived(digits), Edit::Cleared);
+        assert_eq!(manual.source(), Source::Manual);
+    }
+
+    #[test]
+    fn a_source_being_read_by_the_bus_is_the_waiting_state_until_an_input() {
+        let mut manual = Manual::default();
+        manual.set_reading(Some(Source::AtSpi));
+        assert_eq!(
+            manual.state(),
+            WindowState::Waiting {
+                source: Source::AtSpi
+            }
+        );
+        let texts = crate::view::texts(manual.state(), manual.source());
+        assert_eq!(texts.source, "accessibility (AT-SPI)");
+        assert_eq!(texts.status, "reading the source…");
+        assert_eq!(manual.reading(), Some(Source::AtSpi));
     }
 
     #[test]

@@ -34,8 +34,8 @@
 //! manual path from there. A capture without text leaves the field as it
 //! was, starts no lookup and no online request, and says why in the capture
 //! line under the status; the line stays, also when the window is shown
-//! again, until the field is edited, Capture is pressed or a text is
-//! recognized. Capture cannot be pressed while the area is being chosen;
+//! again, until the field is edited, Capture or the shortcut is pressed or a
+//! text is recognized. Capture cannot be pressed while the area is being chosen;
 //! once the snapshot is there it can, and it is the retry: pressing it, or
 //! editing the field, gives up the recognition that runs. Giving up is
 //! dropping the job, which kills the Tesseract child and deletes the
@@ -43,6 +43,20 @@
 //! given-up job had already sent is ignored. Every capture end that is
 //! shown, also one that could not start, is recorded with `--evidence` as it
 //! is shown; a given-up one is not. The job is [`capture`](crate::capture)'s.
+//!
+//! The shortcut also starts the read of the focused editor. The window is
+//! shown at once, in the waiting state with the source AT-SPI and the field
+//! cleared (the lookup and the online requests of the old text are given up),
+//! and one job on the runner asks the accessibility bus for the selected word
+//! and its sentence; nothing waits for it before the window is presented. The
+//! sentence replaces the field as a new text with that word chosen, and the
+//! lookup of the word starts; as the click of a word it is the click path, but
+//! it asks nothing online: the online texts are asked when a word is clicked.
+//! A read that gives nothing ends the waiting, is written to stderr and leaves
+//! the empty state. Each read has a number; a new press, an edit of the field
+//! and a capture give up the read that runs, and whatever it reports later is
+//! ignored. A press also gives up a running capture. The job is
+//! [`context`](crate::context)'s.
 //!
 //! What is asked for and what is kept is [`online`](crate::online)'s. What
 //! the window says is [`view`](crate::view)'s; its widgets and the paste
@@ -61,12 +75,13 @@ use std::{
 
 use addict_core::{
     APP_ID,
-    input::window_state,
+    input::{Source, window_state},
     sentence,
     translation::{Request, Translator},
 };
 use addict_deepl::DeepL;
 use addict_platform::{
+    atspi::ContextFailure,
     ocr::OcrFailure,
     shortcut::{self, ShortcutEvent, ShortcutHandle},
     work::{Job, Outcome, Work},
@@ -77,6 +92,7 @@ use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     capture::{self, Capture, Captured, Failure, Timing},
+    context::{self, Read, Reading},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
     manual::{self, Edit, Manual},
@@ -156,6 +172,8 @@ enum Event {
     Captured(u64),
     /// The capture job with this number ended.
     Recognized(u64, Outcome<Capture>),
+    /// The read of the accessibility bus with this number ended.
+    Context(u64, Outcome<Read>),
 }
 
 /// Starts one attempt to bind the shortcut; its events go to `sender`. With
@@ -268,6 +286,8 @@ struct Session {
     check: Option<Job>,
     /// Where the capture stands.
     capturing: Capturing,
+    /// Where the read of the accessibility bus stands.
+    reading: Reading,
 }
 
 /// Where the capture of a [`Session`] stands; at first no capture runs.
@@ -325,6 +345,7 @@ impl Session {
             Event::Hidden => self.start_capture(),
             Event::Captured(number) => self.snapshot_taken(number),
             Event::Recognized(number, outcome) => self.recognized(number, outcome),
+            Event::Context(number, outcome) => self.context_read(number, outcome),
         }
     }
 
@@ -339,11 +360,13 @@ impl Session {
             return;
         }
         if self.capturing.job.is_some() {
-            if !self.manual.reading() {
+            if self.manual.reading() != Some(Source::Ocr) {
                 return;
             }
             self.give_up_capture();
         }
+        // The capture's text is the one to come: a read that runs is given up.
+        self.give_up_read();
         self.view.clear_capture_failure();
         self.capturing.hiding = true;
         // Hidden, so on Wayland the compositor places the window anew when it
@@ -395,7 +418,7 @@ impl Session {
     /// deletes its snapshot; it shows nothing.
     fn give_up_capture(&mut self) {
         self.capturing.job = None;
-        self.manual.set_reading(false);
+        self.manual.set_reading(None);
     }
 
     /// The snapshot of the job with `number` is there and is being
@@ -405,7 +428,7 @@ impl Session {
         if !self.is_capturing(number) {
             return;
         }
-        self.manual.set_reading(true);
+        self.manual.set_reading(Some(Source::Ocr));
         self.view.set_capture_sensitive(true);
         self.reveal();
     }
@@ -432,7 +455,7 @@ impl Session {
     fn capture_ended(&mut self, captured: Captured, timing: &Timing) {
         self.capturing.job = None;
         self.view.set_capture_sensitive(true);
-        self.manual.set_reading(false);
+        self.manual.set_reading(None);
         let line = match captured {
             Captured::Text(text) => {
                 sentence::recognized(&text).ok_or(Failure::Ocr(OcrFailure::Empty))
@@ -462,6 +485,72 @@ impl Session {
         self.reveal();
     }
 
+    /// Gives up the read of the accessibility bus: dropping the job cancels
+    /// it, and whatever it reports later is ignored. Whether a read ran.
+    fn give_up_read(&mut self) -> bool {
+        let ran = self.reading.end();
+        if self.manual.reading() == Some(Source::AtSpi) {
+            self.manual.set_reading(None);
+        }
+        ran
+    }
+
+    /// Clears the field for the read that starts now: a new empty text, so
+    /// the lookup and the online requests of the old one are given up, and
+    /// the capture line goes. The window shows the empty field and, with the
+    /// state of the read, the waiting state.
+    fn clear_for_read(&mut self) {
+        self.view.clear_capture_failure();
+        let edit = self.manual.edit(String::new());
+        self.view.set_field_text("");
+        self.manual.set_reading(Some(Source::AtSpi));
+        self.text_replaced(edit);
+    }
+
+    /// Starts the read of the accessibility bus as number `number`.
+    fn start_read(&mut self) {
+        let number = self.reading.begin();
+        let sender = self.sender.clone();
+        let started = context::start(self.work.upgrade().as_deref(), move |outcome| {
+            // On the worker: the UI thread wakes for the event.
+            let _ = sender.unbounded_send(Event::Context(number, outcome));
+        });
+        match started {
+            Ok(job) => self.reading.run(job),
+            Err(failure) => self.read_failed(&failure),
+        }
+    }
+
+    /// The read with `number` ended; one that was given up shows nothing.
+    /// The context replaces the field as a new text with the selected word
+    /// chosen and its lookup starts, nothing is asked online; a failure ends
+    /// the waiting and leaves the field as it is, the empty state.
+    fn context_read(&mut self, number: u64, outcome: Outcome<Read>) {
+        if !self.reading.is_running(number) {
+            return;
+        }
+        self.reading.end();
+        // A cancelled job was dropped here on purpose and shows nothing.
+        let Some(read) = context::read_result(outcome) else {
+            return;
+        };
+        match read {
+            Ok(context) => {
+                let edit = self.manual.arrived(context);
+                self.view.set_field_text(self.manual.sentence());
+                self.text_replaced(edit);
+            }
+            Err(failure) => self.read_failed(&failure),
+        }
+    }
+
+    /// The read gave nothing: the waiting ends and the failure is logged.
+    fn read_failed(&mut self, failure: &ContextFailure) {
+        eprintln!("addict: no context from the accessibility bus: {failure:?}");
+        self.give_up_read();
+        self.view.render(self.manual.state(), self.manual.source());
+    }
+
     /// Shows the window with the state as it is now, the field focused,
     /// without an activation token.
     fn reveal(&self) {
@@ -482,17 +571,20 @@ impl Session {
     /// and so is every online text of it. A text of one word is that word
     /// without context, looked up at once; nothing of it is sent online.
     ///
-    /// The capture line goes. A snapshot being recognized is given up: the
-    /// user's text wins, and the state no longer says the capture is read.
+    /// The capture line goes. A snapshot being recognized and a read of the
+    /// accessibility bus are given up: the user's text wins, and the state no
+    /// longer says that a source is read.
     fn sentence_changed(&mut self, text: String) {
         self.view.clear_capture_failure();
-        let gave_up = self.capturing.job.is_some() && self.manual.reading();
-        if gave_up {
+        let gave_up_capture =
+            self.capturing.job.is_some() && self.manual.reading() == Some(Source::Ocr);
+        if gave_up_capture {
             self.give_up_capture();
         }
+        let gave_up_read = self.give_up_read();
         let edit = self.manual.edit(text);
         self.text_replaced(edit);
-        if gave_up {
+        if gave_up_capture || gave_up_read {
             self.view.render(self.manual.state(), self.manual.source());
         }
     }
@@ -519,7 +611,7 @@ impl Session {
                 self.render_manual();
                 self.show_result(None);
             }
-            Edit::Lone(run) => self.start_lookup(run),
+            Edit::Lone(run) | Edit::Chosen(run) => self.start_lookup(run),
         }
     }
 
@@ -849,13 +941,20 @@ impl Session {
         self.view.render_binding(&self.binding);
     }
 
-    /// The shortcut was pressed: the window is shown and takes the focus.
+    /// The shortcut was pressed: a running capture and read are given up, the
+    /// field is cleared and the window is shown at once in the waiting state
+    /// with the source AT-SPI, and the read of the accessibility bus starts;
+    /// the window does not wait for it.
     fn activated(
-        &self,
+        &mut self,
         activation_token: Option<&str>,
         timestamp_ms: u64,
         receipt_ns: Option<u64>,
     ) {
+        self.give_up_press();
+        self.clear_for_read();
+        // Started, not awaited: the window is presented below.
+        self.start_read();
         // Before `present()`: the first frame has the labels.
         self.view.render(self.manual.state(), self.manual.source());
         self.focus();
@@ -876,6 +975,18 @@ impl Session {
             self.window.queue_draw();
             recording.presented(&id, activation_token.is_some());
         }
+    }
+
+    /// Gives up what a press of the shortcut replaces: a running capture,
+    /// also one that is still hiding the window, and the previous read.
+    fn give_up_press(&mut self) {
+        self.capturing.job = None;
+        if self.capturing.hiding {
+            // The hide of the window ends in an event that starts nothing.
+            self.capturing.hiding = false;
+        }
+        self.view.set_capture_sensitive(true);
+        self.give_up_read();
     }
 
     /// The attempt ended without a shortcut: the window shows itself to say so.
@@ -1049,6 +1160,7 @@ fn start(
         online: Kept::default(),
         check,
         capturing: Capturing::default(),
+        reading: Reading::default(),
     };
     serve(session, receiver);
     Resident {

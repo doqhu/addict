@@ -108,11 +108,14 @@ dependencies = [
 name = "addict-platform"
 version = "0.1.0"
 dependencies = [
+ "addict-core",
  "ashpd",
  "futures-util",
  "image",
  "libc",
+ "serde",
  "tokio",
+ "zbus",
 ]
 
 [[package]]
