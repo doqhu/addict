@@ -1,5 +1,6 @@
 //! What the window says about its state: the source label and the status,
-//! right under them the capture line when a capture gave no text, then the
+//! right under them the source line when a capture or a read of Android
+//! Studio gave no text, then the
 //! binding row when the shortcut is not bound and the line of the
 //! dictionary indexes when one is missing or unreadable, then the field
 //! for a word or a sentence, the text of the field with its words as links
@@ -12,7 +13,8 @@
 //! translated without a sentence.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
-//! [`binding_texts`], [`indexes_text`], [`failure_text`], [`sentence_markup`],
+//! [`binding_texts`], [`indexes_text`], [`failure_text`], [`read_failure_text`],
+//! [`sentence_markup`],
 //! [`result_texts`] and [`online_markup`] are pure, and
 //! so is [`Shown`], the result with the sense chosen in it; they are tested
 //! without a display. This module owns no
@@ -26,7 +28,10 @@ use addict_core::{
     translation::{Refusal, Request},
 };
 
-use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
+use addict_platform::{
+    atspi::ContextFailure, foreground::Source as Foregrounded, ocr::OcrFailure,
+    screenshot::CaptureFailure,
+};
 
 use crate::{
     capture::Failure,
@@ -188,11 +193,11 @@ pub(crate) const INSTALL_TESSERACT: &str = "sudo dnf install tesseract tesseract
 /// The command that installs the English data of Tesseract.
 pub(crate) const INSTALL_ENGLISH: &str = "sudo dnf install tesseract-langpack-eng";
 
-/// What the capture line says when the snapshot file is not there, whether
+/// What the source line says when the snapshot file is not there, whether
 /// the capture or the recognition found it missing.
 const NO_SNAPSHOT_FILE: &str = "The snapshot file was not found.";
 
-/// What the capture line says for `failure`, a capture that gave no text.
+/// What the source line says for `failure`, a capture that gave no text.
 /// The portal's code 2, which GNOME also gives for Esc, claims no cause; a
 /// missing Tesseract or missing English data names the command that
 /// installs it. No wildcard arm: a new failure does not compile until it
@@ -222,6 +227,51 @@ pub fn failure_text(failure: &Failure) -> Cow<'static, str> {
         },
         Failure::Unfinished => "The capture did not finish.".into(),
     }
+}
+
+/// The command that turns accessibility on for the session's toolkits.
+pub(crate) const TURN_ON_ACCESSIBILITY: &str =
+    "gsettings set org.gnome.desktop.interface toolkit-accessibility true";
+
+/// What follows every line of a read that gave nothing: the manual path.
+const TYPE_OR_PASTE: &str = " Type or paste the sentence.";
+
+/// What the source line says for `failure`, a read of Android Studio that
+/// gave nothing: the cause, then the manual path. Accessibility that is off
+/// names the command that turns it on; the product does not run it. No
+/// wildcard arm: a new failure does not compile until it is given its line.
+pub fn read_failure_text(failure: &ContextFailure) -> Cow<'static, str> {
+    let cause: Cow<'static, str> = match failure {
+        ContextFailure::AccessibilityOff => format!(
+            "Accessibility is off, so Android Studio cannot be read. Turn it on with: \
+             {TURN_ON_ACCESSIBILITY}"
+        )
+        .into(),
+        ContextFailure::NotFromStudio(source) => match source {
+            Foregrounded::Other => {
+                "Super+Q was pressed outside Android Studio; only its editor is read.".into()
+            }
+            Foregrounded::Unknown => {
+                "The application in front is not known, so nothing was read.".into()
+            }
+            // The adapter reads when Android Studio is in front; should it
+            // ever say otherwise, nothing was read all the same.
+            Foregrounded::AndroidStudio => "Android Studio could not be read.".into(),
+        },
+        ContextFailure::AppNotFound => "Android Studio is not on the accessibility bus. Start \
+             it with the AtkWrapper VM option and screen reader support."
+            .into(),
+        ContextFailure::NoSelection => "Nothing is selected in Android Studio.".into(),
+        ContextFailure::Ambiguous(_) => "Android Studio reports more than one selection.".into(),
+        ContextFailure::TimedOut => "Android Studio did not answer in time.".into(),
+        ContextFailure::Unavailable(detail) => {
+            format!("The accessibility bus is not available: {detail}").into()
+        }
+        ContextFailure::Failed(detail) => {
+            format!("Android Studio could not be read: {detail}").into()
+        }
+    };
+    format!("{cause}{TYPE_OR_PASTE}").into()
 }
 
 /// The sentence as Pango markup: the text as given, with each of `words` (byte
@@ -738,7 +788,9 @@ mod tests {
     };
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
-    use super::{INSTALL_ENGLISH, INSTALL_TESSERACT, failure_text};
+    use super::{
+        INSTALL_ENGLISH, INSTALL_TESSERACT, TURN_ON_ACCESSIBILITY, failure_text, read_failure_text,
+    };
     use crate::{
         capture::Failure,
         dictionaries::{
@@ -746,6 +798,7 @@ mod tests {
             tests::{FREEDICT, OEWN},
         },
     };
+    use addict_platform::{atspi::ContextFailure, foreground::Source as Foregrounded};
 
     fn definition_shown() -> Shown {
         let mut shown = Shown::default();
@@ -1220,6 +1273,69 @@ mod tests {
             assert_eq!(
                 text.contains(INSTALL_ENGLISH),
                 failure == Failure::Ocr(OcrFailure::LanguageMissing),
+                "{text}"
+            );
+        }
+    }
+
+    /// Every failure of a read, each once.
+    fn every_read_failure() -> Vec<ContextFailure> {
+        vec![
+            ContextFailure::AccessibilityOff,
+            ContextFailure::NotFromStudio(Foregrounded::Other),
+            ContextFailure::NotFromStudio(Foregrounded::Unknown),
+            ContextFailure::NotFromStudio(Foregrounded::AndroidStudio),
+            ContextFailure::AppNotFound,
+            ContextFailure::NoSelection,
+            ContextFailure::Ambiguous(2),
+            ContextFailure::TimedOut,
+            ContextFailure::Unavailable("org.a11y.Bus GetAddress: no reply".to_owned()),
+            ContextFailure::Failed("GetText failed".to_owned()),
+        ]
+    }
+
+    #[test]
+    fn the_read_lines_are_as_agreed() {
+        let lines: Vec<String> = every_read_failure()
+            .iter()
+            .map(|failure| read_failure_text(failure).into_owned())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "Accessibility is off, so Android Studio cannot be read. Turn it on with: gsettings set org.gnome.desktop.interface toolkit-accessibility true Type or paste the sentence.",
+                "Super+Q was pressed outside Android Studio; only its editor is read. Type or paste the sentence.",
+                "The application in front is not known, so nothing was read. Type or paste the sentence.",
+                "Android Studio could not be read. Type or paste the sentence.",
+                "Android Studio is not on the accessibility bus. Start it with the AtkWrapper VM option and screen reader support. Type or paste the sentence.",
+                "Nothing is selected in Android Studio. Type or paste the sentence.",
+                "Android Studio reports more than one selection. Type or paste the sentence.",
+                "Android Studio did not answer in time. Type or paste the sentence.",
+                "The accessibility bus is not available: org.a11y.Bus GetAddress: no reply Type or paste the sentence.",
+                "Android Studio could not be read: GetText failed Type or paste the sentence.",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_read_line_is_one_line_and_ends_in_the_manual_path() {
+        let failures = every_read_failure();
+        for (i, a) in failures.iter().enumerate() {
+            for b in &failures[i + 1..] {
+                assert_ne!(
+                    read_failure_text(a),
+                    read_failure_text(b),
+                    "{a:?} and {b:?}"
+                );
+            }
+        }
+        for failure in &failures {
+            let text = read_failure_text(failure);
+            assert_eq!(text.lines().count(), 1, "{text}");
+            assert!(text.ends_with(" Type or paste the sentence."), "{text}");
+            assert_eq!(
+                text.contains(TURN_ON_ACCESSIBILITY),
+                *failure == ContextFailure::AccessibilityOff,
                 "{text}"
             );
         }

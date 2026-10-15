@@ -10,7 +10,7 @@ use std::{
 
 use addict_platform::{
     atspi::Locate,
-    foreground::{Foreground, Source, watch_at},
+    foreground::{Accessibility, Foreground, Source, watch_at},
 };
 use fake_bus::{Address, World, status_world, world};
 
@@ -228,6 +228,53 @@ fn with_accessibility_off_nothing_is_held_until_it_turns_on() {
         assert!(started.elapsed() < WAIT, "the connection was kept");
         std::thread::sleep(Duration::from_millis(10));
     }
+    assert_eq!(foreground.source(), Source::Unknown);
+}
+
+/// Waits until the listener says that accessibility is `wanted`.
+fn accessibility_is(foreground: &Foreground, wanted: Accessibility) {
+    let started = Instant::now();
+    while foreground.accessibility() != wanted {
+        assert!(
+            started.elapsed() < WAIT,
+            "accessibility stayed {:?}, not {wanted:?}",
+            foreground.accessibility()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn the_accessibility_follows_is_enabled() {
+    let status = status_world("fg-a11y-status", false);
+    let a11y = a11y("fg-a11y");
+    let (foreground, _receiver) = listen_with(Some(&status.bus.address), &a11y);
+    accessibility_is(&foreground, Accessibility::Off);
+    status.set_enabled(true);
+    accessibility_is(&foreground, Accessibility::On);
+    subscribed(&a11y);
+    status.set_enabled(false);
+    accessibility_is(&foreground, Accessibility::Off);
+}
+
+#[test]
+fn accessibility_on_at_the_start_is_on() {
+    let world = a11y("fg-a11y-on");
+    let (foreground, _receiver) = listen(&world);
+    accessibility_is(&foreground, Accessibility::On);
+}
+
+#[test]
+fn a_status_that_cannot_be_read_is_unknown() {
+    // Nothing owns `org.a11y.Bus` on this bus: `IsEnabled` is not answered.
+    let world = world("fg-a11y-none", Address::Plain, Vec::new(), &[]);
+    let (foreground, receiver) = listen(&world);
+    // The worker gives up, and its callback goes with it.
+    assert_eq!(
+        receiver.recv_timeout(WAIT),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    );
+    assert_eq!(foreground.accessibility(), Accessibility::Unknown);
     assert_eq!(foreground.source(), Source::Unknown);
 }
 

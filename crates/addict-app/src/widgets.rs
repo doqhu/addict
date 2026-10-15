@@ -1,5 +1,5 @@
 //! The widgets of the window: the source label and the status on one line,
-//! right under them the capture line, then the binding row and the line of
+//! right under them the source line, then the binding row and the line of
 //! the dictionary indexes, then the field for a word or a sentence with the
 //! Capture button beside it, the text of the field with its words as links
 //! and, last, the result, which scrolls: the card of the word with its
@@ -428,10 +428,10 @@ fn result_area() -> ResultArea {
     }
 }
 
-/// The source label and the status on one line, the capture line when a
-/// capture gave no text, then the binding row: its line, the detail and
-/// Retry; the line of the indexes when there is something to say about
-/// them; then the field for a word or a sentence, the text of the field with
+/// The source label and the status on one line, the source line when a
+/// capture or a read of Android Studio gave no text, then the binding row:
+/// its line, the detail and Retry; the line of the indexes when there is
+/// something to say about them; then the field for a word or a sentence, the text of the field with
 /// its words as links, and the result, which scrolls: the card of the word
 /// with its translations, the online texts and the list of senses, the
 /// chosen one explained under its row.
@@ -439,9 +439,10 @@ pub struct View {
     root: gtk::Box,
     source: gtk::Label,
     status: gtk::Label,
-    /// Why the last capture gave no text; hidden until one did, and again
-    /// once something new happens in the window.
-    capture_failure: gtk::Label,
+    /// Why the last capture or read of Android Studio gave no text, shared
+    /// by both: they never run together. Hidden until one gave nothing, and
+    /// again once something new happens in the window.
+    source_failure: gtk::Label,
     binding: gtk::Box,
     binding_text: gtk::Label,
     binding_detail: gtk::Label,
@@ -477,8 +478,8 @@ impl View {
 
         // Wraps, so an install command fits. Not selectable, like the line
         // of the indexes: it must not take the focus from the field.
-        let capture_failure = banner();
-        root.append(&capture_failure);
+        let source_failure = banner();
+        root.append(&source_failure);
 
         let binding_row = binding_row();
         root.append(&binding_row.row);
@@ -502,7 +503,7 @@ impl View {
             root,
             source,
             status,
-            capture_failure,
+            source_failure,
             binding: binding_row.row,
             binding_text: binding_row.text,
             binding_detail: binding_row.detail,
@@ -525,7 +526,7 @@ impl View {
         &self.root
     }
 
-    /// Shows the texts of `state` for a text from `source`. The capture line
+    /// Shows the texts of `state` for a text from `source`. The source line
     /// is left as it is: showing the window again keeps it.
     pub fn render(&self, state: WindowState, source: Source) {
         let texts = texts(state, source);
@@ -565,18 +566,18 @@ impl View {
         self.retry.connect_clicked(move |_| retry());
     }
 
-    /// Shows `line`, why a capture gave no text, under the source and the
-    /// status. [`View::render`] leaves it; [`View::clear_capture_failure`]
-    /// hides it.
-    pub fn render_capture_failure(&self, line: &str) {
-        self.capture_failure.set_text(line);
-        self.capture_failure.set_visible(true);
+    /// Shows `line`, why a capture or a read of Android Studio gave no
+    /// text, under the source and the status. [`View::render`] leaves it;
+    /// [`View::clear_source_failure`] hides it.
+    pub fn render_source_failure(&self, line: &str) {
+        self.source_failure.set_text(line);
+        self.source_failure.set_visible(true);
     }
 
-    /// Hides the capture line.
-    pub fn clear_capture_failure(&self) {
-        self.capture_failure.set_visible(false);
-        self.capture_failure.set_text("");
+    /// Hides the source line.
+    pub fn clear_source_failure(&self) {
+        self.source_failure.set_visible(false);
+        self.source_failure.set_text("");
     }
 
     /// Runs `changed` with the text of the field each time the user changes

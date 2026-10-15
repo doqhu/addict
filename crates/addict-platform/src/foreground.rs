@@ -14,9 +14,10 @@
 //! on the session bus to change, and subscribes when it turns true. It
 //! changes no setting.
 //!
-//! [`Foreground::source`] is what the press of the shortcut snapshots. The
-//! product's own window needs no identification here: it is another
-//! application, [`Source::Other`].
+//! [`Foreground::source`] is what the press of the shortcut snapshots, and
+//! [`Foreground::accessibility`] whether accessibility is on, as the worker
+//! last read `IsEnabled`. The product's own window needs no identification
+//! here: it is another application, [`Source::Other`].
 
 use std::{
     cell::Cell,
@@ -72,6 +73,28 @@ pub enum Source {
     /// deactivated, its name was not given or accessibility is off.
     #[default]
     Unknown,
+}
+
+/// Whether accessibility is on, as `IsEnabled` of `org.a11y.Status` was last
+/// read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Accessibility {
+    /// `IsEnabled` was read as true.
+    On,
+    /// `IsEnabled` was read as false.
+    Off,
+    /// The status was not read yet, or cannot be had: the listener is not
+    /// running, or the session bus or `org.a11y.Bus` did not answer.
+    #[default]
+    Unknown,
+}
+
+/// What the worker shares with the handle: the tracker and the status of
+/// accessibility.
+#[derive(Debug, Default)]
+struct Shared {
+    tracker: Tracker,
+    accessibility: Accessibility,
 }
 
 /// The application activated last, by its bus name, and what it is. A pure
@@ -158,7 +181,7 @@ type StateChangedBody = (String, i32, i32, OwnedValue, HashMap<String, OwnedValu
 
 /// The tracker with the callback for its changes. Lives on the worker.
 struct Observer {
-    shared: Arc<Mutex<Tracker>>,
+    shared: Arc<Mutex<Shared>>,
     last: Cell<Source>,
     on_change: Box<dyn Fn(Source) + Send>,
 }
@@ -166,14 +189,23 @@ struct Observer {
 impl Observer {
     /// Runs `update` on the tracker and reports the source if it changed.
     fn with<R>(&self, update: impl FnOnce(&mut Tracker) -> R) -> R {
-        let mut tracker = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
-        let result = update(&mut tracker);
-        let now = tracker.source();
-        drop(tracker);
+        let mut shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let result = update(&mut shared.tracker);
+        let now = shared.tracker.source();
+        drop(shared);
         if self.last.replace(now) != now {
             (self.on_change)(now);
         }
         result
+    }
+
+    /// What `IsEnabled` was read as, or [`Accessibility::Unknown`] when the
+    /// status can no longer be had.
+    fn set_accessibility(&self, accessibility: Accessibility) {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .accessibility = accessibility;
     }
 }
 
@@ -181,7 +213,7 @@ impl Observer {
 /// thread; nothing in the worker blocks, so that is at once.
 #[derive(Debug)]
 pub struct Foreground {
-    shared: Arc<Mutex<Tracker>>,
+    shared: Arc<Mutex<Shared>>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -192,7 +224,16 @@ impl Foreground {
         self.shared
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .tracker
             .source()
+    }
+
+    /// Whether accessibility is on, as the worker last read it.
+    pub fn accessibility(&self) -> Accessibility {
+        self.shared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .accessibility
     }
 }
 
@@ -222,7 +263,7 @@ pub fn watch_at(
     locate: Locate,
     on_change: impl Fn(Source) + Send + 'static,
 ) -> Foreground {
-    let shared = Arc::new(Mutex::new(Tracker::default()));
+    let shared = Arc::new(Mutex::new(Shared::default()));
     let (stop, stopped) = oneshot::channel();
     let observer = Observer {
         shared: shared.clone(),
@@ -247,7 +288,10 @@ pub fn watch_at(
                 tokio::select! {
                     // Resolves on the signal and when the handle is gone.
                     _ = stopped => {}
-                    () = serve(status_bus.as_deref(), &locate, &observer) => {}
+                    () = serve(status_bus.as_deref(), &locate, &observer) => {
+                        // The status can no longer be had.
+                        observer.set_accessibility(Accessibility::Unknown);
+                    }
                 }
             });
         });
@@ -280,8 +324,10 @@ async fn status_connection(status_bus: Option<&str>) -> Result<Connection, Strin
     }
 }
 
-/// Follows `IsEnabled` and listens while it is true. Returns only when the
-/// status cannot be had at all; the source stays unknown then.
+/// Follows `IsEnabled` and listens while it is true; each read of it is
+/// what [`Foreground::accessibility`] gives. Returns only when the status
+/// cannot be had at all; the source stays unknown then, and the caller sets
+/// the accessibility to unknown.
 async fn serve(status_bus: Option<&str>, locate: &Locate, observer: &Observer) {
     let connection = match status_connection(status_bus).await {
         Ok(connection) => connection,
@@ -307,6 +353,11 @@ async fn serve(status_bus: Option<&str>, locate: &Locate, observer: &Observer) {
                 Ok(Err(e)) => return eprintln!("addict: foreground listener, IsEnabled: {e}"),
                 Err(_) => return eprintln!("addict: foreground listener, IsEnabled: no answer"),
             };
+        observer.set_accessibility(if enabled {
+            Accessibility::On
+        } else {
+            Accessibility::Off
+        });
         let mut ended = false;
         if enabled {
             tokio::select! {
