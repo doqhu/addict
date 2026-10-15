@@ -1,11 +1,17 @@
 //! The AT-SPI adapter: the word selected in Android Studio and the sentence
 //! around it, read from the accessibility bus.
 //!
-//! [`read`] takes a [`Locate`], the [`Source`] the press found in front and a
-//! deadline and gives one [`Context`] or one [`ContextFailure`]. A source that
-//! is not Android Studio ends it at once as [`ContextFailure::NotFromStudio`]:
-//! no bus is opened and no text is read; the decision is the caller's, from
-//! what [`crate::foreground`] observed, and `read` takes it as given. Otherwise
+//! [`read`] takes a [`Locate`], the [`Accessibility`] and the [`Source`] the
+//! press found and a deadline and gives one [`Context`] or one
+//! [`ContextFailure`]. Accessibility that was read as off ends it at once as
+//! [`ContextFailure::AccessibilityOff`], before the source is looked at. A
+//! source that is another application ends it at once as
+//! [`ContextFailure::NotFromStudio`]: no bus is opened. A source that is not
+//! known asks the registry for the names of the applications and nothing
+//! else: without Android Studio among them the read ends as
+//! [`ContextFailure::AppNotFound`], with it as `NotFromStudio`. No text is
+//! read in either case; the decision is the caller's, from what
+//! [`crate::foreground`] observed, and `read` takes it as given. Otherwise
 //! it opens the accessibility bus, finds the application whose registered name
 //! contains `Android Studio`, walks its tree to the one Text object that has a
 //! selection, and reads the selected word and a wider text around it. Every
@@ -25,7 +31,7 @@ use std::{
     time::Duration,
 };
 
-use crate::foreground::Source;
+use crate::foreground::{Accessibility, Source};
 use addict_core::sentence::{self, Selected};
 use futures_util::future::join_all;
 use serde::{Serialize, de::DeserializeOwned};
@@ -80,12 +86,17 @@ pub struct Context {
     pub sentence: Option<Selected>,
 }
 
-/// Why nothing was read. The detail is for the log, not for the window.
+/// Why nothing was read. The detail of `Unavailable` and `Failed` is logged
+/// and shown in the window's source line as given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextFailure {
+    /// `IsEnabled` of `org.a11y.Status` was read as false: no application
+    /// is on the accessibility bus to be read. Nothing was opened.
+    AccessibilityOff,
     /// There is no accessibility bus, or it refuses the connection.
     Unavailable(String),
-    /// No registered application has `Android Studio` in its name.
+    /// No registered application has `Android Studio` in its name; also
+    /// when the application in front was not known.
     AppNotFound,
     /// The application has no Text object with a selection.
     NoSelection,
@@ -94,7 +105,8 @@ pub enum ContextFailure {
     /// The bus did not answer within the deadline.
     TimedOut,
     /// The application in front at the press was not Android Studio, or was
-    /// not known; nothing was read. The source is what the press found.
+    /// not known while Android Studio is registered; no text was read. The
+    /// source is what the press found.
     NotFromStudio(Source),
     /// The application answered, but the read could not be completed.
     Failed(String),
@@ -189,20 +201,44 @@ impl Object {
 
 /// Reads the selection of Android Studio from the accessibility bus at
 /// `bus`, within `limit` altogether, when `source` says that Android Studio
-/// was in front; any other source ends it at once as
-/// [`ContextFailure::NotFromStudio`], before anything is opened.
+/// was in front. `accessibility` read as off ends it at once as
+/// [`ContextFailure::AccessibilityOff`]; an unknown one does not stop it.
+/// Another application in front ends it at once as
+/// [`ContextFailure::NotFromStudio`], before anything is opened; an unknown
+/// one asks only for the names of the applications, within `limit`: no
+/// Android Studio among them is [`ContextFailure::AppNotFound`], one is
+/// `NotFromStudio`, and so is an application or a registry that does not
+/// answer in time, since nothing says that Android Studio is the silent one;
+/// a bus that is not there is [`ContextFailure::Unavailable`].
 pub async fn read(
     bus: &Locate,
+    accessibility: Accessibility,
     source: Source,
     limit: Duration,
 ) -> Result<Context, ContextFailure> {
-    if source != Source::AndroidStudio {
-        return Err(ContextFailure::NotFromStudio(source));
+    if accessibility == Accessibility::Off {
+        return Err(ContextFailure::AccessibilityOff);
     }
-    match timeout(limit, read_selection(bus)).await {
-        Ok(read) => read,
-        Err(_) => Err(ContextFailure::TimedOut),
+    match source {
+        Source::Other => Err(ContextFailure::NotFromStudio(source)),
+        Source::Unknown => match timeout(limit, studio_is_registered(bus)).await {
+            Ok(Err(ContextFailure::TimedOut)) | Err(_) => {
+                Err(ContextFailure::NotFromStudio(Source::Unknown))
+            }
+            Ok(read) => read,
+        },
+        Source::AndroidStudio => timeout(limit, read_selection(bus))
+            .await
+            .unwrap_or(Err(ContextFailure::TimedOut)),
     }
+}
+
+/// Why nothing is read when the application in front is not known: Android
+/// Studio is registered, or it is not. Only names are asked, never text.
+async fn studio_is_registered(bus: &Locate) -> Result<Context, ContextFailure> {
+    let connection = open(bus).await?;
+    applications(&connection).await?;
+    Err(ContextFailure::NotFromStudio(Source::Unknown))
 }
 
 async fn read_selection(bus: &Locate) -> Result<Context, ContextFailure> {

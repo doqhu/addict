@@ -11,7 +11,7 @@ use std::{
 
 use addict_platform::{
     atspi::{ContextFailure, Locate},
-    foreground::Source,
+    foreground::{Accessibility, Source},
 };
 use fake_bus::{
     Address, FakeNode, app, editor, hung_registry, plain, selected, text_node, unselected, world,
@@ -136,9 +136,10 @@ fn an_application_that_is_not_android_studio_in_front_reads_no_text() {
         "not-from-studio",
         vec![selected("Sit on the bank.", "bank", 0)],
     );
+    // Android Studio is registered, so an unknown source is not from it.
     for source in [Source::Other, Source::Unknown] {
         assert_eq!(
-            world.read_from(source, LIMIT),
+            world.read_from(Accessibility::On, source, LIMIT),
             Err(ContextFailure::NotFromStudio(source))
         );
     }
@@ -149,26 +150,122 @@ fn an_application_that_is_not_android_studio_in_front_reads_no_text() {
 }
 
 #[test]
-fn another_source_is_not_from_studio_and_not_unavailable_on_an_absent_bus() {
+fn another_application_is_not_from_studio_and_not_unavailable_on_an_absent_bus() {
     let missing = std::env::temp_dir().join("addict-atspi-test-no-such-bus-gate");
     let locate = Locate::Address(format!("unix:path={}", missing.display()));
     let world = studio("gate-absent", vec![]);
-    for source in [Source::Other, Source::Unknown] {
+    for accessibility in [Accessibility::On, Accessibility::Unknown] {
         assert_eq!(
-            world.read_with(&locate, source, LIMIT),
-            Err(ContextFailure::NotFromStudio(source))
+            world.read_with(&locate, accessibility, Source::Other, LIMIT),
+            Err(ContextFailure::NotFromStudio(Source::Other))
         );
     }
     // The gate does not even look for the session's bus.
     assert_eq!(
-        world.read_with(&Locate::Session, Source::Other, LIMIT),
+        world.read_with(&Locate::Session, Accessibility::On, Source::Other, LIMIT),
         Err(ContextFailure::NotFromStudio(Source::Other))
     );
-    // Android Studio in front on the same absent bus is what it was.
+    // An unknown source asks the bus, so its absence is what it ends in.
     assert!(matches!(
-        world.read_with(&locate, Source::AndroidStudio, LIMIT),
+        world.read_with(&locate, Accessibility::On, Source::Unknown, LIMIT),
         Err(ContextFailure::Unavailable(_))
     ));
+    // Android Studio in front on the same absent bus is what it was.
+    assert!(matches!(
+        world.read_with(&locate, Accessibility::On, Source::AndroidStudio, LIMIT),
+        Err(ContextFailure::Unavailable(_))
+    ));
+}
+
+#[test]
+fn accessibility_off_ends_the_read_before_the_source_and_the_bus() {
+    let missing = std::env::temp_dir().join("addict-atspi-test-no-such-bus-off");
+    let locate = Locate::Address(format!("unix:path={}", missing.display()));
+    let world = studio("off-absent", vec![]);
+    for source in [Source::AndroidStudio, Source::Other, Source::Unknown] {
+        assert_eq!(
+            world.read_with(&locate, Accessibility::Off, source, LIMIT),
+            Err(ContextFailure::AccessibilityOff),
+            "{source:?}"
+        );
+    }
+    assert_eq!(
+        world.read_with(
+            &Locate::Session,
+            Accessibility::Off,
+            Source::AndroidStudio,
+            LIMIT
+        ),
+        Err(ContextFailure::AccessibilityOff)
+    );
+}
+
+#[test]
+fn accessibility_off_reads_no_text_though_a_selection_is_there() {
+    let world = studio("off-present", vec![selected("Sit on the bank.", "bank", 0)]);
+    assert_eq!(
+        world.read_from(Accessibility::Off, Source::AndroidStudio, LIMIT),
+        Err(ContextFailure::AccessibilityOff)
+    );
+    assert_eq!(world.text_calls(), 0);
+}
+
+#[test]
+fn an_accessibility_that_is_not_known_does_not_stop_the_read() {
+    let world = studio(
+        "a11y-unknown",
+        vec![selected("Sit on the bank.", "bank", 0)],
+    );
+    let context = world
+        .read_from(Accessibility::Unknown, Source::AndroidStudio, LIMIT)
+        .expect("context");
+    assert_eq!(context.word, "bank");
+}
+
+#[test]
+fn an_unknown_source_without_android_studio_registered_is_app_not_found() {
+    let nodes = editor(
+        "org.example.Reader",
+        vec![selected("Sit on the bank.", "bank", 0)],
+    );
+    let reader = world("unknown-not-found", Address::Plain, nodes, &[0]);
+    assert_eq!(
+        reader.read_from(Accessibility::On, Source::Unknown, LIMIT),
+        Err(ContextFailure::AppNotFound)
+    );
+    assert_eq!(reader.text_calls(), 0);
+    let empty = world("unknown-empty-registry", Address::Plain, vec![], &[]);
+    assert_eq!(
+        empty.read_from(Accessibility::Unknown, Source::Unknown, LIMIT),
+        Err(ContextFailure::AppNotFound)
+    );
+}
+
+#[test]
+fn an_unknown_source_on_a_silent_registry_is_not_from_studio_at_the_deadline() {
+    let world = hung_registry("unknown-hung-registry");
+    let limit = Duration::from_millis(600);
+    let started = Instant::now();
+    assert_eq!(
+        world.read_from(Accessibility::On, Source::Unknown, limit),
+        Err(ContextFailure::NotFromStudio(Source::Unknown))
+    );
+    let elapsed = started.elapsed();
+    assert!(elapsed >= limit && elapsed < limit + SLACK, "{elapsed:?}");
+}
+
+#[test]
+fn an_unknown_source_with_a_silent_application_and_no_studio_is_not_from_studio() {
+    let mut nodes = editor("org.example.Reader", vec![]);
+    nodes[0].silent_name = true;
+    let silent = world("unknown-silent-name", Address::Plain, nodes, &[0]);
+    let started = Instant::now();
+    assert_eq!(
+        silent.read_from(Accessibility::On, Source::Unknown, LIMIT),
+        Err(ContextFailure::NotFromStudio(Source::Unknown))
+    );
+    assert!(started.elapsed() < LIMIT + SLACK);
+    assert_eq!(silent.text_calls(), 0);
 }
 
 #[test]
@@ -356,6 +453,7 @@ fn the_session_bus_names_the_accessibility_bus() {
         let context = child_runtime()
             .block_on(addict_platform::atspi::read(
                 &Locate::Session,
+                Accessibility::On,
                 Source::AndroidStudio,
                 LIMIT,
             ))
@@ -388,6 +486,7 @@ fn at_spi_bus_address_wins_over_the_session_bus() {
         let context = child_runtime()
             .block_on(addict_platform::atspi::read(
                 &Locate::Session,
+                Accessibility::On,
                 Source::AndroidStudio,
                 LIMIT,
             ))
@@ -418,6 +517,7 @@ fn a_session_without_the_launcher_or_the_variable_is_unavailable() {
         let failure = child_runtime()
             .block_on(addict_platform::atspi::read(
                 &Locate::Session,
+                Accessibility::On,
                 Source::AndroidStudio,
                 LIMIT,
             ))

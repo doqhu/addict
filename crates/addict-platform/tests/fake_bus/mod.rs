@@ -23,7 +23,7 @@ use std::{
 
 use addict_platform::{
     atspi::{Context, ContextFailure, Locate, read},
-    foreground::Source,
+    foreground::{Accessibility, Source},
 };
 use zbus::{
     Connection, fdo,
@@ -416,30 +416,44 @@ fn build(
 }
 
 impl World {
-    /// Reads this world's bus by its address, Android Studio in front.
+    /// Reads this world's bus by its address, accessibility on and Android
+    /// Studio in front.
     pub fn read(&self, limit: Duration) -> Result<Context, ContextFailure> {
-        self.read_from(Source::AndroidStudio, limit)
+        self.read_from(Accessibility::On, Source::AndroidStudio, limit)
     }
 
-    /// Reads this world's bus by its address with `source` in front.
-    pub fn read_from(&self, source: Source, limit: Duration) -> Result<Context, ContextFailure> {
-        self.read_with(&Locate::Address(self.bus.address.clone()), source, limit)
-    }
-
-    /// Reads with `locate`, Android Studio in front, on the runtime that
-    /// serves the fake.
-    pub fn read_at(&self, locate: &Locate, limit: Duration) -> Result<Context, ContextFailure> {
-        self.read_with(locate, Source::AndroidStudio, limit)
-    }
-
-    /// Reads with `locate` and `source`.
-    pub fn read_with(
+    /// Reads this world's bus by its address with `accessibility` and
+    /// `source` in front.
+    pub fn read_from(
         &self,
-        locate: &Locate,
+        accessibility: Accessibility,
         source: Source,
         limit: Duration,
     ) -> Result<Context, ContextFailure> {
-        self.runtime.block_on(read(locate, source, limit))
+        self.read_with(
+            &Locate::Address(self.bus.address.clone()),
+            accessibility,
+            source,
+            limit,
+        )
+    }
+
+    /// Reads with `locate`, accessibility on and Android Studio in front, on
+    /// the runtime that serves the fake.
+    pub fn read_at(&self, locate: &Locate, limit: Duration) -> Result<Context, ContextFailure> {
+        self.read_with(locate, Accessibility::On, Source::AndroidStudio, limit)
+    }
+
+    /// Reads with `locate`, `accessibility` and `source`.
+    pub fn read_with(
+        &self,
+        locate: &Locate,
+        accessibility: Accessibility,
+        source: Source,
+        limit: Duration,
+    ) -> Result<Context, ContextFailure> {
+        self.runtime
+            .block_on(read(locate, accessibility, source, limit))
     }
 
     /// The text objects' calls answered so far.
