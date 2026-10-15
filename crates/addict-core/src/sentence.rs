@@ -309,12 +309,27 @@ fn has_comment(characters: &[char], start: usize, end: usize) -> bool {
         .any(|pair| pair == ['/', '/'])
 }
 
-/// Whether the comment of the line that starts at `line_start` starts there:
-/// the line before it lies whole in `characters`, a line break before it
-/// too, and holds no `//`, so no comment there can go on into this line. A
-/// line before that the text cuts, or none at all, could be a comment and so
-/// does not count.
-fn comment_starts_here(characters: &[char], line_start: usize) -> bool {
+/// Whether `start..end`, trailing whitespace and closers aside, ends with a
+/// stop.
+fn ends_with_stop(characters: &[char], start: usize, end: usize) -> bool {
+    let mut last = end;
+    while last > start && characters[last - 1].is_whitespace() {
+        last -= 1;
+    }
+    while last > start && is_closer(characters[last - 1]) {
+        last -= 1;
+    }
+    last > start && is_stop(characters[last - 1])
+}
+
+/// Whether a sentence starts with the comment text at `text` of the line that
+/// starts at `line_start`. The line before it must lie whole in
+/// `characters`, a line break before it too: a line the text cuts, or none
+/// at all, could be a comment and so does not count. Then either it holds
+/// no `//`, so no comment there can go on into this line; or it is a
+/// whole-line `//` comment that ends with a stop and the text here does not
+/// start with a lowercase letter, so the sentence above has ended.
+fn sentence_starts_here(characters: &[char], line_start: usize, text: usize) -> bool {
     let Some(mut previous_end) = line_start.checked_sub(1) else {
         return false;
     };
@@ -330,15 +345,27 @@ fn comment_starts_here(characters: &[char], line_start: usize) -> bool {
     else {
         return false;
     };
-    !has_comment(characters, previous_start, previous_end)
+    if !has_comment(characters, previous_start, previous_end) {
+        return true;
+    }
+    is_comment_line(characters, previous_start, previous_end)
+        && ends_with_stop(characters, previous_start, previous_end)
+        && characters
+            .get(text)
+            .is_some_and(|first| !first.is_lowercase())
+}
+
+/// Whether the content of `start..end` begins with the `//` of a comment.
+fn is_comment_line(characters: &[char], start: usize, end: usize) -> bool {
+    characters[content_start(characters, start, end)..end].starts_with(&['/', '/'])
 }
 
 /// Where the text of the trimmed sentence `from..to` of `characters` starts
 /// when it lies in the area where the sentence of an editor is known to be
 /// right, `None` otherwise. The area is a sentence of a whole-line `//`
 /// comment that ends in its line with a stop: a later sentence of the line,
-/// or the first one when the comment starts on this line
-/// ([`comment_starts_here`]). The first sentence's text starts after the
+/// or the first one when a sentence starts on this line
+/// ([`sentence_starts_here`]). The first sentence's text starts after the
 /// `/` marker and the whitespace that follows it.
 fn in_area(characters: &[char], from: usize, to: usize) -> Option<usize> {
     let line_start = characters[..from]
@@ -351,26 +378,18 @@ fn in_area(characters: &[char], from: usize, to: usize) -> Option<usize> {
         .map_or(characters.len(), |index| from + index);
     let content = content_start(characters, line_start, line_end);
     let is_comment = characters[content..line_end].starts_with(&['/', '/']);
-    let mut last = to;
-    while last > from && is_closer(characters[last - 1]) {
-        last -= 1;
-    }
-    let ends_with_stop = last > from && is_stop(characters[last - 1]);
-    if !(is_comment && to <= line_end && ends_with_stop) {
+    if !(is_comment && to <= line_end && ends_with_stop(characters, from, to)) {
         return None;
     }
     if from > content {
         return Some(from);
-    }
-    if !comment_starts_here(characters, line_start) {
-        return None;
     }
     let mut text = from;
     while text < to && characters[text] == '/' {
         text += 1;
     }
     let text = content_start(characters, text, to);
-    (text < to).then_some(text)
+    (text < to && sentence_starts_here(characters, line_start, text)).then_some(text)
 }
 
 /// The sentence of `wider` around the selected characters `start..end`,
@@ -386,12 +405,16 @@ fn in_area(characters: &[char], from: usize, to: usize) -> Option<usize> {
 /// Only a sentence of the confirmed area is given, anything else is `None`:
 /// its line, the run of `wider` between line breaks, starts with `//` after
 /// its leading whitespace; the sentence starts after a sentence break inside
-/// that line, or it is the first sentence of the line and the comment starts
-/// on this line: the line before it is whole in `wider` and holds no `//`;
-/// and it ends in the line with a stop, closers after it allowed. The
-/// first sentence's text leaves out the `//` marker and the whitespace after
-/// it. A string literal, a trailing comment after code and a sentence wrapped
-/// by hand over several comment lines are thus outside the area.
+/// that line, or it is the first sentence of the line and a sentence starts
+/// on this line: the line before it is whole in `wider` and holds no `//`,
+/// or is a whole-line `//` comment that ends with a stop while this sentence
+/// does not start with a lowercase letter; and it ends in the line with a
+/// stop, closers after it allowed. The first sentence's text leaves out the
+/// `//` marker and the whitespace after it. A string literal, a trailing
+/// comment after code and a sentence wrapped by hand after a line without a
+/// stop, or onto a line that starts lowercase, are thus outside the area. A
+/// wrap right after a stop, as in `Mr.` then `Smith`, is not told apart from
+/// two sentences.
 pub fn of_selection(wider: &str, start: usize, end: usize) -> Option<Selected> {
     let characters: Vec<char> = wider.chars().collect();
     let count = characters.len();
@@ -966,7 +989,8 @@ val message = \"The charge will appear on your next statement. Keep the receipt.
 
     #[test]
     fn the_first_sentence_is_not_given_when_the_comment_may_start_earlier() {
-        // Wrapped by hand: the line before is a comment too.
+        // Wrapped by hand: the comment line before ends without a stop, and
+        // this line starts lowercase.
         let text = "}\nx\n// The player is released when the dialog\n// leaves the composition.\n";
         assert_eq!(selected(text, "leaves", 0), None);
         // Its first line does not end with a stop.
@@ -986,6 +1010,54 @@ val message = \"The charge will appear on your next statement. Keep the receipt.
         assert_eq!(selected(text, "One", 0), None);
         // A trailing comment after code is not a whole-line comment.
         assert_eq!(selected("}\nx\nf() // One here.", "One", 0), None);
+    }
+
+    #[test]
+    fn a_later_comment_line_after_a_finished_sentence_gives_its_first_sentence() {
+        // One sentence per line, from the file read on 2026-10-15.
+        let text = "}\nx\n// The row carries the click and the role.\n// The button only draws.\n";
+        let found = selected(text, "button", 0).expect("sentence");
+        assert_eq!(found.text, "The button only draws.");
+        assert_eq!(&found.text[found.word], "button");
+        // The first line as before, and a third line after the second.
+        assert_eq!(
+            selected(text, "row", 0).expect("sentence").text,
+            "The row carries the click and the role."
+        );
+        let text = "}\nx\n// One.\n// Two here.\n// Three here.";
+        assert_eq!(
+            selected(text, "Three", 0).expect("sentence").text,
+            "Three here."
+        );
+        // A closer after the stop, whitespace after it, and `\r\n` breaks.
+        let text = "}\nx\n    // He said \"done.\"  \n    // Then we left.";
+        assert_eq!(
+            selected(text, "left", 0).expect("sentence").text,
+            "Then we left."
+        );
+        let text = "}\r\nx\r\n// One.\r\n// Two here.";
+        assert_eq!(
+            selected(text, "Two", 0).expect("sentence").text,
+            "Two here."
+        );
+    }
+
+    #[test]
+    fn a_later_comment_line_continuing_a_sentence_gives_nothing() {
+        // The line above ends without a stop: wrapped by hand.
+        let text = "}\nx\n// A published twister recorded in every voice of its language; no\n// separate preview object exists.";
+        assert_eq!(selected(text, "separate", 0), None);
+        // A stop above, but this line starts lowercase: as after `e.g.`.
+        let text = "}\nx\n// See e.g.\n// the docs here.";
+        assert_eq!(selected(text, "docs", 0), None);
+        // A trailing comment above, even one that ends with a stop.
+        let text = "}\nval x = 1 // a note.\n// Next one.";
+        assert_eq!(selected(text, "Next", 0), None);
+        // An empty comment line above has no stop.
+        let text = "}\nx\n// One.\n//\n// Two here.";
+        assert_eq!(selected(text, "Two", 0), None);
+        // A comment line above that the text cuts.
+        assert_eq!(selected("tail.\n// Two here.", "Two", 0), None);
     }
 
     #[test]
