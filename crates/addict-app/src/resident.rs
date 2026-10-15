@@ -1422,7 +1422,7 @@ impl Session {
         let path = self.key_file.clone();
         self.key_job = self.work.upgrade().map(|work| {
             work.run(
-                manual::LOOKUP_LIMIT,
+                settings::KEY_CHECK_LIMIT,
                 async move { KeyState::of(path.as_deref()) },
                 move |outcome| {
                     let state = match outcome {

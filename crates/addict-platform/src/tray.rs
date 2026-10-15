@@ -6,14 +6,23 @@
 //! how to wake its own thread; nothing here polls. A click on the icon opens
 //! the menu.
 //!
-//! A session without a StatusNotifierHost, or a bus that cannot be reached, is
-//! reported once as [`TrayEvent::Unavailable`]; the application goes on
-//! without a tray.
+//! A session without a StatusNotifierWatcher is reported once as
+//! [`TrayEvent::Unavailable`] and the item waits: a watcher that comes later,
+//! such as a shell extension that starts after the application at login,
+//! gets the item then. A bus that cannot be reached ends the worker with an
+//! `Unavailable`; the application goes on without a tray either way.
 
-use std::{sync::Arc, thread::JoinHandle, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle,
+    time::Duration,
+};
 
 use ksni::{
-    Tray, TrayMethods,
+    OfflineReason, Tray, TrayMethods,
     menu::{MenuItem, StandardItem},
 };
 use tokio::sync::oneshot;
@@ -27,8 +36,9 @@ pub enum TrayEvent {
     Settings,
     /// Exit was chosen.
     Exit,
-    /// There is no tray: `message` is one line saying why. Always the last
-    /// event of the worker.
+    /// There is no tray: `message` is one line saying why. Said once for each
+    /// time the watcher is missing, while the item waits for it; when the
+    /// bus or the worker itself fails, it is the last event of the worker.
     Unavailable { message: String },
 }
 
@@ -40,12 +50,12 @@ pub const ENTRIES: [(&str, TrayEvent); 3] = [
     ("Exit", TrayEvent::Exit),
 ];
 
-/// Shared by the item, which reports the choices, and the worker, which
-/// reports the failure.
 /// How long registering the item and removing it may each take. A host that
 /// does not answer ends the tray, not the application's shutdown.
 const BUS_LIMIT: Duration = Duration::from_secs(1);
 
+/// Shared by the item, which reports the choices, and the worker, which
+/// reports the failure.
 type Callback = Arc<dyn Fn(TrayEvent) + Send + Sync>;
 
 /// Keeps the worker alive. Dropping it removes the item and waits for the
@@ -72,6 +82,8 @@ impl Drop for TrayHandle {
 struct Item {
     app_id: String,
     on_event: Callback,
+    /// The missing watcher was already said; cleared when one comes.
+    told_offline: AtomicBool,
 }
 
 impl Tray for Item {
@@ -105,6 +117,27 @@ impl Tray for Item {
                 .into()
             })
             .collect()
+    }
+
+    fn watcher_online(&self) {
+        self.told_offline.store(false, Ordering::Relaxed);
+    }
+
+    /// The watcher is missing, at the start or later: said once, and the
+    /// item stays to be registered when a watcher comes.
+    fn watcher_offline(&self, reason: OfflineReason) -> bool {
+        if !self.told_offline.swap(true, Ordering::Relaxed) {
+            (self.on_event)(unavailable("no tray host", &offline_text(&reason)));
+        }
+        true
+    }
+}
+
+fn offline_text(reason: &OfflineReason) -> String {
+    match reason {
+        OfflineReason::No => "the StatusNotifierWatcher left the bus".to_owned(),
+        OfflineReason::Error(e) => e.to_string(),
+        other => format!("{other:?}"),
     }
 }
 
@@ -151,16 +184,22 @@ pub fn start(app_id: &str, on_event: impl Fn(TrayEvent) + Send + Sync + 'static)
 }
 
 /// Registers the item, then serves until the stop signal or the handle is
-/// gone. Registration and removal each have [`BUS_LIMIT`]; the stop signal
-/// also ends a registration that is still waiting.
+/// gone. A missing watcher does not fail the registration: the item waits
+/// for one (`assume_sni_available`). Registration and removal each have
+/// [`BUS_LIMIT`]; the stop signal also ends a registration that is still
+/// waiting.
 async fn run(app_id: String, on_event: Callback, mut stopped: oneshot::Receiver<()>) {
     let item = Item {
         app_id,
         on_event: on_event.clone(),
+        told_offline: AtomicBool::new(false),
     };
     let registered = tokio::select! {
         _ = &mut stopped => return,
-        registered = tokio::time::timeout(BUS_LIMIT, item.spawn()) => registered,
+        registered = tokio::time::timeout(
+            BUS_LIMIT,
+            item.assume_sni_available(true).spawn(),
+        ) => registered,
     };
     match registered {
         Ok(Ok(handle)) => {
@@ -195,8 +234,25 @@ mod tests {
         let item = Item {
             app_id: "dev.addict.Addict".to_owned(),
             on_event: Arc::new(move |event| sink.lock().expect("sink").push(event)),
+            told_offline: AtomicBool::new(false),
         };
         (item, heard)
+    }
+
+    #[test]
+    fn a_missing_watcher_is_said_once_and_the_item_waits() {
+        let (item, heard) = item();
+        assert!(item.watcher_offline(OfflineReason::No));
+        assert!(item.watcher_offline(OfflineReason::No));
+        assert_eq!(
+            *heard.lock().expect("heard"),
+            [TrayEvent::Unavailable {
+                message: "no tray host: the StatusNotifierWatcher left the bus".to_owned()
+            }]
+        );
+        item.watcher_online();
+        assert!(item.watcher_offline(OfflineReason::No));
+        assert_eq!(heard.lock().expect("heard").len(), 2);
     }
 
     #[test]

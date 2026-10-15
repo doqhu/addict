@@ -122,8 +122,9 @@
 //! with the trigger of the shortcut, the file of the DeepL key and the state
 //! it is in, never the key, and a button that asks the portal for its dialog
 //! to change the shortcut; the line there says when it cannot. Exit ends the
-//! application. A session with no StatusNotifierHost says so once on stderr
-//! and goes on without the icon.
+//! application. A session with no StatusNotifierWatcher says so once on
+//! stderr and goes on without the icon; the icon appears when a watcher
+//! comes, such as a shell extension that starts after the application.
 //!
 //! The application is unique: a second launch exits at once and makes the
 //! resident instance show its window as it is, without a read.
