@@ -16,6 +16,12 @@
       <sourceFolder url="file://$MODULE_DIR$/crates/addict-probe/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/crates/addict-probe/tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/crates/addict-ui-gtk/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/addict-deepl/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/addict-deepl/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/addict-exp5/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/addict-exp5/tests" isTestSource="true" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/addict-exp8/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/crates/addict-exp8/tests" isTestSource="true" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
