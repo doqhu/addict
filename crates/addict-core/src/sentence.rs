@@ -11,6 +11,10 @@
 //! `well-known` is two words. The ranges are byte ranges of the given text,
 //! so the text itself is kept as it was, punctuation included.
 //!
+//! The text read from an editor over the accessibility bus is cut by
+//! [`of_selection`]: the sentence around a selection given in character
+//! offsets, a line break ending a sentence.
+//!
 //! A text recognized from a screen capture ([`recognized`]) has its lines
 //! joined with one space, an empty line among them being only a line break;
 //! a line that ends in `-` right after a letter, followed by a line that
@@ -199,9 +203,146 @@ pub fn around(text: &str, word: Range<usize>) -> Range<usize> {
         .unwrap_or(0..text.len())
 }
 
+/// The sentence a selection lies in, cut out of the text read around it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Selected {
+    /// The sentence, without the whitespace around it.
+    pub text: String,
+    /// The selected characters, as a byte range of `text`.
+    pub word: Range<usize>,
+}
+
+/// Whether `character` ends a sentence of a selection's text when the rest
+/// allows it.
+fn is_stop(character: char) -> bool {
+    matches!(
+        character,
+        '.' | '!'
+            | '?'
+            | '\u{2026}'
+            | '\u{203c}'
+            | '\u{2047}'
+            | '\u{2048}'
+            | '\u{2049}'
+            | '\u{3002}'
+            | '\u{ff01}'
+            | '\u{ff1f}'
+    )
+}
+
+/// Whether `character` may close a sentence right after its stop.
+fn is_closer(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\'' | '\u{201d}' | '\u{2019}' | '\u{bb}' | '\u{203a}' | ')' | ']' | '}'
+    )
+}
+
+/// Whether `character` is a line break.
+fn is_line_break(character: char) -> bool {
+    matches!(
+        character,
+        '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// The breaks of `characters` as `(end of a sentence, start of the next)`,
+/// both character indexes. A line break always ends a sentence; a run of
+/// stops with the closers after it ends one when whitespace follows, and then
+/// the end or a character that is not a lowercase letter, or a line break.
+fn breaks(characters: &[char]) -> Vec<(usize, usize)> {
+    let count = characters.len();
+    let mut found = Vec::new();
+    let mut index = 0;
+    while index < count {
+        let character = characters[index];
+        if is_line_break(character) {
+            let mut next = index;
+            while next < count && characters[next].is_whitespace() {
+                next += 1;
+            }
+            found.push((index, next));
+            index = next;
+        } else if is_stop(character) {
+            let mut end = index + 1;
+            while end < count && is_stop(characters[end]) {
+                end += 1;
+            }
+            while end < count && is_closer(characters[end]) {
+                end += 1;
+            }
+            let mut next = end;
+            let mut line_break = false;
+            while next < count && characters[next].is_whitespace() {
+                line_break |= is_line_break(characters[next]);
+                next += 1;
+            }
+            if next > end && (next == count || line_break || !characters[next].is_lowercase()) {
+                found.push((end, next));
+            }
+            index = next.max(index + 1);
+        } else {
+            index += 1;
+        }
+    }
+    found
+}
+
+/// The sentence of `wider` around the selected characters `start..end`,
+/// which are character offsets of `wider`, as an accessibility bus gives
+/// them and never byte indexes; `None` when the range is empty or lies
+/// outside the text, or when no sentence is left, as for a blank text.
+///
+/// A sentence ends as in [`sentences`] and also at every line break: the
+/// text of an editor is read line by line, so a sentence never runs over one.
+/// The word is the selection as far as it lies in the sentence, in bytes of
+/// the sentence; a selection that has only whitespace there gives `None`.
+pub fn of_selection(wider: &str, start: usize, end: usize) -> Option<Selected> {
+    let characters: Vec<char> = wider.chars().collect();
+    let count = characters.len();
+    if start >= end || end > count {
+        return None;
+    }
+    let breaks = breaks(&characters);
+    let before = breaks
+        .iter()
+        .filter(|&&(_, next)| next <= start)
+        .map(|&(_, next)| next)
+        .max();
+    let after = breaks
+        .iter()
+        .filter(|&&(stop, _)| stop >= end)
+        .map(|&(stop, _)| stop)
+        .min();
+    let mut from = before.unwrap_or(0);
+    let mut to = after.unwrap_or(count);
+    while from < to && characters[from].is_whitespace() {
+        from += 1;
+    }
+    while to > from && characters[to - 1].is_whitespace() {
+        to -= 1;
+    }
+    let (word_from, word_to) = (start.max(from), end.min(to));
+    if word_from >= word_to {
+        return None;
+    }
+    let bytes = |upto: usize| -> usize {
+        characters[from..upto]
+            .iter()
+            .map(|character| character.len_utf8())
+            .sum()
+    };
+    Some(Selected {
+        text: characters[from..to].iter().collect(),
+        word: bytes(word_from)..bytes(word_to),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{around, lookup_word, pasted, recognized, sentences, words};
+    use super::{
+        Selected, around, lookup_word, of_selection, pasted, recognized, sentences, words,
+    };
 
     /// The words of `sentence` as texts.
     fn texts(sentence: &str) -> Vec<&str> {
@@ -550,5 +691,97 @@ mod tests {
             sentence_of(&text, "unlikely"),
             "On average, we expect to test half of the elements, so this method is considered linear (except in the unlikely case that we know the target element is at the beginning of the array)."
         );
+    }
+
+    /// Character offsets of the `nth` occurrence of `needle` in `text`.
+    fn chars_of(text: &str, needle: &str, nth: usize) -> (usize, usize) {
+        let byte = text.match_indices(needle).nth(nth).expect("needle").0;
+        let start = text[..byte].chars().count();
+        (start, start + needle.chars().count())
+    }
+
+    fn selected(text: &str, needle: &str, nth: usize) -> Option<Selected> {
+        let (start, end) = chars_of(text, needle, nth);
+        of_selection(text, start, end)
+    }
+
+    #[test]
+    fn a_selection_gives_its_sentence_and_the_place_of_the_word_in_it() {
+        let text = "// The bank was closed. We sat on the bank of the river.";
+        let found = selected(text, "bank", 1).expect("sentence");
+        assert_eq!(found.text, "We sat on the bank of the river.");
+        assert_eq!(&found.text[found.word.clone()], "bank");
+        // The second occurrence, not the first.
+        assert_eq!(found.word, 14..18);
+        let first = selected(text, "bank", 0).expect("sentence");
+        assert_eq!(first.text, "// The bank was closed.");
+        assert_eq!(&first.text[first.word.clone()], "bank");
+    }
+
+    #[test]
+    fn a_line_break_ends_a_sentence() {
+        let text = "a.\n// We sat on the bank\nnext";
+        let found = selected(text, "bank", 0).expect("sentence");
+        assert_eq!(found.text, "// We sat on the bank");
+        assert_eq!(&found.text[found.word], "bank");
+        // Without a stop before it.
+        let text = "one two\nthree four\nfive";
+        let found = selected(text, "four", 0).expect("sentence");
+        assert_eq!(found.text, "three four");
+    }
+
+    #[test]
+    fn offsets_are_characters_and_not_bytes() {
+        let text = "\u{1f600} Sit. \u{1f600}\u{1f600} We sat on the b\u{e4}nk, \u{1f600} here.";
+        let found = selected(text, "b\u{e4}nk", 0).expect("sentence");
+        assert_eq!(
+            found.text,
+            "\u{1f600}\u{1f600} We sat on the b\u{e4}nk, \u{1f600} here."
+        );
+        assert_eq!(&found.text[found.word], "b\u{e4}nk");
+        let found = selected(text, "here", 0).expect("sentence");
+        assert_eq!(&found.text[found.word], "here");
+    }
+
+    #[test]
+    fn a_range_outside_the_text_or_empty_is_nothing() {
+        let text = "We sat on the bank.";
+        let count = text.chars().count();
+        assert_eq!(of_selection(text, 3, count + 1), None);
+        assert_eq!(of_selection(text, count + 2, count + 4), None);
+        assert_eq!(of_selection(text, 5, 5), None);
+        assert_eq!(of_selection(text, 6, 5), None);
+        assert_eq!(of_selection("", 0, 0), None);
+    }
+
+    #[test]
+    fn a_blank_text_or_selection_has_no_sentence() {
+        assert_eq!(of_selection("  \n ", 0, 2), None);
+        // Whitespace only of the sentence is selected.
+        assert_eq!(of_selection("We sat.   ", 7, 10), None);
+    }
+
+    #[test]
+    fn a_selection_with_whitespace_at_its_ends_keeps_the_word_inside() {
+        let text = "We sat on the bank.  ";
+        let (start, end) = chars_of(text, "bank.  ", 0);
+        let found = of_selection(text, start, end).expect("sentence");
+        assert_eq!(found.text, "We sat on the bank.");
+        assert_eq!(&found.text[found.word], "bank.");
+    }
+
+    #[test]
+    fn a_text_without_a_break_is_one_sentence() {
+        let text = "  the bank of the river  ";
+        let found = selected(text, "bank", 0).expect("sentence");
+        assert_eq!(found.text, "the bank of the river");
+        assert_eq!(found.word, 4..8);
+    }
+
+    #[test]
+    fn a_lowercase_letter_after_a_stop_keeps_the_sentence() {
+        let text = "Use e.g. the bank here. Next";
+        let found = selected(text, "bank", 0).expect("sentence");
+        assert_eq!(found.text, "Use e.g. the bank here.");
     }
 }

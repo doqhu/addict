@@ -11,8 +11,14 @@ name = "addict_platform"
 path = "src/lib.rs"
 
 [dependencies]
+addict-core = { path = "../addict-core" }
 ashpd = { version = "=0.13.13", default-features = false, features = ["tokio", "global_shortcuts", "screenshot"] }
 futures-util = "=0.3.34"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 libc = "=0.2.190"
+serde = "=1.0.229"
 tokio = { version = "=1.53.2", features = ["macros", "net", "rt", "sync", "time"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+tokio = { version = "=1.53.2", features = ["rt-multi-thread"] }
