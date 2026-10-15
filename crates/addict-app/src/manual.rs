@@ -49,14 +49,28 @@ use crate::{
 /// How long the lookup of one word may take.
 pub(crate) const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
 
-/// The most characters a clipboard text may have, as one line, to become
-/// the field's text: a longer one, a copied file or log, counts as nothing.
-pub(crate) const CLIPBOARD_MAX_CHARS: usize = 300;
+/// The most characters a selected or copied text may have, as one line, to
+/// become the field's text: a paragraph passes, a copied file or log does not.
+pub(crate) const CLIPBOARD_MAX_CHARS: usize = 1000;
 
-/// The clipboard text `raw` as the one line the field would hold: `None`
-/// when it is blank or longer than [`CLIPBOARD_MAX_CHARS`] characters.
-pub fn clipboard_line(raw: &str) -> Option<String> {
-    sentence::pasted(raw).filter(|line| line.chars().count() <= CLIPBOARD_MAX_CHARS)
+/// Why a selected or copied text gives no line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoLine {
+    /// Empty or only whitespace.
+    Blank,
+    /// Longer than [`CLIPBOARD_MAX_CHARS`]: this many characters as one line.
+    TooLong(usize),
+}
+
+/// The selected or copied text `raw` as the one line the field would hold,
+/// or why there is none: blank, or longer than [`CLIPBOARD_MAX_CHARS`]
+/// characters.
+pub fn clipboard_line(raw: &str) -> Result<String, NoLine> {
+    let line = sentence::pasted(raw).ok_or(NoLine::Blank)?;
+    match line.chars().count() {
+        chars if chars > CLIPBOARD_MAX_CHARS => Err(NoLine::TooLong(chars)),
+        _ => Ok(line),
+    }
 }
 
 /// What an edit of the field did to the manual input.
@@ -380,8 +394,8 @@ pub(crate) mod tests {
     };
 
     use super::{
-        CLIPBOARD_MAX_CHARS, Edit, LOOKUP_LIMIT, Manual, check_indexes, clipboard_line, look_up,
-        lookup_result,
+        CLIPBOARD_MAX_CHARS, Edit, LOOKUP_LIMIT, Manual, NoLine, check_indexes, clipboard_line,
+        look_up, lookup_result,
     };
     use crate::{
         dictionaries::{
@@ -1403,24 +1417,24 @@ pub(crate) mod tests {
 
     #[test]
     fn a_clipboard_line_is_one_line_of_at_most_the_limit() {
-        assert_eq!(clipboard_line(" bank\n").as_deref(), Some("bank"));
+        assert_eq!(clipboard_line(" bank\n").as_deref(), Ok("bank"));
         assert_eq!(
             clipboard_line("the river\nbank").as_deref(),
-            Some("the river bank")
+            Ok("the river bank")
         );
         for blank in ["", "  ", "\n\t"] {
-            assert_eq!(clipboard_line(blank), None, "{blank:?}");
+            assert_eq!(clipboard_line(blank), Err(NoLine::Blank), "{blank:?}");
         }
-        assert_eq!(CLIPBOARD_MAX_CHARS, 300);
+        assert_eq!(CLIPBOARD_MAX_CHARS, 1000);
         // Counted in characters after joining, not in bytes or as copied.
         let at_the_limit = "я".repeat(CLIPBOARD_MAX_CHARS);
-        assert_eq!(clipboard_line(&at_the_limit), Some(at_the_limit.clone()));
-        let spread = format!("{}\n\n  ", "a ".repeat(150));
+        assert_eq!(clipboard_line(&at_the_limit), Ok(at_the_limit.clone()));
+        let spread = format!("{}\n\n  ", "a ".repeat(500));
+        assert_eq!(clipboard_line(&spread).map(|l| l.chars().count()), Ok(999));
         assert_eq!(
-            clipboard_line(&spread).map(|l| l.chars().count()),
-            Some(299)
+            clipboard_line(&format!("{at_the_limit}я")),
+            Err(NoLine::TooLong(1001))
         );
-        assert_eq!(clipboard_line(&format!("{at_the_limit}я")), None);
     }
 
     #[test]
