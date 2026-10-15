@@ -1,17 +1,22 @@
 //! The accessibility read without its widgets: one job on the work runner
 //! asks the accessibility bus for the word selected in Android Studio and
-//! its sentence.
+//! its sentence, when Android Studio was the application in front at the
+//! press.
 //!
-//! [`start`] starts the job; it ends with one [`Read`], what the adapter
-//! gave, or why it gave nothing. [`read_result`] says what an outcome of the
-//! job is for the window. The job only reads. What the window does with the
-//! context is [`resident`](crate::resident)'s; what the adapter does on the
-//! bus is [`addict_platform::atspi`]'s.
+//! [`start`] starts the job with the [`Source`] the press settled on
+//! ([`choose_source`]); it ends with one [`Read`], what the adapter gave, or
+//! why it gave nothing; a source that is not Android Studio ends it at once
+//! as `NotFromStudio` with no text read. [`read_result`] says what an outcome
+//! of the job is for the window. The job only reads. What the window does
+//! with the context is [`resident`](crate::resident)'s; what the adapter does
+//! on the bus is [`addict_platform::atspi`]'s, and what was in front is
+//! [`addict_platform::foreground`]'s.
 
 use std::time::Duration;
 
 use addict_platform::{
     atspi::{self, Context, ContextFailure, Locate},
+    foreground::Source,
     work::{Job, Outcome, Work},
 };
 
@@ -64,27 +69,37 @@ impl Reading {
     }
 }
 
-/// Starts the read of the session's accessibility bus on `work`.
-/// `on_outcome` runs once on the worker when the job has ended. Without a
-/// runner nothing starts and the failure is given back.
+/// What the press takes as the application in front. A press while the
+/// product's own window is active keeps the source of the press that opened
+/// it (`kept`): the window is in front now, which says nothing about where
+/// the text is. Otherwise it is what the listener `observed`.
+pub fn choose_source(window_active: bool, kept: Source, observed: Source) -> Source {
+    if window_active { kept } else { observed }
+}
+
+/// Starts the read of the session's accessibility bus on `work`, with
+/// `source` in front. `on_outcome` runs once on the worker when the job has
+/// ended. Without a runner nothing starts and the failure is given back.
 pub fn start(
     work: Option<&Work>,
+    source: Source,
     on_outcome: impl FnOnce(Outcome<Read>) + Send + 'static,
 ) -> Result<Job, ContextFailure> {
-    start_at(work, Locate::Session, CONTEXT_LIMIT, on_outcome)
+    start_at(work, Locate::Session, source, CONTEXT_LIMIT, on_outcome)
 }
 
 /// [`start`] on the bus `locate` with the deadline `limit` for the read.
 fn start_at(
     work: Option<&Work>,
     locate: Locate,
+    source: Source,
     limit: Duration,
     on_outcome: impl FnOnce(Outcome<Read>) + Send + 'static,
 ) -> Result<Job, ContextFailure> {
     let work = work.ok_or_else(|| ContextFailure::Failed("no work runner".to_owned()))?;
     Ok(work.run(
         limit.saturating_add(MARGIN),
-        async move { atspi::read(&locate, limit).await },
+        async move { atspi::read(&locate, source, limit).await },
         on_outcome,
     ))
 }
@@ -108,15 +123,16 @@ mod tests {
     use addict_core::sentence::Selected;
     use addict_platform::{
         atspi::{Context, ContextFailure, Locate},
+        foreground::Source,
         work::{Outcome, Work},
     };
 
-    use super::{CONTEXT_LIMIT, MARGIN, Reading, read_result, start, start_at};
+    use super::{CONTEXT_LIMIT, MARGIN, Reading, choose_source, read_result, start, start_at};
     use crate::manual::tests::WAIT;
 
     #[test]
     fn without_a_runner_nothing_starts() {
-        let started = start(None, |_| panic!("ended"));
+        let started = start(None, Source::AndroidStudio, |_| panic!("ended"));
         assert!(matches!(started, Err(ContextFailure::Failed(_))));
     }
 
@@ -129,6 +145,7 @@ mod tests {
         let job = start_at(
             Some(&work),
             Locate::Address(format!("unix:path={}", missing.display())),
+            Source::AndroidStudio,
             CONTEXT_LIMIT,
             move |outcome| {
                 let _ = sender.send((outcome, thread::current().id() != caller));
@@ -142,6 +159,45 @@ mod tests {
             read_result(outcome),
             Some(Err(ContextFailure::Unavailable(_)))
         ));
+    }
+
+    #[test]
+    fn a_source_that_is_not_android_studio_ends_the_job_without_a_bus() {
+        let work = Work::start().expect("runner");
+        // The bus is absent: only the gate can answer other than Unavailable.
+        let missing = std::env::temp_dir().join("addict-context-test-no-such-bus-gate");
+        for source in [Source::Other, Source::Unknown] {
+            let (sender, receiver) = mpsc::channel();
+            let job = start_at(
+                Some(&work),
+                Locate::Address(format!("unix:path={}", missing.display())),
+                source,
+                CONTEXT_LIMIT,
+                move |outcome| {
+                    let _ = sender.send(outcome);
+                },
+            )
+            .expect("job");
+            let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+            drop(job);
+            assert_eq!(
+                read_result(outcome),
+                Some(Err(ContextFailure::NotFromStudio(source)))
+            );
+        }
+    }
+
+    #[test]
+    fn a_focused_window_keeps_the_source_of_its_press() {
+        use Source::{AndroidStudio, Other, Unknown};
+        // The window is in front: the observed source is the window's own.
+        assert_eq!(choose_source(true, AndroidStudio, Other), AndroidStudio);
+        assert_eq!(choose_source(true, Other, Other), Other);
+        assert_eq!(choose_source(true, Unknown, AndroidStudio), Unknown);
+        // The window is not in front: what was observed.
+        assert_eq!(choose_source(false, AndroidStudio, Other), Other);
+        assert_eq!(choose_source(false, Unknown, AndroidStudio), AndroidStudio);
+        assert_eq!(choose_source(false, AndroidStudio, Unknown), Unknown);
     }
 
     #[test]

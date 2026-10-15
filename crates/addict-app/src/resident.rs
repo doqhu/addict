@@ -44,15 +44,20 @@
 //! shown, also one that could not start, is recorded with `--evidence` as it
 //! is shown; a given-up one is not. The job is [`capture`](crate::capture)'s.
 //!
-//! The shortcut also starts the read of the focused editor. The window is
-//! shown at once, in the waiting state with the source AT-SPI and the field
-//! cleared (the lookup and the online requests of the old text are given up),
-//! and one job on the runner asks the accessibility bus for the selected word
-//! and its sentence; nothing waits for it before the window is presented. The
+//! The shortcut also starts the read of the focused editor, when that is
+//! Android Studio. The press first takes the source: the application the
+//! listener of [`addict_platform::foreground`] saw activated last, or, when the
+//! product's own window is active at the press, the source kept from the press
+//! that opened it. The window is shown at once, in the waiting state with the
+//! source AT-SPI and the field cleared (the lookup and the online requests of
+//! the old text are given up), and one job on the runner asks the accessibility
+//! bus for the selected word and its sentence; nothing waits for it before the
+//! window is presented. With another source or none the job ends at once
+//! without reading text, which is logged and leaves the empty state. The
 //! sentence replaces the field as a new text with that word chosen, and the
 //! lookup of the word starts; as the click of a word it is the click path, but
-//! it asks nothing online: the online texts are asked when a word is clicked.
-//! A read that gives nothing ends the waiting, is written to stderr and leaves
+//! it asks nothing online: the online texts are asked when a word is clicked. A
+//! read that gives nothing ends the waiting, is written to stderr and leaves
 //! the empty state. Each read has a number; a new press, an edit of the field
 //! and a capture give up the read that runs, and whatever it reports later is
 //! ignored. A press also gives up a running capture. The job is
@@ -82,6 +87,7 @@ use addict_core::{
 use addict_deepl::DeepL;
 use addict_platform::{
     atspi::ContextFailure,
+    foreground::{self, Foreground, Source as Foregrounded},
     ocr::OcrFailure,
     shortcut::{self, ShortcutEvent, ShortcutHandle},
     work::{Job, Outcome, Work},
@@ -121,6 +127,9 @@ struct Resident {
     _work: Option<Rc<Work>>,
     /// What the lookups ask.
     _articles: Arc<dyn Articles>,
+    /// The listener of the application in front; the session asks it at
+    /// each press.
+    _foreground: Rc<Foreground>,
 }
 
 /// Everything the worker threads tell the UI thread, over one channel.
@@ -288,6 +297,11 @@ struct Session {
     capturing: Capturing,
     /// Where the read of the accessibility bus stands.
     reading: Reading,
+    /// The listener of the application in front; gone with the resident.
+    foreground: Weak<Foreground>,
+    /// What the press that last started a read took as the application in
+    /// front; none at first.
+    kept: Foregrounded,
 }
 
 /// Where the capture of a [`Session`] stands; at first no capture runs.
@@ -507,11 +521,24 @@ impl Session {
         self.text_replaced(edit);
     }
 
-    /// Starts the read of the accessibility bus as number `number`.
-    fn start_read(&mut self) {
+    /// What the press takes as the application in front, and keeps for the
+    /// next press that finds the window active.
+    fn take_source(&mut self) -> Foregrounded {
+        let observed = self
+            .foreground
+            .upgrade()
+            .map_or(Foregrounded::Unknown, |listener| listener.source());
+        let source = context::choose_source(self.window.is_active(), self.kept, observed);
+        self.kept = source;
+        source
+    }
+
+    /// Starts the read of the accessibility bus as number `number`, with
+    /// `source` in front.
+    fn start_read(&mut self, source: Foregrounded) {
         let number = self.reading.begin();
         let sender = self.sender.clone();
-        let started = context::start(self.work.upgrade().as_deref(), move |outcome| {
+        let started = context::start(self.work.upgrade().as_deref(), source, move |outcome| {
             // On the worker: the UI thread wakes for the event.
             let _ = sender.unbounded_send(Event::Context(number, outcome));
         });
@@ -941,20 +968,25 @@ impl Session {
         self.view.render_binding(&self.binding);
     }
 
-    /// The shortcut was pressed: a running capture and read are given up, the
-    /// field is cleared and the window is shown at once in the waiting state
-    /// with the source AT-SPI, and the read of the accessibility bus starts;
-    /// the window does not wait for it.
+    /// The shortcut was pressed: the application in front is taken first,
+    /// then a running capture and read are given up, the field is cleared and
+    /// the window is shown at once in the waiting state with the source
+    /// AT-SPI, and the read of the accessibility bus starts, which ends at
+    /// once when that application was not Android Studio; the window does
+    /// not wait for it.
     fn activated(
         &mut self,
         activation_token: Option<&str>,
         timestamp_ms: u64,
         receipt_ns: Option<u64>,
     ) {
+        // Before anything of the window changes: the window's own activity
+        // and the listener are what they were at the press.
+        let source = self.take_source();
         self.give_up_press();
         self.clear_for_read();
         // Started, not awaited: the window is presented below.
-        self.start_read();
+        self.start_read(source);
         // Before `present()`: the first frame has the labels.
         self.view.render(self.manual.state(), self.manual.source());
         self.focus();
@@ -995,13 +1027,24 @@ impl Session {
         self.binding = Binding::NotBound { detail: message };
         self.view.render_binding(&self.binding);
         // No press stands behind this, so there is no token.
+        self.forget_source();
         if let Some(recording) = &self.recording {
             recording.shown_without_press();
         }
         self.window.present();
     }
 
-    fn launched(&self) {
+    /// The window is about to be shown without a press. Unless it is in
+    /// front already, no press opened it, so the source of an earlier press
+    /// is not its source.
+    fn forget_source(&mut self) {
+        if !self.window.is_active() {
+            self.kept = Foregrounded::Unknown;
+        }
+    }
+
+    fn launched(&mut self) {
+        self.forget_source();
         self.view.render(self.manual.state(), self.manual.source());
         self.focus();
         // No `set_startup_id`: GTK has already applied the
@@ -1137,6 +1180,9 @@ fn start(
     // Nothing is opened here: the indexes are files, and files are the
     // runner's.
     let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());
+    // One connection to the accessibility bus and a few strings; it asks
+    // nothing of the applications.
+    let listener = Rc::new(foreground::watch(|_| {}));
     let check = start_check(work.as_deref(), articles.clone(), &sender);
     let (translator, key_file) = online_translator();
     let session = Session {
@@ -1161,6 +1207,8 @@ fn start(
         check,
         capturing: Capturing::default(),
         reading: Reading::default(),
+        foreground: Rc::downgrade(&listener),
+        kept: Foregrounded::Unknown,
     };
     serve(session, receiver);
     Resident {
@@ -1169,6 +1217,7 @@ fn start(
         events,
         _work: work,
         _articles: articles,
+        _foreground: listener,
     }
 }
 

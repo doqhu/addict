@@ -1,15 +1,18 @@
 //! The AT-SPI adapter: the word selected in Android Studio and the sentence
 //! around it, read from the accessibility bus.
 //!
-//! [`read`] takes a [`Locate`] and a deadline and gives one [`Context`] or
-//! one [`ContextFailure`]. It opens the accessibility bus, finds the
-//! application whose registered name contains `Android Studio`, walks its
-//! tree to the one Text object that has a selection, and reads the selected
-//! word and a wider text around it. Every offset on the bus is a character
-//! offset, never a byte index. The sentence is cut from the wider text by
-//! [`addict_core::sentence::of_selection`]: the adapter never asks the
-//! application for a sentence, whose answers were wrong in every EXP-2
-//! scenario.
+//! [`read`] takes a [`Locate`], the [`Source`] the press found in front and a
+//! deadline and gives one [`Context`] or one [`ContextFailure`]. A source that
+//! is not Android Studio ends it at once as [`ContextFailure::NotFromStudio`]:
+//! no bus is opened and no text is read; the decision is the caller's, from
+//! what [`crate::foreground`] observed, and `read` takes it as given. Otherwise
+//! it opens the accessibility bus, finds the application whose registered name
+//! contains `Android Studio`, walks its tree to the one Text object that has a
+//! selection, and reads the selected word and a wider text around it. Every
+//! offset on the bus is a character offset, never a byte index. The sentence is
+//! cut from the wider text by [`addict_core::sentence::of_selection`]: the
+//! adapter never asks the application for a sentence, whose answers were wrong
+//! in every EXP-2 scenario.
 //!
 //! The adapter only reads: it changes no setting of the application or of
 //! the session. The whole read is bounded by its deadline; a part of the
@@ -22,6 +25,7 @@ use std::{
     time::Duration,
 };
 
+use crate::foreground::Source;
 use addict_core::sentence::{self, Selected};
 use futures_util::future::join_all;
 use serde::{Serialize, de::DeserializeOwned};
@@ -31,9 +35,9 @@ use zbus::{
     zvariant::{DynamicType, OwnedObjectPath, OwnedValue, Type},
 };
 
-const A11Y_BUS_NAME: &str = "org.a11y.Bus";
-const A11Y_BUS_PATH: &str = "/org/a11y/bus";
-const REGISTRY_NAME: &str = "org.a11y.atspi.Registry";
+pub(crate) const A11Y_BUS_NAME: &str = "org.a11y.Bus";
+pub(crate) const A11Y_BUS_PATH: &str = "/org/a11y/bus";
+pub(crate) const REGISTRY_NAME: &str = "org.a11y.atspi.Registry";
 const ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
 
 const ACCESSIBLE: &str = "org.a11y.atspi.Accessible";
@@ -54,7 +58,7 @@ const MAX_NODES: usize = 5000;
 const NODE_LIMIT: Duration = Duration::from_millis(500);
 
 /// Time an application gets to give its name, and an object its selection.
-const CALL_LIMIT: Duration = Duration::from_millis(500);
+pub(crate) const CALL_LIMIT: Duration = Duration::from_millis(500);
 
 /// Where the accessibility bus is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +93,9 @@ pub enum ContextFailure {
     Ambiguous(usize),
     /// The bus did not answer within the deadline.
     TimedOut,
+    /// The application in front at the press was not Android Studio, or was
+    /// not known; nothing was read. The source is what the press found.
+    NotFromStudio(Source),
     /// The application answered, but the read could not be completed.
     Failed(String),
 }
@@ -96,14 +103,14 @@ pub enum ContextFailure {
 /// One accessible object: a bus name and an object path on the
 /// accessibility bus.
 #[derive(Debug, Clone)]
-struct Object {
+pub(crate) struct Object {
     connection: Connection,
     bus_name: String,
     path: String,
 }
 
 impl Object {
-    fn new(connection: &Connection, bus_name: &str, path: &str) -> Self {
+    pub(crate) fn new(connection: &Connection, bus_name: &str, path: &str) -> Self {
         Self {
             connection: connection.clone(),
             bus_name: bus_name.to_owned(),
@@ -113,7 +120,12 @@ impl Object {
 
     /// Calls a method and returns its reply, or the error text as the bus
     /// gave it.
-    async fn call<B, R>(&self, interface: &str, member: &str, body: &B) -> Result<R, String>
+    pub(crate) async fn call<B, R>(
+        &self,
+        interface: &str,
+        member: &str,
+        body: &B,
+    ) -> Result<R, String>
     where
         B: Serialize + DynamicType + Sync,
         R: DeserializeOwned + Type,
@@ -134,7 +146,7 @@ impl Object {
     }
 
     /// Reads one property.
-    async fn property<T>(&self, interface: &str, name: &str) -> Result<T, String>
+    pub(crate) async fn property<T>(&self, interface: &str, name: &str) -> Result<T, String>
     where
         T: TryFrom<OwnedValue>,
         T::Error: std::fmt::Display,
@@ -176,8 +188,17 @@ impl Object {
 }
 
 /// Reads the selection of Android Studio from the accessibility bus at
-/// `bus`, within `limit` altogether.
-pub async fn read(bus: &Locate, limit: Duration) -> Result<Context, ContextFailure> {
+/// `bus`, within `limit` altogether, when `source` says that Android Studio
+/// was in front; any other source ends it at once as
+/// [`ContextFailure::NotFromStudio`], before anything is opened.
+pub async fn read(
+    bus: &Locate,
+    source: Source,
+    limit: Duration,
+) -> Result<Context, ContextFailure> {
+    if source != Source::AndroidStudio {
+        return Err(ContextFailure::NotFromStudio(source));
+    }
     match timeout(limit, read_selection(bus)).await {
         Ok(read) => read,
         Err(_) => Err(ContextFailure::TimedOut),
@@ -198,7 +219,7 @@ fn env_var(name: &str) -> Option<String> {
 
 /// Finds and opens the accessibility bus. A bus that is absent or refuses is
 /// [`ContextFailure::Unavailable`].
-async fn open(bus: &Locate) -> Result<Connection, ContextFailure> {
+pub(crate) async fn open(bus: &Locate) -> Result<Connection, ContextFailure> {
     let address = match bus {
         Locate::Address(address) => address.clone(),
         Locate::Session => session_address().await?,
@@ -258,7 +279,7 @@ async fn applications(connection: &Connection) -> Result<Vec<Object>, ContextFai
     let mut matched = Vec::new();
     for (root, name) in named {
         match name {
-            Ok(Ok(name)) if name.to_lowercase().contains(APPLICATION) => matched.push(root),
+            Ok(Ok(name)) if is_android_studio(&name) => matched.push(root),
             Ok(_) => {}
             Err(_) => silent += 1,
         }
@@ -270,6 +291,22 @@ async fn applications(connection: &Connection) -> Result<Vec<Object>, ContextFai
     } else {
         Err(ContextFailure::AppNotFound)
     }
+}
+
+/// Whether an application of this registered name is Android Studio:
+/// the name contains `Android Studio`, compared without case.
+pub(crate) fn is_android_studio(name: &str) -> bool {
+    name.to_lowercase().contains(APPLICATION)
+}
+
+/// The registered name of the application at `bus_name`, from its root; none
+/// when it does not give it within [`CALL_LIMIT`].
+pub(crate) async fn application_name(connection: &Connection, bus_name: &str) -> Option<String> {
+    let root = Object::new(connection, bus_name, ROOT_PATH);
+    timeout(CALL_LIMIT, root.property::<String>(ACCESSIBLE, "Name"))
+        .await
+        .ok()?
+        .ok()
 }
 
 /// A Text object that reports a selection.

@@ -5,17 +5,30 @@
 //!
 //! The nodes of a fake application are [`FakeNode`]s: build the tree with
 //! [`app`], [`plain`] and [`text_node`], serve it with [`world`] and read it
-//! with [`World::read`].
+//! with [`World::read`]. An application that only announces its activation
+//! is a [`FakeApp`]; the registry keeps the events it was asked for and the
+//! status of accessibility can be flipped.
 #![allow(dead_code)]
 
 use std::{
+    collections::HashMap,
     path::PathBuf,
     process::{Child, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
-use addict_platform::atspi::{Context, ContextFailure, Locate, read};
-use zbus::{Connection, fdo, zvariant::OwnedObjectPath};
+use addict_platform::{
+    atspi::{Context, ContextFailure, Locate, read},
+    foreground::Source,
+};
+use zbus::{
+    Connection, fdo,
+    zvariant::{OwnedObjectPath, Value},
+};
 
 const REGISTRY_ROOT: &str = "/org/a11y/atspi/accessible/root";
 
@@ -113,6 +126,9 @@ fn node_path(id: usize) -> OwnedObjectPath {
     OwnedObjectPath::try_from(format!("/fake/n{id}")).unwrap()
 }
 
+const STATUS_PATH: &str = "/org/a11y/bus";
+const REGISTRY_PATH: &str = "/org/a11y/atspi/registry";
+
 struct Accessible {
     node: FakeNode,
     bus_name: String,
@@ -156,7 +172,8 @@ impl Accessible {
     }
 }
 
-struct Text(FakeText);
+/// A text object and the count of the calls it answered.
+struct Text(FakeText, Arc<AtomicUsize>);
 
 fn chars(text: &str, start: i32, end: i32) -> String {
     let (start, end) = (start.max(0) as usize, end.max(0) as usize);
@@ -170,11 +187,13 @@ fn chars(text: &str, start: i32, end: i32) -> String {
 impl Text {
     #[zbus(property)]
     async fn character_count(&self) -> i32 {
+        self.1.fetch_add(1, Ordering::SeqCst);
         self.0.content.chars().count() as i32
     }
 
     #[zbus(name = "GetNSelections")]
     async fn get_n_selections(&self) -> i32 {
+        self.1.fetch_add(1, Ordering::SeqCst);
         self.0.selections.len() as i32
     }
 
@@ -192,6 +211,7 @@ impl Text {
     }
 
     async fn get_text(&self, start: i32, end: i32) -> fdo::Result<String> {
+        self.1.fetch_add(1, Ordering::SeqCst);
         if self.0.only_selected_range && !self.0.selections.contains(&(start, end)) {
             return Err(fdo::Error::Failed("wider text refused".to_owned()));
         }
@@ -218,6 +238,32 @@ struct Launcher {
 impl Launcher {
     async fn get_address(&self) -> String {
         self.address.clone()
+    }
+}
+
+/// `org.a11y.Status` as the session bus has it.
+struct Status {
+    enabled: bool,
+}
+
+#[zbus::interface(name = "org.a11y.Status")]
+impl Status {
+    #[zbus(property)]
+    async fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+/// `org.a11y.atspi.Registry` at its own path: it keeps what it was asked to
+/// forward.
+struct Registry {
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+#[zbus::interface(name = "org.a11y.atspi.Registry")]
+impl Registry {
+    async fn register_event(&self, event: String, _properties: Vec<String>, _app: String) {
+        self.events.lock().unwrap().push(event);
     }
 }
 
@@ -249,18 +295,26 @@ pub enum Address {
 
 pub struct World {
     pub bus: Bus,
-    _connection: Connection,
+    connection: Connection,
     runtime: tokio::runtime::Runtime,
+    registered: Arc<Mutex<Vec<String>>>,
+    text_calls: Arc<AtomicUsize>,
 }
 
 /// Serves `nodes`; the registry lists the nodes in `applications`.
 pub fn world(name: &str, address: Address, nodes: Vec<FakeNode>, applications: &[usize]) -> World {
-    build(name, address, nodes, applications, false)
+    build(name, address, nodes, applications, false, true)
+}
+
+/// A bus on which `org.a11y.Bus` answers its address and `IsEnabled` is
+/// `enabled`; no application is on it.
+pub fn status_world(name: &str, enabled: bool) -> World {
+    build(name, Address::Launcher, Vec::new(), &[], false, enabled)
 }
 
 /// A registry that owns its name and never answers.
 pub fn hung_registry(name: &str) -> World {
-    build(name, Address::Plain, Vec::new(), &[], true)
+    build(name, Address::Plain, Vec::new(), &[], true, true)
 }
 
 fn build(
@@ -269,6 +323,7 @@ fn build(
     nodes: Vec<FakeNode>,
     applications: &[usize],
     hung_registry: bool,
+    enabled: bool,
 ) -> World {
     let bus = start_bus(name);
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -276,6 +331,8 @@ fn build(
         .enable_all()
         .build()
         .unwrap();
+    let registered = Arc::new(Mutex::new(Vec::new()));
+    let text_calls = Arc::new(AtomicUsize::new(0));
     let connection = runtime.block_on(async {
         let connection = zbus::connection::Builder::address(bus.address.as_str())
             .unwrap()
@@ -284,6 +341,15 @@ fn build(
             .unwrap();
         let bus_name = connection.unique_name().unwrap().to_string();
         let server = connection.object_server();
+        server
+            .at(
+                REGISTRY_PATH,
+                Registry {
+                    events: registered.clone(),
+                },
+            )
+            .await
+            .unwrap();
         if hung_registry {
             server.at(REGISTRY_ROOT, HungRegistry).await.unwrap();
         } else {
@@ -305,7 +371,10 @@ fn build(
         for (id, node) in nodes.into_iter().enumerate() {
             let path = node_path(id);
             if let Some(text) = node.text.clone() {
-                server.at(&path, Text(text)).await.unwrap();
+                server
+                    .at(&path, Text(text, text_calls.clone()))
+                    .await
+                    .unwrap();
             }
             server
                 .at(
@@ -325,33 +394,196 @@ fn build(
         if address == Address::Launcher {
             server
                 .at(
-                    "/org/a11y/bus",
+                    STATUS_PATH,
                     Launcher {
                         address: bus.address.clone(),
                     },
                 )
                 .await
                 .unwrap();
+            server.at(STATUS_PATH, Status { enabled }).await.unwrap();
             connection.request_name("org.a11y.Bus").await.unwrap();
         }
         connection
     });
     World {
         bus,
-        _connection: connection,
+        connection,
         runtime,
+        registered,
+        text_calls,
     }
 }
 
 impl World {
-    /// Reads this world's bus by its address.
+    /// Reads this world's bus by its address, Android Studio in front.
     pub fn read(&self, limit: Duration) -> Result<Context, ContextFailure> {
-        self.read_at(&Locate::Address(self.bus.address.clone()), limit)
+        self.read_from(Source::AndroidStudio, limit)
     }
 
-    /// Reads with `locate`, on the runtime that serves the fake.
+    /// Reads this world's bus by its address with `source` in front.
+    pub fn read_from(&self, source: Source, limit: Duration) -> Result<Context, ContextFailure> {
+        self.read_with(&Locate::Address(self.bus.address.clone()), source, limit)
+    }
+
+    /// Reads with `locate`, Android Studio in front, on the runtime that
+    /// serves the fake.
     pub fn read_at(&self, locate: &Locate, limit: Duration) -> Result<Context, ContextFailure> {
-        self.runtime.block_on(read(locate, limit))
+        self.read_with(locate, Source::AndroidStudio, limit)
+    }
+
+    /// Reads with `locate` and `source`.
+    pub fn read_with(
+        &self,
+        locate: &Locate,
+        source: Source,
+        limit: Duration,
+    ) -> Result<Context, ContextFailure> {
+        self.runtime.block_on(read(locate, source, limit))
+    }
+
+    /// The text objects' calls answered so far.
+    pub fn text_calls(&self) -> usize {
+        self.text_calls.load(Ordering::SeqCst)
+    }
+
+    /// The events the registry was asked to forward, in order.
+    pub fn registered_events(&self) -> Vec<String> {
+        self.registered.lock().unwrap().clone()
+    }
+
+    /// Flips `IsEnabled` of a status world and announces the change.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.runtime.block_on(async {
+            let status = self
+                .connection
+                .object_server()
+                .interface::<_, Status>(STATUS_PATH)
+                .await
+                .expect("a status world");
+            let mut guard = status.get_mut().await;
+            guard.enabled = enabled;
+            guard
+                .is_enabled_changed(status.signal_emitter())
+                .await
+                .unwrap();
+        });
+    }
+
+    /// How many connections the bus has, the daemon's own not counted.
+    pub fn client_count(&self) -> usize {
+        self.runtime.block_on(async {
+            let names: Vec<String> = Connection::call_method(
+                &self.connection,
+                Some("org.freedesktop.DBus"),
+                "/org/freedesktop/DBus",
+                Some("org.freedesktop.DBus"),
+                "ListNames",
+                &(),
+            )
+            .await
+            .unwrap()
+            .body()
+            .deserialize()
+            .unwrap();
+            names.iter().filter(|name| name.starts_with(':')).count()
+        })
+    }
+
+    /// An application on this bus that has this registered name.
+    pub fn open_app(&self, name: &'static str) -> FakeApp {
+        let address = self.bus.address.clone();
+        let handle = self.runtime.handle().clone();
+        let connection = handle.block_on(async {
+            let connection = zbus::connection::Builder::address(address.as_str())
+                .unwrap()
+                .build()
+                .await
+                .unwrap();
+            let node = FakeNode {
+                name,
+                application: true,
+                ..FakeNode::default()
+            };
+            let bus_name = connection.unique_name().unwrap().to_string();
+            connection
+                .object_server()
+                .at(REGISTRY_ROOT, Accessible { node, bus_name })
+                .await
+                .unwrap();
+            connection
+        });
+        FakeApp { connection, handle }
+    }
+
+    /// A client on this bus that serves no object: it announces windows
+    /// but cannot give its name.
+    pub fn open_mute_client(&self) -> FakeApp {
+        let address = self.bus.address.clone();
+        let handle = self.runtime.handle().clone();
+        let connection = handle.block_on(async {
+            zbus::connection::Builder::address(address.as_str())
+                .unwrap()
+                .build()
+                .await
+                .unwrap()
+        });
+        FakeApp { connection, handle }
+    }
+}
+
+/// An application that announces its activation, as one connection of its
+/// own on the bus.
+pub struct FakeApp {
+    connection: Connection,
+    handle: tokio::runtime::Handle,
+}
+
+impl FakeApp {
+    /// Its bus name.
+    pub fn bus_name(&self) -> String {
+        self.connection.unique_name().unwrap().to_string()
+    }
+
+    /// `Window:Activate`.
+    pub fn window_activated(&self) {
+        self.emit("org.a11y.atspi.Event.Window", "Activate", "", 0);
+    }
+
+    /// `Window:Deactivate`.
+    pub fn window_deactivated(&self) {
+        self.emit("org.a11y.atspi.Event.Window", "Deactivate", "", 0);
+    }
+
+    /// `Object:StateChanged` of `state` set to `value`.
+    pub fn state_changed(&self, state: &str, value: bool) {
+        self.emit(
+            "org.a11y.atspi.Event.Object",
+            "StateChanged",
+            state,
+            i32::from(value),
+        );
+    }
+
+    fn emit(&self, interface: &str, member: &str, kind: &str, detail: i32) {
+        self.handle.block_on(async {
+            self.connection
+                .emit_signal(
+                    None::<&str>,
+                    "/org/a11y/atspi/accessible/window",
+                    interface,
+                    member,
+                    &(
+                        kind,
+                        detail,
+                        0i32,
+                        Value::from(0i32),
+                        HashMap::<String, Value>::new(),
+                    ),
+                )
+                .await
+                .unwrap();
+        });
     }
 }
 
