@@ -15,11 +15,18 @@ pub enum Source {
     AtSpi,
     /// Recognised from a screen capture.
     Ocr,
+    /// Read from the clipboard when the press gave no other context.
+    Clipboard,
 }
 
 impl Source {
     /// Every source, each exactly once.
-    pub const ALL: [Source; 3] = [Source::Manual, Source::AtSpi, Source::Ocr];
+    pub const ALL: [Source; 4] = [
+        Source::Manual,
+        Source::AtSpi,
+        Source::Ocr,
+        Source::Clipboard,
+    ];
 }
 
 /// A word, an optional sentence and their source.
@@ -130,6 +137,7 @@ mod tests {
             Source::Manual => 0,
             Source::AtSpi => 1,
             Source::Ocr => 2,
+            Source::Clipboard => 3,
         }
     }
 

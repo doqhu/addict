@@ -8,12 +8,16 @@
 //! goes with the sentence around it only, and with none when that sentence
 //! is the word alone.
 //!
-//! The text comes from the user, from a screen capture or from the
-//! accessibility bus. A recognized text is always a new text with the source
-//! OCR, and an edit of it keeps that source; the source is manual again once
-//! the field holds no word. A text that arrived from the bus ([`Manual::arrived`])
-//! is the sentence around the selected word, with that word chosen, and its
-//! source is AT-SPI; it is one sentence, as a typed text is. While a source is
+//! The text comes from the user, from a screen capture, from the
+//! accessibility bus or from the clipboard. A recognized text is always a new
+//! text with the source OCR, and an edit of it keeps that source; the source
+//! is manual again once the field holds no word. A text that arrived from the
+//! bus ([`Manual::arrived`]) is the sentence around the selected word, with
+//! that word chosen, and its source is AT-SPI; it is one sentence, as a typed
+//! text is. A text copied to the clipboard ([`Manual::copied`]), read when a
+//! press gave no other context, is a new text as one line with the source
+//! clipboard, and one sentence too; only one of at most
+//! [`CLIPBOARD_MAX_CHARS`] counts ([`clipboard_line`]). While a source is
 //! being read and there is no input, the window says that it is being read.
 //!
 //! [`Manual`] is the state and holds no widget, so what an edit or a click
@@ -43,6 +47,16 @@ use crate::{
 
 /// How long the lookup of one word may take.
 pub(crate) const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
+
+/// The most characters a clipboard text may have, as one line, to become
+/// the field's text: a longer one, a copied file or log, counts as nothing.
+pub(crate) const CLIPBOARD_MAX_CHARS: usize = 300;
+
+/// The clipboard text `raw` as the one line the field would hold: `None`
+/// when it is blank or longer than [`CLIPBOARD_MAX_CHARS`] characters.
+pub fn clipboard_line(raw: &str) -> Option<String> {
+    sentence::pasted(raw).filter(|line| line.chars().count() <= CLIPBOARD_MAX_CHARS)
+}
 
 /// What an edit of the field did to the manual input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +224,17 @@ impl Manual {
             .map_or(Edit::Cleared, Edit::Chosen)
     }
 
+    /// The clipboard gave `text` after a press without other context: the
+    /// field holds it as one line, a new text with the source clipboard, and
+    /// the reading is over. A text of one word has that word chosen at once;
+    /// in more words nothing is chosen until a click. A blank text leaves no
+    /// word, and the source is manual. Never [`Edit::Same`].
+    pub fn copied(&mut self, text: &str) -> Edit {
+        self.reading = None;
+        self.source = Source::Clipboard;
+        self.replace(sentence::pasted(text).unwrap_or_default())
+    }
+
     /// `text` is a new text of the field.
     fn replace(&mut self, text: String) -> Edit {
         self.words = sentence::words(&text);
@@ -258,7 +283,7 @@ impl Manual {
     pub fn sentence_of(&self, index: usize) -> Option<(usize, Range<usize>)> {
         let word = self.words.get(index)?;
         match self.source {
-            Source::Manual | Source::AtSpi => {
+            Source::Manual | Source::AtSpi | Source::Clipboard => {
                 (self.words.len() > 1).then_some((0, 0..self.sentence.len()))
             }
             Source::Ocr => {
@@ -352,7 +377,10 @@ pub(crate) mod tests {
         work::{Outcome, Work},
     };
 
-    use super::{Edit, LOOKUP_LIMIT, Manual, check_indexes, look_up, lookup_result};
+    use super::{
+        CLIPBOARD_MAX_CHARS, Edit, LOOKUP_LIMIT, Manual, check_indexes, clipboard_line, look_up,
+        lookup_result,
+    };
     use crate::{
         dictionaries::{
             Answer, Articles, Indexes, Looked, State,
@@ -1290,6 +1318,107 @@ pub(crate) mod tests {
         assert_eq!(texts.source, "accessibility (AT-SPI)");
         assert_eq!(texts.status, "reading the source…");
         assert_eq!(manual.reading(), Some(Source::AtSpi));
+    }
+
+    const CLIPBOARD_DICTIONARY: WindowState = WindowState::Dictionary {
+        source: Source::Clipboard,
+    };
+
+    #[test]
+    fn a_copied_lone_word_is_the_input_at_once() {
+        let mut manual = with_sentence(SENTENCE);
+        manual.set_reading(Some(Source::Clipboard));
+        let text = manual.text_number();
+        let Edit::Lone(run) = manual.copied(" bank\n") else {
+            panic!("not a lone word");
+        };
+        assert_ne!(manual.text_number(), text);
+        assert!(manual.awaits(run));
+        assert_eq!(manual.sentence(), "bank");
+        assert_eq!(manual.reading(), None);
+        assert_eq!(manual.source(), Source::Clipboard);
+        let input = manual.input().expect("input");
+        assert_eq!(input.word(), "bank");
+        assert_eq!(input.sentence(), None);
+        assert_eq!(input.source(), Source::Clipboard);
+        assert_eq!(manual.state(), CLIPBOARD_DICTIONARY);
+    }
+
+    #[test]
+    fn a_copied_sentence_waits_for_a_click_and_is_one_sentence() {
+        let mut manual = Manual::default();
+        manual.set_reading(Some(Source::Clipboard));
+        assert_eq!(
+            manual.state(),
+            WindowState::Waiting {
+                source: Source::Clipboard
+            }
+        );
+        assert_eq!(manual.copied("I sat on the\nbank."), Edit::Cleared);
+        assert_eq!(manual.sentence(), SENTENCE);
+        assert_eq!(manual.source(), Source::Clipboard);
+        assert_eq!(manual.input(), None);
+        assert_eq!(manual.state(), WindowState::Empty);
+        manual.choose(4).expect("run");
+        let input = manual.input().expect("input");
+        assert_eq!(input.word(), "bank");
+        assert_eq!(input.sentence(), Some(SENTENCE));
+        assert_eq!(input.source(), Source::Clipboard);
+        assert_eq!(
+            manual.state(),
+            WindowState::Contextual {
+                source: Source::Clipboard
+            }
+        );
+        let texts = crate::view::texts(manual.state(), manual.source());
+        assert_eq!(texts.source, "clipboard");
+    }
+
+    #[test]
+    fn a_blank_copied_text_is_no_input_and_manual() {
+        let mut manual = with_sentence(SENTENCE);
+        assert_eq!(manual.copied("  \n"), Edit::Cleared);
+        assert_eq!(manual.sentence(), "");
+        assert_eq!(manual.input(), None);
+        assert_eq!(manual.source(), Source::Manual);
+        assert_eq!(manual.state(), WindowState::Empty);
+    }
+
+    #[test]
+    fn an_edit_of_a_copied_text_keeps_its_source() {
+        let mut manual = Manual::default();
+        manual.copied("The bank is beside the river.");
+        assert_eq!(
+            manual.edit("The bank is beside the road.".to_owned()),
+            Edit::Cleared
+        );
+        assert_eq!(manual.source(), Source::Clipboard);
+        manual.choose(1).expect("run");
+        assert_eq!(manual.input().expect("input").source(), Source::Clipboard);
+        lone(&mut manual, "bank");
+        assert_eq!(manual.state(), CLIPBOARD_DICTIONARY);
+    }
+
+    #[test]
+    fn a_clipboard_line_is_one_line_of_at_most_the_limit() {
+        assert_eq!(clipboard_line(" bank\n").as_deref(), Some("bank"));
+        assert_eq!(
+            clipboard_line("the river\nbank").as_deref(),
+            Some("the river bank")
+        );
+        for blank in ["", "  ", "\n\t"] {
+            assert_eq!(clipboard_line(blank), None, "{blank:?}");
+        }
+        assert_eq!(CLIPBOARD_MAX_CHARS, 300);
+        // Counted in characters after joining, not in bytes or as copied.
+        let at_the_limit = "я".repeat(CLIPBOARD_MAX_CHARS);
+        assert_eq!(clipboard_line(&at_the_limit), Some(at_the_limit.clone()));
+        let spread = format!("{}\n\n  ", "a ".repeat(150));
+        assert_eq!(
+            clipboard_line(&spread).map(|l| l.chars().count()),
+            Some(299)
+        );
+        assert_eq!(clipboard_line(&format!("{at_the_limit}я")), None);
     }
 
     #[test]

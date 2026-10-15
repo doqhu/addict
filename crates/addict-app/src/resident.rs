@@ -66,15 +66,34 @@
 //! without reading text. The sentence replaces the field as a new text
 //! with that word chosen, and the lookup of the word starts; as the click of a
 //! word it is the click path, but it asks nothing online: the online texts are
-//! asked when a word is clicked. A read that gives nothing ends the waiting,
-//! is written to stderr, leaves the empty state and its focused field, and
-//! says why in the source line, which the capture shares: they never run
-//! together. The line names the cause and the manual path, and goes, like the
-//! capture's, when the field is edited, Capture or the shortcut is pressed.
+//! asked when a word is clicked. A read that gives nothing is written to
+//! stderr and is followed by the read of the clipboard (below); when that
+//! gives nothing too, the waiting ends, the empty state stays with its
+//! focused field, and the source line says why the read of the bus gave
+//! nothing; the capture shares the line: they never run together. The line
+//! names the cause and the manual path, and goes, like the capture's, when
+//! the field is edited, Capture or the shortcut is pressed.
 //! Each read has a number; a new press, an edit of the field and a capture
 //! give up the read that runs, and whatever it reports later is ignored and
 //! shows no line. A press also gives up a running capture. The job is
 //! [`context`](crate::context)'s.
+//!
+//! A read of the press that ends without context, for any cause, is written
+//! to stderr at once, and the window then reads the clipboard once, in place
+//! of showing the line: the waiting goes on with the source clipboard, and
+//! the field stays editable. Wayland gives a client the clipboard only with
+//! its keyboard focus, so the read starts once the window is active, at once
+//! when it is already; GTK's clipboard of the window's display is read, never
+//! the primary selection. Waiting for the activity and the read together end
+//! after [`CLIPBOARD_LIMIT`], which cancels the read. A text of the clipboard
+//! as one line, of at most [`CLIPBOARD_MAX_CHARS`] characters, replaces the
+//! field as a new text with the source clipboard, as a read context does,
+//! without a word chosen unless it is one word, and nothing is asked online;
+//! the line is not shown. A clipboard that is empty, blank, not text, too
+//! long, unreadable or late is written to stderr and leaves the empty state
+//! with the line of the read. The clipboard read has a number and is given up
+//! like the read it follows, by a press, an edit and a capture; what it
+//! reports later is ignored. Retry, a launch and a capture read no clipboard.
 //!
 //! What is asked for and what is kept is [`online`](crate::online)'s. What
 //! the window says is [`view`](crate::view)'s; its widgets and the paste
@@ -114,7 +133,7 @@ use crate::{
     context::{self, Read, Reading},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
-    manual::{self, Edit, Manual},
+    manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual},
     online::{self, Kept, Subject},
     recording::Recording,
     style,
@@ -128,6 +147,10 @@ const TRIGGER: &str = "LOGO+q";
 
 /// How long one attempt to bind the shortcut may take.
 const BIND_LIMIT: Duration = Duration::from_secs(60);
+
+/// How long the read of the clipboard after a press without context may
+/// take, the wait for the window to be active included.
+const CLIPBOARD_LIMIT: Duration = Duration::from_secs(1);
 
 /// What lives as long as the resident application.
 struct Resident {
@@ -199,6 +222,11 @@ enum Event {
     ContextSource(u64, Foregrounded),
     /// The read of the accessibility bus with this number ended.
     Context(u64, Outcome<Read>),
+    /// The window became active.
+    Active,
+    /// The read of the clipboard with this number ended: the line of its
+    /// text, or why there is none.
+    Clipboard(u64, Result<String, String>),
 }
 
 /// Starts one attempt to bind the shortcut; its events go to `sender`. With
@@ -313,6 +341,8 @@ struct Session {
     capturing: Capturing,
     /// Where the read of the accessibility bus stands.
     reading: Reading,
+    /// Where the read of the clipboard after it stands.
+    copying: Copying,
     /// The listener of the application in front; gone with the resident.
     foreground: Weak<Foreground>,
     /// What the press that last started a read took as the application in
@@ -333,6 +363,56 @@ struct Capturing {
     /// Between Capture and the start of its job, while the window leaves
     /// the screen.
     hiding: bool,
+}
+
+/// Where the read of the clipboard of a [`Session`] stands; at first none
+/// runs.
+#[derive(Default)]
+struct Copying {
+    /// The read, from the failed read of the bus to its end.
+    read: Option<ClipboardRead>,
+    /// The number of the last started read. An event that carries another
+    /// number, or comes when none runs, is from a read that was given up.
+    number: u64,
+}
+
+/// One read of the clipboard.
+struct ClipboardRead {
+    /// The source line of the read of the bus that failed, shown when the
+    /// clipboard gives nothing.
+    line: String,
+    /// Cancels the read of the clipboard; `None` while the window is not yet
+    /// active and nothing is read.
+    cancellable: Option<gio::Cancellable>,
+}
+
+impl Copying {
+    /// A new read starts after the failure that `line` says; the number of
+    /// the new one is given back.
+    fn begin(&mut self, line: String) -> u64 {
+        self.end();
+        self.number += 1;
+        self.read = Some(ClipboardRead {
+            line,
+            cancellable: None,
+        });
+        self.number
+    }
+
+    /// Whether the read with `number` is the one that runs.
+    fn is_running(&self, number: u64) -> bool {
+        self.read.is_some() && number == self.number
+    }
+
+    /// The read ends: one that reads is cancelled. The read that ran, if one
+    /// did.
+    fn end(&mut self) -> Option<ClipboardRead> {
+        let read = self.read.take()?;
+        if let Some(cancellable) = &read.cancellable {
+            cancellable.cancel();
+        }
+        Some(read)
+    }
 }
 
 impl Session {
@@ -377,6 +457,8 @@ impl Session {
             Event::Recognized(number, outcome) => self.recognized(number, outcome),
             Event::ContextSource(number, source) => self.context_source(number, source),
             Event::Context(number, outcome) => self.context_read(number, outcome),
+            Event::Active => self.window_active(),
+            Event::Clipboard(number, line) => self.copied(number, line),
         }
     }
 
@@ -516,14 +598,20 @@ impl Session {
         self.reveal();
     }
 
-    /// Gives up the read of the accessibility bus: dropping the job cancels
-    /// it, and whatever it reports later is ignored. Whether a read ran.
+    /// Gives up the read of the accessibility bus and the read of the
+    /// clipboard after it: dropping the job cancels the one, the other is
+    /// cancelled, and whatever they report later is ignored. Whether a read
+    /// ran.
     fn give_up_read(&mut self) -> bool {
         let ran = self.reading.end();
-        if self.manual.reading() == Some(Source::AtSpi) {
+        let copied = self.copying.end().is_some();
+        if matches!(
+            self.manual.reading(),
+            Some(Source::AtSpi | Source::Clipboard)
+        ) {
             self.manual.set_reading(None);
         }
-        ran
+        ran || copied
     }
 
     /// Clears the field for the read that starts now: a new empty text, so
@@ -604,9 +692,8 @@ impl Session {
 
     /// The read with `number` ended; one that was given up shows nothing.
     /// The context replaces the field as a new text with the selected word
-    /// chosen and its lookup starts, nothing is asked online; a failure ends
-    /// the waiting, leaves the field as it is, the empty state, and says why
-    /// in the source line.
+    /// chosen and its lookup starts, nothing is asked online; a failure
+    /// leaves the field as it is and starts the read of the clipboard.
     fn context_read(&mut self, number: u64, outcome: Outcome<Read>) {
         if !self.reading.is_running(number) {
             return;
@@ -626,14 +713,97 @@ impl Session {
         }
     }
 
-    /// The read gave nothing: the waiting ends, the failure is logged and
-    /// the source line says why, with the manual path. The field keeps the
-    /// focus: the line cannot take it.
+    /// The read gave nothing: the failure is logged at once, and the
+    /// clipboard is read in its place; the line that says why, with the
+    /// manual path, waits for it.
     fn read_failed(&mut self, failure: &ContextFailure) {
         eprintln!("addict: no context from the accessibility bus: {failure:?}");
         self.give_up_read();
+        self.start_copy(read_failure_text(failure).into_owned());
+    }
+
+    /// Starts the read of the clipboard as the next number, after the
+    /// failure that `line` says: the window waits with the source clipboard,
+    /// the read starts once the window is active, and after
+    /// [`CLIPBOARD_LIMIT`] it ends without text.
+    fn start_copy(&mut self, line: String) {
+        let number = self.copying.begin(line);
+        self.manual.set_reading(Some(Source::Clipboard));
         self.view.render(self.manual.state(), self.manual.source());
-        self.view.render_source_failure(&read_failure_text(failure));
+        let late = self.sender.clone();
+        glib::timeout_add_local_once(CLIPBOARD_LIMIT, move || {
+            let _ = late.unbounded_send(Event::Clipboard(
+                number,
+                Err(format!("no answer within {CLIPBOARD_LIMIT:?}")),
+            ));
+        });
+        if self.window.is_active() {
+            self.read_clipboard();
+        }
+    }
+
+    /// The window became active: the read of the clipboard that waits for
+    /// it starts.
+    fn window_active(&mut self) {
+        if self.window.is_active() {
+            self.read_clipboard();
+        }
+    }
+
+    /// Reads the clipboard of the window's display for the read that runs
+    /// and still waits; nothing else does.
+    fn read_clipboard(&mut self) {
+        let number = self.copying.number;
+        let Some(read) = self.copying.read.as_mut() else {
+            return;
+        };
+        if read.cancellable.is_some() {
+            return;
+        }
+        let cancellable = gio::Cancellable::new();
+        read.cancellable = Some(cancellable.clone());
+        let sender = self.sender.clone();
+        self.window
+            .clipboard()
+            .read_text_async(Some(&cancellable), move |read| {
+                let line = match read {
+                    Ok(Some(text)) => manual::clipboard_line(&text).ok_or_else(|| {
+                        format!("blank or longer than {CLIPBOARD_MAX_CHARS} characters as one line")
+                    }),
+                    Ok(None) => Err("no text".to_owned()),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = sender.unbounded_send(Event::Clipboard(number, line));
+            });
+    }
+
+    /// The read of the clipboard with `number` ended; one that was given up
+    /// shows nothing. A `line` replaces the field as a new text with the
+    /// source clipboard; nothing is asked online. Without one, the reason is
+    /// logged, the waiting ends and the source line of the failed read of
+    /// the bus says why.
+    fn copied(&mut self, number: u64, line: Result<String, String>) {
+        if !self.copying.is_running(number) {
+            return;
+        }
+        let Some(read) = self.copying.end() else {
+            return;
+        };
+        match line {
+            Ok(line) => {
+                let edit = self.manual.copied(&line);
+                self.view.set_field_text(self.manual.sentence());
+                self.text_replaced(edit);
+            }
+            Err(reason) => {
+                eprintln!("addict: no text from the clipboard: {reason}");
+                if self.manual.reading() == Some(Source::Clipboard) {
+                    self.manual.set_reading(None);
+                }
+                self.view.render(self.manual.state(), self.manual.source());
+                self.view.render_source_failure(&read.line);
+            }
+        }
     }
 
     /// Shows the window with the state as it is now, the field focused,
@@ -1031,7 +1201,9 @@ impl Session {
     /// the window is shown at once in the waiting state with the source
     /// AT-SPI, and the read of the accessibility bus starts, which ends at
     /// once when that application was not Android Studio; the window does
-    /// not wait for it.
+    /// not wait for it. A read that ends without context is followed by the
+    /// read of the clipboard: the window waits on with the source clipboard,
+    /// for at most [`CLIPBOARD_LIMIT`].
     fn activated(
         &mut self,
         activation_token: Option<&str>,
@@ -1229,6 +1401,12 @@ fn start(
     let view = View::new(window_state(None, None), &binding);
     connect_view(&view, &sender);
     let window = build_window(application, &view);
+    let active = sender.clone();
+    window.connect_is_active_notify(move |window| {
+        if window.is_active() {
+            let _ = active.unbounded_send(Event::Active);
+        }
+    });
 
     // Only the primary instance gets here, so a second launch records no
     // session.
@@ -1267,6 +1445,7 @@ fn start(
         check,
         capturing: Capturing::default(),
         reading: Reading::default(),
+        copying: Copying::default(),
         foreground: Rc::downgrade(&listener),
         kept: Foregrounded::Unknown,
     };
@@ -1350,5 +1529,53 @@ pub fn run(evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gtk::{gio, prelude::*};
+
+    use super::{CLIPBOARD_LIMIT, Copying};
+
+    #[test]
+    fn only_the_last_clipboard_read_is_the_one_that_runs() {
+        let mut copying = Copying::default();
+        assert!(!copying.is_running(0));
+        assert!(copying.end().is_none());
+
+        let first = copying.begin("first line".to_owned());
+        assert!(copying.is_running(first));
+        let cancellable = gio::Cancellable::new();
+        copying.read.as_mut().expect("read").cancellable = Some(cancellable.clone());
+
+        // A new read, after a new press, cancels the one that reads.
+        let second = copying.begin("second line".to_owned());
+        assert!(cancellable.is_cancelled());
+        assert_ne!(first, second);
+        assert!(!copying.is_running(first));
+        assert!(copying.is_running(second));
+
+        // Ended by an edit or a capture: what it reports later is ignored.
+        let read = copying.end().expect("read");
+        assert_eq!(read.line, "second line");
+        assert!(!copying.is_running(second));
+        assert!(copying.end().is_none());
+    }
+
+    #[test]
+    fn a_read_that_waits_for_the_window_is_ended_without_a_cancellable() {
+        let mut copying = Copying::default();
+        let number = copying.begin("line".to_owned());
+        // The window is not active yet: nothing is read, nothing to cancel.
+        let read = copying.end().expect("read");
+        assert!(read.cancellable.is_none());
+        assert!(!copying.is_running(number));
+    }
+
+    #[test]
+    fn the_clipboard_limit_is_finite_and_short() {
+        assert!(!CLIPBOARD_LIMIT.is_zero());
+        assert!(CLIPBOARD_LIMIT.as_secs() <= 1);
     }
 }

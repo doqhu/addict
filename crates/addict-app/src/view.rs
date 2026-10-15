@@ -77,6 +77,7 @@ fn source_label(source: Source) -> &'static str {
         Source::Manual => "manual input",
         Source::AtSpi => "accessibility (AT-SPI)",
         Source::Ocr => "screen capture (OCR)",
+        Source::Clipboard => "clipboard",
     }
 }
 
