@@ -1,11 +1,10 @@
 //! The widgets of the window: the source label and the status on one line,
 //! right under them the capture line, then the binding row and the line of
-//! the dictionary indexes, then
-//! the field for a word or a sentence with the Capture button beside it,
-//! the text of the field with its words as links and, last, the result,
-//! which scrolls: the card of the word with its translations as pills, the
-//! online texts, and the list of senses, a row for each, the chosen one
-//! explained under its row.
+//! the dictionary indexes, then the field for a word or a sentence with the
+//! Capture button beside it, the text of the field with its words as links
+//! and, last, the result, which scrolls: the card of the word with its
+//! translations as pills, the online texts, and the list of senses, a row
+//! for each, the chosen one explained under its row.
 //!
 //! This module owns the widgets, their layout and their signals, and no
 //! text: what the widgets say is [`view`](crate::view)'s, and [`View`] puts
@@ -160,6 +159,44 @@ fn binding_row() -> BindingRow {
     }
 }
 
+/// One dim line, the meta row: the source at the start, the status at the
+/// end. Given back as the row, the source and the status.
+fn meta_row() -> (gtk::Box, gtk::Label, gtk::Label) {
+    let source = gtk::Label::builder()
+        .xalign(0.0)
+        .hexpand(true)
+        .css_classes(["meta"])
+        .build();
+    let status = gtk::Label::builder()
+        .xalign(1.0)
+        .css_classes(["meta"])
+        .build();
+    let meta = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    meta.append(&source);
+    meta.append(&status);
+    (meta, source, status)
+}
+
+/// The field for a word or a sentence, its paste taken over, with the
+/// Capture button beside it. Given back as the row, the field and the
+/// button.
+fn field_row() -> (gtk::Box, gtk::Entry, gtk::Button) {
+    let field = gtk::Entry::builder()
+        .placeholder_text(FIELD_PLACEHOLDER)
+        .css_classes(["lookup"])
+        .build();
+    replace_on_paste(&field);
+    field.set_hexpand(true);
+    let capture = gtk::Button::builder()
+        .label(CAPTURE_LABEL)
+        .css_classes(["capture"])
+        .build();
+    let field_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    field_row.append(&field);
+    field_row.append(&capture);
+    (field_row, field, capture)
+}
+
 /// What runs with the index of a sense when its row is clicked.
 type SenseChosen = Rc<dyn Fn(usize)>;
 
@@ -168,6 +205,15 @@ fn clear(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
+}
+
+/// A line in a banner that wraps and is hidden until it has something to
+/// say.
+fn banner() -> gtk::Label {
+    wrapping(gtk::Label::builder())
+        .css_classes(["banner"])
+        .visible(false)
+        .build()
 }
 
 /// A dim caption above a part of the result.
@@ -383,12 +429,12 @@ fn result_area() -> ResultArea {
 }
 
 /// The source label and the status on one line, the capture line when a
-/// capture gave no text, then the binding row: its
-/// line, the detail and Retry; the line of the indexes when there is
-/// something to say about them; then the field for a word or a sentence,
-/// the text of the field with its words as links, and the result, which
-/// scrolls: the card of the word with its translations, the online texts
-/// and the list of senses, the chosen one explained under its row.
+/// capture gave no text, then the binding row: its line, the detail and
+/// Retry; the line of the indexes when there is something to say about
+/// them; then the field for a word or a sentence, the text of the field with
+/// its words as links, and the result, which scrolls: the card of the word
+/// with its translations, the online texts and the list of senses, the
+/// chosen one explained under its row.
 pub struct View {
     root: gtk::Box,
     source: gtk::Label,
@@ -426,27 +472,12 @@ impl View {
             .margin_start(20)
             .margin_end(20)
             .build();
-        // One dim line: the source at the start, the status at the end.
-        let source = gtk::Label::builder()
-            .xalign(0.0)
-            .hexpand(true)
-            .css_classes(["meta"])
-            .build();
-        let status = gtk::Label::builder()
-            .xalign(1.0)
-            .css_classes(["meta"])
-            .build();
-        let meta = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        meta.append(&source);
-        meta.append(&status);
+        let (meta, source, status) = meta_row();
         root.append(&meta);
 
         // Wraps, so an install command fits. Not selectable, like the line
         // of the indexes: it must not take the focus from the field.
-        let capture_failure = wrapping(gtk::Label::builder())
-            .css_classes(["banner"])
-            .visible(false)
-            .build();
+        let capture_failure = banner();
         root.append(&capture_failure);
 
         let binding_row = binding_row();
@@ -454,25 +485,10 @@ impl View {
 
         // Hidden until the indexes were checked. Not selectable: it must not
         // take the focus from the field.
-        let indexes = wrapping(gtk::Label::builder())
-            .css_classes(["banner"])
-            .visible(false)
-            .build();
+        let indexes = banner();
         root.append(&indexes);
 
-        let field = gtk::Entry::builder()
-            .placeholder_text(FIELD_PLACEHOLDER)
-            .css_classes(["lookup"])
-            .build();
-        replace_on_paste(&field);
-        field.set_hexpand(true);
-        let capture = gtk::Button::builder()
-            .label(CAPTURE_LABEL)
-            .css_classes(["capture"])
-            .build();
-        let field_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        field_row.append(&field);
-        field_row.append(&capture);
+        let (field_row, field, capture) = field_row();
         let sentence = wrapping(gtk::Label::builder().use_markup(true))
             .css_classes(["sentence"])
             .visible(false)

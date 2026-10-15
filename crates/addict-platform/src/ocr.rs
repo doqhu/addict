@@ -164,6 +164,9 @@ async fn run(
 
 type Attempt = Result<(String, Option<u64>), (OcrFailure, Option<u64>)>;
 
+/// The recognition behind [`run`]: the image to read, the child under
+/// `limit`, and the outcome with the peak memory of the child when it was
+/// reaped after its own exit.
 async fn attempt(
     program: &str,
     image: &Path,
@@ -184,33 +187,16 @@ async fn attempt(
         Ok(directory) => Arc::new(directory),
         Err(e) => return failed(OcrFailure::Failed(format!("temporary directory: {e}"))),
     };
-    let image = if params.scale > 1 {
-        let shared = directory.clone();
-        let scale = params.scale;
-        let upscaled = tokio::task::spawn_blocking(move || upscale(&image, scale, &shared.0)).await;
-        match upscaled {
-            Ok(Ok(image)) => image,
-            Ok(Err(detail)) => return failed(OcrFailure::Failed(detail)),
-            Err(e) => return failed(OcrFailure::Failed(format!("upscale: {e}"))),
-        }
-    } else {
-        image
+    let image = match to_read(image, params.scale, &directory).await {
+        Ok(image) => image,
+        Err(failure) => return failed(failure),
     };
     // After the upscale: the limit is the child's own.
     let begun = Instant::now();
-    let stderr = match fs::File::create(directory.0.join(STDERR_FILE)) {
-        Ok(file) => file,
-        Err(e) => return failed(OcrFailure::Failed(format!("stderr file: {e}"))),
+    let mut command = match recognition_command(program, &image, params, &directory.0) {
+        Ok(command) => command,
+        Err(failure) => return failed(failure),
     };
-    let mut command = Command::new(program);
-    command
-        .arg(&image)
-        .arg(OUTPUT_BASE)
-        .args(["-l", params.language, "--psm"])
-        .arg(params.page_segmentation.to_string())
-        .current_dir(&directory.0)
-        .stdout(Stdio::null())
-        .stderr(stderr);
     let mut child = match spawn(&mut command) {
         Ok(child) => child,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -230,10 +216,9 @@ async fn attempt(
         }
     };
     let peak = Some(exit.peak_rss_bytes);
-    let exited_well = libc::WIFEXITED(exit.status) && libc::WEXITSTATUS(exit.status) == 0;
     let result = match outcome(&directory.0, exit.status) {
         // Only after a failed exit: the recognition itself stays one child.
-        Err(OcrFailure::Failed(detail)) if !exited_well => {
+        Err(OcrFailure::Failed(detail)) if !exited_well(exit.status) => {
             let remaining = limit.saturating_sub(begun.elapsed());
             match listed(program, params.language, &directory.0, remaining).await {
                 Some(false) => Err(OcrFailure::LanguageMissing),
@@ -246,6 +231,49 @@ async fn attempt(
         Ok(text) => Ok((text, peak)),
         Err(failure) => Err((failure, peak)),
     }
+}
+
+/// The image Tesseract reads: `image` itself with a `scale` of 1 or less,
+/// or else [`upscale`]d off the async thread into `directory`, which the
+/// upscale shares so that a recognition dropped during it leaves nothing
+/// behind.
+async fn to_read(
+    image: PathBuf,
+    scale: u8,
+    directory: &Arc<TempDir>,
+) -> Result<PathBuf, OcrFailure> {
+    if scale <= 1 {
+        return Ok(image);
+    }
+    let shared = directory.clone();
+    let upscaled = tokio::task::spawn_blocking(move || upscale(&image, scale, &shared.0)).await;
+    match upscaled {
+        Ok(Ok(image)) => Ok(image),
+        Ok(Err(detail)) => Err(OcrFailure::Failed(detail)),
+        Err(e) => Err(OcrFailure::Failed(format!("upscale: {e}"))),
+    }
+}
+
+/// `tesseract <image> result -l <language> --psm <mode>`, run in `directory`
+/// with stdout null and stderr into a file there, which is created now.
+fn recognition_command(
+    program: &str,
+    image: &Path,
+    params: &Params,
+    directory: &Path,
+) -> Result<Command, OcrFailure> {
+    let stderr = fs::File::create(directory.join(STDERR_FILE))
+        .map_err(|e| OcrFailure::Failed(format!("stderr file: {e}")))?;
+    let mut command = Command::new(program);
+    command
+        .arg(image)
+        .arg(OUTPUT_BASE)
+        .args(["-l", params.language, "--psm"])
+        .arg(params.page_segmentation.to_string())
+        .current_dir(directory)
+        .stdout(Stdio::null())
+        .stderr(stderr);
+    Ok(command)
 }
 
 /// `image` upscaled `scale` times with Catmull-Rom and written as PNG into
@@ -299,7 +327,7 @@ async fn listed(program: &str, language: &str, directory: &Path, limit: Duration
         .await
         .ok()?
         .ok()?;
-    if !(libc::WIFEXITED(exit.status) && libc::WEXITSTATUS(exit.status) == 0) {
+    if !exited_well(exit.status) {
         return None;
     }
     let listing = read_head(&path).ok()?;
@@ -329,10 +357,21 @@ fn spawn(command: &mut Command) -> io::Result<Child> {
     Ok(Child::new(child.id() as libc::pid_t))
 }
 
+/// The exit code of a child that ended with the wait `status`, or `None`
+/// when it did not exit by itself.
+fn exit_code(status: libc::c_int) -> Option<libc::c_int> {
+    libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status))
+}
+
+/// Whether a child that ended with the wait `status` exited with 0.
+fn exited_well(status: libc::c_int) -> bool {
+    exit_code(status) == Some(0)
+}
+
 /// The text, or the failure, for a child that ended with the wait `status`;
 /// its files are in `directory`.
 fn outcome(directory: &Path, status: libc::c_int) -> Result<String, OcrFailure> {
-    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+    if exited_well(status) {
         let path = directory.join(OUTPUT_BASE).with_extension("txt");
         let text = read_limited(&path)
             .map_err(|e| OcrFailure::Failed(format!("read the output: {e}")))?
@@ -348,8 +387,8 @@ fn outcome(directory: &Path, status: libc::c_int) -> Result<String, OcrFailure> 
     if stderr.contains(LANGUAGE_MISSING) {
         return Err(OcrFailure::LanguageMissing);
     }
-    let how = if libc::WIFEXITED(status) {
-        format!("exit status {}", libc::WEXITSTATUS(status))
+    let how = if let Some(code) = exit_code(status) {
+        format!("exit status {code}")
     } else if libc::WIFSIGNALED(status) {
         format!("signal {}", libc::WTERMSIG(status))
     } else {

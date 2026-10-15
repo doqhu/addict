@@ -7,46 +7,49 @@
 //! lookup, which runs on the work runner and comes back as an event. The
 //! dictionary indexes are opened and read there too: where they stand is
 //! asked once at the start and comes with the outcome of every lookup, and
-//! the window says it whenever one is missing or unreadable. It keeps
-//! the shown result with the sense chosen in it, and a click on a sense only
-//! changes that choice. Only the explicit definition action sends its
-//! English definition without context; a separate job is cancelled on a
-//! changed sense or replacement article and guards its outcome by request
-//! identity. A click on a word of a sentence also asks online for
-//! the word in its sentence and, once for that sentence, for the sentence
-//! itself; a typed text is one sentence, while in a recognized one it is the
-//! sentence around the word, and a word that is a sentence alone there asks
-//! nothing online;
-//! Enter in the field, or a paste, asks for a lone word. Each request is a
-//! job of its own on the runner, in one of two slots, the word's and the
-//! sentence's, and comes back as an event with the number of its text: the
-//! article never waits for it, a repeated click leaves it alone, another
-//! word gives up only the word's, another sentence the sentence's too, and a
-//! new text gives up both. What is
-//! asked for and what is kept is [`online`](crate::online)'s. What the
-//! window says is [`view`](crate::view)'s; its widgets and the paste into
-//! its field are [`widgets`](crate::widgets)'s; what an edit or a click does
-//! to the manual input is [`manual`](crate::manual)'s. Capture hides the
-//! window and starts one job on the runner, which takes the screenshot,
-//! recognizes its text and deletes the snapshot; the window comes back in
-//! the reading state once the snapshot is there, and the recognized text,
-//! its lines joined by [`sentence::recognized`], then replaces the field as
-//! a new text with the source OCR, which follows
-//! the manual path from there. A capture without text leaves the field as
-//! it was, starts no lookup and no online request, and says why in the
-//! capture line under the status; the line stays, also when the window is
-//! shown again, until the field is edited, Capture is pressed or a text is
+//! the window says it whenever one is missing or unreadable.
+//!
+//! The module keeps the shown result with the sense chosen in it, and a
+//! click on a sense only changes that choice.
+//!
+//! Only the explicit definition action sends its English definition without
+//! context; a separate job is cancelled on a changed sense or replacement
+//! article and guards its outcome by request identity. A click on a word of
+//! a sentence also asks online for the word in its sentence and, once for
+//! that sentence, for the sentence itself; a typed text is one sentence,
+//! while in a recognized one it is the sentence around the word, and a word
+//! that is a sentence alone there asks nothing online; Enter in the field,
+//! or a paste, asks for a lone word. Each request is a job of its own on the
+//! runner, in one of two slots, the word's and the sentence's, and comes
+//! back as an event with the number of its text: the article never waits
+//! for it, a repeated click leaves it alone, another word gives up only the
+//! word's, another sentence the sentence's too, and a new text gives up
+//! both.
+//!
+//! Capture hides the window and starts one job on the runner, which takes
+//! the screenshot, recognizes its text and deletes the snapshot; the window
+//! comes back in the reading state once the snapshot is there, and the
+//! recognized text, its lines joined by [`sentence::recognized`], then
+//! replaces the field as a new text with the source OCR, which follows the
+//! manual path from there. A capture without text leaves the field as it
+//! was, starts no lookup and no online request, and says why in the capture
+//! line under the status; the line stays, also when the window is shown
+//! again, until the field is edited, Capture is pressed or a text is
 //! recognized. Capture cannot be pressed while the area is being chosen;
 //! once the snapshot is there it can, and it is the retry: pressing it, or
 //! editing the field, gives up the recognition that runs. Giving up is
 //! dropping the job, which kills the Tesseract child and deletes the
 //! snapshot, and shows nothing. Each capture job has a number, so what a
 //! given-up job had already sent is ignored. Every capture end that is
-//! shown, also one that could not start, is recorded with `--evidence` as
-//! it is shown; a given-up one is not. The job is
-//! [`capture`](crate::capture)'s; how a request starts
-//! and ends is [`translate`](crate::translate)'s; what is recorded with
-//! `--evidence` is [`recording`](crate::recording)'s.
+//! shown, also one that could not start, is recorded with `--evidence` as it
+//! is shown; a given-up one is not. The job is [`capture`](crate::capture)'s.
+//!
+//! What is asked for and what is kept is [`online`](crate::online)'s. What
+//! the window says is [`view`](crate::view)'s; its widgets and the paste
+//! into its field are [`widgets`](crate::widgets)'s; what an edit or a click
+//! does to the manual input is [`manual`](crate::manual)'s. How a request
+//! starts and ends is [`translate`](crate::translate)'s; what is recorded
+//! with `--evidence` is [`recording`](crate::recording)'s.
 
 use std::{
     cell::{Cell, RefCell},
@@ -68,7 +71,7 @@ use addict_platform::{
     shortcut::{self, ShortcutEvent, ShortcutHandle},
     work::{Job, Outcome, Work},
 };
-use futures_channel::mpsc::UnboundedSender;
+use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
@@ -263,13 +266,20 @@ struct Session {
     online: Kept,
     /// The check of the indexes at the start; dropping it cancels the check.
     check: Option<Job>,
+    /// Where the capture stands.
+    capturing: Capturing,
+}
+
+/// Where the capture of a [`Session`] stands; at first no capture runs.
+#[derive(Default)]
+struct Capturing {
     /// The capture job, from Capture to its end; dropping it cancels the
     /// job, which kills its Tesseract child and deletes its snapshot.
-    capturing: Option<Job>,
+    job: Option<Job>,
     /// The number of the last started capture job. An event that carries
     /// another number, or comes when no job runs, is from a job that was
     /// given up.
-    capture_number: u64,
+    number: u64,
     /// Between Capture and the start of its job, while the window leaves
     /// the screen.
     hiding: bool,
@@ -325,17 +335,17 @@ impl Session {
     /// new capture; a press queued behind one whose area is being chosen
     /// starts nothing. The capture line goes.
     fn capture(&mut self) {
-        if self.hiding {
+        if self.capturing.hiding {
             return;
         }
-        if self.capturing.is_some() {
+        if self.capturing.job.is_some() {
             if !self.manual.reading() {
                 return;
             }
             self.give_up_capture();
         }
         self.view.clear_capture_failure();
-        self.hiding = true;
+        self.capturing.hiding = true;
         // Hidden, so on Wayland the compositor places the window anew when it
         // comes back. The opacity of a GTK 4 toplevel is ignored, and making
         // its children transparent left the window in GNOME's capture.
@@ -352,12 +362,12 @@ impl Session {
 
     /// The window is off the screen: the capture job starts.
     fn start_capture(&mut self) {
-        if !self.hiding {
+        if !self.capturing.hiding {
             return;
         }
-        self.hiding = false;
-        self.capture_number += 1;
-        let number = self.capture_number;
+        self.capturing.hiding = false;
+        self.capturing.number += 1;
+        let number = self.capturing.number;
         let captured = self.sender.clone();
         let ended = self.sender.clone();
         let started = capture::start(
@@ -371,20 +381,20 @@ impl Session {
             },
         );
         match started {
-            Ok(job) => self.capturing = Some(job),
+            Ok(job) => self.capturing.job = Some(job),
             Err(capture) => self.capture_ended(capture.captured, &capture.timing),
         }
     }
 
     /// Whether the capture job with `number` is the one that runs.
     fn is_capturing(&self, number: u64) -> bool {
-        self.capturing.is_some() && number == self.capture_number
+        self.capturing.job.is_some() && number == self.capturing.number
     }
 
     /// Gives up the capture job: dropping it kills its Tesseract child and
     /// deletes its snapshot; it shows nothing.
     fn give_up_capture(&mut self) {
-        self.capturing = None;
+        self.capturing.job = None;
         self.manual.set_reading(false);
     }
 
@@ -420,7 +430,7 @@ impl Session {
     /// capture line. The window is shown either way, the field focused. With
     /// `--evidence` the end is recorded as shown, with `timing`.
     fn capture_ended(&mut self, captured: Captured, timing: &Timing) {
-        self.capturing = None;
+        self.capturing.job = None;
         self.view.set_capture_sensitive(true);
         self.manual.set_reading(false);
         let line = match captured {
@@ -476,7 +486,7 @@ impl Session {
     /// user's text wins, and the state no longer says the capture is read.
     fn sentence_changed(&mut self, text: String) {
         self.view.clear_capture_failure();
-        let gave_up = self.capturing.is_some() && self.manual.reading();
+        let gave_up = self.capturing.job.is_some() && self.manual.reading();
         if gave_up {
             self.give_up_capture();
         }
@@ -980,6 +990,16 @@ fn online_translator() -> (Arc<dyn Translator>, Option<std::path::PathBuf>) {
     (Arc::new(translator), key_file)
 }
 
+/// Hands each event of `receiver` to `session`, on the UI thread, for as
+/// long as the channel is open.
+fn serve(mut session: Session, mut receiver: UnboundedReceiver<Event>) {
+    glib::spawn_future_local(async move {
+        while let Some(event) = receiver.next().await {
+            session.handle(event);
+        }
+    });
+}
+
 /// Builds the hidden window, starts the first attempt to bind the shortcut
 /// and the event loop. Runs once, in the primary instance.
 fn start(
@@ -987,7 +1007,7 @@ fn start(
     evidence: Option<Rc<RefCell<evidence::Writer>>>,
 ) -> Resident {
     // The worker threads push; the main context wakes only for an event.
-    let (sender, mut receiver) = futures_channel::mpsc::unbounded();
+    let (sender, receiver) = futures_channel::mpsc::unbounded();
 
     // The first attempt starts below, with the window still hidden.
     let binding = Binding::Attempting;
@@ -1008,7 +1028,7 @@ fn start(
     let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());
     let check = start_check(work.as_deref(), articles.clone(), &sender);
     let (translator, key_file) = online_translator();
-    let mut session = Session {
+    let session = Session {
         binding,
         view,
         window,
@@ -1028,15 +1048,9 @@ fn start(
         translating_definition: None,
         online: Kept::default(),
         check,
-        capturing: None,
-        capture_number: 0,
-        hiding: false,
+        capturing: Capturing::default(),
     };
-    glib::spawn_future_local(async move {
-        while let Some(event) = receiver.next().await {
-            session.handle(event);
-        }
-    });
+    serve(session, receiver);
     Resident {
         _hold: application.hold(),
         _shortcut: handle,
