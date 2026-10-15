@@ -643,8 +643,8 @@ pub struct ProductSummary {
 /// whole inventory, three idle states are judged, any idle CPU fails, no
 /// `human-scenarios` record is needed, the closing sample counts only after
 /// [`PRODUCT_LOOKUPS`] lookups, the sample after an OCR cycle only after a
-/// `recognized` `ocr` record, and the data sets must be recorded. The `ocr`
-/// and `online` records are counted nowhere else.
+/// `recognized` `ocr` record, and the data sets must be recorded. The `ocr`,
+/// `online` and `context` records are counted nowhere else.
 pub fn summarize_product(
     records: &[Evidence],
     mapping: Option<&ClockMapping>,
@@ -1601,6 +1601,48 @@ mod product_tests {
         assert_eq!(
             serde_json::to_value(&s).unwrap(),
             serde_json::to_value(product(&plain, Origin::Foliate)).unwrap()
+        );
+    }
+
+    #[test]
+    fn context_records_among_the_presses_and_lookups_change_nothing() {
+        let context = |outcome: &str| {
+            row(
+                Origin::AndroidStudio,
+                "context",
+                None,
+                json!({"outcome":outcome,"read_ms":230,"source":"android-studio","accessibility":"on","peak_rss_bytes":141_234_176u64,"pss_bytes":63_012_864u64}),
+            )
+        };
+        let plain = session(Origin::AndroidStudio);
+        let mut rows = Vec::new();
+        for record in &plain {
+            rows.push(record.clone());
+            if record.event == "lookup" {
+                rows.push(context("sentence"));
+                rows.push(context("not-from-studio"));
+            }
+        }
+        // Also among the presses and before the closing sample.
+        let warm = rows
+            .iter()
+            .position(|r| r.event == "invocation" && r.details["cold"] == false)
+            .unwrap();
+        rows.insert(warm + 1, context("cancelled"));
+        let closing = rows
+            .iter()
+            .position(|r| r.event == "memory" && r.details["phase"] == "after-close")
+            .unwrap();
+        rows.insert(closing, context("word-only"));
+        assert_eq!(rows.len(), plain.len() + 2 * PRODUCT_LOOKUPS + 2);
+
+        let s = product(&rows, Origin::AndroidStudio);
+        assert_eq!(s.acceptance, "pass", "{s:?}");
+        assert_eq!((s.warm_attempts, s.valid_latency_samples), (30, 30));
+        assert_eq!(s.lookups, PRODUCT_LOOKUPS);
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            serde_json::to_value(product(&plain, Origin::AndroidStudio)).unwrap()
         );
     }
 
