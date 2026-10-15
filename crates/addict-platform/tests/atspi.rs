@@ -40,19 +40,19 @@ fn the_selected_word_comes_with_its_sentence() {
 
 #[test]
 fn a_line_break_ends_the_sentence() {
-    let content = "a.\n// We sat on the bank\nnext";
+    let content = "a.\n// Lead. We sat on the bank.\nnext.";
     let world = studio("line-break", vec![selected(content, "bank", 0)]);
     let context = world.read(LIMIT).expect("context");
     assert_eq!(
         context.sentence.expect("sentence").text,
-        "// We sat on the bank"
+        "We sat on the bank."
     );
 }
 
 #[test]
 fn offsets_after_a_character_outside_the_bmp_are_characters() {
     let content =
-        "\u{1f600}\u{1f600} Done. \u{1f600} We sat on the b\u{e4}nk \u{1f600} of the river.";
+        "// \u{1f600}\u{1f600} Done. \u{1f600} We sat on the b\u{e4}nk \u{1f600} of the river.";
     let world = studio("non-bmp", vec![selected(content, "b\u{e4}nk", 0)]);
     let context = world.read(LIMIT).expect("context");
     assert_eq!(context.word, "b\u{e4}nk");
@@ -67,7 +67,7 @@ fn offsets_after_a_character_outside_the_bmp_are_characters() {
 #[test]
 fn a_selection_far_into_a_long_text_is_read_in_its_window() {
     let before = "Filler words. ".repeat(200);
-    let content = format!("{before}We sat on the bank of the river.\nAfter. {before}");
+    let content = format!("{before}\n// Lead. We sat on the bank of the river.\nAfter. {before}");
     let world = studio("long", vec![selected(&content, "bank", 0)]);
     let context = world.read(LIMIT).expect("context");
     assert_eq!(context.word, "bank");
@@ -82,7 +82,7 @@ fn the_sentence_is_never_asked_of_the_application() {
     // The fake gives a wrong sentence to `GetStringAtOffset`, as EXP-2 found.
     let world = studio(
         "own-sentence",
-        vec![selected("Sit on the bank.", "bank", 0)],
+        vec![selected("// Lead. Sit on the bank.", "bank", 0)],
     );
     let context = world.read(LIMIT).expect("context");
     assert_eq!(context.sentence.expect("sentence").text, "Sit on the bank.");

@@ -1168,7 +1168,7 @@ pub(crate) mod tests {
 
     #[test]
     fn the_occurrence_that_was_selected_is_the_one_chosen() {
-        let text = "The bank by the bank.";
+        let text = "// Lead. The bank by the bank.";
         for (nth, index) in [(0, 1), (1, 4)] {
             let mut manual = Manual::default();
             assert_eq!(
@@ -1184,7 +1184,7 @@ pub(crate) mod tests {
         let mut manual = with_sentence(SENTENCE);
         let old = manual.choose(4).expect("run");
         let number = manual.text_number();
-        let edit = manual.arrived(context(SENTENCE, "bank", 0));
+        let edit = manual.arrived(context(&format!("// Lead. {SENTENCE}"), "bank", 0));
         // The same text again is still new.
         let Edit::Chosen(run) = edit else {
             panic!("{edit:?}");
@@ -1220,7 +1220,12 @@ pub(crate) mod tests {
     #[test]
     fn an_arrived_sentence_that_is_the_word_alone_is_a_dictionary_input() {
         let mut manual = Manual::default();
-        let edit = manual.arrived(context("One.\nbank\nTwo.", "bank", 0));
+        let arrived = context("// Lead. Bank.", "Bank", 0);
+        assert_eq!(
+            arrived.sentence.as_ref().map(|found| found.text.as_str()),
+            Some("Bank.")
+        );
+        let edit = manual.arrived(arrived);
         assert!(matches!(edit, Edit::Lone(_)), "{edit:?}");
         assert_eq!(manual.input().expect("input").sentence(), None);
         assert_eq!(manual.source(), Source::AtSpi);
@@ -1244,15 +1249,19 @@ pub(crate) mod tests {
     #[test]
     fn a_part_of_a_word_or_a_wider_selection_chooses_what_it_touches() {
         let text = "We sat on the bank of the river.";
+        let wider = format!("// Lead. {text}");
         let mut manual = Manual::default();
         // `ban` is a part of `bank` only.
         assert!(matches!(
-            manual.arrived(context(text, "ban", 0)),
+            manual.arrived(context(&wider, "ban", 0)),
             Edit::Chosen(_)
         ));
         assert_eq!(chosen_word(&manual), Some("bank"));
         // `the bank` touches two words: none is chosen, the text is there.
-        assert_eq!(manual.arrived(context(text, "the bank", 0)), Edit::Cleared);
+        assert_eq!(
+            manual.arrived(context(&wider, "the bank", 0)),
+            Edit::Cleared
+        );
         assert_eq!(manual.sentence(), text);
         assert_eq!(manual.chosen(), None);
         assert_eq!(manual.state(), WindowState::Empty);
@@ -1261,10 +1270,8 @@ pub(crate) mod tests {
     #[test]
     fn a_text_of_an_arrived_selection_that_has_no_word_is_manual() {
         let mut manual = Manual::default();
-        let digits = Context {
-            word: "42".to_owned(),
-            sentence: sentence::of_selection("42", 0, 2),
-        };
+        let digits = context("// Lead. 42.", "42", 0);
+        assert!(digits.sentence.is_some());
         assert_eq!(manual.arrived(digits), Edit::Cleared);
         assert_eq!(manual.source(), Source::Manual);
     }

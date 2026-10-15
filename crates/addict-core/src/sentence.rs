@@ -13,7 +13,9 @@
 //!
 //! The text read from an editor over the accessibility bus is cut by
 //! [`of_selection`]: the sentence around a selection given in character
-//! offsets, a line break ending a sentence.
+//! offsets, a line break ending a sentence. Only the area confirmed for the
+//! editor gives one: a whole-line `//` comment, the sentence not the first in
+//! its line and ending in it with a stop.
 //!
 //! A text recognized from a screen capture ([`recognized`]) has its lines
 //! joined with one space, an empty line among them being only a line break;
@@ -288,6 +290,31 @@ fn breaks(characters: &[char]) -> Vec<(usize, usize)> {
     found
 }
 
+/// Whether the trimmed sentence `from..to` of `characters` lies in the area
+/// where the sentence of an editor is known to be right: a later sentence of
+/// a whole-line `//` comment that ends in its line with a stop.
+fn in_area(characters: &[char], from: usize, to: usize) -> bool {
+    let line_start = characters[..from]
+        .iter()
+        .rposition(|&character| is_line_break(character))
+        .map_or(0, |index| index + 1);
+    let line_end = characters[from..]
+        .iter()
+        .position(|&character| is_line_break(character))
+        .map_or(characters.len(), |index| from + index);
+    let mut content = line_start;
+    while content < line_end && characters[content].is_whitespace() {
+        content += 1;
+    }
+    let is_comment = characters[content..line_end].starts_with(&['/', '/']);
+    let mut last = to;
+    while last > from && is_closer(characters[last - 1]) {
+        last -= 1;
+    }
+    let ends_with_stop = last > from && is_stop(characters[last - 1]);
+    is_comment && from > content && to <= line_end && ends_with_stop
+}
+
 /// The sentence of `wider` around the selected characters `start..end`,
 /// which are character offsets of `wider`, as an accessibility bus gives
 /// them and never byte indexes; `None` when the range is empty or lies
@@ -297,6 +324,14 @@ fn breaks(characters: &[char]) -> Vec<(usize, usize)> {
 /// text of an editor is read line by line, so a sentence never runs over one.
 /// The word is the selection as far as it lies in the sentence, in bytes of
 /// the sentence; a selection that has only whitespace there gives `None`.
+///
+/// Only a sentence of the confirmed area is given, anything else is `None`:
+/// its line, the run of `wider` between line breaks, starts with `//` after
+/// its leading whitespace; the sentence starts after a sentence break inside
+/// that line, so the first sentence of a line, which takes the `//` marker,
+/// is left out; and it ends in the line with a stop, closers after it
+/// allowed. A string literal, a trailing comment after code and a sentence
+/// wrapped by hand over several comment lines are thus outside the area.
 pub fn of_selection(wider: &str, start: usize, end: usize) -> Option<Selected> {
     let characters: Vec<char> = wider.chars().collect();
     let count = characters.len();
@@ -323,7 +358,7 @@ pub fn of_selection(wider: &str, start: usize, end: usize) -> Option<Selected> {
         to -= 1;
     }
     let (word_from, word_to) = (start.max(from), end.min(to));
-    if word_from >= word_to {
+    if word_from >= word_to || !in_area(&characters, from, to) {
         return None;
     }
     let bytes = |upto: usize| -> usize {
@@ -713,26 +748,26 @@ mod tests {
         assert_eq!(&found.text[found.word.clone()], "bank");
         // The second occurrence, not the first.
         assert_eq!(found.word, 14..18);
-        let first = selected(text, "bank", 0).expect("sentence");
-        assert_eq!(first.text, "// The bank was closed.");
-        assert_eq!(&first.text[first.word.clone()], "bank");
+        // The first sentence of the line takes the `//` marker.
+        assert_eq!(selected(text, "bank", 0), None);
     }
 
     #[test]
     fn a_line_break_ends_a_sentence() {
-        let text = "a.\n// We sat on the bank\nnext";
+        let text = "a.\n// Lead. We sat on the bank.\nnext.";
         let found = selected(text, "bank", 0).expect("sentence");
-        assert_eq!(found.text, "// We sat on the bank");
+        assert_eq!(found.text, "We sat on the bank.");
         assert_eq!(&found.text[found.word], "bank");
-        // Without a stop before it.
+        // Without a stop before the break the sentence is not known to end.
+        let text = "// Lead. We sat on the bank\n// next one.";
+        assert_eq!(selected(text, "bank", 0), None);
         let text = "one two\nthree four\nfive";
-        let found = selected(text, "four", 0).expect("sentence");
-        assert_eq!(found.text, "three four");
+        assert_eq!(selected(text, "four", 0), None);
     }
 
     #[test]
     fn offsets_are_characters_and_not_bytes() {
-        let text = "\u{1f600} Sit. \u{1f600}\u{1f600} We sat on the b\u{e4}nk, \u{1f600} here.";
+        let text = "// \u{1f600} Sit. \u{1f600}\u{1f600} We sat on the b\u{e4}nk, \u{1f600} here.";
         let found = selected(text, "b\u{e4}nk", 0).expect("sentence");
         assert_eq!(
             found.text,
@@ -745,12 +780,14 @@ mod tests {
 
     #[test]
     fn a_range_outside_the_text_or_empty_is_nothing() {
-        let text = "We sat on the bank.";
+        let text = "// Lead. We sat on the bank.";
         let count = text.chars().count();
-        assert_eq!(of_selection(text, 3, count + 1), None);
+        let (start, end) = chars_of(text, "bank", 0);
+        assert!(of_selection(text, start, end).is_some());
+        assert_eq!(of_selection(text, start, count + 1), None);
         assert_eq!(of_selection(text, count + 2, count + 4), None);
-        assert_eq!(of_selection(text, 5, 5), None);
-        assert_eq!(of_selection(text, 6, 5), None);
+        assert_eq!(of_selection(text, start, start), None);
+        assert_eq!(of_selection(text, end, start), None);
         assert_eq!(of_selection("", 0, 0), None);
     }
 
@@ -758,12 +795,14 @@ mod tests {
     fn a_blank_text_or_selection_has_no_sentence() {
         assert_eq!(of_selection("  \n ", 0, 2), None);
         // Whitespace only of the sentence is selected.
-        assert_eq!(of_selection("We sat.   ", 7, 10), None);
+        let text = "// Lead. We sat.   ";
+        let (start, _) = chars_of(text, "   ", 0);
+        assert_eq!(of_selection(text, start, start + 3), None);
     }
 
     #[test]
     fn a_selection_with_whitespace_at_its_ends_keeps_the_word_inside() {
-        let text = "We sat on the bank.  ";
+        let text = "// Lead. We sat on the bank.  ";
         let (start, end) = chars_of(text, "bank.  ", 0);
         let found = of_selection(text, start, end).expect("sentence");
         assert_eq!(found.text, "We sat on the bank.");
@@ -771,17 +810,71 @@ mod tests {
     }
 
     #[test]
-    fn a_text_without_a_break_is_one_sentence() {
+    fn a_text_without_a_break_is_one_sentence_outside_the_area() {
+        // One sentence, so the first of its line, and without a stop.
         let text = "  the bank of the river  ";
+        assert_eq!(selected(text, "bank", 0), None);
+        let text = "  // the bank of the river.  ";
+        assert_eq!(selected(text, "bank", 0), None);
+    }
+
+    #[test]
+    fn a_closer_after_the_stop_ends_the_sentence() {
+        let text = "// Lead. He said \"we sat on the bank.\"";
         let found = selected(text, "bank", 0).expect("sentence");
-        assert_eq!(found.text, "the bank of the river");
-        assert_eq!(found.word, 4..8);
+        assert_eq!(found.text, "He said \"we sat on the bank.\"");
     }
 
     #[test]
     fn a_lowercase_letter_after_a_stop_keeps_the_sentence() {
-        let text = "Use e.g. the bank here. Next";
+        let text = "// Lead. Use e.g. the bank here. Next";
         let found = selected(text, "bank", 0).expect("sentence");
         assert_eq!(found.text, "Use e.g. the bank here.");
+    }
+
+    /// `experiment-exp-2/context-fixture.kt`, copied verbatim.
+    const FIXTURE: &str = "// The bank was closed for the day. We could not charge the card.
+// Check the value. It\u{2019}s a \u{201c}mean\u{201d} value \u{2014} not the median \u{1f642} \u{2014} and that is the issue.
+val message = \"The charge will appear on your next statement. Keep the receipt.\"
+// This sentence is long enough that it has been wrapped by hand onto
+// a second line of the comment before it ends. Next one.
+";
+
+    fn fixture_sentence(needle: &str, nth: usize) -> Option<String> {
+        selected(FIXTURE, needle, nth).map(|found| {
+            assert_eq!(&found.text[found.word.clone()], needle);
+            found.text
+        })
+    }
+
+    #[test]
+    fn the_fixture_gives_a_sentence_only_in_the_confirmed_area() {
+        // J2: the second sentence of a comment line.
+        assert_eq!(
+            fixture_sentence("charge", 0).as_deref(),
+            Some("We could not charge the card.")
+        );
+        // The first sentence of a comment line.
+        assert_eq!(fixture_sentence("bank", 0), None);
+        // J3: after and before a character outside the BMP.
+        let j3 = "It\u{2019}s a \u{201c}mean\u{201d} value \u{2014} not the median \u{1f642} \u{2014} and that is the issue.";
+        assert_eq!(fixture_sentence("issue", 0).as_deref(), Some(j3));
+        assert_eq!(fixture_sentence("mean", 0).as_deref(), Some(j3));
+        // J4: a string literal.
+        assert_eq!(fixture_sentence("charge", 1), None);
+        assert_eq!(fixture_sentence("receipt", 0), None);
+        // J5: a comment wrapped by hand.
+        assert_eq!(fixture_sentence("wrapped", 0), None);
+        assert_eq!(fixture_sentence("ends", 0), None);
+        // A sentence that ends in its line after the wrap.
+        assert_eq!(fixture_sentence("Next", 0).as_deref(), Some("Next one."));
+    }
+
+    #[test]
+    fn the_line_must_be_a_whole_line_comment_with_a_stop() {
+        assert_eq!(selected("// A. We sat on the bank", "bank", 0), None);
+        let found = selected("    // A. We sat on the bank.", "bank", 0).expect("sentence");
+        assert_eq!(found.text, "We sat on the bank.");
+        assert_eq!(selected("f() // A. We sat on the bank.", "bank", 0), None);
     }
 }
