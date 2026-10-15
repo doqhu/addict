@@ -9,16 +9,17 @@
 //! is the word alone.
 //!
 //! The text comes from the user, from a screen capture, from the
-//! accessibility bus or from the clipboard. A recognized text is always a new
-//! text with the source OCR, and an edit of it keeps that source; the source
-//! is manual again once the field holds no word. A text that arrived from the
-//! bus ([`Manual::arrived`]) is the sentence around the selected word, with
-//! that word chosen, and its source is AT-SPI; it is one sentence, as a typed
-//! text is. A text copied to the clipboard ([`Manual::copied`]), read when a
-//! press gave no other context, is a new text as one line with the source
-//! clipboard, and one sentence too; only one of at most
-//! [`CLIPBOARD_MAX_CHARS`] counts ([`clipboard_line`]). While a source is
-//! being read and there is no input, the window says that it is being read.
+//! accessibility bus or from the primary selection or the clipboard. A
+//! recognized text is always a new text with the source OCR, and an edit of
+//! it keeps that source; the source is manual again once the field holds no
+//! word. A text that arrived from the bus ([`Manual::arrived`]) is the
+//! sentence around the selected word, with that word chosen, and its source
+//! is AT-SPI; it is one sentence, as a typed text is. A text selected or
+//! copied ([`Manual::copied`]), read when a press gave no other context, is a
+//! new text as one line with the source clipboard, and one sentence too; only
+//! one of at most [`CLIPBOARD_MAX_CHARS`] counts ([`clipboard_line`]). While
+//! a source is being read and there is no input, the window says that it is
+//! being read.
 //!
 //! [`Manual`] is the state and holds no widget, so what an edit or a click
 //! does to it is tested without a display. [`look_up`] starts a lookup on the
@@ -224,7 +225,8 @@ impl Manual {
             .map_or(Edit::Cleared, Edit::Chosen)
     }
 
-    /// The clipboard gave `text` after a press without other context: the
+    /// The primary selection or the clipboard gave `text` after a press
+    /// without other context: the
     /// field holds it as one line, a new text with the source clipboard, and
     /// the reading is over. A text of one word has that word chosen at once;
     /// in more words nothing is chosen until a click. A blank text leaves no
@@ -1371,7 +1373,7 @@ pub(crate) mod tests {
             }
         );
         let texts = crate::view::texts(manual.state(), manual.source());
-        assert_eq!(texts.source, "clipboard");
+        assert_eq!(texts.source, "selection or clipboard");
     }
 
     #[test]

@@ -79,21 +79,23 @@
 //! [`context`](crate::context)'s.
 //!
 //! A read of the press that ends without context, for any cause, is written
-//! to stderr at once, and the window then reads the clipboard once, in place
-//! of showing the line: the waiting goes on with the source clipboard, and
-//! the field stays editable. Wayland gives a client the clipboard only with
-//! its keyboard focus, so the read starts once the window is active, at once
-//! when it is already; GTK's clipboard of the window's display is read, never
-//! the primary selection. Waiting for the activity and the read together end
-//! after [`CLIPBOARD_LIMIT`], which cancels the read. A text of the clipboard
-//! as one line, of at most [`CLIPBOARD_MAX_CHARS`] characters, replaces the
-//! field as a new text with the source clipboard, as a read context does,
-//! without a word chosen unless it is one word, and nothing is asked online;
-//! the line is not shown. A clipboard that is empty, blank, not text, too
-//! long, unreadable or late is written to stderr and leaves the empty state
-//! with the line of the read. The clipboard read has a number and is given up
-//! like the read it follows, by a press, an edit and a capture; what it
-//! reports later is ignored. Retry, a launch and a capture read no clipboard.
+//! to stderr at once, and the window then reads the primary selection or the
+//! clipboard once, in place of showing the line: the waiting goes on with the
+//! source clipboard, and the field stays editable. Wayland gives a client the
+//! clipboard only with its keyboard focus, so the read starts once the window
+//! is active, at once when it is already. The primary selection of the
+//! window's display, the text selected without a copy, is read first, and
+//! GTK's clipboard only when the selection gives no line. Waiting for the
+//! activity and both reads together end after [`CLIPBOARD_LIMIT`], which
+//! cancels the read. A text of either as one line, of at most
+//! [`CLIPBOARD_MAX_CHARS`] characters, replaces the field as a new text with
+//! the source clipboard, as a read context does, without a word chosen unless
+//! it is one word, and nothing is asked online; the line is not shown. When
+//! neither gives a line (empty, blank, not text, too long, unreadable or
+//! late), why is written to stderr, and the empty state stays with the line
+//! of the read. The read has a number and is given up like the read it
+//! follows, by a press, an edit and a capture; what it reports later is
+//! ignored. Retry, a launch and a capture read no clipboard.
 //!
 //! What is asked for and what is kept is [`online`](crate::online)'s. What
 //! the window says is [`view`](crate::view)'s; its widgets and the paste
@@ -376,7 +378,7 @@ struct Copying {
     number: u64,
 }
 
-/// One read of the clipboard.
+/// One read of the primary selection, then of the clipboard.
 struct ClipboardRead {
     /// The source line of the read of the bus that failed, shown when the
     /// clipboard gives nothing.
@@ -722,10 +724,10 @@ impl Session {
         self.start_copy(read_failure_text(failure).into_owned());
     }
 
-    /// Starts the read of the clipboard as the next number, after the
-    /// failure that `line` says: the window waits with the source clipboard,
-    /// the read starts once the window is active, and after
-    /// [`CLIPBOARD_LIMIT`] it ends without text.
+    /// Starts the read of the primary selection and the clipboard as the
+    /// next number, after the failure that `line` says: the window waits
+    /// with the source clipboard, the read starts once the window is active,
+    /// and after [`CLIPBOARD_LIMIT`] it ends without text.
     fn start_copy(&mut self, line: String) {
         let number = self.copying.begin(line);
         self.manual.set_reading(Some(Source::Clipboard));
@@ -750,8 +752,9 @@ impl Session {
         }
     }
 
-    /// Reads the clipboard of the window's display for the read that runs
-    /// and still waits; nothing else does.
+    /// Reads the primary selection of the window's display for the read that
+    /// runs and still waits, and the clipboard when the selection gives no
+    /// line; nothing else does. Both reads share its cancellable.
     fn read_clipboard(&mut self) {
         let number = self.copying.number;
         let Some(read) = self.copying.read.as_mut() else {
@@ -763,22 +766,27 @@ impl Session {
         let cancellable = gio::Cancellable::new();
         read.cancellable = Some(cancellable.clone());
         let sender = self.sender.clone();
-        self.window
-            .clipboard()
-            .read_text_async(Some(&cancellable), move |read| {
-                let line = match read {
-                    Ok(Some(text)) => manual::clipboard_line(&text).ok_or_else(|| {
-                        format!("blank or longer than {CLIPBOARD_MAX_CHARS} characters as one line")
-                    }),
-                    Ok(None) => Err("no text".to_owned()),
-                    Err(e) => Err(e.to_string()),
+        let display = WidgetExt::display(&self.window);
+        let clipboard = display.clipboard();
+        read_line(
+            &display.primary_clipboard(),
+            &cancellable.clone(),
+            move |primary| {
+                let Err(selection) = primary else {
+                    let _ = sender.unbounded_send(Event::Clipboard(number, primary));
+                    return;
                 };
-                let _ = sender.unbounded_send(Event::Clipboard(number, line));
-            });
+                read_line(&clipboard, &cancellable, move |copied| {
+                    let line = copied
+                        .map_err(|copied| format!("selection: {selection}; clipboard: {copied}"));
+                    let _ = sender.unbounded_send(Event::Clipboard(number, line));
+                });
+            },
+        );
     }
 
-    /// The read of the clipboard with `number` ended; one that was given up
-    /// shows nothing. A `line` replaces the field as a new text with the
+    /// The read of the primary selection and the clipboard with `number`
+    /// ended; one that was given up shows nothing. A `line` replaces the field as a new text with the
     /// source clipboard; nothing is asked online. Without one, the reason is
     /// logged, the waiting ends and the source line of the failed read of
     /// the bus says why.
@@ -796,7 +804,7 @@ impl Session {
                 self.text_replaced(edit);
             }
             Err(reason) => {
-                eprintln!("addict: no text from the clipboard: {reason}");
+                eprintln!("addict: no text from the selection or the clipboard: {reason}");
                 if self.manual.reading() == Some(Source::Clipboard) {
                     self.manual.set_reading(None);
                 }
@@ -1304,6 +1312,24 @@ impl Session {
         current.borrow_mut().take();
         *current.borrow_mut() = Some(start_shortcut(&self.sender, self.timed));
     }
+}
+
+/// Reads the text of `clipboard` once and gives `done` its line, of at most
+/// [`CLIPBOARD_MAX_CHARS`] characters, or why there is none.
+fn read_line(
+    clipboard: &gdk::Clipboard,
+    cancellable: &gio::Cancellable,
+    done: impl FnOnce(Result<String, String>) + 'static,
+) {
+    clipboard.read_text_async(Some(cancellable), move |read| {
+        done(match read {
+            Ok(Some(text)) => manual::clipboard_line(&text).ok_or_else(|| {
+                format!("blank or longer than {CLIPBOARD_MAX_CHARS} characters as one line")
+            }),
+            Ok(None) => Err("no text".to_owned()),
+            Err(e) => Err(e.to_string()),
+        });
+    });
 }
 
 /// Sends what the user does in the `view` to `sender`: Retry, an edit of the
