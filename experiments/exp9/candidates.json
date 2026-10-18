@@ -1,0 +1,1030 @@
+{
+  "schema": 1,
+  "note": "EXP-9 manifest. Files are downloaded into the ignored experiments/exp9/data/ on 2026-10-18 and are identified by size and SHA-256; identify.py stops (exit 2) when a present file differs. A file already on disk from EXP-7 is referenced by a path relative to experiments/exp9/data/, not downloaded again.",
+  "target_lists": {
+    "es": {
+      "path": "_bmad-output/initiative-linux-rust-translator/experiment-exp-9/target-words-es.txt",
+      "sha256": "2f28fa2dc900a8f970a22ea2b61567c3cdc76249eb73435f1d85bde5bd90b51a",
+      "approved": "2026-10-18"
+    },
+    "ca": {
+      "path": "_bmad-output/initiative-linux-rust-translator/experiment-exp-9/target-words-ca.txt",
+      "sha256": "dd88c2126d01200ceed9526f2ba0dab68fc30d825a76f6914f43830f4a2a2627",
+      "approved": "2026-10-18"
+    },
+    "note": "Set sha256 (of the file as approved) and approved (date) only after the user approves the list; until then no ES or CA candidate is downloaded or opened. After approval a list is not edited: a change is a new dated run."
+  },
+  "candidates": [
+    {
+      "name": "freedict-spa-rus-tei",
+      "title": "FreeDict Spanish-Russian (WikDict) 2025.11.23, TEI source",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "ru",
+        "sense-labels"
+      ],
+      "file": "freedict-spa-rus-2025.11.23.src.tar.xz",
+      "url": "https://download.freedict.org/dictionaries/spa-rus/2025.11.23/freedict-spa-rus-2025.11.23.src.tar.xz",
+      "version": "2025.11.23 (src release dated 2025-11-28 in freedict-database.json)",
+      "upstream_sha512": "c92e588b3024dc351229f93846b2cbca7c1af7b08cb2261b09424abbf87bf540a34b57cb5cc4c6558b1cd2743f2a58b6e70a4b619c739ea467d5234b235118b8",
+      "upstream_check": "equal",
+      "format": "freedict-tei-tar-xz",
+      "members": {
+        "tei": "spa-rus/spa-rus.tei"
+      },
+      "licence": "CC BY-SA 3.0 Unported, as stated in the TEI header; built by WikDict from Wiktionary via DBnary",
+      "licence_url": "https://creativecommons.org/licenses/by-sa/3.0/legalcode",
+      "note": "<def> carries a short source-language sense text taken from the Wiktionary sense, not a full definition.",
+      "size": 578944,
+      "sha256": "1a64b0d8b3af5ec9258c91adf9b1b099c36fc62e9d474a9862b81e2d813bba67"
+    },
+    {
+      "name": "freedict-cat-rus-tei",
+      "title": "FreeDict Catalan-Russian (WikDict) 2025.11.23, TEI source",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "ru",
+        "sense-labels"
+      ],
+      "file": "freedict-cat-rus-2025.11.23.src.tar.xz",
+      "url": "https://download.freedict.org/dictionaries/cat-rus/2025.11.23/freedict-cat-rus-2025.11.23.src.tar.xz",
+      "version": "2025.11.23 (src release dated 2026-02-12 in freedict-database.json)",
+      "upstream_sha512": "7f78d17d1ebd4d568ede9dd0a0f5468adb7d0721d14007543b1501e5e4ef0f39fd35286565882f26869ae96bf96be76f6d9c105424790a981b7bb4b22454122b",
+      "upstream_check": "equal",
+      "format": "freedict-tei-tar-xz",
+      "members": {
+        "tei": "cat-rus/cat-rus.tei"
+      },
+      "licence": "CC BY-SA 3.0 Unported, as stated in the TEI header; built by WikDict from Wiktionary via DBnary",
+      "licence_url": "https://creativecommons.org/licenses/by-sa/3.0/legalcode",
+      "note": "<def> carries a short source-language sense text taken from the Wiktionary sense, not a full definition.",
+      "size": 435808,
+      "sha256": "b9e5c21e584ca2d1c855288340ee4abafab96a0c6a863e2e2e247f24d039ed24"
+    },
+    {
+      "name": "freedict-cat-eng-tei",
+      "title": "FreeDict Catalan-English (WikDict) 2025.11.23, TEI source",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "en",
+        "sense-labels"
+      ],
+      "file": "freedict-cat-eng-2025.11.23.src.tar.xz",
+      "url": "https://download.freedict.org/dictionaries/cat-eng/2025.11.23/freedict-cat-eng-2025.11.23.src.tar.xz",
+      "version": "2025.11.23 (src release dated 2025-11-28 in freedict-database.json)",
+      "upstream_sha512": "932a1ae9aab62855da027acad6a58c75dc9f017c5f0082f4c0a7ad75284a794b9928a22770517c909291460f09870c2ef7a9c81319631ba21071ece6d0ae76a0",
+      "upstream_check": "equal",
+      "format": "freedict-tei-tar-xz",
+      "members": {
+        "tei": "cat-eng/cat-eng.tei"
+      },
+      "licence": "CC BY-SA 3.0 Unported, as stated in the TEI header; built by WikDict from Wiktionary via DBnary",
+      "licence_url": "https://creativecommons.org/licenses/by-sa/3.0/legalcode",
+      "note": "<def> carries a short source-language sense text taken from the Wiktionary sense, not a full definition.",
+      "size": 793248,
+      "sha256": "583eb76dbaa89d043e5f8a7624fe1c0386eb68b015d85cfbe451f11d4d434b23"
+    },
+    {
+      "name": "freedict-rus-spa-tei",
+      "title": "FreeDict Russian-Spanish (WikDict), reverse direction 2025.11.23, TEI source",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "ru"
+      ],
+      "file": "freedict-rus-spa-2025.11.23.src.tar.xz",
+      "url": "https://download.freedict.org/dictionaries/rus-spa/2025.11.23/freedict-rus-spa-2025.11.23.src.tar.xz",
+      "version": "2025.11.23 (src release dated 2025-11-28 in freedict-database.json)",
+      "upstream_sha512": "aa378ee417c729b6407d0f11381a0baf035338153c1a43c649fac1acd40a9c0af143c7ce7cddfdb87b0d43345de469970ca2eb58069193d9180e4c6910242c31",
+      "upstream_check": "equal",
+      "format": "freedict-tei-tar-xz",
+      "members": {
+        "tei": "rus-spa/rus-spa.tei"
+      },
+      "licence": "CC BY-SA 3.0 Unported, as stated in the TEI header; built by WikDict from Wiktionary via DBnary",
+      "licence_url": "https://creativecommons.org/licenses/by-sa/3.0/legalcode",
+      "note": "Reverse direction: usable only by inverting translations into ES/CA headwords. <def> carries a short source-language sense text taken from the Wiktionary sense, not a full definition.",
+      "size": 586520,
+      "sha256": "3e8d5f3d28b98382d28b6e3be8e248bc61cfbe8eaee680b80f98b13adb84a795"
+    },
+    {
+      "name": "freedict-eng-spa-tei",
+      "title": "FreeDict English-Spanish (WikDict), reverse direction 2025.11.23, TEI source",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "en"
+      ],
+      "file": "freedict-eng-spa-2025.11.23.src.tar.xz",
+      "url": "https://download.freedict.org/dictionaries/eng-spa/2025.11.23/freedict-eng-spa-2025.11.23.src.tar.xz",
+      "version": "2025.11.23 (src release dated 2026-02-11 in freedict-database.json)",
+      "upstream_sha512": "622e8fec6c4178cb4c21e4577701c5325670f825331b07a185b4c6b810603c337e80429738a97581f68f668667910e7ad36f27332eaee2828f1f906537852fe3",
+      "upstream_check": "equal",
+      "format": "freedict-tei-tar-xz",
+      "members": {
+        "tei": "eng-spa/eng-spa.tei"
+      },
+      "licence": "CC BY-SA 3.0 Unported, as stated in the TEI header; built by WikDict from Wiktionary via DBnary",
+      "licence_url": "https://creativecommons.org/licenses/by-sa/3.0/legalcode",
+      "note": "Reverse direction: usable only by inverting translations into ES/CA headwords. <def> carries a short source-language sense text taken from the Wiktionary sense, not a full definition.",
+      "size": 3715012,
+      "sha256": "dd724fb48c5701395c15d7d648a9e6f6b75d6ff4269e465dce6d3a292700198d"
+    },
+    {
+      "name": "freedict-eng-cat-tei",
+      "title": "FreeDict English-Catalan (WikDict), reverse direction 2025.11.23, TEI source",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "en"
+      ],
+      "file": "freedict-eng-cat-2025.11.23.src.tar.xz",
+      "url": "https://download.freedict.org/dictionaries/eng-cat/2025.11.23/freedict-eng-cat-2025.11.23.src.tar.xz",
+      "version": "2025.11.23 (src release dated 2026-02-12 in freedict-database.json)",
+      "upstream_sha512": "4c79e60d8eda53de60030c55e71304293ee5625cf7e5de1ef338d39f9dfb6d207b591bb006f2f847cc7ee00b6acded17c49562e88232c18e153f0ffc295bb0b5",
+      "upstream_check": "equal",
+      "format": "freedict-tei-tar-xz",
+      "members": {
+        "tei": "eng-cat/eng-cat.tei"
+      },
+      "licence": "CC BY-SA 3.0 Unported, as stated in the TEI header; built by WikDict from Wiktionary via DBnary",
+      "licence_url": "https://creativecommons.org/licenses/by-sa/3.0/legalcode",
+      "note": "Reverse direction: usable only by inverting translations into ES/CA headwords. <def> carries a short source-language sense text taken from the Wiktionary sense, not a full definition.",
+      "size": 2014080,
+      "sha256": "314d5927f9fa3a68041b4f428db7c23e6fc2d7ff09bcb73c799cd6d1fac4827f"
+    },
+    {
+      "name": "freedict-spa-eng-tei",
+      "title": "FreeDict Spanish-English 0.3.1 (Ergane), TEI source",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "en"
+      ],
+      "file": "freedict-spa-eng-0.3.1.src.tar.xz",
+      "url": "https://download.freedict.org/dictionaries/spa-eng/0.3.1/freedict-spa-eng-0.3.1.src.tar.xz",
+      "version": "0.3.1 (src release dated 2019-11-23)",
+      "upstream_sha512": "bc8dc9c09b0d4584d1cbaa9c3e75183431ad5cd9a42b31685f0392413a6755504909c35c5ccae3bb8eb66e3b8623df93982c8d5a331dcf516c08bfa5028ce67c",
+      "upstream_check": "equal",
+      "format": "freedict-tei-tar-xz",
+      "members": {
+        "tei": "spa-eng/spa-eng.tei"
+      },
+      "licence": "GPL-2.0-or-later, as stated in the TEI header (data from Ergane via travlang)",
+      "licence_url": "https://www.gnu.org/licenses/gpl-2.0.html",
+      "note": "4502 headwords, capitalised headwords common; not a WikDict build.",
+      "size": 121624,
+      "sha256": "7ad87dba7c9f8d2ff48ad822e8483792370ee98315982aa6a0932ea4fb511595"
+    },
+    {
+      "name": "wikdict-es-ru",
+      "title": "WikDict es-ru SQLite",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "ru"
+      ],
+      "file": "wikdict-2026-06-es-ru.sqlite3",
+      "url": "https://download.wikdict.com/dictionaries/sqlite/2_2026-06/es-ru.sqlite3",
+      "version": "WikDict 2_2026-06 (Last-Modified 2026-06-23)",
+      "format": "wikdict-sqlite-pair",
+      "reverse": false,
+      "licence": "CC BY-SA (data from Wiktionary via DBnary), stated on the WikDict about page",
+      "licence_url": "https://www.wikdict.com/page/about",
+      "note": "Versioned directory 2_2026-06 (files dated 2026-06-23); WikDict builds from DBnary, so it repeats DBnary content of that time. No upstream checksum published. Table translation has a short source-language sense text per row where Wiktionary gives one.",
+      "size": 5963776,
+      "sha256": "4c941b5df1809575e47d5e0524a683eb03a3a1941b731b7434be10a74b6e78f6"
+    },
+    {
+      "name": "wikdict-ca-ru",
+      "title": "WikDict ca-ru SQLite",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "ru"
+      ],
+      "file": "wikdict-2026-06-ca-ru.sqlite3",
+      "url": "https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ca-ru.sqlite3",
+      "version": "WikDict 2_2026-06 (Last-Modified 2026-06-23)",
+      "format": "wikdict-sqlite-pair",
+      "reverse": false,
+      "licence": "CC BY-SA (data from Wiktionary via DBnary), stated on the WikDict about page",
+      "licence_url": "https://www.wikdict.com/page/about",
+      "note": "Versioned directory 2_2026-06 (files dated 2026-06-23); WikDict builds from DBnary, so it repeats DBnary content of that time. No upstream checksum published. Table translation has a short source-language sense text per row where Wiktionary gives one.",
+      "size": 3076096,
+      "sha256": "01cf2923abad3086781da0638245cd86d2edb70f23bcea7eb149caabb7ef8421"
+    },
+    {
+      "name": "wikdict-es-en",
+      "title": "WikDict es-en SQLite",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "en"
+      ],
+      "file": "wikdict-2026-06-es-en.sqlite3",
+      "url": "https://download.wikdict.com/dictionaries/sqlite/2_2026-06/es-en.sqlite3",
+      "version": "WikDict 2_2026-06 (Last-Modified 2026-06-23)",
+      "format": "wikdict-sqlite-pair",
+      "reverse": false,
+      "licence": "CC BY-SA (data from Wiktionary via DBnary), stated on the WikDict about page",
+      "licence_url": "https://www.wikdict.com/page/about",
+      "note": "Versioned directory 2_2026-06 (files dated 2026-06-23); WikDict builds from DBnary, so it repeats DBnary content of that time. No upstream checksum published. Table translation has a short source-language sense text per row where Wiktionary gives one.",
+      "size": 11063296,
+      "sha256": "e09d4da3699841ef6210058de837931a36a32ebfccfd2ab1b7baacf58313135c"
+    },
+    {
+      "name": "wikdict-ca-en",
+      "title": "WikDict ca-en SQLite",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "en"
+      ],
+      "file": "wikdict-2026-06-ca-en.sqlite3",
+      "url": "https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ca-en.sqlite3",
+      "version": "WikDict 2_2026-06 (Last-Modified 2026-06-23)",
+      "format": "wikdict-sqlite-pair",
+      "reverse": false,
+      "licence": "CC BY-SA (data from Wiktionary via DBnary), stated on the WikDict about page",
+      "licence_url": "https://www.wikdict.com/page/about",
+      "note": "Versioned directory 2_2026-06 (files dated 2026-06-23); WikDict builds from DBnary, so it repeats DBnary content of that time. No upstream checksum published. Table translation has a short source-language sense text per row where Wiktionary gives one.",
+      "size": 5189632,
+      "sha256": "c9931a4de03e65c6b7ba752b1d4cfc81959d94f207abcbe5294db71cdcbf4694"
+    },
+    {
+      "name": "wikdict-ru-es",
+      "title": "WikDict ru-es SQLite, reverse direction",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "ru"
+      ],
+      "file": "wikdict-2026-06-ru-es.sqlite3",
+      "url": "https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ru-es.sqlite3",
+      "version": "WikDict 2_2026-06 (Last-Modified 2026-06-23)",
+      "format": "wikdict-sqlite-pair",
+      "reverse": true,
+      "licence": "CC BY-SA (data from Wiktionary via DBnary), stated on the WikDict about page",
+      "licence_url": "https://www.wikdict.com/page/about",
+      "note": "Versioned directory 2_2026-06 (files dated 2026-06-23); WikDict builds from DBnary, so it repeats DBnary content of that time. No upstream checksum published. Reverse direction: usable only by inverting trans_list.",
+      "size": 7081984,
+      "sha256": "c1a85cd464de77d2cb862d4253c94491f1e67f07a96d2267fbc430d87573b40d"
+    },
+    {
+      "name": "wikdict-ru-ca",
+      "title": "WikDict ru-ca SQLite, reverse direction",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "ru"
+      ],
+      "file": "wikdict-2026-06-ru-ca.sqlite3",
+      "url": "https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ru-ca.sqlite3",
+      "version": "WikDict 2_2026-06 (Last-Modified 2026-06-23)",
+      "format": "wikdict-sqlite-pair",
+      "reverse": true,
+      "licence": "CC BY-SA (data from Wiktionary via DBnary), stated on the WikDict about page",
+      "licence_url": "https://www.wikdict.com/page/about",
+      "note": "Versioned directory 2_2026-06 (files dated 2026-06-23); WikDict builds from DBnary, so it repeats DBnary content of that time. No upstream checksum published. Reverse direction: usable only by inverting trans_list.",
+      "size": 5771264,
+      "sha256": "0275ead1c53cba99d57596100550afeebd62c03e5bddcbe7b92a7dac348c737b"
+    },
+    {
+      "name": "wikdict-en-es",
+      "title": "WikDict en-es SQLite, reverse direction",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "en"
+      ],
+      "file": "wikdict-2026-06-en-es.sqlite3",
+      "url": "https://download.wikdict.com/dictionaries/sqlite/2_2026-06/en-es.sqlite3",
+      "version": "WikDict 2_2026-06 (Last-Modified 2026-06-23)",
+      "format": "wikdict-sqlite-pair",
+      "reverse": true,
+      "licence": "CC BY-SA (data from Wiktionary via DBnary), stated on the WikDict about page",
+      "licence_url": "https://www.wikdict.com/page/about",
+      "note": "Versioned directory 2_2026-06 (files dated 2026-06-23); WikDict builds from DBnary, so it repeats DBnary content of that time. No upstream checksum published. Reverse direction: usable only by inverting trans_list.",
+      "size": 16146432,
+      "sha256": "d66fd6f8b7f3872f5fa17391846468ac18cda11a63b64961ebd36c7ba1069a79"
+    },
+    {
+      "name": "wikdict-en-ca",
+      "title": "WikDict en-ca SQLite, reverse direction",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "en"
+      ],
+      "file": "wikdict-2026-06-en-ca.sqlite3",
+      "url": "https://download.wikdict.com/dictionaries/sqlite/2_2026-06/en-ca.sqlite3",
+      "version": "WikDict 2_2026-06 (Last-Modified 2026-06-23)",
+      "format": "wikdict-sqlite-pair",
+      "reverse": true,
+      "licence": "CC BY-SA (data from Wiktionary via DBnary), stated on the WikDict about page",
+      "licence_url": "https://www.wikdict.com/page/about",
+      "note": "Versioned directory 2_2026-06 (files dated 2026-06-23); WikDict builds from DBnary, so it repeats DBnary content of that time. No upstream checksum published. Reverse direction: usable only by inverting trans_list.",
+      "size": 9711616,
+      "sha256": "44991b6772ad00ea0a7f5ca4e7a2bb2f449ec29cbc6f93db5707dec5decfc2d0"
+    },
+    {
+      "name": "wikdict-es",
+      "title": "WikDict es monolingual SQLite (entries and forms)",
+      "languages": [
+        "es"
+      ],
+      "kinds": [],
+      "file": "wikdict-2026-06-es.sqlite3",
+      "url": "https://download.wikdict.com/dictionaries/sqlite/2_2026-06/es.sqlite3",
+      "version": "WikDict 2_2026-06 (Last-Modified 2026-06-23)",
+      "format": "wikdict-sqlite-mono",
+      "native_prefix": "spa",
+      "licence": "CC BY-SA (data from Wiktionary via DBnary)",
+      "licence_url": "https://www.wikdict.com/page/about",
+      "note": "Versioned directory 2_2026-06 (files dated 2026-06-23); WikDict builds from DBnary, so it repeats DBnary content of that time. No upstream checksum published. No definitions; holds entries of every DBnary edition and, for ca only, a form table (forms of the Catalan Wiktionary). Its form table is empty for es (0 rows), so it carries no content kind used here; kept to record that.",
+      "size": 186318848,
+      "sha256": "b01497f8983effb5953be26954f43d7188f847213d8a81650f8289daf5329a02"
+    },
+    {
+      "name": "wikdict-ca",
+      "title": "WikDict ca monolingual SQLite (entries and forms)",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "wikdict-2026-06-ca.sqlite3",
+      "url": "https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ca.sqlite3",
+      "version": "WikDict 2_2026-06 (Last-Modified 2026-06-23)",
+      "format": "wikdict-sqlite-mono",
+      "native_prefix": "cat",
+      "licence": "CC BY-SA (data from Wiktionary via DBnary)",
+      "licence_url": "https://www.wikdict.com/page/about",
+      "note": "Versioned directory 2_2026-06 (files dated 2026-06-23); WikDict builds from DBnary, so it repeats DBnary content of that time. No upstream checksum published. No definitions; holds entries of every DBnary edition and, for ca only, a form table (forms of the Catalan Wiktionary).",
+      "size": 260558848,
+      "sha256": "374b6772c857b05cd41d18c606e0b17fc6b0985926870d1c539ced93af7a3804"
+    },
+    {
+      "name": "kaikki-raw-enwiktionary",
+      "title": "Kaikki raw wiktextract data of English Wiktionary, all languages (EXP-7 file)",
+      "languages": [
+        "es",
+        "ca"
+      ],
+      "kinds": [
+        "en",
+        "synonyms",
+        "forms"
+      ],
+      "file": "../../exp7/data/raw-wiktextract-data.jsonl.gz",
+      "url": "https://kaikki.org/dictionary/raw-wiktextract-data.jsonl.gz",
+      "version": "extracted 2026-10-03 from the enwiktionary dump of 2026-09-02, wiktextract 1a05e46 and e3d6d4e (EXP-7)",
+      "format": "kaikki-jsonl-gz",
+      "edition": "en",
+      "licence": "CC BY-SA and GFDL, \"the same licenses as Wiktionary\" (kaikki.org main page, read 2026-10-18)",
+      "licence_url": "https://kaikki.org/dictionary/index.html",
+      "note": "Already on disk from EXP-7 (experiments/exp7/data/), referenced, not downloaded again; hash re-checked 2026-10-18, equal to EXP-7. URL not versioned: kaikki.org replaces the file about weekly, the hash identifies only the local copy. Glosses are English.",
+      "size": 2981058381,
+      "sha256": "3dac8a09e57827bef493e2e6b552fe917bf3b1fc55dee05c4e4a3702aff5dbdb"
+    },
+    {
+      "name": "kaikki-en-Spanish",
+      "title": "Kaikki English Wiktionary, Spanish, post-processed",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "en",
+        "synonyms",
+        "forms"
+      ],
+      "file": "kaikki-en-Spanish.jsonl.gz",
+      "url": "https://kaikki.org/dictionary/Spanish/kaikki.org-dictionary-Spanish.jsonl.gz",
+      "version": "extracted 2026-10-03 from the enwiktionary dump of 2026-09-02 (Last-Modified 2026-10-03)",
+      "format": "kaikki-jsonl-gz",
+      "edition": "en",
+      "licence": "CC BY-SA and GFDL, \"the same licenses as Wiktionary\" (kaikki.org main page, read 2026-10-18)",
+      "licence_url": "https://kaikki.org/dictionary/index.html",
+      "note": "URL not versioned: kaikki.org replaces the file about weekly, the hash identifies only the local copy. Glosses are in the edition language (en). The per-language post-processed files are marked DEPRECATED on kaikki.org for the English edition.",
+      "size": 95164223,
+      "sha256": "c805cfb9f13c1769400d08e4a01bc4aeefb67775cbb36e2e4deb199e0af57b38"
+    },
+    {
+      "name": "kaikki-en-Catalan",
+      "title": "Kaikki English Wiktionary, Catalan, post-processed",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "en",
+        "synonyms",
+        "forms"
+      ],
+      "file": "kaikki-en-Catalan.jsonl.gz",
+      "url": "https://kaikki.org/dictionary/Catalan/kaikki.org-dictionary-Catalan.jsonl.gz",
+      "version": "extracted 2026-10-03 from the enwiktionary dump of 2026-09-02 (Last-Modified 2026-10-03)",
+      "format": "kaikki-jsonl-gz",
+      "edition": "en",
+      "licence": "CC BY-SA and GFDL, \"the same licenses as Wiktionary\" (kaikki.org main page, read 2026-10-18)",
+      "licence_url": "https://kaikki.org/dictionary/index.html",
+      "note": "URL not versioned: kaikki.org replaces the file about weekly, the hash identifies only the local copy. Glosses are in the edition language (en). The per-language post-processed files are marked DEPRECATED on kaikki.org for the English edition.",
+      "size": 23331032,
+      "sha256": "7cc434210347de5d15723d299509c21f49a68a5029fb1145a59f0f582bdf12a5"
+    },
+    {
+      "name": "kaikki-es-Espanol",
+      "title": "Kaikki Spanish Wiktionary, Español, post-processed",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "definitions",
+        "synonyms",
+        "ru",
+        "en",
+        "forms"
+      ],
+      "file": "kaikki-es-Espanol.jsonl.gz",
+      "url": "https://kaikki.org/eswiktionary/Espa%C3%B1ol/kaikki.org-dictionary-Espa%C3%B1ol.jsonl.gz",
+      "version": "extracted 2026-10-16 from the eswiktionary dump of 2026-10-01, wiktextract 4b3d73a and 04e9833 (Last-Modified 2026-10-16)",
+      "format": "kaikki-jsonl-gz",
+      "edition": "es",
+      "licence": "CC BY-SA and GFDL, \"the same licenses as Wiktionary\" (kaikki.org main page, read 2026-10-18)",
+      "licence_url": "https://kaikki.org/dictionary/index.html",
+      "note": "URL not versioned: kaikki.org replaces the file about weekly, the hash identifies only the local copy. Glosses are in the edition language (es). The per-language post-processed files are marked DEPRECATED on kaikki.org for the English edition.",
+      "size": 108490455,
+      "sha256": "fee9c37580717d7faa69e951515a94fa0aaa77b816d2f9f96a0fb8d44b87b9bc"
+    },
+    {
+      "name": "kaikki-es-Catalan",
+      "title": "Kaikki Spanish Wiktionary, Catalán, post-processed",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "kaikki-es-Catalan.jsonl.gz",
+      "url": "https://kaikki.org/eswiktionary/Catal%C3%A1n/kaikki.org-dictionary-Catal%C3%A1n.jsonl.gz",
+      "version": "extracted 2026-10-16 from the eswiktionary dump of 2026-10-01 (Last-Modified 2026-10-16)",
+      "format": "kaikki-jsonl-gz",
+      "edition": "es",
+      "licence": "CC BY-SA and GFDL, \"the same licenses as Wiktionary\" (kaikki.org main page, read 2026-10-18)",
+      "licence_url": "https://kaikki.org/dictionary/index.html",
+      "note": "URL not versioned: kaikki.org replaces the file about weekly, the hash identifies only the local copy. Glosses are in the edition language (es). The per-language post-processed files are marked DEPRECATED on kaikki.org for the English edition.",
+      "size": 468492,
+      "sha256": "fd5b528dc5dfe07ea80f80ec75a8aa51e532f80609f98a2af1d8788224ade79c"
+    },
+    {
+      "name": "kaikki-ru-Ispanskiy",
+      "title": "Kaikki Russian Wiktionary, Испанский, post-processed",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "ru",
+        "synonyms"
+      ],
+      "file": "kaikki-ru-Ispanskiy.jsonl.gz",
+      "url": "https://kaikki.org/ruwiktionary/%D0%98%D1%81%D0%BF%D0%B0%D0%BD%D1%81%D0%BA%D0%B8%D0%B9/kaikki.org-dictionary-%D0%98%D1%81%D0%BF%D0%B0%D0%BD%D1%81%D0%BA%D0%B8%D0%B9.jsonl.gz",
+      "version": "extracted 2026-10-16 from the ruwiktionary dump of 2026-10-01, wiktextract 4b3d73a and 04e9833 (Last-Modified 2026-10-16)",
+      "format": "kaikki-jsonl-gz",
+      "edition": "ru",
+      "licence": "CC BY-SA and GFDL, \"the same licenses as Wiktionary\" (kaikki.org main page, read 2026-10-18)",
+      "licence_url": "https://kaikki.org/dictionary/index.html",
+      "note": "URL not versioned: kaikki.org replaces the file about weekly, the hash identifies only the local copy. Glosses are in the edition language (ru). The per-language post-processed files are marked DEPRECATED on kaikki.org for the English edition.",
+      "size": 1989508,
+      "sha256": "0d01b005c4b902d80889e8af0b1ed60570dc4e2e03c9a044b27d9097d20f4f98"
+    },
+    {
+      "name": "kaikki-ru-Katalanskiy",
+      "title": "Kaikki Russian Wiktionary, Каталанский, post-processed",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "ru",
+        "synonyms"
+      ],
+      "file": "kaikki-ru-Katalanskiy.jsonl.gz",
+      "url": "https://kaikki.org/ruwiktionary/%D0%9A%D0%B0%D1%82%D0%B0%D0%BB%D0%B0%D0%BD%D1%81%D0%BA%D0%B8%D0%B9/kaikki.org-dictionary-%D0%9A%D0%B0%D1%82%D0%B0%D0%BB%D0%B0%D0%BD%D1%81%D0%BA%D0%B8%D0%B9.jsonl.gz",
+      "version": "extracted 2026-10-16 from the ruwiktionary dump of 2026-10-01 (Last-Modified 2026-10-16)",
+      "format": "kaikki-jsonl-gz",
+      "edition": "ru",
+      "licence": "CC BY-SA and GFDL, \"the same licenses as Wiktionary\" (kaikki.org main page, read 2026-10-18)",
+      "licence_url": "https://kaikki.org/dictionary/index.html",
+      "note": "URL not versioned: kaikki.org replaces the file about weekly, the hash identifies only the local copy. Glosses are in the edition language (ru). The per-language post-processed files are marked DEPRECATED on kaikki.org for the English edition.",
+      "size": 743710,
+      "sha256": "fb4c82d5e67aa974c133b713a745a32085c98aeeea21cf381751f224cdae287c"
+    },
+    {
+      "name": "kaikki-raw-eswiktionary",
+      "title": "Kaikki raw wiktextract data of Spanish Wiktionary, all languages",
+      "languages": [
+        "es",
+        "ca"
+      ],
+      "kinds": [
+        "definitions",
+        "synonyms",
+        "ru",
+        "en",
+        "forms"
+      ],
+      "file": "es-extract.jsonl.gz",
+      "url": "https://kaikki.org/dictionary/downloads/es/es-extract.jsonl.gz",
+      "version": "Last-Modified 2026-10-03; the dump date is not stated on the raw-data page",
+      "format": "kaikki-jsonl-gz",
+      "edition": "es",
+      "licence": "CC BY-SA and GFDL, \"the same licenses as Wiktionary\" (kaikki.org main page, read 2026-10-18)",
+      "licence_url": "https://kaikki.org/dictionary/index.html",
+      "note": "URL not versioned: kaikki.org replaces the file about weekly, the hash identifies only the local copy. Glosses are in the edition language (es). The per-language post-processed files are marked DEPRECATED on kaikki.org for the English edition.",
+      "size": 103226106,
+      "sha256": "fb5b5b8520912d1d1a398f2b8bf2569c11911b4c26bad6b8c066a84f5e3d34ed"
+    },
+    {
+      "name": "kaikki-raw-ruwiktionary",
+      "title": "Kaikki raw wiktextract data of Russian Wiktionary, all languages",
+      "languages": [
+        "es",
+        "ca"
+      ],
+      "kinds": [
+        "ru",
+        "synonyms"
+      ],
+      "file": "ru-extract.jsonl.gz",
+      "url": "https://kaikki.org/dictionary/downloads/ru/ru-extract.jsonl.gz",
+      "version": "Last-Modified 2026-10-03; the dump date is not stated on the raw-data page",
+      "format": "kaikki-jsonl-gz",
+      "edition": "ru",
+      "licence": "CC BY-SA and GFDL, \"the same licenses as Wiktionary\" (kaikki.org main page, read 2026-10-18)",
+      "licence_url": "https://kaikki.org/dictionary/index.html",
+      "note": "URL not versioned: kaikki.org replaces the file about weekly, the hash identifies only the local copy. Glosses are in the edition language (ru). The per-language post-processed files are marked DEPRECATED on kaikki.org for the English edition.",
+      "size": 308932270,
+      "sha256": "8d13661ba146a7cd7a7177c898eb22812a006840a3401a0af0e10a252a9818b7"
+    },
+    {
+      "name": "dbnary-es-ontolex",
+      "title": "DBnary Spanish Wiktionary, ontolex 2026-10-01",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "definitions",
+        "synonyms",
+        "ru",
+        "en"
+      ],
+      "file": "dbnary-es_dbnary_ontolex_2026-10-01.ttl.bz2",
+      "url": "https://kaiko.getalp.org/static/ontolex/es/es_dbnary_ontolex_2026-10-01.ttl.bz2",
+      "version": "dump of 2026-10-01 (file dated 2026-10-03)",
+      "format": "dbnary-ttl-bz2",
+      "licence": "CC BY-SA 3.0 Unported (DBnary dataset; extraction software MIT)",
+      "licence_url": "https://kaiko.getalp.org/about-dbnary/",
+      "note": "Dated file name, so the URL is versioned; no checksum published. The ru edition exolex file (other languages in ruwiktionary) is empty (459 bytes), so Spanish/Catalan words of ruwiktionary are not in DBnary.",
+      "size": 13365498,
+      "sha256": "6df940b3f67b8577f812b8b8ceb55dc8145d5c716f00c697757502ae83369745"
+    },
+    {
+      "name": "dbnary-ca-ontolex",
+      "title": "DBnary Catalan Wiktionary, ontolex 2026-10-01",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "definitions",
+        "synonyms",
+        "ru",
+        "en"
+      ],
+      "file": "dbnary-ca_dbnary_ontolex_2026-10-01.ttl.bz2",
+      "url": "https://kaiko.getalp.org/static/ontolex/ca/ca_dbnary_ontolex_2026-10-01.ttl.bz2",
+      "version": "dump of 2026-10-01 (file dated 2026-10-03)",
+      "format": "dbnary-ttl-bz2",
+      "licence": "CC BY-SA 3.0 Unported (DBnary dataset; extraction software MIT)",
+      "licence_url": "https://kaiko.getalp.org/about-dbnary/",
+      "note": "Dated file name, so the URL is versioned; no checksum published. The ru edition exolex file (other languages in ruwiktionary) is empty (459 bytes), so Spanish/Catalan words of ruwiktionary are not in DBnary.",
+      "size": 20657385,
+      "sha256": "bb52ce1aee0164ea276a74586cf24a38ef6b118047eb9f609d6da2c3eddf4142"
+    },
+    {
+      "name": "dbnary-ca-morphology",
+      "title": "DBnary Catalan Wiktionary, morphology 2026-10-01",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "dbnary-ca_dbnary_morphology_2026-10-01.ttl.bz2",
+      "url": "https://kaiko.getalp.org/static/ontolex/ca/ca_dbnary_morphology_2026-10-01.ttl.bz2",
+      "version": "dump of 2026-10-01 (file dated 2026-10-03)",
+      "format": "dbnary-ttl-bz2",
+      "licence": "CC BY-SA 3.0 Unported (DBnary dataset; extraction software MIT)",
+      "licence_url": "https://kaiko.getalp.org/about-dbnary/",
+      "note": "Dated file name, so the URL is versioned; no checksum published. The ru edition exolex file (other languages in ruwiktionary) is empty (459 bytes), so Spanish/Catalan words of ruwiktionary are not in DBnary.",
+      "size": 10863205,
+      "sha256": "ff8893daa591bab302c3f42dff8ef56f1a52005cee1b2c59184bad8dc926df9f"
+    },
+    {
+      "name": "dbnary-ru-ontolex",
+      "title": "DBnary Russian Wiktionary, ontolex (Russian entries; reverse direction) 2026-10-01",
+      "languages": [
+        "es",
+        "ca"
+      ],
+      "kinds": [
+        "ru"
+      ],
+      "file": "dbnary-ru_dbnary_ontolex_2026-10-01.ttl.bz2",
+      "url": "https://kaiko.getalp.org/static/ontolex/ru/ru_dbnary_ontolex_2026-10-01.ttl.bz2",
+      "version": "dump of 2026-10-01 (file dated 2026-10-03)",
+      "format": "dbnary-ttl-bz2",
+      "licence": "CC BY-SA 3.0 Unported (DBnary dataset; extraction software MIT)",
+      "licence_url": "https://kaiko.getalp.org/about-dbnary/",
+      "note": "Dated file name, so the URL is versioned; no checksum published. Russian entries with translations into Spanish and Catalan: usable only by inverting. The ru edition exolex file (other languages in ruwiktionary) is empty (459 bytes), so Spanish/Catalan words of ruwiktionary are not in DBnary.",
+      "size": 48352890,
+      "sha256": "bdb33bbb6cfab7c59566875f16e34f05a8d1a5a9a5edc284eb36805072a3c5ef"
+    },
+    {
+      "name": "omw-es-2.0",
+      "title": "Open Multilingual Wordnet 2.0, MCR Spanish, WN-LMF",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "definitions",
+        "synonyms",
+        "en"
+      ],
+      "file": "omw-es-2.0.tar.xz",
+      "url": "https://github.com/omwn/omw-data/releases/download/v2.0/omw-es-2.0.tar.xz",
+      "version": "OMW 2.0 (tag v2.0, published 2026-02-01); lexicon version 2.0",
+      "format": "wn-lmf-tar-xz",
+      "members": {
+        "xml": "omw-es/omw-es.xml"
+      },
+      "licence": "CC BY 3.0 (Multilingual Central Repository 3.0; English WordNet parts under the WordNet licence)",
+      "licence_url": "https://creativecommons.org/licenses/by/3.0/",
+      "note": "Synsets carry ILI ids, so English glosses come through the ILI from an English wordnet (OEWN 2025 already on disk, EXP-7). Synonyms are synset members. No <Form> elements.",
+      "size": 3232924,
+      "sha256": "d8450d42885cd51f3db39fe64219a7a003eeb432b4caa00428285fe6ab224303"
+    },
+    {
+      "name": "omw-ca-2.0",
+      "title": "Open Multilingual Wordnet 2.0, MCR Catalan, WN-LMF",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "definitions",
+        "synonyms",
+        "en"
+      ],
+      "file": "omw-ca-2.0.tar.xz",
+      "url": "https://github.com/omwn/omw-data/releases/download/v2.0/omw-ca-2.0.tar.xz",
+      "version": "OMW 2.0 (tag v2.0, published 2026-02-01); lexicon version 2.0",
+      "format": "wn-lmf-tar-xz",
+      "members": {
+        "xml": "omw-ca/omw-ca.xml"
+      },
+      "licence": "CC BY 3.0 (Multilingual Central Repository 3.0; English WordNet parts under the WordNet licence)",
+      "licence_url": "https://creativecommons.org/licenses/by/3.0/",
+      "note": "Synsets carry ILI ids, so English glosses come through the ILI from an English wordnet (OEWN 2025 already on disk, EXP-7). Synonyms are synset members. No <Form> elements.",
+      "size": 2318960,
+      "sha256": "9f17523225c7d1188dd1791d5a52e5b60a0a1b9772730e5343da8c49fea3469a"
+    },
+    {
+      "name": "lo-th_es_v2",
+      "title": "OpenThesaurus Spanish (LibreOffice th_es_v2), MyThes",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "synonyms"
+      ],
+      "file": "lo-libreoffice-26.8.1.1-es-th_es_v2.dat",
+      "url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/libreoffice-26.8.1.1/es/th_es_v2.dat",
+      "version": "LibreOffice dictionaries tag libreoffice-26.8.1.1; data snapshot 2012-01-11 (README_th_es.txt)",
+      "format": "mythes-dat",
+      "licence": "LGPL-2.1 (README_th_es.txt and es/LICENSE.md)",
+      "licence_url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/libreoffice-26.8.1.1/es/LICENSE.md",
+      "note": "ISO-8859-1, multi-word headwords, meaning lines without part of speech. No .idx downloaded (built by MyThes from the .dat).",
+      "size": 2876858,
+      "sha256": "ee0b7ad7dfede636aa5d5509cbbcbab59bef4cb8cbdff01f9528b15bd139b889"
+    },
+    {
+      "name": "sinonims-cat-2.3.2",
+      "title": "Softcatalà Diccionari de sinònims 2.3.2, MyThes",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "synonyms"
+      ],
+      "file": "sinonims-cat-2.3.2-th_ca_ES.dat",
+      "url": "https://github.com/Softcatala/sinonims-cat/releases/download/2.3.2/th_ca_ES.dat",
+      "version": "2.3.2 (release 2025-05-18)",
+      "format": "mythes-dat",
+      "licence": "CC BY 4.0 for the dictionary data (README.txt of the release and LICENSE of the repository)",
+      "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+      "note": "UTF-8, meaning lines carry a part of speech.",
+      "size": 12078115,
+      "sha256": "ab637e5a780e89b3a10b91f307b7d6811e8f335a259102f1d329ad9d2a4a090e"
+    },
+    {
+      "name": "lo-th_ca_ES_v3",
+      "title": "Softcatalà sinònims 2.3.1 as bundled by LibreOffice (th_ca_ES_v3), MyThes",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "synonyms"
+      ],
+      "file": "lo-libreoffice-26.8.1.1-th_ca_ES_v3.dat",
+      "url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/libreoffice-26.8.1.1/ca/dictionaries/th_ca_ES_v3.dat",
+      "version": "LibreOffice dictionaries tag libreoffice-26.8.1.1; Softcatalà 2.3.1 (August 2023, README_thes_ca.txt)",
+      "format": "mythes-dat",
+      "licence": "CC BY 4.0 (README_thes_ca.txt, LICENSES-en.txt)",
+      "licence_url": "https://creativecommons.org/licenses/by/4.0/",
+      "note": "An older release of sinonims-cat (its size equals the 2.3.1 release asset th_ca_ES.dat, 11289695 bytes); kept only to show the release LibreOffice ships.",
+      "size": 11289695,
+      "sha256": "33a66900244b8d7d0f51becfec690c0cff37d888357d737bc5ecb11c51714891"
+    },
+    {
+      "name": "lo-hunspell-es_ES",
+      "title": "LibreOffice Spanish (Spain) Hunspell .dic",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "lo-libreoffice-26.8.1.1-es_ES.dic",
+      "url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/libreoffice-26.8.1.1/es/es_ES.dic",
+      "version": "LibreOffice dictionaries tag libreoffice-26.8.1.1",
+      "format": "hunspell-aff-dic",
+      "members": {
+        "aff": "lo-libreoffice-26.8.1.1-es_ES.aff"
+      },
+      "companion": {
+        "file": "lo-libreoffice-26.8.1.1-es_ES.aff",
+        "url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/libreoffice-26.8.1.1/es/es_ES.aff",
+        "size": 169202,
+        "sha256": "e73a9bf8e1383f4986a5dc9e2fbed49371c0c61f511c626d15586bd433c1cad9"
+      },
+      "licence": "GPL-3.0-or-later or LGPL-3.0-or-later or MPL-1.1-or-later, at the user's choice (es/LICENSE.md)",
+      "licence_url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/libreoffice-26.8.1.1/es/LICENSE.md",
+      "note": "Spell checker: stems plus affix rules, no lemma or tag for a generated form; a form-to-lemma list needs unmunching.",
+      "size": 715989,
+      "sha256": "6975dddec3d5d2c676069537bc67b4b5f786c65c5d4cf6703a82acf779ac9ec1"
+    },
+    {
+      "name": "lo-hunspell-ca",
+      "title": "LibreOffice Catalan Hunspell .dic (Softcatalà)",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "lo-libreoffice-26.8.1.1-ca.dic",
+      "url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/libreoffice-26.8.1.1/ca/dictionaries/ca.dic",
+      "version": "LibreOffice dictionaries tag libreoffice-26.8.1.1",
+      "format": "hunspell-aff-dic",
+      "members": {
+        "aff": "lo-libreoffice-26.8.1.1-ca.aff"
+      },
+      "companion": {
+        "file": "lo-libreoffice-26.8.1.1-ca.aff",
+        "url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/libreoffice-26.8.1.1/ca/dictionaries/ca.aff",
+        "size": 52471,
+        "sha256": "abcca353b16af2d91be51d68899f47e5076a47489d08f696717fbac44074ddb8"
+      },
+      "licence": "LGPL / GPL (ca/LICENSES-en.txt)",
+      "licence_url": "https://raw.githubusercontent.com/LibreOffice/dictionaries/libreoffice-26.8.1.1/ca/LICENSES-en.txt",
+      "note": "Spell checker: stems plus affix rules; superseded by catalan-dict-tools v3.0.9 below.",
+      "size": 3086130,
+      "sha256": "4838bb46776f5d82a3823aa7abb17cd00b9dc0c301d1b6d002e1ab6558fa07ca"
+    },
+    {
+      "name": "catalan-dict-tools-3.0.9-all",
+      "title": "Softcatalà catalan-dict-tools v3.0.9, all release files (Hunspell, oxt, xpi)",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "catalan-dict-tools-ca.3.0.9-all.zip",
+      "url": "https://github.com/Softcatala/catalan-dict-tools/releases/download/v3.0.9/ca.3.0.9-all.zip",
+      "version": "v3.0.9 (release 2025-05-02)",
+      "format": "hunspell-zip",
+      "members": {
+        "dic": "catalan.dic",
+        "aff": "catalan.aff"
+      },
+      "licence": "GPL-2.0-or-later or LGPL-2.1-or-later (LICENSE and README.txt in the zip)",
+      "licence_url": "https://raw.githubusercontent.com/Softcatala/catalan-dict-tools/master/LICENSE",
+      "note": "Hunspell only, no lemma/tag text list; the expanded form list of the same project is catalan-pos-dict below.",
+      "size": 9318084,
+      "sha256": "2682dacc72be8a170a9479618b1005b900b896e37582be93e9a2e18dd8b3bd87"
+    },
+    {
+      "name": "spanish-pos-dict-2.5",
+      "title": "LanguageTool Spanish POS dictionary (morfologik), org.softcatala:spanish-pos-dict 2.5",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "spanish-pos-dict-2.5.jar",
+      "url": "https://repo1.maven.org/maven2/org/softcatala/spanish-pos-dict/2.5/spanish-pos-dict-2.5.jar",
+      "version": "2.5 (Maven Central, lastUpdated 2025-05-16)",
+      "upstream_sha1": "c32e1b07a3d6b01677f91f2ba396484735a06ffa",
+      "upstream_check": "equal",
+      "format": "morfologik-jar",
+      "members": {
+        "dict": "org/languagetool/resource/es/es-ES.dict",
+        "info": "org/languagetool/resource/es/es-ES.info"
+      },
+      "licence": "LGPL-2.1 (pom.xml in the jar)",
+      "licence_url": "https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt",
+      "note": "Binary FSA; decompiled with morfologik-tools 2.1.9 into lemma_form_tag lines (EAGLES tags). Forms include enclitic pronouns (dámelo -> dar).",
+      "size": 2914808,
+      "sha256": "f5cf2f9939c0fd17dd0cad75a8fd05893c7a0c035bbf159b5dc8f81740271b9a"
+    },
+    {
+      "name": "catalan-pos-dict-3.3",
+      "title": "LanguageTool Catalan POS dictionary (morfologik), org.softcatala:catalan-pos-dict 3.3",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "catalan-pos-dict-3.3.jar",
+      "url": "https://repo1.maven.org/maven2/org/softcatala/catalan-pos-dict/3.3/catalan-pos-dict-3.3.jar",
+      "version": "3.3 (Maven Central, lastUpdated 2026-03-04)",
+      "upstream_sha1": "bfa4f2bd5d4557aed934b0d09a489b030f9c110a",
+      "upstream_check": "equal",
+      "format": "morfologik-jar",
+      "members": {
+        "dict": "org/languagetool/resource/ca/ca-ES.dict",
+        "info": "org/languagetool/resource/ca/ca-ES.info"
+      },
+      "licence": "GPL-2.0 or LGPL-2.1 (pom.xml in the jar)",
+      "licence_url": "https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt",
+      "note": "Binary FSA; decompiled into lemma_form_tag lines. Forms with l·l are present (col·leccions -> col·lecció); elided clitics are separate tokens in LanguageTool, not forms.",
+      "size": 9299914,
+      "sha256": "e5f32aadd1852e8e442810611d89906c06369a94d2a62c1a142eb3e8f5bda2f1"
+    },
+    {
+      "name": "spanish-dict-tools-56fda6b",
+      "title": "spanish-dict-tools source lexicon (lemmas with inflection models), commit 56fda6b",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "spanish-dict-tools-56fda6b.tar.gz",
+      "url": "https://github.com/jaumeortola/spanish-dict-tools/archive/56fda6b4675b6a4b0e8842a45276b057dda98407.tar.gz",
+      "version": "git commit 56fda6b4675b (2026-09-01)",
+      "format": "source-tar-gz",
+      "members": {
+        "verbs": "diccionari-arrel/verbs-fdic.txt",
+        "nouns": "diccionari-arrel/noms-fdic.txt",
+        "adjectives": "diccionari-arrel/adjectius-fdic.txt",
+        "rest": "diccionari-arrel/resta-lt.txt"
+      },
+      "licence": "LGPL-2.1 (repository licence)",
+      "licence_url": "https://github.com/jaumeortola/spanish-dict-tools/blob/56fda6b4675b6a4b0e8842a45276b057dda98407/COPYING.txt",
+      "note": "Source of spanish-pos-dict: lemmas with paradigm names and verb models; expanding it needs the project Perl scripts. GitHub archive tarballs are generated on request, so the hash may differ on a later download of the same commit.",
+      "size": 1893057,
+      "sha256": "da622a22c4958b19685e3987f1811148c7de757aaf3efab55958a3d79c1d1d9b"
+    },
+    {
+      "name": "apertium-eng-spa-0.8.1",
+      "title": "apertium eng-spa-0.8.1",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "en",
+        "forms"
+      ],
+      "file": "apertium-eng-spa-0.8.1.tar.bz2",
+      "url": "https://github.com/apertium/apertium-eng-spa/releases/download/v0.8.1/apertium-eng-spa-0.8.1.tar.bz2",
+      "version": "v0.8.1 (release 2022-06-09)",
+      "format": "apertium-tar",
+      "members": {
+        "bidix": "apertium-eng-spa-0.8.1/apertium-eng-spa.eng-spa.dix",
+        "spa": "apertium-eng-spa-0.8.1/apertium-eng-spa.spa.dix"
+      },
+      "licence": "GPL-2.0 (COPYING in the archive; GitHub repository licence)",
+      "licence_url": "https://github.com/apertium/apertium-eng-spa",
+      "note": "Machine-translation lexicon: one English equivalent per lemma and part of speech, no senses. The pair carries its own Spanish monodix (paradigms).",
+      "size": 1220893,
+      "sha256": "8d7ca3b0595272993342a2ab8f0195b743402aefd2a8143b21cd8dc5317ce55e"
+    },
+    {
+      "name": "apertium-eng-cat-1.0.1",
+      "title": "apertium eng-cat-1.0.1",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "en"
+      ],
+      "file": "apertium-eng-cat-1.0.1.tar.gz",
+      "url": "https://github.com/apertium/apertium-eng-cat/releases/download/v1.0.1/apertium-eng-cat-1.0.1.tar.gz",
+      "version": "v1.0.1 (release 2019-11-27)",
+      "format": "apertium-tar",
+      "members": {
+        "bidix": "apertium-eng-cat-1.0.1/apertium-eng-cat.eng-cat.dix"
+      },
+      "licence": "GPL-3.0 (COPYING in the archive; GitHub repository licence)",
+      "licence_url": "https://github.com/apertium/apertium-eng-cat",
+      "note": "Machine-translation lexicon: one English equivalent per lemma and part of speech, no senses.",
+      "size": 685508,
+      "sha256": "cd9f033d17680f2f8be114a5ffa93d5fbccc74ead2704b3a8d7da17e5945c28f"
+    },
+    {
+      "name": "apertium-spa-1.3.1",
+      "title": "apertium spa-1.3.1",
+      "languages": [
+        "es"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "apertium-spa-1.3.1.tar.bz2",
+      "url": "https://github.com/apertium/apertium-spa/releases/download/v1.3.1/apertium-spa-1.3.1.tar.bz2",
+      "version": "v1.3.1 (release 2026-05-14)",
+      "format": "apertium-tar",
+      "members": {
+        "metadix": "apertium-spa-1.3.1/apertium-spa.spa.metadix"
+      },
+      "licence": "GPL-2.0 (COPYING in the archive; GitHub repository licence)",
+      "licence_url": "https://github.com/apertium/apertium-spa",
+      "note": "Monolingual morphology: lemmas with paradigms; forms must be generated (lttoolbox).",
+      "size": 910943,
+      "sha256": "748cbcc30994554b389358480754ef9e43012503a43c6309065e892dd52983da"
+    },
+    {
+      "name": "apertium-cat-2.12.0",
+      "title": "apertium cat-2.12.0",
+      "languages": [
+        "ca"
+      ],
+      "kinds": [
+        "forms"
+      ],
+      "file": "apertium-cat-2.12.0.tar.bz2",
+      "url": "https://github.com/apertium/apertium-cat/releases/download/v2.12.0/apertium-cat-2.12.0.tar.bz2",
+      "version": "v2.12.0 (release 2024-02-05)",
+      "format": "apertium-tar",
+      "members": {
+        "metadix": "apertium-cat-2.12.0/apertium-cat.cat.metadix"
+      },
+      "licence": "GPL-2.0 (COPYING in the archive; GitHub repository licence)",
+      "licence_url": "https://github.com/apertium/apertium-cat",
+      "note": "Monolingual morphology: lemmas with paradigms; forms must be generated (lttoolbox).",
+      "size": 1212866,
+      "sha256": "0294dd5fd7930ec5df5c219392d0511e549b15fdd0426f4616c9a0e021083bbd"
+    }
+  ],
+  "checksum_sources": [
+    {
+      "file": "freedict-database.json",
+      "url": "https://freedict.org/freedict-database.json",
+      "fetched": "2026-10-18",
+      "note": "Source of the FreeDict SHA-512 values; not a candidate. URL not versioned: the hash identifies only the local copy in experiments/exp9/data/.",
+      "size": 568521,
+      "sha256": "08078a2c28bb06dac716ca4b0e785621ed8bfde7c0a4aac15236c3279e2ca060"
+    }
+  ]
+}
