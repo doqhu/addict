@@ -17,9 +17,10 @@ pub struct Article {
 /// One sense of a word.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sense {
-    /// The definition, in English.
+    /// The definition, in the language of the dictionary it comes from:
+    /// English for an English index, Spanish for a Spanish one.
     pub definition: String,
-    /// English words close to this sense; may be empty.
+    /// Words of that language close to this sense; may be empty.
     pub synonyms: Vec<String>,
 }
 

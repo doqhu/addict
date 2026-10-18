@@ -1,0 +1,426 @@
+//! A Kaikki file, Wiktionary as JSON Lines, as the contents of an index.
+//!
+//! Each line is one entry: one word of one language in one part of speech.
+//! Only the entries of the language asked for are read, by their
+//! `lang_code`; the others are skipped. Of an entry, these fields are read,
+//! the same ones the selection experiment counted
+//! (`experiments/exp9/sources.py`, `kaikki`):
+//!
+//! - `word`, the headword as written;
+//! - `senses[].glosses`, the definition of each sense, its glosses joined
+//!   with a space. A sense that points at another word (`form_of`,
+//!   `alt_of`), such as «Plural de banco.», is a sense like the others. A
+//!   sense without a gloss is skipped;
+//! - `synonyms[]`, each with the `sense_index` of the sense it belongs to,
+//!   1-based within the entry: it is matched with the `sense_index` of the
+//!   senses, and with the place of the sense when no sense has one. A
+//!   synonym without an index, or with one that names no sense of the entry,
+//!   is dropped, and so is the word itself;
+//! - the form→lemma pairs: the word an entry with a `form_of` or `alt_of`
+//!   sense points at, and the `forms` list of an entry without the forms
+//!   that are table tags, inflection templates, classes, romanizations or
+//!   canonical spellings. Both sides of a pair are one word ([`is_word`]).
+//!
+//! The entries of one word, one per part of speech, are joined in file order
+//! into one headword. A headword gets one sense record per sense, with its
+//! synonyms as members: the format's way for a source without synsets. A
+//! word whose entries give no sense is no headword. The headwords have no
+//! translations. The pairs go into the form table, a form with its lemmas in
+//! the order first seen; the lookups do not read them yet.
+//!
+//! The file is read as a stream; the headwords are held until its end,
+//! because the entries are not in the order of the index.
+
+use std::{
+    collections::BTreeMap,
+    fmt,
+    io::{self, BufRead},
+};
+
+use serde::Deserialize;
+
+use crate::format::{Contents, ExceptionForm, Headword, SenseRecord};
+
+/// The tags of a `forms` item that is no inflected form of the word.
+const FORMS_SKIPPED: [&str; 5] = [
+    "table-tags",
+    "inflection-template",
+    "class",
+    "romanization",
+    "canonical",
+];
+
+/// Why a Kaikki file gave no contents.
+#[derive(Debug)]
+pub enum ParseError {
+    /// The stream could not be read.
+    Io(io::Error),
+    /// A line is not an entry; its number, from 1, and why.
+    Line { number: usize, cause: String },
+    /// No line is an entry of the language.
+    NoEntry,
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "cannot read the file: {error}"),
+            Self::Line { number, cause } => {
+                write!(f, "line {number} is not a Kaikki entry: {cause}")
+            }
+            Self::NoEntry => write!(f, "the file has no entry of the language"),
+        }
+    }
+}
+
+impl std::error::Error for ParseError {}
+
+#[derive(Deserialize)]
+struct Entry {
+    #[serde(default)]
+    word: Option<String>,
+    #[serde(default)]
+    lang_code: Option<String>,
+    #[serde(default)]
+    senses: Vec<Sense>,
+    #[serde(default)]
+    synonyms: Vec<Synonym>,
+    #[serde(default)]
+    forms: Vec<Form>,
+}
+
+#[derive(Deserialize)]
+struct Sense {
+    #[serde(default)]
+    glosses: Vec<String>,
+    #[serde(default)]
+    sense_index: Option<String>,
+    #[serde(default)]
+    form_of: Vec<Target>,
+    #[serde(default)]
+    alt_of: Vec<Target>,
+}
+
+#[derive(Deserialize)]
+struct Synonym {
+    #[serde(default)]
+    word: Option<String>,
+    #[serde(default)]
+    sense_index: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Target {
+    #[serde(default)]
+    word: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Form {
+    #[serde(default)]
+    form: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+/// Whether `sense` has a gloss that is not blank.
+fn has_gloss(sense: &Sense) -> bool {
+    sense.glosses.iter().any(|gloss| !gloss.trim().is_empty())
+}
+
+/// Whether `text` is one word: letters, with an inner `'` or `·` only
+/// between two letters. The check of `rules.py`, `is_word`.
+pub fn is_word(text: &str) -> bool {
+    let characters: Vec<char> = text.chars().collect();
+    let (Some(first), Some(last)) = (characters.first(), characters.last()) else {
+        return false;
+    };
+    if !first.is_alphabetic() || !last.is_alphabetic() {
+        return false;
+    }
+    characters.iter().enumerate().all(|(at, character)| {
+        character.is_alphabetic()
+            || (matches!(character, '\'' | '·')
+                && characters[at - 1].is_alphabetic()
+                && characters[at + 1].is_alphabetic())
+    })
+}
+
+/// The contents of the index of the Kaikki file `reader` holds, of the
+/// entries whose `lang_code` is `language`; `source` is the id written into
+/// the index.
+pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Contents, ParseError> {
+    let mut entries = 0;
+    let mut headwords: BTreeMap<String, Vec<SenseRecord>> = BTreeMap::new();
+    let mut forms: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut pair = |form: &str, lemma: &str| {
+        if form != lemma && is_word(form) && is_word(lemma) {
+            let lemmas = forms.entry(form.to_owned()).or_default();
+            if !lemmas.iter().any(|known| known == lemma) {
+                lemmas.push(lemma.to_owned());
+            }
+        }
+    };
+    for (at, line) in reader.lines().enumerate() {
+        let line = line.map_err(ParseError::Io)?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: Entry = serde_json::from_str(&line).map_err(|error| ParseError::Line {
+            number: at + 1,
+            cause: error.to_string(),
+        })?;
+        if entry.lang_code.as_deref() != Some(language) {
+            continue;
+        }
+        let Some(word) = entry.word.filter(|word| !word.is_empty()) else {
+            continue;
+        };
+        entries += 1;
+
+        for sense in &entry.senses {
+            for target in sense.form_of.iter().chain(&sense.alt_of) {
+                if let Some(lemma) = &target.word {
+                    pair(&word, lemma);
+                }
+            }
+        }
+        for form in &entry.forms {
+            let skipped = form
+                .tags
+                .iter()
+                .any(|tag| FORMS_SKIPPED.contains(&tag.as_str()));
+            if let (Some(text), false) = (&form.form, skipped) {
+                pair(text, &word);
+            }
+        }
+
+        let mut senses: Vec<(Option<&str>, SenseRecord)> = entry
+            .senses
+            .iter()
+            .filter(|sense| has_gloss(sense))
+            .map(|sense| {
+                let definition = sense
+                    .glosses
+                    .iter()
+                    .map(|gloss| gloss.trim())
+                    .filter(|gloss| !gloss.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (
+                    sense.sense_index.as_deref(),
+                    SenseRecord {
+                        definition,
+                        members: Vec::new(),
+                    },
+                )
+            })
+            .collect();
+        // The place of a sense among all senses of the entry, glossless ones
+        // too: a `sense_index` without a field to match counts them.
+        let places: Vec<usize> = entry
+            .senses
+            .iter()
+            .enumerate()
+            .filter(|(_, sense)| has_gloss(sense))
+            .map(|(place, _)| place + 1)
+            .collect();
+        let indexed = senses.iter().any(|(index, _)| index.is_some());
+        for synonym in &entry.synonyms {
+            let (Some(text), Some(index)) = (&synonym.word, &synonym.sense_index) else {
+                continue;
+            };
+            if text.is_empty() || *text == word {
+                continue;
+            }
+            let at = if indexed {
+                senses
+                    .iter()
+                    .position(|(own, _)| own.is_some_and(|own| own == index.trim()))
+            } else {
+                index
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|number| places.iter().position(|place| *place == number))
+            };
+            if let Some((_, record)) = at.and_then(|at| senses.get_mut(at))
+                && !record.members.contains(text)
+            {
+                record.members.push(text.clone());
+            }
+        }
+        if !senses.is_empty() {
+            headwords
+                .entry(word)
+                .or_default()
+                .extend(senses.into_iter().map(|(_, record)| record));
+        }
+    }
+    if entries == 0 {
+        return Err(ParseError::NoEntry);
+    }
+
+    let mut contents = Contents {
+        source: source.to_owned(),
+        ..Contents::default()
+    };
+    for (word, senses) in headwords {
+        let first = contents.senses.len() as u32;
+        contents.senses.extend(senses);
+        contents.headwords.push(Headword {
+            word,
+            senses: (first..contents.senses.len() as u32).collect(),
+            translations: Vec::new(),
+        });
+    }
+    contents.forms = forms
+        .into_iter()
+        .map(|(form, lemmas)| ExceptionForm { form, lemmas })
+        .collect();
+    Ok(contents)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::format::{self, tests::texts};
+
+    /// Small lines in the shape of `kaikki-es-Espanol`: `banco` as a noun
+    /// with numbered synonyms and as an interjection, a plural that is a
+    /// form of it, a word of another language and a glossless sense.
+    pub(crate) const FIXTURE: &str = concat!(
+        r#"{"word": "banco", "pos": "noun", "lang_code": "es", "senses": [{"glosses": ["Empresa que ofrece servicios monetarios."], "sense_index": "1"}, {"glosses": ["Mueble alargado para sentarse."], "sense_index": "2"}, {"glosses": ["Mueble sin respaldo."], "sense_index": "3"}], "synonyms": [{"word": "banca", "sense_index": "2"}, {"word": "banquillo", "sense_index": "3"}, {"word": "escaño"}, {"word": "banco", "sense_index": "1"}, {"word": "banca", "sense_index": "2"}, {"word": "cardumen", "sense_index": "9"}], "forms": [{"form": "bancos", "tags": ["plural"]}, {"form": "es-sust", "tags": ["inflection-template"]}]}"#,
+        "\n",
+        r#"{"word": "cerrar", "pos": "verb", "lang_code": "es", "senses": [{"tags": ["no-gloss"]}, {"glosses": ["Asegurar con cerradura.", "Impedir el paso."], "sense_index": "1"}], "forms": [{"form": "cierro"}, {"form": "cerró"}, {"form": "cierre usted"}]}"#,
+        "\n",
+        "\n",
+        r#"{"word": "bancos", "pos": "noun", "lang_code": "es", "senses": [{"glosses": ["Plural de banco."], "form_of": [{"word": "banco"}], "sense_index": "1"}]}"#,
+        "\n",
+        r#"{"word": "banco", "pos": "intj", "lang_code": "es", "senses": [{"glosses": ["Expresa aceptación."], "sense_index": "1"}]}"#,
+        "\n",
+        r#"{"word": "bank", "pos": "noun", "lang_code": "en", "senses": [{"glosses": ["A company."]}]}"#,
+        "\n",
+        r#"{"word": "arromanzar", "pos": "verb", "lang_code": "es", "senses": [{"tags": ["no-gloss"]}]}"#,
+        "\n",
+    );
+
+    fn parsed() -> Contents {
+        parse(FIXTURE.as_bytes(), "es", "fixture-es").expect("parse")
+    }
+
+    fn senses_of<'a>(contents: &'a Contents, word: &str) -> Vec<&'a SenseRecord> {
+        let headword = contents
+            .headwords
+            .iter()
+            .find(|headword| headword.word == word)
+            .unwrap_or_else(|| panic!("{word}"));
+        headword
+            .senses
+            .iter()
+            .map(|at| &contents.senses[*at as usize])
+            .collect()
+    }
+
+    #[test]
+    fn the_entries_of_one_word_are_one_headword_in_file_order() {
+        let contents = parsed();
+        assert_eq!(contents.source, "fixture-es");
+        let words: Vec<_> = contents.headwords.iter().map(|h| h.word.as_str()).collect();
+        // No `bank` of the other language, no glossless `arromanzar`.
+        assert_eq!(words, ["banco", "bancos", "cerrar"]);
+        let banco = senses_of(&contents, "banco");
+        let definitions: Vec<_> = banco.iter().map(|s| s.definition.as_str()).collect();
+        assert_eq!(
+            definitions,
+            [
+                "Empresa que ofrece servicios monetarios.",
+                "Mueble alargado para sentarse.",
+                "Mueble sin respaldo.",
+                "Expresa aceptación.",
+            ]
+        );
+        assert!(contents.headwords.iter().all(|h| h.translations.is_empty()));
+    }
+
+    #[test]
+    fn the_synonyms_are_the_members_of_the_sense_they_name() {
+        let contents = parsed();
+        let banco = senses_of(&contents, "banco");
+        // The word itself, one without an index, one of no sense and a
+        // repeated one are dropped.
+        assert!(banco[0].members.is_empty());
+        assert_eq!(banco[1].members, texts(&["banca"]));
+        assert_eq!(banco[2].members, texts(&["banquillo"]));
+        assert!(banco[3].members.is_empty());
+    }
+
+    #[test]
+    fn a_form_of_sense_is_a_sense_and_the_glosses_are_joined() {
+        let contents = parsed();
+        assert_eq!(
+            senses_of(&contents, "bancos")[0].definition,
+            "Plural de banco."
+        );
+        let cerrar = senses_of(&contents, "cerrar");
+        assert_eq!(cerrar.len(), 1);
+        assert_eq!(
+            cerrar[0].definition,
+            "Asegurar con cerradura. Impedir el paso."
+        );
+    }
+
+    #[test]
+    fn the_forms_go_into_the_form_table() {
+        let contents = parsed();
+        let forms: Vec<_> = contents
+            .forms
+            .iter()
+            .map(|form| (form.form.as_str(), form.lemmas.clone()))
+            .collect();
+        // `bancos` from both the list and its form-of sense, once; no
+        // template and no form of two words.
+        assert_eq!(
+            forms,
+            [
+                ("bancos", texts(&["banco"])),
+                ("cerró", texts(&["cerrar"])),
+                ("cierro", texts(&["cerrar"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_contents_make_an_index_with_the_same_bytes_each_time() {
+        let first = format::encode(&parsed()).expect("encode");
+        assert_eq!(format::encode(&parsed()).expect("encode"), first);
+    }
+
+    #[test]
+    fn a_line_that_is_no_entry_and_a_file_without_the_language_are_errors() {
+        let broken = format!("{FIXTURE}{{\"word\": \n");
+        let error = parse(broken.as_bytes(), "es", "x").expect_err("broken");
+        assert!(
+            matches!(error, ParseError::Line { number: 8, .. }),
+            "{error}"
+        );
+        assert!(matches!(
+            parse(FIXTURE.as_bytes(), "ca", "x"),
+            Err(ParseError::NoEntry)
+        ));
+        assert!(matches!(
+            parse(&b""[..], "es", "x"),
+            Err(ParseError::NoEntry)
+        ));
+    }
+
+    #[test]
+    fn a_word_is_letters_with_an_inner_apostrophe_or_middle_dot() {
+        for word in ["banco", "cerró", "col·lecció", "l'endemà", "Ñu"] {
+            assert!(is_word(word), "{word}");
+        }
+        for text in ["", "es-sust", "cierre usted", "'hood", "col·", "·a", "a1"] {
+            assert!(!is_word(text), "{text}");
+        }
+    }
+}

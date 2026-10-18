@@ -5,9 +5,11 @@
 //! by positioned reads and answers the `addict_core` dictionary contract,
 //! [`combined`] answers it with one article from two open indexes, for the
 //! word as written and for its dictionary forms, and gives the same result
-//! per headword, [`oewn`] and [`freedict`] turn an Open English WordNet file
-//! and a FreeDict TEI file into the writer's input, with what the two do the
-//! same way in `xml`, and [`import`] is the logic of `addict import`.
+//! per headword, [`lookup`] is the per-language hook from a picked word to
+//! the headwords to try, [`oewn`], [`freedict`] and [`kaikki`] turn an Open
+//! English WordNet file, a FreeDict TEI file and a Kaikki JSON Lines file
+//! into the writer's input, with what the first two do the same way in
+//! `xml`, and [`import`] is the logic of `addict import`.
 
 #![forbid(unsafe_code)]
 
@@ -16,6 +18,8 @@ pub mod format;
 pub mod freedict;
 pub mod import;
 pub mod index;
+pub mod kaikki;
+pub mod lookup;
 pub mod oewn;
 mod xml;
 
