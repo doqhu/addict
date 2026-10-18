@@ -408,7 +408,15 @@ impl Articles for Dictionaries {
                     *combined = Combined::default();
                     match self.source_of(&error) {
                         // Only an English source is named here.
-                        Source::Oewn | Source::KaikkiEs => {
+                        Source::Oewn
+                        | Source::KaikkiEs
+                        | Source::WikdictEsRu
+                        | Source::OmwEs
+                        | Source::KaikkiEnSpanish
+                        | Source::WikdictCaRu
+                        | Source::DbnaryCa
+                        | Source::SinonimsCat
+                        | Source::KaikkiEnCatalan => {
                             indexes.definitions = State::Unreadable;
                             Answer::Unreadable(definitions)
                         }
@@ -446,7 +454,8 @@ pub mod tests {
     };
 
     use super::{
-        Answer, Articles, Dictionaries, Grouped, IndexFile, Indexes, Looked, State, other_sources,
+        Answer, Articles, Dictionaries, Grouped, IndexFile, Indexes, Kind, Looked, State,
+        other_sources,
     };
 
     /// The sample dictionary as a source of articles with both indexes open.
@@ -506,6 +515,34 @@ pub mod tests {
                 Source::Oewn => english(),
                 Source::Freedict => russian(),
                 Source::KaikkiEs => spanish(),
+                Source::WikdictEsRu => headwords("es-ru", &[("banco", &[], &["банк"])]),
+                Source::OmwEs => {
+                    headwords("es-syn", &[("banco", &[("", &["banco", "banca"])], &[])])
+                }
+                Source::KaikkiEnSpanish => headwords("es-en", &[("banco", &[("bank", &[])], &[])]),
+                Source::WikdictCaRu => headwords(
+                    "ca-ru",
+                    &[
+                        ("col·lecció", &[], &["коллекция"]),
+                        ("banc", &[], &["скамья"]),
+                    ],
+                ),
+                Source::DbnaryCa => headwords(
+                    "ca-def",
+                    &[("col·lecció", &[("Conjunt d'objectes reunits.", &[])], &[])],
+                ),
+                Source::SinonimsCat => headwords(
+                    "ca-syn",
+                    &[(
+                        "col·lecció",
+                        &[("", &["recull", "aplec"]), ("", &["sèrie", "recull"])],
+                        &[],
+                    )],
+                ),
+                Source::KaikkiEnCatalan => headwords(
+                    "ca-en",
+                    &[("col·lecció", &[("collection", &[]), ("set", &[])], &[])],
+                ),
             };
             std::fs::write(self.index(source), encode(&contents).expect("encode"))
                 .expect("write the index");
@@ -719,11 +756,11 @@ pub mod tests {
             assert_eq!(looked.indexes.catalan, State::Missing, "{word}");
             assert_eq!(looked.indexes.spanish, State::Open, "{word}");
         }
-        // No Catalan source is known yet: none is opened or asked.
+        // The Catalan sources are known, and none is imported.
         assert!(
             other_sources()
                 .iter()
-                .all(|source| source.language() != Language::Ca)
+                .any(|source| source.language() == Language::Ca)
         );
     }
 
@@ -1081,6 +1118,35 @@ pub mod tests {
     /// definition and its members, and its translations.
     type Canned<'a> = (&'a str, &'a [(&'a str, &'a [&'a str])], &'a [&'a str]);
 
+    /// The contents of an index with the source id `source` and `headwords`,
+    /// sorted.
+    fn headwords(source: &str, headwords: &[Canned<'_>]) -> Contents {
+        let mut contents = Contents {
+            source: source.to_owned(),
+            senses: Vec::new(),
+            headwords: Vec::new(),
+            forms: Vec::new(),
+        };
+        let mut sorted = headwords.to_vec();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        for (word, senses, translations) in sorted {
+            let mut numbers = Vec::new();
+            for (definition, members) in senses {
+                numbers.push(contents.senses.len() as u32);
+                contents.senses.push(SenseRecord {
+                    definition: (*definition).to_owned(),
+                    members: texts(members),
+                });
+            }
+            contents.headwords.push(Headword {
+                word: word.to_owned(),
+                senses: numbers,
+                translations: texts(translations),
+            });
+        }
+        contents
+    }
+
     /// Writes `headwords`, each with its senses as a definition and its
     /// members and with its translations, as the index `name` in `dir`, and
     /// opens it.
@@ -1214,6 +1280,74 @@ pub mod tests {
             section_lines(Language::Es, found).1[0],
             "The dictionary has no Russian translation of this word."
         );
+    }
+
+    #[test]
+    fn a_catalan_word_with_the_four_catalan_indexes_gets_the_four_kinds() {
+        let dir = DataDir::new("catalan-kinds");
+        dir.import(Source::Oewn);
+        dir.import(Source::Freedict);
+        for source in import::KNOWN.iter().map(|known| known.source) {
+            if source.language() != Language::En {
+                dir.import(source);
+            }
+        }
+        let dictionaries = dir.dictionaries();
+        let indexes = dictionaries.indexes();
+        assert_eq!(indexes.catalan, State::Open);
+        assert_eq!(indexes.spanish, State::Open);
+        assert_eq!(indexes.files(), Indexes::OPEN.files());
+        let catalan: Vec<_> = other_sources()
+            .into_iter()
+            .filter(|source| source.language() == Language::Ca)
+            .map(|source| source.kind())
+            .collect();
+        assert_eq!(
+            catalan,
+            [
+                Kind::Russian,
+                Kind::Definitions,
+                Kind::Synonyms,
+                Kind::English
+            ]
+        );
+
+        let looked = dictionaries.look_up_in(Language::Ca, "col·lecció");
+        assert_eq!(
+            looked.answer,
+            Answer::Grouped(Grouped {
+                definitions: Some(vec![Sense {
+                    definition: "Conjunt d'objectes reunits.".to_owned(),
+                    synonyms: Vec::new(),
+                }]),
+                russian: Some(texts(&["коллекция"])),
+                synonyms: Some(texts(&["recull", "aplec", "sèrie"])),
+                english: Some(texts(&["collection", "set"])),
+            })
+        );
+        // A word only some indexes have: the others are asked and say so.
+        let Answer::Grouped(banc) = dictionaries.look_up_in(Language::Ca, "Banc").answer else {
+            panic!("banc");
+        };
+        assert_eq!(banc.russian, Some(texts(&["скамья"])));
+        assert_eq!(banc.definitions, Some(Vec::new()));
+        assert_eq!(banc.synonyms, Some(Vec::new()));
+        assert_eq!(banc.english, Some(Vec::new()));
+        // Spanish reads its own four, and English is unchanged.
+        let Answer::Grouped(banco) = dictionaries.look_up_in(Language::Es, "banco").answer else {
+            panic!("banco");
+        };
+        assert_eq!(banco.russian, Some(texts(&["банк"])));
+        assert_eq!(banco.synonyms, Some(texts(&["banca"])));
+        assert_eq!(banco.english, Some(texts(&["bank"])));
+        assert_eq!(
+            dictionaries.look_up_in(Language::Ca, "banco").answer,
+            Answer::NoEntry
+        );
+        let Answer::Article(bank) = dictionaries.look_up("bank").answer else {
+            panic!("bank");
+        };
+        assert_eq!(bank.senses, english_bank());
     }
 
     #[test]

@@ -2,10 +2,15 @@
 //!
 //! A `LexicalEntry` has a `Lemma`, the headword as written, any number of
 //! `Form`s and its `Sense`s, each pointing at a `Synset`; a `Synset` has a
-//! `Definition` and lists its member entries. One written form has an entry
-//! per part of speech: their senses are joined in file order. A sense record
-//! is a synset, stored once with the lemmas of its members, so the synonyms
-//! of a sense are the other members.
+//! `Definition` and lists its members. One written form has an entry per
+//! part of speech: their senses are joined in file order. A sense record is a
+//! synset, stored once with the lemmas of its members, so the synonyms of a
+//! sense are the other members.
+//!
+//! A member is the id of an entry, as in Open English WordNet, or the id of
+//! a `Sense`, as in the Open Multilingual Wordnet 2.0 files: an entry id is
+//! looked up first, and a sense id gives the lemma of the entry the sense is
+//! in.
 //!
 //! The exception list is the `Form`s: form to the lemmas it is a form of,
 //! without the forms equal to their lemma.
@@ -37,6 +42,8 @@ struct Entry {
     lemma: Option<String>,
     forms: Vec<String>,
     synsets: Vec<String>,
+    /// The ids of the senses, for the members that name a sense.
+    senses: Vec<String>,
 }
 
 struct Synset {
@@ -51,6 +58,8 @@ struct Parsed {
     /// Lemma and synset ids of each entry, in file order.
     entries: Vec<(String, Vec<String>)>,
     lemma_of: HashMap<String, String>,
+    /// The lemma of the entry each sense id is in.
+    lemma_of_sense: HashMap<String, String>,
     /// Definition and member entry ids of each synset, in file order.
     synsets: Vec<(String, Vec<String>)>,
     synset_at: HashMap<String, u32>,
@@ -73,6 +82,11 @@ impl Parsed {
             .is_some()
         {
             return Err(malformed(format!("the entry id {} is repeated", entry.id)));
+        }
+        for sense in entry.senses {
+            self.lemma_of_sense
+                .entry(sense)
+                .or_insert_with(|| lemma.clone());
         }
         self.entries.push((lemma, entry.synsets));
         Ok(())
@@ -111,8 +125,13 @@ impl Parsed {
             .map(|(definition, member_ids)| {
                 let mut members: Vec<String> = Vec::new();
                 for id in member_ids {
-                    // A member that is not an entry of the file has no lemma.
-                    if let Some(lemma) = self.lemma_of.get(&id)
+                    // A member that is neither an entry nor a sense of the
+                    // file has no lemma.
+                    let lemma = self
+                        .lemma_of
+                        .get(&id)
+                        .or_else(|| self.lemma_of_sense.get(&id));
+                    if let Some(lemma) = lemma
                         && !members.contains(lemma)
                     {
                         members.push(lemma.clone());
@@ -249,6 +268,7 @@ fn new_entry(element: &BytesStart<'_>) -> Result<Entry, ParseError> {
         lemma: None,
         forms: Vec::new(),
         synsets: Vec::new(),
+        senses: Vec::new(),
     })
 }
 
@@ -282,7 +302,10 @@ fn child(element: &BytesStart<'_>, entry: Option<&mut Entry>) -> Result<(), Pars
             entry.lemma = Some(lemma);
         }
         b"Form" => entry.forms.extend(attribute(element, "writtenForm")?),
-        b"Sense" => entry.synsets.push(required(element, "synset")?),
+        b"Sense" => {
+            entry.synsets.push(required(element, "synset")?);
+            entry.senses.extend(attribute(element, "id")?);
+        }
         _ => {}
     }
     Ok(())
@@ -506,6 +529,53 @@ pub(crate) mod tests {
         assert_eq!(contents.forms.len(), 1);
         assert_eq!(contents.forms[0].lemmas, ["a", "b"]);
         assert_eq!(contents.headwords.len(), 2);
+    }
+
+    /// A lexicon in the shape of Open Multilingual Wordnet 2.0: the members
+    /// of a synset are sense ids, and an entry id among them is still read.
+    pub(crate) const OMW: &str = r#"<LexicalResource><Lexicon id="omw-es">
+        <LexicalEntry id="omw-es-banco-n">
+          <Lemma writtenForm="banco" partOfSpeech="n"/>
+          <Sense id="omw-es-banco-08420278-n" synset="omw-es-08420278-n"/>
+          <Sense id="omw-es-banco-04177820-n" synset="omw-es-04177820-n"/>
+        </LexicalEntry>
+        <LexicalEntry id="omw-es-entidad_bancaria-n">
+          <Lemma writtenForm="entidad bancaria" partOfSpeech="n"/>
+          <Sense id="omw-es-entidad_bancaria-08420278-n" synset="omw-es-08420278-n"/>
+        </LexicalEntry>
+        <LexicalEntry id="omw-es-banca-n">
+          <Lemma writtenForm="banca" partOfSpeech="n"/>
+          <Sense id="omw-es-banca-08420278-n" synset="omw-es-08420278-n"/>
+          <Sense synset="omw-es-04177820-n"/>
+        </LexicalEntry>
+        <LexicalEntry id="omw-es-escaño-n">
+          <Lemma writtenForm="escaño" partOfSpeech="n"/>
+          <Sense id="omw-es-escaño-04177820-n" synset="omw-es-04177820-n"/>
+        </LexicalEntry>
+        <Synset id="omw-es-08420278-n" ili="i1" members="omw-es-banco-08420278-n omw-es-entidad_bancaria-08420278-n omw-es-banca-08420278-n omw-es-gone-08420278-n">
+          <Definition>entidad financiera</Definition>
+        </Synset>
+        <Synset id="omw-es-04177820-n" ili="i2" members="omw-es-escaño-04177820-n omw-es-banco-n omw-es-banco-04177820-n"/>
+    </Lexicon></LexicalResource>"#;
+
+    #[test]
+    fn the_members_of_a_synset_may_name_senses() {
+        let contents = parse(OMW.as_bytes(), "omw").expect("parse");
+        assert_eq!(
+            senses(&contents, "banco"),
+            [
+                (
+                    "entidad financiera",
+                    vec!["banco", "entidad bancaria", "banca"]
+                ),
+                // An entry id among sense ids, and the same lemma twice.
+                ("", vec!["escaño", "banco"]),
+            ]
+        );
+        assert_eq!(senses(&contents, "escaño"), [("", vec!["escaño", "banco"])]);
+        // A sense without an id is a sense, and names no member.
+        assert_eq!(senses(&contents, "banca").len(), 2);
+        assert!(crate::format::encode(&contents).is_ok());
     }
 
     #[test]

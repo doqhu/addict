@@ -12,6 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 addict-core = { path = "../addict-core" }
+bzip2 = "=0.6.1"
 flate2 = "=1.1.10"
 lzma-rs = "=0.3.0"
 quick-xml = "=0.41.0"

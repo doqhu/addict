@@ -7,21 +7,27 @@
 //! word as written and for its dictionary forms, and gives the same result
 //! per headword, [`lookup`] is the per-language hook from a picked word to
 //! the headwords to try and the article of one language grouped by kind,
-//! [`oewn`], [`freedict`] and [`kaikki`] turn an Open
-//! English WordNet file, a FreeDict TEI file and a Kaikki JSON Lines file
-//! into the writer's input, with what the first two do the same way in
-//! `xml`, and [`import`] is the logic of `addict import`.
+//! [`oewn`], [`freedict`], [`kaikki`], [`wikdict`], [`dbnary`] and
+//! [`mythes`] turn a WordNet file (Open English WordNet, Open Multilingual
+//! Wordnet), a FreeDict TEI file, a Kaikki JSON Lines file, a WikDict SQLite
+//! database, a DBnary Turtle file and a MyThes thesaurus into the writer's
+//! input, with what the first two do the same way in `xml` and the SQLite
+//! file read by [`sqlite`], and [`import`] is the logic of `addict import`.
 
 #![forbid(unsafe_code)]
 
 pub mod combined;
+pub mod dbnary;
 pub mod format;
 pub mod freedict;
 pub mod import;
 pub mod index;
 pub mod kaikki;
 pub mod lookup;
+pub mod mythes;
 pub mod oewn;
+pub mod sqlite;
+pub mod wikdict;
 mod xml;
 
 pub use combined::{Combined, Found};
