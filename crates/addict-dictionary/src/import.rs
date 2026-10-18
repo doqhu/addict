@@ -50,6 +50,12 @@ pub enum Kind {
     Definitions,
     /// Russian translations of the words.
     Russian,
+    /// Synonyms of the words in their own language, from the members of the
+    /// senses; the definitions of the senses are not shown.
+    Synonyms,
+    /// English glosses of the words: the definitions of the senses are
+    /// English phrases, not definitions in the language of the words.
+    English,
 }
 
 impl Source {

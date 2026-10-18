@@ -6,7 +6,8 @@
 //! [`combined`] answers it with one article from two open indexes, for the
 //! word as written and for its dictionary forms, and gives the same result
 //! per headword, [`lookup`] is the per-language hook from a picked word to
-//! the headwords to try, [`oewn`], [`freedict`] and [`kaikki`] turn an Open
+//! the headwords to try and the article of one language grouped by kind,
+//! [`oewn`], [`freedict`] and [`kaikki`] turn an Open
 //! English WordNet file, a FreeDict TEI file and a Kaikki JSON Lines file
 //! into the writer's input, with what the first two do the same way in
 //! `xml`, and [`import`] is the logic of `addict import`.
