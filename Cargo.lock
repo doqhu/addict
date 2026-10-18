@@ -60,6 +60,8 @@ dependencies = [
  "flate2",
  "lzma-rs",
  "quick-xml",
+ "serde",
+ "serde_json",
  "sha2",
  "tar",
 ]

@@ -8,7 +8,7 @@
 //! index as it was, and the same file gives the same index bytes.
 //!
 //! Each source has its own index file, and an import touches no other. The
-//! WordNet file is a gzip of its XML. The FreeDict file is an xz of a tar
+//! WordNet file is a gzip of its XML, the Kaikki file a gzip of JSON Lines. The FreeDict file is an xz of a tar
 //! archive, unpacked in memory; of its members only the dictionary,
 //! [`FREEDICT_MEMBER`], is read.
 //!
@@ -25,15 +25,31 @@ use std::{
 use flate2::bufread::MultiGzDecoder;
 use sha2::{Digest, Sha256};
 
-use crate::{format, freedict, oewn};
+use addict_core::translation::Source as Language;
 
-/// A dictionary source. Each has one index file in the data directory.
+use crate::{format, freedict, kaikki, oewn};
+
+/// A dictionary source. Each has one index file in the data directory, in
+/// the one index format; what the file holds and in which language is the
+/// source's, not the file's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     /// Open English WordNet: gzip of WN-LMF XML.
     Oewn,
     /// FreeDict: xz of a tar archive with the dictionary in TEI XML.
     Freedict,
+    /// The Spanish Wiktionary's Spanish entries from Kaikki: gzip of JSON
+    /// Lines.
+    KaikkiEs,
+}
+
+/// What the senses or the translations of an index are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// Definitions in the language of the words, with synonyms per sense.
+    Definitions,
+    /// Russian translations of the words.
+    Russian,
 }
 
 impl Source {
@@ -42,6 +58,23 @@ impl Source {
         match self {
             Self::Oewn => "oewn.index",
             Self::Freedict => "freedict.index",
+            Self::KaikkiEs => "kaikki-es-Espanol.index",
+        }
+    }
+
+    /// The language of the headwords of the source.
+    pub fn language(self) -> Language {
+        match self {
+            Self::Oewn | Self::Freedict => Language::En,
+            Self::KaikkiEs => Language::Es,
+        }
+    }
+
+    /// What the source gives for its headwords.
+    pub fn kind(self) -> Kind {
+        match self {
+            Self::Oewn | Self::KaikkiEs => Kind::Definitions,
+            Self::Freedict => Kind::Russian,
         }
     }
 }
@@ -76,6 +109,16 @@ pub const KNOWN: &[KnownFile<'static>] = &[
         source: Source::Freedict,
         size: 3_948_540,
         sha256: "f3dadcc29d7df6e77edb13b98a2ba2c3fac002852eddd8b557637f0b13d39c39",
+    },
+    // `kaikki-es-Espanol` of EXP-9: the eswiktionary dump of 2026-10-01,
+    // extracted on 2026-10-16. Kaikki replaces the file about weekly under
+    // the same URL; only this copy is known.
+    KnownFile {
+        name: "kaikki.org-dictionary-Español.jsonl.gz",
+        edition: "kaikki-es-Espanol-2026-10-16",
+        source: Source::KaikkiEs,
+        size: 108_490_455,
+        sha256: "fee9c37580717d7faa69e951515a94fa0aaa77b816d2f9f96a0fb8d44b87b9bc",
     },
 ];
 
@@ -210,6 +253,12 @@ fn import_known(file: &Path, dir: &Path, known: &[KnownFile<'_>]) -> Result<Impo
         )
         .map_err(|error| error.to_string()),
         Source::Freedict => freedict_archive(&bytes, known.edition),
+        Source::KaikkiEs => kaikki::parse(
+            BufReader::new(MultiGzDecoder::new(bytes.as_slice())),
+            known.source.language().code(),
+            known.edition,
+        )
+        .map_err(|error| error.to_string()),
     }
     .and_then(|contents| {
         let index = format::encode(&contents).map_err(|error| error.to_string())?;
@@ -347,7 +396,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        freedict::tests::FIXTURE as TEI, index::Index, oewn::tests::FIXTURE, testdir::TempDir,
+        freedict::tests::FIXTURE as TEI, index::Index, kaikki::tests::FIXTURE as KAIKKI,
+        oewn::tests::FIXTURE, testdir::TempDir,
     };
 
     fn os(text: &str) -> Option<OsString> {
@@ -381,8 +431,8 @@ mod tests {
     }
 
     #[test]
-    fn the_known_files_are_the_chosen_wordnet_and_the_chosen_freedict() {
-        assert_eq!(KNOWN.len(), 2);
+    fn the_known_files_are_the_chosen_wordnet_freedict_and_spanish_kaikki() {
+        assert_eq!(KNOWN.len(), 3);
         assert_eq!(KNOWN[1].name, "freedict-eng-rus-2025.11.23.src.tar.xz");
         assert_eq!(KNOWN[1].edition, "freedict-eng-rus-2025.11.23");
         assert_eq!(KNOWN[1].size, 3948540);
@@ -405,6 +455,82 @@ mod tests {
             index_path(Path::new("/d"), Source::Oewn),
             Path::new("/d/oewn.index")
         );
+    }
+
+    #[test]
+    fn the_spanish_source_is_the_chosen_kaikki_file_with_its_kind_and_language() {
+        let known = KNOWN[2];
+        assert_eq!(known.source, Source::KaikkiEs);
+        assert_eq!(known.size, 108490455);
+        assert_eq!(
+            known.sha256,
+            "fee9c37580717d7faa69e951515a94fa0aaa77b816d2f9f96a0fb8d44b87b9bc"
+        );
+        assert_eq!(
+            index_path(Path::new("/d"), Source::KaikkiEs),
+            Path::new("/d/kaikki-es-Espanol.index")
+        );
+        assert_eq!(Source::KaikkiEs.language(), Language::Es);
+        assert_eq!(Source::KaikkiEs.kind(), Kind::Definitions);
+        assert_eq!(Source::Oewn.language(), Language::En);
+        assert_eq!(Source::Oewn.kind(), Kind::Definitions);
+        assert_eq!(Source::Freedict.language(), Language::En);
+        assert_eq!(Source::Freedict.kind(), Kind::Russian);
+        // One index file per source.
+        let mut names: Vec<_> = KNOWN.iter().map(|k| k.source.index_name()).collect();
+        names.dedup();
+        assert_eq!(names.len(), KNOWN.len());
+    }
+
+    #[test]
+    fn the_kaikki_file_is_imported_into_its_own_readable_index() {
+        let fixture = Fixture::new("kaikki");
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(KAIKKI.as_bytes()).expect("compress");
+        let gz = encoder.finish().expect("compress");
+        let archive = Archive::new(&fixture, "kaikki.jsonl.gz", &gz);
+        let [wordnet] = fixture.known();
+        let known = [
+            wordnet,
+            KnownFile {
+                name: "kaikki.jsonl.gz",
+                edition: "fixture-es-1",
+                source: Source::KaikkiEs,
+                size: archive.size,
+                sha256: &archive.sha256,
+            },
+        ];
+        let data = fixture.data();
+        let oewn = import_known(&fixture.file(), &data, &known).expect("wordnet");
+        let oewn_bytes = fs::read(&oewn.path).expect("index");
+
+        let imported = import_known(&archive.file, &data, &known).expect("import");
+        assert_eq!(imported.path, data.join("kaikki-es-Espanol.index"));
+        assert_eq!(imported.headwords, 3);
+        assert_eq!(imported.exception_forms, 3);
+        assert_eq!(fs::read(&oewn.path).expect("index"), oewn_bytes);
+        let bytes = fs::read(&imported.path).expect("index");
+        let again = import_known(&archive.file, &data, &known).expect("again");
+        assert_eq!(again, imported);
+        assert_eq!(fs::read(&imported.path).expect("index"), bytes);
+
+        let index = Index::open(&imported.path).expect("open");
+        assert_eq!(index.source(), "fixture-es-1");
+        let banco = index.find("banco").expect("find").expect("banco");
+        assert_eq!(banco.senses.len(), 4);
+        assert_eq!(banco.senses[1].synonyms, ["banca"]);
+        assert_eq!(banco.senses[2].synonyms, ["banquillo"]);
+        assert!(banco.translations.is_empty());
+        assert_eq!(index.find("zzz").expect("find"), None);
+        assert_eq!(index.exception_lemmas("cerró").expect("form"), ["cerrar"]);
+
+        // Another size or hash writes nothing, as for the other sources.
+        let short = Archive::new(&fixture, "short.jsonl.gz", &gz[..gz.len() - 3]);
+        assert!(matches!(
+            import_known(&short.file, &data, &known),
+            Err(ImportError::Size { .. })
+        ));
+        assert_eq!(fs::read(&imported.path).expect("index"), bytes);
     }
 
     /// A gzip of the WordNet fixture in a file, and the hash of that file.

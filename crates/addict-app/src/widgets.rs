@@ -375,6 +375,9 @@ struct ResultArea {
     translations: gtk::Box,
     online: gtk::Label,
     senses: gtk::Box,
+    /// What stands above the list: the kind and the language of the senses,
+    /// set for each result.
+    senses_caption: gtk::Label,
     hint: gtk::Label,
     rows: gtk::Box,
     definition_action: gtk::Button,
@@ -419,7 +422,8 @@ fn result_area() -> ResultArea {
         .spacing(6)
         .visible(false)
         .build();
-    senses.append(&caption(SENSES_LABEL));
+    let senses_caption = caption(SENSES_LABEL);
+    senses.append(&senses_caption);
     senses.append(&hint);
     senses.append(&rows);
     let content = gtk::Box::builder()
@@ -460,6 +464,7 @@ fn result_area() -> ResultArea {
         translations,
         online,
         senses,
+        senses_caption,
         hint,
         rows,
         definition_action,
@@ -774,6 +779,7 @@ impl View {
             .set_visible(texts.translations.is_some());
         result.article.set_visible(true);
 
+        result.senses_caption.set_text(texts.senses_label);
         result.hint.set_text(texts.hint.unwrap_or_default());
         result.hint.set_visible(texts.hint.is_some());
         let chosen = self.sense_chosen.clone();

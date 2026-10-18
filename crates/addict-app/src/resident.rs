@@ -107,10 +107,15 @@
 //!
 //! The user reads in one language, chosen with the EN / ES / CA switch
 //! beside the field; English at first. Every online request about the
-//! field's text is sent from it, and only English is looked up offline: for
-//! Spanish and Catalan the result is the line that there is no offline
-//! dictionary for the language, and no lookup runs. The definition of a
-//! sense is OEWN's and is always sent from English. A capture recognizes the
+//! field's text is sent from it. English is looked up offline in its two
+//! indexes. Spanish is looked up in its own index when the last known state
+//! of the indexes says the Spanish one is there; otherwise, and always for
+//! Catalan, the result is the line that there is no offline dictionary for
+//! the language, and no lookup runs. With Spanish chosen and its index not
+//! known to be there, the indexes are checked again, so that an import done
+//! while the application runs is found by the next pick. The definition of
+//! an English sense is OEWN's and is always sent from English; a Spanish
+//! sense offers none to send. A capture recognizes the
 //! text with the data of the language. A press of another language forgets
 //! the online texts of the field's text and, for the word shown, redoes its
 //! offline result and asks again what its click or its submit asked; with no
@@ -223,8 +228,13 @@ enum Event {
         outcome: Outcome<Translated>,
         elapsed: Option<evidence::Elapsed>,
     },
-    /// The lookup started as number `run` ended.
-    Lookup { run: u64, outcome: Outcome<Looked> },
+    /// The lookup started as number `run`, of a word read in `language`,
+    /// ended.
+    Lookup {
+        run: u64,
+        language: Language,
+        outcome: Outcome<Looked>,
+    },
     /// The online request about `subject`, sent from `source` for the text
     /// with the number `text`, ended. `elapsed` is as for a definition.
     Translated {
@@ -384,16 +394,21 @@ struct Session {
     translating_definition: Option<Job>,
     /// The online texts of the text the field holds.
     online: Kept,
-    /// The check of the indexes at the start; dropping it cancels the check.
+    /// The check of the indexes at the start, or the last one a Spanish
+    /// word without its index asked for, which replaces any still running;
+    /// dropping it cancels the check.
     check: Option<Job>,
+    /// Where the indexes stood when last asked, by a check or a lookup;
+    /// `None` until the first answer.
+    indexes: Option<Indexes>,
     /// Where the capture stands.
     capturing: Capturing,
     /// Where the read of the accessibility bus stands.
     reading: Reading,
     /// Where the read of the clipboard after it stands.
     copying: Copying,
-    /// The language the user reads: the requests are sent from it, and only
-    /// English is looked up offline.
+    /// The language the user reads: the requests are sent from it, and its
+    /// own indexes alone are looked up offline.
     language: Language,
     /// Where the reading language is kept across restarts; `None` when the
     /// environment names no configuration directory.
@@ -513,7 +528,11 @@ impl Session {
                 outcome,
                 elapsed,
             } => self.definition_translated(number, outcome, elapsed),
-            Event::Lookup { run, outcome } => self.looked_up(run, outcome),
+            Event::Lookup {
+                run,
+                language,
+                outcome,
+            } => self.looked_up(run, language, outcome),
             Event::Translated {
                 text,
                 subject,
@@ -531,6 +550,7 @@ impl Session {
             Event::LanguageChosen(language) => self.language_chosen(language),
             Event::Indexes(indexes) => {
                 self.check = None;
+                self.indexes = Some(indexes);
                 self.view.render_indexes(indexes);
             }
             Event::Capture => self.capture(),
@@ -1095,14 +1115,20 @@ impl Session {
             return;
         };
         let sender = self.sender.clone();
+        let language = self.language;
         let started = manual::offline(
             self.work.upgrade().as_deref(),
             self.articles.clone(),
             word,
-            self.language,
+            language,
+            self.indexes,
             move |outcome| {
                 // On the worker: the UI thread wakes for the event.
-                let _ = sender.unbounded_send(Event::Lookup { run, outcome });
+                let _ = sender.unbounded_send(Event::Lookup {
+                    run,
+                    language,
+                    outcome,
+                });
             },
         );
         match started {
@@ -1110,20 +1136,31 @@ impl Session {
                 self.pending = Some(job);
                 self.show_result(Some(Lookup::Pending));
             }
-            Err(lookup) => self.show_result(Some(lookup)),
+            Err(lookup) => {
+                let checks = manual::checks_again(&lookup, language);
+                self.show_result(Some(lookup));
+                if checks {
+                    self.check = start_check(
+                        self.work.upgrade().as_deref(),
+                        self.articles.clone(),
+                        &self.sender,
+                    );
+                }
+            }
         }
     }
 
     /// A lookup ended. Only the last started one is shown; where it found
     /// the indexes is shown for every one that read them, and every one
     /// that was not given up is recorded.
-    fn looked_up(&mut self, run: u64, outcome: Outcome<Looked>) {
+    fn looked_up(&mut self, run: u64, language: Language, outcome: Outcome<Looked>) {
         if let Some(recording) = &self.recording
             && let Some(answered) = evidence::answered(&outcome)
         {
             recording.looked_up(answered);
         }
         if let Outcome::Finished(looked) = &outcome {
+            self.indexes = Some(looked.indexes);
             self.view.render_indexes(looked.indexes);
         }
         if !self.manual.awaits(run) {
@@ -1133,7 +1170,7 @@ impl Session {
         let Some(input) = self.manual.input() else {
             return;
         };
-        if let Some(lookup) = manual::lookup_result(outcome, input.word()) {
+        if let Some(lookup) = manual::result_in(outcome, input.word(), language) {
             self.show_result(Some(lookup));
         }
     }
@@ -1889,6 +1926,7 @@ fn start(
         translating_definition: None,
         online: Kept::default(),
         check,
+        indexes: None,
         capturing: Capturing::default(),
         reading: Reading::default(),
         copying: Copying::default(),

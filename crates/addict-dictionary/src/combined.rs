@@ -16,7 +16,8 @@
 //! That is the exact lookup, [`Combined::find`]. The reduced lookup,
 //! [`Combined::find_reduced`], is what the dictionary contract answers with:
 //! it tries the word as written, its lowercase and then the dictionary forms
-//! of `addict_core::reduction`, each through the exact lookup, and keeps
+//! of `addict_core::reduction`, as the English arm of
+//! [`lookup::headwords`] gives them, each through the exact lookup, and keeps
 //! every one that is a headword of either index. The exception list of the
 //! definitions index serves both. The contract merges what was found into
 //! one article, and [`Combined::article`] is that article with the error of
@@ -28,9 +29,13 @@
 use addict_core::{
     dictionary::{Article, Dictionary},
     reduction,
+    translation::Source as Language,
 };
 
-use crate::index::{Error, Index};
+use crate::{
+    index::{Error, Index},
+    lookup,
+};
 
 /// One headword the reduced lookup found, and its article.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,13 +122,7 @@ impl Combined {
             Some(definitions) => definitions.exception_lemmas(&lowercase)?,
             None => Vec::new(),
         };
-        let forms = reduction::forms(&lowercase, &lemmas);
-        let mut candidates = vec![written.to_owned()];
-        for candidate in std::iter::once(lowercase).chain(forms) {
-            if !candidates.contains(&candidate) {
-                candidates.push(candidate);
-            }
-        }
+        let candidates = lookup::headwords(Language::En, word, &lemmas);
         let mut found = Vec::new();
         for headword in candidates {
             if let Some(article) = self.find(&headword)? {
@@ -145,7 +144,7 @@ impl Combined {
 /// One article of what the reduced lookup found: the senses in the order
 /// found, a sense whose definition is already there skipped, and the translations joined in the same
 /// order, each once. `None` when nothing was found.
-fn merged(found: Vec<Found>) -> Option<Article> {
+pub(crate) fn merged(found: Vec<Found>) -> Option<Article> {
     if found.is_empty() {
         return None;
     }
