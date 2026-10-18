@@ -1,5 +1,9 @@
-//! The online translator contract: a text and an optional context in, the
-//! Russian text or a [`Refusal`] out.
+//! The online translator contract: a text in the language of its
+//! [`Source`] and an optional context in, the Russian text or a [`Refusal`]
+//! out.
+//!
+//! The language of a request is named in one place, [`Request::source`]:
+//! English, Spanish or Catalan. The target is always Russian.
 //!
 //! [`Translator::translate`] gives a future and runs nothing itself: core has
 //! no runtime, and running the future off the UI thread, under a deadline, is
@@ -9,14 +13,47 @@
 
 use std::{future::Future, pin::Pin};
 
+/// The language a text is read in and translated from. English is the
+/// default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Source {
+    #[default]
+    En,
+    Es,
+    Ca,
+}
+
+impl Source {
+    /// Every language, in the order the window offers them.
+    pub const ALL: [Source; 3] = [Source::En, Source::Es, Source::Ca];
+
+    /// The lowercase code of the language: `en`, `es` or `ca`. No wildcard
+    /// arm: a new language does not compile until it is given its code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Source::En => "en",
+            Source::Es => "es",
+            Source::Ca => "ca",
+        }
+    }
+
+    /// The language of `code`, as [`Source::code`] writes it, exactly; any
+    /// other text is none.
+    pub fn of_code(code: &str) -> Option<Source> {
+        Source::ALL.into_iter().find(|source| source.code() == code)
+    }
+}
+
 /// What is asked of a translator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
-    /// The English text to translate.
+    /// The text to translate, in the language of `source`.
     pub text: String,
     /// The text around it, which guides the translation and is not
     /// translated itself.
     pub context: Option<String>,
+    /// The language of `text` and `context`.
+    pub source: Source,
 }
 
 /// Why a request gave no translation.
@@ -30,7 +67,7 @@ pub enum Refusal {
     UnsafeKey,
     /// The service could not be reached.
     Network,
-    /// The service rejected the EN to RU language pair.
+    /// The service rejected the language pair of the request.
     UnsupportedLanguage,
     /// The service rejected the key.
     RejectedKey,
@@ -46,8 +83,8 @@ pub enum Refusal {
 /// The pending answer of a translator.
 pub type Translating<'a> = Pin<Box<dyn Future<Output = Result<String, Refusal>> + Send + 'a>>;
 
-/// An online translator from English into Russian. It is shared with the
-/// thread that runs the requests.
+/// An online translator from the language of a request into Russian. It is
+/// shared with the thread that runs the requests.
 pub trait Translator: Send + Sync {
     /// The Russian text for `request`. Nothing happens until the future is
     /// polled, and dropping it gives the request up.
@@ -102,13 +139,45 @@ mod tests {
         task::{Context, Poll, Waker},
     };
 
-    use super::{Canned, Refusal, Request, Translating, Translator};
+    use super::{Canned, Refusal, Request, Source, Translating, Translator};
 
     fn request() -> Request {
         Request {
             text: "bank".to_owned(),
             context: Some("I sat on the bank of the river.".to_owned()),
+            source: Source::En,
         }
+    }
+
+    #[test]
+    fn english_is_the_default_language() {
+        assert_eq!(Source::default(), Source::En);
+    }
+
+    #[test]
+    fn every_language_has_its_own_code_and_is_found_by_it() {
+        assert_eq!(Source::ALL.map(Source::code), ["en", "es", "ca"]);
+        for source in Source::ALL {
+            assert_eq!(Source::of_code(source.code()), Some(source));
+        }
+        for other in ["", "fr", "EN", " en", "es\n", "en-GB"] {
+            assert_eq!(Source::of_code(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn the_canned_translator_keeps_the_language_of_a_request() {
+        let translator = Canned::new(Ok("банк"));
+        let spanish = Request {
+            text: "banco".to_owned(),
+            context: Some("El banco cerró a las tres.".to_owned()),
+            source: Source::Es,
+        };
+        assert_eq!(
+            ready(translator.translate(spanish.clone())),
+            Ok("банк".to_owned())
+        );
+        assert_eq!(translator.asked(), [spanish]);
     }
 
     /// The answer of a future that is ready at its first poll.

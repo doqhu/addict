@@ -93,6 +93,16 @@ impl Params {
         page_segmentation: 6,
         scale: 2,
     };
+
+    /// [`Params::ENGLISH`] with the traineddata `language` in place of
+    /// `eng`: the text is read in the language the user reads. Data that is
+    /// not installed is [`OcrFailure::LanguageMissing`].
+    pub const fn in_language(language: &'static str) -> Params {
+        Params {
+            language,
+            ..Params::ENGLISH
+        }
+    }
 }
 
 /// Why a recognition gave no text.
@@ -655,6 +665,17 @@ mod tests {
         assert_eq!(Params::ENGLISH.scale, 2);
         assert_eq!(Params::ENGLISH.page_segmentation, 6);
         assert_eq!(Params::ENGLISH.language, "eng");
+    }
+
+    #[test]
+    fn another_language_changes_only_the_traineddata() {
+        assert_eq!(Params::in_language("eng"), Params::ENGLISH);
+        let catalan = Params::in_language("cat");
+        assert_eq!(catalan.language, "cat");
+        assert_eq!(
+            (catalan.page_segmentation, catalan.scale),
+            (Params::ENGLISH.page_segmentation, Params::ENGLISH.scale)
+        );
     }
 
     #[test]

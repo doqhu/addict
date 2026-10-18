@@ -105,6 +105,20 @@
 //! up like the read it follows, by a press, an edit and a capture; what it
 //! reports later is ignored. Retry, a launch and a capture read no clipboard.
 //!
+//! The user reads in one language, chosen with the EN / ES / CA switch
+//! beside the field; English at first. Every online request about the
+//! field's text is sent from it, and only English is looked up offline: for
+//! Spanish and Catalan the result is the line that there is no offline
+//! dictionary for the language, and no lookup runs. The definition of a
+//! sense is OEWN's and is always sent from English. A capture recognizes the
+//! text with the data of the language. A press of another language forgets
+//! the online texts of the field's text and, for the word shown, redoes its
+//! offline result and asks again what its click or its submit asked; with no
+//! word nothing is sent. The choice is kept in the language file, read once
+//! on the runner after the start and written on the runner at each change
+//! ([`language`](crate::language)); a read that comes after the user chose
+//! changes nothing.
+//!
 //! What is asked for and what is kept is [`online`](crate::online)'s. What
 //! the window says is [`view`](crate::view)'s; its widgets and the paste
 //! into its field are [`widgets`](crate::widgets)'s; what an edit or a click
@@ -124,7 +138,7 @@ use addict_core::{
     APP_ID,
     input::{Source, window_state},
     sentence,
-    translation::{Request, Translator},
+    translation::{Request, Source as Language, Translator},
 };
 use addict_deepl::DeepL;
 use addict_platform::{
@@ -143,7 +157,7 @@ use crate::{
     capture::{self, Capture, Captured, Failure, Timing},
     context::{self, Read, Reading},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
-    evidence,
+    evidence, language,
     manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
     online::{self, Kept, Subject},
     recording::Recording,
@@ -211,15 +225,21 @@ enum Event {
     },
     /// The lookup started as number `run` ended.
     Lookup { run: u64, outcome: Outcome<Looked> },
-    /// The online request about `subject`, sent for the text with the number
-    /// `text`, ended. `elapsed` is as for a definition.
+    /// The online request about `subject`, sent from `source` for the text
+    /// with the number `text`, ended. `elapsed` is as for a definition.
     Translated {
         text: u64,
         subject: Subject,
+        source: Language,
         number: u64,
         outcome: Outcome<Translated>,
         elapsed: Option<evidence::Elapsed>,
     },
+    /// The language file, read on the runner after the start, holds this
+    /// reading language.
+    LanguageRead(Language),
+    /// The user pressed the button of this language in the switch.
+    LanguageChosen(Language),
     /// The check at the start says where the dictionary indexes stand.
     Indexes(Indexes),
     /// Capture was pressed.
@@ -372,6 +392,17 @@ struct Session {
     reading: Reading,
     /// Where the read of the clipboard after it stands.
     copying: Copying,
+    /// The language the user reads: the requests are sent from it, and only
+    /// English is looked up offline.
+    language: Language,
+    /// Where the reading language is kept across restarts; `None` when the
+    /// environment names no configuration directory.
+    language_file: Option<std::path::PathBuf>,
+    /// Whether the user chose the language in this session: the read of the
+    /// file, should it come later, changes nothing then.
+    language_chosen: bool,
+    /// The read or the write of the language file on the runner.
+    language_job: Option<Job>,
     /// The listener of the application in front; gone with the resident.
     foreground: Weak<Foreground>,
     /// What the press that last started a read took as the application in
@@ -392,6 +423,9 @@ struct Capturing {
     /// Between Capture and the start of its job, while the window leaves
     /// the screen.
     hiding: bool,
+    /// The language the last started capture job recognizes, which its
+    /// line of missing data names.
+    language: Language,
 }
 
 /// Where the read of the clipboard of a [`Session`] stands; at first none
@@ -483,10 +517,18 @@ impl Session {
             Event::Translated {
                 text,
                 subject,
+                source,
                 number,
                 outcome,
                 elapsed,
-            } => self.translated(text, subject, number, outcome, elapsed),
+            } => self.translated(text, subject, source, number, outcome, elapsed),
+            Event::LanguageRead(language) => {
+                self.language_job = None;
+                if !self.language_chosen {
+                    self.apply_language(language);
+                }
+            }
+            Event::LanguageChosen(language) => self.language_chosen(language),
             Event::Indexes(indexes) => {
                 self.check = None;
                 self.view.render_indexes(indexes);
@@ -543,11 +585,13 @@ impl Session {
         }
         self.capturing.hiding = false;
         self.capturing.number += 1;
+        self.capturing.language = self.language;
         let number = self.capturing.number;
         let captured = self.sender.clone();
         let ended = self.sender.clone();
         let started = capture::start(
             self.work.upgrade().as_deref(),
+            self.capturing.language,
             move || {
                 // On the worker: the UI thread wakes for the event.
                 let _ = captured.unbounded_send(Event::Captured(number));
@@ -627,7 +671,8 @@ impl Session {
             Err(failure) => {
                 eprintln!("addict: no text from the capture: {failure:?}");
                 self.reveal();
-                self.view.render_source_failure(&failure_text(&failure));
+                self.view
+                    .render_source_failure(&failure_text(&failure, self.capturing.language));
                 return;
             }
         };
@@ -1038,7 +1083,9 @@ impl Session {
     }
 
     /// Shows the input that was just chosen and starts its lookup, which has
-    /// the number `run`. The online texts are not touched.
+    /// the number `run`; for a reading language without an offline
+    /// dictionary no lookup starts, and the line that says so is shown. The
+    /// online texts are not touched.
     fn start_lookup(&mut self, run: u64) {
         // The lookup of another word, if it runs, is replaced.
         self.pending = None;
@@ -1048,10 +1095,11 @@ impl Session {
             return;
         };
         let sender = self.sender.clone();
-        let started = manual::look_up(
+        let started = manual::offline(
             self.work.upgrade().as_deref(),
             self.articles.clone(),
             word,
+            self.language,
             move |outcome| {
                 // On the worker: the UI thread wakes for the event.
                 let _ = sender.unbounded_send(Event::Lookup { run, outcome });
@@ -1098,14 +1146,16 @@ impl Session {
         let Some(number) = self.online.request_number(subject) else {
             return;
         };
+        let source = self.language;
         let request = self
             .manual
             .input()
-            .and_then(|input| translate::request(input, subject));
+            .and_then(|input| translate::request(input, subject, source));
         let started = self.send_online(request, subject.into(), move |outcome, elapsed| {
             Event::Translated {
                 text,
                 subject,
+                source,
                 number,
                 outcome,
                 elapsed,
@@ -1133,6 +1183,11 @@ impl Session {
     ) -> Result<Job, Online> {
         let sender = self.sender.clone();
         let probe = self.probe();
+        // A request that is not there is recorded with the language it would
+        // have been sent from.
+        let source = request
+            .as_ref()
+            .map_or(self.language, |request| request.source);
         let started = translate::translate(
             self.work.upgrade().as_deref(),
             self.translator.clone(),
@@ -1145,21 +1200,24 @@ impl Session {
             },
         );
         if let Err(online) = &started {
-            self.record(translate::translation_unstarted(online, requested, probe));
+            self.record(translate::translation_unstarted(
+                online, requested, source, probe,
+            ));
         }
         started
     }
 
-    /// What an ended online request for `requested` shows, after its record
-    /// is written when there is one; `None` for a request that was given up:
-    /// it shows nothing and is not recorded.
+    /// What an ended online request for `requested`, sent from `source`,
+    /// shows, after its record is written when there is one; `None` for a
+    /// request that was given up: it shows nothing and is not recorded.
     fn online_ended(
         &self,
         outcome: Outcome<Translated>,
         requested: evidence::Requested,
+        source: Language,
         elapsed: Option<evidence::Elapsed>,
     ) -> Option<Online> {
-        let (online, record) = translate::translation_ended(outcome, requested, elapsed)?;
+        let (online, record) = translate::translation_ended(outcome, requested, source, elapsed)?;
         self.record(record);
         Some(online)
     }
@@ -1195,11 +1253,12 @@ impl Session {
         &mut self,
         text: u64,
         subject: Subject,
+        source: Language,
         number: u64,
         outcome: Outcome<Translated>,
         elapsed: Option<evidence::Elapsed>,
     ) {
-        let Some(online) = self.online_ended(outcome, subject.into(), elapsed) else {
+        let Some(online) = self.online_ended(outcome, subject.into(), source, elapsed) else {
             return;
         };
         if self.online.answer(text, subject, number, online) {
@@ -1281,13 +1340,98 @@ impl Session {
         outcome: Outcome<Translated>,
         elapsed: Option<evidence::Elapsed>,
     ) {
-        let Some(online) = self.online_ended(outcome, evidence::Requested::Definition, elapsed)
-        else {
+        // A definition is OEWN's, so always sent from English.
+        let Some(online) = self.online_ended(
+            outcome,
+            evidence::Requested::Definition,
+            Language::En,
+            elapsed,
+        ) else {
             return;
         };
         if self.shown.answer_definition(number, online) {
             self.translating_definition = None;
             self.render_shown();
+        }
+    }
+
+    /// The user pressed the button of `language` in the switch: it is the
+    /// reading language from now on, kept in the language file by a write on
+    /// the runner, and what the window shows of the current word is asked
+    /// anew in it.
+    fn language_chosen(&mut self, language: Language) {
+        self.language_chosen = true;
+        if language == self.language {
+            return;
+        }
+        self.apply_language(language);
+        self.save_language();
+    }
+
+    /// Makes `language` the reading language and the switch shows it. The
+    /// word shown, if there is one, has its offline result redone and its
+    /// online texts forgotten and asked again, as its click or its submit
+    /// asked them: a word of a sentence with its sentence, a lone word only
+    /// when it was submitted. Without a word nothing is sent.
+    fn apply_language(&mut self, language: Language) {
+        self.view.set_language(language);
+        if language == self.language {
+            return;
+        }
+        self.language = language;
+        // The field holds a newer text, whose own event comes next and is
+        // handled in the new language.
+        if self.field_is_newer() {
+            return;
+        }
+        // Cancels the online requests; whatever they still report has a
+        // number that is no longer awaited.
+        self.translating_word = None;
+        self.translating_sentence = None;
+        let submitted = self.online.forget();
+        if let Some(run) = self.manual.again() {
+            self.start_lookup(run);
+            let chosen = self.manual.chosen().and_then(|index| {
+                self.manual
+                    .sentence_of(index)
+                    .map(|sentence| (index, sentence))
+            });
+            if let Some((index, (number, span))) = chosen {
+                let long = online::is_long(&self.manual.sentence()[span]);
+                for subject in self.online.click(index, number, long).ask {
+                    self.start_translation(subject);
+                }
+            } else if submitted && self.online.submit() {
+                self.start_translation(Subject::Lone);
+            }
+        }
+        self.render_online();
+    }
+
+    /// Writes the reading language to its file on the runner. A write that
+    /// fails is written to stderr and nothing else: the choice holds until
+    /// the application ends.
+    fn save_language(&mut self) {
+        let path = self.language_file.clone();
+        let language = self.language;
+        self.language_job = self.work.upgrade().map(|work| {
+            work.run(
+                language::FILE_LIMIT,
+                async move { language::write(path.as_deref(), language) },
+                |outcome| match outcome {
+                    // Replaced by a newer choice, which is written instead.
+                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
+                    Outcome::Finished(Err(e)) => {
+                        eprintln!("addict: the reading language was not kept: {e}");
+                    }
+                    Outcome::TimedOut | Outcome::Panicked => {
+                        eprintln!("addict: the reading language was not kept");
+                    }
+                },
+            )
+        });
+        if self.language_job.is_none() {
+            eprintln!("addict: the reading language was not kept: no runner");
         }
     }
 
@@ -1571,6 +1715,10 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     view.connect_sense_chosen(move |index| {
         let _ = sense.unbounded_send(Event::Sense(index));
     });
+    let language = sender.clone();
+    view.connect_language_chosen(move |chosen| {
+        let _ = language.unbounded_send(Event::LanguageChosen(chosen));
+    });
 }
 
 /// The style, the view and the hidden window around it, for `binding`: what
@@ -1643,6 +1791,28 @@ fn start_check(
     })
 }
 
+/// Starts the one read of the language file at `path` on `work`; the
+/// language it holds, English for anything else, comes to `sender` as an
+/// event. Without a runner nothing is read, and English stays.
+fn start_language(
+    work: Option<&Work>,
+    path: Option<std::path::PathBuf>,
+    sender: &UnboundedSender<Event>,
+) -> Option<Job> {
+    let read = sender.clone();
+    let job = work?.run(
+        language::FILE_LIMIT,
+        async move { language::read(path.as_deref()) },
+        move |outcome| {
+            if let Outcome::Finished(language) = outcome {
+                // On the worker: the UI thread wakes for the event.
+                let _ = read.unbounded_send(Event::LanguageRead(language));
+            }
+        },
+    );
+    Some(job)
+}
+
 /// The online translator and the key file it reads, for the window to name.
 /// Nothing is read or connected here: the key file and the network are the
 /// runner's, at the first click on a word of a sentence or the first submit
@@ -1690,6 +1860,10 @@ fn start(
     // nothing of the applications.
     let listener = Rc::new(foreground::watch(|_| {}));
     let check = start_check(work.as_deref(), articles.clone(), &sender);
+    // After the check: the runner takes its jobs in this order. Only the
+    // path is made here; the file is the runner's.
+    let language_file = language::path();
+    let language_job = start_language(work.as_deref(), language_file.clone(), &sender);
     let (translator, key_file) = online_translator();
     let settings = start_settings(&window, key_file.as_deref(), &sender);
     let session = Session {
@@ -1718,6 +1892,10 @@ fn start(
         capturing: Capturing::default(),
         reading: Reading::default(),
         copying: Copying::default(),
+        language: Language::default(),
+        language_file,
+        language_chosen: false,
+        language_job,
         foreground: Rc::downgrade(&listener),
         kept: Foregrounded::Unknown,
     };

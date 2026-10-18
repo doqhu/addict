@@ -23,7 +23,9 @@
 //!
 //! [`Manual`] is the state and holds no widget, so what an edit or a click
 //! does to it is tested without a display. [`look_up`] starts a lookup on the
-//! work runner and [`lookup_result`] says what the window shows for its
+//! work runner, [`offline`] starts it only for English, the one reading
+//! language with offline dictionaries, and [`lookup_result`] says what the
+//! window shows for its
 //! outcome; [`check_indexes`] asks on the runner where the dictionary indexes
 //! stand. The online requests about the input are
 //! [`translate`](crate::translate)'s. Putting any of it on the screen is
@@ -34,6 +36,7 @@ use std::{ops::Range, sync::Arc, time::Duration};
 use addict_core::{
     input::{Input, Source, WindowState, window_state},
     sentence,
+    translation::Source as Language,
 };
 use addict_platform::{
     atspi::Context,
@@ -324,6 +327,15 @@ impl Manual {
     pub fn awaits(&self, run: u64) -> bool {
         run == self.run && self.input.is_some()
     }
+
+    /// The input is to be looked up anew, as it is: the number of the new
+    /// lookup, after which the outcome of the one before is not awaited.
+    /// Nothing else changes. `None` without an input.
+    pub fn again(&mut self) -> Option<u64> {
+        self.input.as_ref()?;
+        self.run += 1;
+        Some(self.run)
+    }
 }
 
 /// Starts the lookup of `word` in `articles` on `work`, with a deadline.
@@ -341,6 +353,25 @@ pub fn look_up(
         async move { articles.look_up(&word) },
         on_outcome,
     ))
+}
+
+/// The offline result of `word` read in `language`. For English, the
+/// lookup, started as [`look_up`] starts it. For a language without an
+/// offline dictionary nothing starts and nothing is asked of `articles`: the
+/// line that says there is no dictionary is given back, so no English
+/// article of a word spelt alike is shown. No wildcard arm: a new language
+/// does not compile until it is given its offline result.
+pub fn offline(
+    work: Option<&Work>,
+    articles: Arc<dyn Articles>,
+    word: String,
+    language: Language,
+    on_outcome: impl FnOnce(Outcome<Looked>) + Send + 'static,
+) -> Result<Job, Lookup> {
+    match language {
+        Language::En => look_up(work, articles, word, on_outcome),
+        Language::Es | Language::Ca => Err(Lookup::NoDictionary(language)),
+    }
 }
 
 /// Asks `articles` on `work`, with the deadline of a lookup, where the
@@ -389,6 +420,7 @@ pub(crate) mod tests {
         dictionary::{Dictionary, Sample},
         input::{Source, WindowState},
         sentence,
+        translation::Source as Language,
     };
     use addict_platform::{
         atspi::Context,
@@ -397,7 +429,7 @@ pub(crate) mod tests {
 
     use super::{
         CLIPBOARD_MAX_CHARS, Edit, LOOKUP_LIMIT, Manual, NoLine, check_indexes, clipboard_line,
-        look_up, lookup_result,
+        look_up, lookup_result, offline,
     };
     use crate::{
         dictionaries::{
@@ -457,6 +489,92 @@ pub(crate) mod tests {
         let reported = receiver.recv_timeout(WAIT).expect("outcome");
         drop(job);
         reported
+    }
+
+    /// A source of articles that must not be asked.
+    struct Unasked;
+
+    impl Articles for Unasked {
+        fn indexes(&self) -> Indexes {
+            panic!("the indexes were asked")
+        }
+
+        fn look_up(&self, word: &str) -> Looked {
+            panic!("{word} was looked up")
+        }
+    }
+
+    #[test]
+    fn a_spanish_or_catalan_word_is_not_looked_up() {
+        let work = Work::start().expect("runner");
+        for language in [Language::Es, Language::Ca] {
+            // `real`, `once` and `fin` are English words too.
+            for word in ["real", "once", "fin", "banco"] {
+                let started = offline(
+                    Some(&work),
+                    std::sync::Arc::new(Unasked),
+                    word.to_owned(),
+                    language,
+                    |_| panic!("a lookup ended"),
+                );
+                assert_eq!(started.err(), Some(Lookup::NoDictionary(language)));
+            }
+        }
+        // Also without a runner: nothing was to run.
+        let started = offline(
+            None,
+            std::sync::Arc::new(Unasked),
+            "real".to_owned(),
+            Language::Es,
+            |_| {},
+        );
+        assert_eq!(started.err(), Some(Lookup::NoDictionary(Language::Es)));
+    }
+
+    #[test]
+    fn an_english_word_is_looked_up_as_before() {
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = mpsc::channel();
+        let job = offline(
+            Some(&work),
+            std::sync::Arc::new(Sampled),
+            "bank".to_owned(),
+            Language::En,
+            move |outcome| {
+                let _ = sender.send(outcome);
+            },
+        )
+        .expect("job");
+        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+        drop(job);
+        assert_eq!(
+            lookup_result(outcome, "bank"),
+            Some(Lookup::Article(Sample.lookup("bank").expect("bank")))
+        );
+        let started = offline(
+            None,
+            std::sync::Arc::new(Sampled),
+            "bank".to_owned(),
+            Language::En,
+            |_| {},
+        );
+        assert_eq!(started.err(), Some(Lookup::Unfinished));
+    }
+
+    #[test]
+    fn the_same_input_again_is_a_new_lookup_of_it() {
+        let mut manual = Manual::default();
+        assert_eq!(manual.again(), None);
+        manual.edit(SENTENCE.to_owned());
+        assert_eq!(manual.again(), None);
+        let run = manual.choose(BANK).expect("run");
+        let input = manual.input().cloned();
+        let again = manual.again().expect("again");
+        assert_ne!(again, run);
+        assert!(!manual.awaits(run));
+        assert!(manual.awaits(again));
+        assert_eq!(manual.input().cloned(), input);
+        assert_eq!(manual.chosen(), Some(BANK));
     }
 
     #[test]

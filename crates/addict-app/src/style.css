@@ -78,7 +78,8 @@ window.addict .banner label {
   color: var(--warn);
 }
 
-/* The field and Capture: one height, one radius. */
+/* The field, the switch of the language and Capture: one height, one
+ * radius. */
 window.addict entry.lookup {
   min-height: 44px;
   padding: 0 12px;
@@ -113,6 +114,43 @@ window.addict button.capture {
 
 window.addict button.capture:hover {
   background: var(--chip);
+}
+
+/* The switch of the reading language: three linked buttons of the
+ * field's height, the pressed one in the accent. */
+window.addict .language > button {
+  min-height: 44px;
+  min-width: 34px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  box-shadow: none;
+  font-weight: 500;
+  font-size: 0.9em;
+  border-radius: 0;
+}
+
+window.addict .language > button:first-child {
+  border-radius: 12px 0 0 12px;
+}
+
+window.addict .language > button:last-child {
+  border-radius: 0 12px 12px 0;
+}
+
+window.addict .language > button:not(:first-child) {
+  border-left-width: 0;
+}
+
+window.addict .language > button:hover {
+  background: var(--chip);
+}
+
+window.addict .language > button:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
 }
 
 /* The sentence: larger, its words plain; the chosen one is bold. */

@@ -2,7 +2,8 @@
 //! sentence or a definition, the job that sends it and what its outcome is.
 //!
 //! [`request`] builds the one online request about a [`Subject`]: the word
-//! with its sentence as context, the sentence itself, or a lone word;
+//! with its sentence as context, the sentence itself, or a lone word, in the
+//! reading language the window has chosen;
 //! [`translate`] starts a request as a job of its own on the work runner,
 //! with its own deadline, and [`translation_result`] says what the window
 //! shows for its outcome. [`translation_ended`] and [`translation_unstarted`]
@@ -16,7 +17,7 @@ use std::{sync::Arc, time::Duration};
 
 use addict_core::{
     input::Input,
-    translation::{Refusal, Request, Translator},
+    translation::{Refusal, Request, Source, Translator},
 };
 use addict_platform::work::{Job, Outcome, Work};
 
@@ -39,26 +40,29 @@ pub const SENTENCE_LIMIT: usize = 500;
 /// What an online translation ends with.
 pub type Translated = Result<String, Refusal>;
 
-/// The online request about `subject` for `input`, with nothing in it but
-/// what is named here. For a word of a sentence: the word, with the sentence
-/// as context. For the sentence: the sentence, without context. For a lone
-/// word: the word, without context. `None` when the input is not of that
-/// kind: a lone word has no sentence, and a word of a sentence is not sent
-/// without it.
-pub fn request(input: &Input, subject: Subject) -> Option<Request> {
+/// The online request about `subject` for `input`, read in `source`, with
+/// nothing in it but what is named here. For a word of a sentence: the word,
+/// with the sentence as context. For the sentence: the sentence, without
+/// context. For a lone word: the word, without context. `None` when the
+/// input is not of that kind: a lone word has no sentence, and a word of a
+/// sentence is not sent without it.
+pub fn request(input: &Input, subject: Subject, source: Source) -> Option<Request> {
     let sentence = input.sentence().map(str::to_owned);
     match subject {
         Subject::Word(_) => Some(Request {
             text: input.word().to_owned(),
             context: Some(sentence?),
+            source,
         }),
         Subject::Sentence(_) => Some(Request {
             text: sentence?,
             context: None,
+            source,
         }),
         Subject::Lone => sentence.is_none().then(|| Request {
             text: input.word().to_owned(),
             context: None,
+            source,
         }),
     }
 }
@@ -109,7 +113,8 @@ pub fn translation_result(outcome: Outcome<Translated>) -> Option<Online> {
 }
 
 /// What the window shows for the `outcome` of an online request for
-/// `requested`, with the record of it for the evidence, or `None` for a
+/// `requested`, sent from `source`, with the record of it for the evidence,
+/// or `None` for a
 /// request that was given up: it shows nothing and is not recorded. The
 /// record is there whenever the request was timed, which gives `elapsed`,
 /// whether or not the answer is still awaited: that is asked after this.
@@ -118,22 +123,24 @@ pub fn translation_result(outcome: Outcome<Translated>) -> Option<Online> {
 pub fn translation_ended(
     outcome: Outcome<Translated>,
     requested: Requested,
+    source: Source,
     elapsed: Option<Elapsed>,
 ) -> Option<(Online, Option<Record>)> {
     let online = translation_result(outcome)?;
-    let record = evidence::online_record(requested, &online, elapsed);
+    let record = evidence::online_record(requested, source, &online, elapsed);
     Some((online, record))
 }
 
-/// The record of a request for `requested` that [`translate`] did not start
-/// and gave back as `online`: no time passed. None when `probe` measures
-/// nothing. As [`translation_ended`], for the UI thread.
+/// The record of a request for `requested` from `source` that [`translate`]
+/// did not start and gave back as `online`: no time passed. None when
+/// `probe` measures nothing. As [`translation_ended`], for the UI thread.
 pub fn translation_unstarted(
     online: &Online,
     requested: Requested,
+    source: Source,
     probe: Probe,
 ) -> Option<Record> {
-    evidence::online_record(requested, online, probe.not_started())
+    evidence::online_record(requested, source, online, probe.not_started())
 }
 
 #[cfg(test)]
@@ -146,7 +153,7 @@ pub(crate) mod tests {
 
     use addict_core::{
         dictionary::{Dictionary, Sample},
-        translation::{Canned, Refusal, Request, Translating, Translator},
+        translation::{Canned, Refusal, Request, Source as Language, Translating, Translator},
     };
     use addict_deepl::{
         DeepL,
@@ -204,7 +211,8 @@ pub(crate) mod tests {
             failure.asked(),
             [Request {
                 text: definition.clone(),
-                context: None
+                context: None,
+                source: Language::En,
             }]
         );
         let (retry, request) = shown.request_definition().expect("retry action");
@@ -214,7 +222,8 @@ pub(crate) mod tests {
             success.asked(),
             [Request {
                 text: definition,
-                context: None
+                context: None,
+                source: Language::En,
             }]
         );
         assert!(shown.request_definition().is_none());
@@ -288,13 +297,19 @@ pub(crate) mod tests {
         Request {
             text: "bank".to_owned(),
             context: Some(RIVER.to_owned()),
+            source: Language::En,
         }
     }
 
     /// The request about the chosen word of `manual` in its sentence.
     fn word_request(manual: &Manual) -> Request {
         let chosen = manual.chosen().expect("chosen");
-        request(manual.input().expect("input"), Subject::Word(chosen)).expect("a sentence")
+        request(
+            manual.input().expect("input"),
+            Subject::Word(chosen),
+            Language::En,
+        )
+        .expect("a sentence")
     }
 
     /// The outcome of the online translation of the chosen word of `manual`
@@ -357,6 +372,7 @@ pub(crate) mod tests {
         Request {
             text: "bank".to_owned(),
             context: None,
+            source: Language::En,
         }
     }
 
@@ -380,7 +396,8 @@ pub(crate) mod tests {
         ];
         for (started, requested, subject) in unstarted {
             let online = started.expect_err("nothing started");
-            let record = translation_unstarted(&online, requested, probe).expect("a record");
+            let record =
+                translation_unstarted(&online, requested, Language::En, probe).expect("a record");
             assert_eq!(record.event(), "online");
             let details = record.details();
             assert_eq!(details["subject"], subject);
@@ -400,11 +417,15 @@ pub(crate) mod tests {
         // The worker only took the time; nothing is shown and no record is
         // made of it, so no memory is read for it either.
         assert!(elapsed.is_some());
-        assert_eq!(translation_ended(outcome, Requested::Word, elapsed), None);
+        assert_eq!(
+            translation_ended(outcome, Requested::Word, Language::En, elapsed),
+            None
+        );
         // The same request, left to end, is recorded.
         let canned = Arc::new(Canned::new(Ok("берег")));
         let (outcome, elapsed) = probed(&work, canned, bank(), probe, false);
-        let (_, record) = translation_ended(outcome, Requested::Word, elapsed).expect("ended");
+        let (_, record) =
+            translation_ended(outcome, Requested::Word, Language::En, elapsed).expect("ended");
         assert!(record.is_some());
     }
 
@@ -427,7 +448,8 @@ pub(crate) mod tests {
                 shown.show(None);
             }
             let (online, record) =
-                translation_ended(outcome, Requested::Definition, elapsed).expect("ended");
+                translation_ended(outcome, Requested::Definition, Language::En, elapsed)
+                    .expect("ended");
             // The record exists before the window is asked whether it still
             // awaits the answer, and whatever it says.
             let record = record.expect("a record");
@@ -454,7 +476,7 @@ pub(crate) mod tests {
         let (outcome, elapsed) = probed(&work, canned, bank(), probe, false);
         assert_eq!(elapsed, None);
         assert_eq!(
-            translation_ended(outcome, Requested::Word, elapsed),
+            translation_ended(outcome, Requested::Word, Language::En, elapsed),
             Some((Online::Translated("берег".to_owned()), None))
         );
         // A refusal, and a request that could not start.
@@ -462,12 +484,15 @@ pub(crate) mod tests {
         let (outcome, elapsed) = probed(&work, refusing.clone(), bank(), probe, false);
         assert_eq!(elapsed, None);
         assert_eq!(
-            translation_ended(outcome, Requested::Sentence, elapsed),
+            translation_ended(outcome, Requested::Sentence, Language::En, elapsed),
             Some((Online::Refused(Refusal::Quota), None))
         );
         let online = translate(None, refusing, Some(bank()), |_| {}).expect_err("nothing started");
         assert_eq!(probe.not_started(), None);
-        assert_eq!(translation_unstarted(&online, Requested::Word, probe), None);
+        assert_eq!(
+            translation_unstarted(&online, Requested::Word, Language::En, probe),
+            None
+        );
     }
 
     /// A translator whose every call panics.
@@ -495,6 +520,7 @@ pub(crate) mod tests {
         Request {
             text: RIVER.to_owned(),
             context: None,
+            source: Language::En,
         }
     }
 
@@ -502,6 +528,7 @@ pub(crate) mod tests {
         Request {
             text: "river".to_owned(),
             context: Some(RIVER.to_owned()),
+            source: Language::En,
         }
     }
 
@@ -509,6 +536,7 @@ pub(crate) mod tests {
         Request {
             text: word.to_owned(),
             context: None,
+            source: Language::En,
         }
     }
 
@@ -530,21 +558,27 @@ pub(crate) mod tests {
     fn each_subject_has_its_one_request_and_nothing_else_in_it() {
         let manual = bank_of_the_river();
         let input = manual.input().expect("input");
-        assert_eq!(request(input, Subject::Word(BANK)), Some(bank_request()));
         assert_eq!(
-            request(input, Subject::Sentence(0)),
+            request(input, Subject::Word(BANK), Language::En),
+            Some(bank_request())
+        );
+        assert_eq!(
+            request(input, Subject::Sentence(0), Language::En),
             Some(sentence_request())
         );
         // A word of a sentence is not sent without it.
-        assert_eq!(request(input, Subject::Lone), None);
+        assert_eq!(request(input, Subject::Lone, Language::En), None);
 
         let mut manual = Manual::default();
         lone(&mut manual, " Bank. ");
         let input = manual.input().expect("input");
-        assert_eq!(request(input, Subject::Lone), Some(lone_request("Bank")));
+        assert_eq!(
+            request(input, Subject::Lone, Language::En),
+            Some(lone_request("Bank"))
+        );
         // A lone word has no sentence to send, as text or as context.
-        assert_eq!(request(input, Subject::Word(0)), None);
-        assert_eq!(request(input, Subject::Sentence(0)), None);
+        assert_eq!(request(input, Subject::Word(0), Language::En), None);
+        assert_eq!(request(input, Subject::Sentence(0), Language::En), None);
     }
 
     /// The manual path as the resident drives it, without a window: an edit
@@ -557,6 +591,8 @@ pub(crate) mod tests {
         kept: Kept,
         work: Work,
         translator: Arc<Canned>,
+        /// The reading language.
+        language: Language,
     }
 
     impl Desk {
@@ -566,6 +602,7 @@ pub(crate) mod tests {
                 kept: Kept::default(),
                 work: Work::start().expect("runner"),
                 translator: Arc::new(Canned::new(answer)),
+                language: Language::En,
             }
         }
 
@@ -614,7 +651,7 @@ pub(crate) mod tests {
             let asked = self
                 .manual
                 .input()
-                .and_then(|input| request(input, subject));
+                .and_then(|input| request(input, subject, self.language));
             let started = translate(
                 Some(&self.work),
                 self.translator.clone(),
@@ -638,6 +675,29 @@ pub(crate) mod tests {
             self.translator.asked()
         }
 
+        /// The switch is set to `language`, as the resident handles it: the
+        /// online texts are forgotten and the chosen word, or the submitted
+        /// lone word, is asked for again.
+        fn switch(&mut self, language: Language) {
+            if language == self.language {
+                return;
+            }
+            self.language = language;
+            let submitted = self.kept.forget();
+            let chosen = self
+                .manual
+                .chosen()
+                .and_then(|index| self.manual.sentence_of(index).map(|of| (index, of)));
+            if let Some((index, (number, span))) = chosen {
+                let long = is_long(&self.manual.sentence()[span]);
+                for subject in self.kept.click(index, number, long).ask {
+                    self.send(subject);
+                }
+            } else if submitted && self.kept.submit() {
+                self.send(Subject::Lone);
+            }
+        }
+
         fn shown(&self) -> OnlineTexts<'_> {
             self.kept.shown(self.manual.chosen())
         }
@@ -645,6 +705,142 @@ pub(crate) mod tests {
 
     fn online(text: &str) -> Online {
         Online::Translated(text.to_owned())
+    }
+
+    /// The Spanish sentence of the matrix, and `banco` in it.
+    const BANCO_SENTENCE: &str = "El banco cerró a las tres.";
+    const BANCO: usize = 1;
+
+    #[test]
+    fn a_spanish_word_is_sent_from_es_with_its_sentence() {
+        let mut desk = Desk::with_text(Ok("банк"), BANCO_SENTENCE);
+        desk.language = Language::Es;
+        desk.click(BANCO);
+        assert_eq!(
+            desk.asked(),
+            [
+                Request {
+                    text: "banco".to_owned(),
+                    context: Some(BANCO_SENTENCE.to_owned()),
+                    source: Language::Es,
+                },
+                Request {
+                    text: BANCO_SENTENCE.to_owned(),
+                    context: None,
+                    source: Language::Es,
+                },
+            ]
+        );
+        assert_eq!(desk.shown().word, Some(&online("банк")));
+    }
+
+    #[test]
+    fn a_catalan_sentence_is_sent_from_ca_without_context() {
+        let text = "La col·lecció d'art és gran.";
+        let mut desk = Desk::with_text(Ok("коллекция"), text);
+        desk.language = Language::Ca;
+        // `col·lecció` is one word, the second.
+        assert_eq!(&text[desk.manual.words()[1].clone()], "col·lecció");
+        desk.click(1);
+        assert_eq!(
+            desk.asked()[1],
+            Request {
+                text: text.to_owned(),
+                context: None,
+                source: Language::Ca,
+            }
+        );
+        assert_eq!(desk.asked()[0].text, "col·lecció");
+        assert_eq!(desk.asked()[0].source, Language::Ca);
+    }
+
+    #[test]
+    fn changing_the_language_sends_the_shown_word_and_its_sentence_again() {
+        let mut desk = Desk::with_text(Ok("банк"), BANCO_SENTENCE);
+        desk.click(BANCO);
+        assert_eq!(desk.asked().len(), 2);
+        assert!(
+            desk.asked()
+                .iter()
+                .all(|asked| asked.source == Language::En)
+        );
+        desk.switch(Language::Es);
+        assert_eq!(
+            desk.asked()[2..],
+            [
+                Request {
+                    text: "banco".to_owned(),
+                    context: Some(BANCO_SENTENCE.to_owned()),
+                    source: Language::Es,
+                },
+                Request {
+                    text: BANCO_SENTENCE.to_owned(),
+                    context: None,
+                    source: Language::Es,
+                },
+            ]
+        );
+        // The same language again sends nothing.
+        desk.switch(Language::Es);
+        assert_eq!(desk.asked().len(), 4);
+        // A submitted lone word is sent again; one that was not, is not.
+        let mut lone = Desk::with_text(Ok("банк"), "banco");
+        lone.switch(Language::Es);
+        assert!(lone.asked().is_empty());
+        lone.submit();
+        lone.switch(Language::Ca);
+        assert_eq!(
+            lone.asked(),
+            [
+                Request {
+                    text: "banco".to_owned(),
+                    context: None,
+                    source: Language::Es,
+                },
+                Request {
+                    text: "banco".to_owned(),
+                    context: None,
+                    source: Language::Ca,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn changing_the_language_without_a_word_sends_nothing() {
+        let mut desk = Desk::with_text(Ok("банк"), BANCO_SENTENCE);
+        desk.switch(Language::Es);
+        desk.switch(Language::Ca);
+        assert!(desk.asked().is_empty());
+        let mut empty = Desk::new(Ok("банк"));
+        empty.switch(Language::Es);
+        assert!(empty.asked().is_empty());
+    }
+
+    #[test]
+    fn a_request_is_recorded_with_its_language() {
+        let work = Work::start().expect("runner");
+        for (language, code) in [
+            (Language::En, "en"),
+            (Language::Es, "es"),
+            (Language::Ca, "ca"),
+        ] {
+            let canned = Arc::new(Canned::new(Ok("банк")));
+            let asked = Request {
+                source: language,
+                ..bank()
+            };
+            let (outcome, elapsed) = probed(&work, canned, asked, Probe::start(true), false);
+            let (_, record) =
+                translation_ended(outcome, Requested::Word, language, elapsed).expect("ended");
+            assert_eq!(record.expect("a record").details()["source"], code);
+            let online =
+                translate(None, Arc::new(Mute), Some(bank()), |_| {}).expect_err("unstarted");
+            let record =
+                translation_unstarted(&online, Requested::Sentence, language, Probe::start(true))
+                    .expect("a record");
+            assert_eq!(record.details()["source"], code);
+        }
     }
 
     #[test]
@@ -688,10 +884,12 @@ pub(crate) mod tests {
                 Request {
                     text: "iterations".to_owned(),
                     context: Some(sentence.to_owned()),
+                    source: Language::En,
                 },
                 Request {
                     text: sentence.to_owned(),
                     context: None,
+                    source: Language::En,
                 },
             ]
         );
@@ -710,10 +908,12 @@ pub(crate) mod tests {
                 Request {
                     text: "pitfall".to_owned(),
                     context: Some(other.to_owned()),
+                    source: Language::En,
                 },
                 Request {
                     text: other.to_owned(),
                     context: None,
+                    source: Language::En,
                 },
             ]
         );
@@ -779,6 +979,7 @@ pub(crate) mod tests {
             [Request {
                 text: "bank".to_owned(),
                 context: Some(text.clone()),
+                source: Language::En,
             }]
         );
         assert_eq!(desk.shown().sentence, Some(&Whole::TooLong));
@@ -789,6 +990,7 @@ pub(crate) mod tests {
             Request {
                 text: "river".to_owned(),
                 context: Some(text),
+                source: Language::En,
             }
         );
     }
@@ -804,6 +1006,7 @@ pub(crate) mod tests {
             Request {
                 text,
                 context: None,
+                source: Language::En,
             }
         );
     }
@@ -830,6 +1033,7 @@ pub(crate) mod tests {
                 Request {
                     text: "bank".to_owned(),
                     context: Some(edited.to_owned()),
+                    source: Language::En,
                 },
                 lone_request(edited),
             ]
@@ -1088,7 +1292,7 @@ pub(crate) mod tests {
                 translate(
                     Some(&work),
                     translator.clone(),
-                    request(input, subject),
+                    request(input, subject, Language::En),
                     move |outcome| {
                         let _ = online.send(Reported::Online(outcome));
                     },
@@ -1139,6 +1343,89 @@ pub(crate) mod tests {
         });
         assert!(bodies.contains(&word), "{bodies:?}");
         assert!(bodies.contains(&sentence), "{bodies:?}");
+    }
+
+    #[test]
+    fn the_spanish_and_catalan_bodies_name_their_source_and_russian() {
+        let stub = Stub::start(Reply::translation("банк")).expect("stub");
+        let key = KeyFile::new("spanish", 0o600);
+        let translator: Arc<dyn Translator> =
+            Arc::new(DeepL::with_base_url(&key.0, stub.base_url()));
+        let mut spanish = Manual::default();
+        spanish.edit(BANCO_SENTENCE.to_owned());
+        spanish.choose(BANCO).expect("run");
+        let input = spanish.input().expect("input");
+        let work = Work::start().expect("runner");
+        for (subject, language) in [
+            (Subject::Word(BANCO), Language::Es),
+            (Subject::Sentence(0), Language::Ca),
+        ] {
+            let (sender, receiver) = mpsc::channel();
+            let _job = translate(
+                Some(&work),
+                translator.clone(),
+                request(input, subject, language),
+                move |outcome| {
+                    let _ = sender.send(outcome);
+                },
+            )
+            .expect("job");
+            receiver.recv_timeout(WAIT).expect("outcome");
+        }
+        let bodies: Vec<serde_json::Value> = stub
+            .seen()
+            .iter()
+            .map(|seen| serde_json::from_str(&seen.body).expect("JSON"))
+            .collect();
+        assert_eq!(
+            bodies,
+            [
+                serde_json::json!({
+                    "text": ["banco"],
+                    "context": BANCO_SENTENCE,
+                    "source_lang": "ES",
+                    "target_lang": "RU",
+                }),
+                serde_json::json!({
+                    "text": [BANCO_SENTENCE],
+                    "source_lang": "CA",
+                    "target_lang": "RU",
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_a_key_a_spanish_word_is_the_key_refusal_and_nothing_leaves() {
+        let stub = Stub::start(Reply::translation("банк")).expect("stub");
+        let missing =
+            std::env::temp_dir().join(format!("addict-manual-missing-{}.key", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        let translator = Arc::new(DeepL::with_base_url(&missing, stub.base_url()));
+        let mut spanish = Manual::default();
+        spanish.edit(BANCO_SENTENCE.to_owned());
+        spanish.choose(BANCO).expect("run");
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = mpsc::channel();
+        let _job = translate(
+            Some(&work),
+            translator,
+            request(
+                spanish.input().expect("input"),
+                Subject::Word(BANCO),
+                Language::Es,
+            ),
+            move |outcome| {
+                let _ = sender.send(outcome);
+            },
+        )
+        .expect("job");
+        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+        assert_eq!(
+            translation_result(outcome),
+            Some(Online::Refused(Refusal::Key))
+        );
+        assert!(stub.seen().is_empty());
     }
 
     #[test]

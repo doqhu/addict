@@ -15,7 +15,7 @@ use std::{
     sync::OnceLock,
 };
 
-use addict_core::translation::{Refusal, Request, Translating, Translator};
+use addict_core::translation::{Refusal, Request, Source, Translating, Translator};
 use reqwest::{
     StatusCode,
     header::{AUTHORIZATION, HeaderValue},
@@ -30,9 +30,18 @@ const FREE_HOST: &str = "https://api-free.deepl.com";
 /// The host of every other key.
 const PRO_HOST: &str = "https://api.deepl.com";
 
-/// The language of what is translated and the language it is translated to.
-const SOURCE_LANG: &str = "EN";
+/// The language every text is translated to.
 const TARGET_LANG: &str = "RU";
+
+/// The `source_lang` of a request in `source`, as DeepL writes it. No
+/// wildcard arm: a new language does not compile until it is given its code.
+fn source_lang(source: Source) -> &'static str {
+    match source {
+        Source::En => "EN",
+        Source::Es => "ES",
+        Source::Ca => "CA",
+    }
+}
 
 /// What stands before the key in the `Authorization` header.
 const AUTH_SCHEME: &str = "DeepL-Auth-Key ";
@@ -119,14 +128,15 @@ impl DeepL {
         self.key_file.as_deref()
     }
 
-    /// The Russian text for the English `request.text`, read in
-    /// `request.context` when there is one. The context is not translated.
+    /// The Russian text for `request.text`, in the language of
+    /// `request.source` and read in `request.context` when there is one.
+    /// The context is not translated.
     pub async fn translate(&self, request: &Request) -> Result<String, Refusal> {
         let (http, base, authorization) = self.prepared()?;
         let body = TranslateBody {
             text: [&request.text],
             context: request.context.as_deref(),
-            source_lang: SOURCE_LANG,
+            source_lang: source_lang(request.source),
             target_lang: TARGET_LANG,
         };
         let sent = http

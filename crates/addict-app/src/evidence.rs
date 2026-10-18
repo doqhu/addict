@@ -19,7 +19,7 @@ use std::{
     time::{Instant, SystemTime},
 };
 
-use addict_core::translation::Refusal;
+use addict_core::translation::{Refusal, Source as Language};
 use addict_platform::{
     atspi::{Context, ContextFailure},
     foreground::{Accessibility, Source},
@@ -367,12 +367,13 @@ impl Probe {
     }
 }
 
-/// The record of an online request for `requested` that stands as `online`
-/// and took `elapsed`. None for a request that has not ended, and none
+/// The record of an online request for `requested`, sent from `source`, that
+/// stands as `online` and took `elapsed`. None for a request that has not ended, and none
 /// without a time: evidence is not recorded then. The memory is read here,
 /// off the worker, and only for a record that is made.
 pub fn online_record(
     requested: Requested,
+    source: Language,
     online: &Online,
     elapsed: Option<Elapsed>,
 ) -> Option<Record> {
@@ -381,19 +382,20 @@ pub fn online_record(
         elapsed_ms,
         memory: Memory::read(),
     };
-    Some(self::online(requested, ended, measured))
+    Some(self::online(requested, source, ended, measured))
 }
 
 /// An online request ended. The record says what kind of text was asked for,
-/// how it ended and what that took, and nothing of the text, of the answer
-/// or of the key. It names no press, and its event is its own: the harness
-/// counts it nowhere.
-fn online(requested: Requested, ended: Ended, measured: Measured) -> Record {
+/// the language the request was sent with, how it ended and what that took,
+/// and nothing of the text, of the answer or of the key. It names no press,
+/// and its event is its own: the harness counts it nowhere.
+fn online(requested: Requested, source: Language, ended: Ended, measured: Measured) -> Record {
     Record {
         invocation_id: None,
         event: "online",
         details: json!({
             "subject": requested.label(),
+            "source": source.code(),
             "outcome": ended.label(),
             "elapsed_ms": measured.elapsed_ms,
             "peak_rss_bytes": measured.memory.peak_rss_bytes,
@@ -938,22 +940,27 @@ mod tests {
         let file = TempFile::new("online");
         let mut writer = start(&file.0, Origin::Foliate);
         let kinds = [
-            (Requested::from(Subject::Word(3)), "word"),
-            (Requested::from(Subject::Lone), "word"),
-            (Requested::from(Subject::Sentence(0)), "sentence"),
-            (Requested::Definition, "definition"),
+            (Requested::from(Subject::Word(3)), "word", Language::En),
+            (Requested::from(Subject::Lone), "word", Language::Es),
+            (
+                Requested::from(Subject::Sentence(0)),
+                "sentence",
+                Language::Ca,
+            ),
+            (Requested::Definition, "definition", Language::En),
         ];
         let mut expected = Vec::new();
-        for (requested, subject) in kinds {
+        for (requested, subject, source) in kinds {
             for (elapsed_ms, (online, outcome)) in (400..).zip(endings()) {
                 let measured = Measured {
                     elapsed_ms,
                     memory: MEMORY,
                 };
                 let ended = ended(&online).expect("a request that ended");
-                writer.write(&super::online(requested, ended, measured));
+                writer.write(&super::online(requested, source, ended, measured));
                 expected.push(json!({
                     "subject": subject,
+                    "source": source.code(),
                     "outcome": outcome,
                     "elapsed_ms": elapsed_ms,
                     "peak_rss_bytes": 141_234_176,
@@ -976,7 +983,7 @@ mod tests {
                 (row.backend, row.mode, row.origin),
                 (Backend::Gtk4, Mode::Resident, HarnessOrigin::Foliate)
             );
-            // These five fields and nothing else.
+            // These six fields and nothing else.
             assert_eq!(&row.details, details);
         }
     }
@@ -993,11 +1000,17 @@ mod tests {
             },
         };
         let refused = Ended::Refused(Refusal::Other);
-        writer.write(&online(Requested::Definition, refused, measured));
+        writer.write(&online(
+            Requested::Definition,
+            Language::En,
+            refused,
+            measured,
+        ));
         assert_eq!(
             read(&file.0)[1].details,
             json!({
                 "subject": "definition",
+                "source": "en",
                 "outcome": "other",
                 "elapsed_ms": 0,
                 "peak_rss_bytes": null,
@@ -1028,8 +1041,10 @@ mod tests {
         assert!(elapsed.0 < 60_000);
         assert_eq!(probe.not_started(), Some(Elapsed(0)));
         let translated = Online::Translated("берег".to_owned());
-        let record = online_record(Requested::Word, &translated, Some(elapsed)).expect("a record");
+        let record = online_record(Requested::Word, Language::Es, &translated, Some(elapsed))
+            .expect("a record");
         assert_eq!(record.details["elapsed_ms"], elapsed.0);
+        assert_eq!(record.details["source"], "es");
         for field in ["peak_rss_bytes", "pss_bytes"] {
             assert!(
                 record.details[field]
@@ -1040,10 +1055,18 @@ mod tests {
         // No record, and so no read, of a request that still runs or was not
         // timed.
         assert_eq!(
-            online_record(Requested::Word, &Online::Pending, Some(elapsed)),
+            online_record(
+                Requested::Word,
+                Language::En,
+                &Online::Pending,
+                Some(elapsed)
+            ),
             None
         );
-        assert_eq!(online_record(Requested::Word, &translated, None), None);
+        assert_eq!(
+            online_record(Requested::Word, Language::En, &translated, None),
+            None
+        );
     }
 
     #[test]
@@ -1057,7 +1080,12 @@ mod tests {
             };
             let online = |writer: &mut Writer, requested| {
                 if with_online {
-                    writer.write(&super::online(requested, Ended::Translated, measured));
+                    writer.write(&super::online(
+                        requested,
+                        Language::En,
+                        Ended::Translated,
+                        measured,
+                    ));
                     let read = Read::failed(&Failure::Capture(CaptureFailure::Ended));
                     writer.write(&ocr(read, &Timing::default(), MEMORY, Some(0)));
                 }
