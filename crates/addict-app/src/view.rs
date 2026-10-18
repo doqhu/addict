@@ -25,7 +25,7 @@ use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 use addict_core::{
     dictionary::Article,
     input::{Source, WindowState},
-    translation::{Refusal, Request},
+    translation::{Refusal, Request, Source as Language},
 };
 
 use addict_platform::{
@@ -184,26 +184,64 @@ fn unreadable_text(file: IndexFile) -> String {
 /// What the empty field says.
 pub(crate) const FIELD_PLACEHOLDER: &str = "Type or paste a word, or a sentence to click a word in";
 
+/// What the button of `language` in the switch beside the field says. No
+/// wildcard arm: a new language does not compile until it is given its
+/// label.
+pub(crate) fn language_label(language: Language) -> &'static str {
+    match language {
+        Language::En => "EN",
+        Language::Es => "ES",
+        Language::Ca => "CA",
+    }
+}
+
+/// The tooltip of the switch of the reading language.
+pub(crate) const LANGUAGE_TOOLTIP: &str = "Язык текста, который вы читаете";
+
 /// What the button beside the field says: it takes a screen capture and
 /// puts the text recognized in it into the field.
 pub(crate) const CAPTURE_LABEL: &str = "Capture";
 
-/// The command that installs Tesseract with its English data.
-pub(crate) const INSTALL_TESSERACT: &str = "sudo dnf install tesseract tesseract-langpack-eng";
+/// The package of the Tesseract data of `language`. No wildcard arm: a new
+/// language does not compile until it is given its package.
+pub(crate) fn ocr_package(language: Language) -> &'static str {
+    match language {
+        Language::En => "tesseract-langpack-eng",
+        Language::Es => "tesseract-langpack-spa",
+        Language::Ca => "tesseract-langpack-cat",
+    }
+}
 
-/// The command that installs the English data of Tesseract.
-pub(crate) const INSTALL_ENGLISH: &str = "sudo dnf install tesseract-langpack-eng";
+/// The name of `language` before "OCR data" in the line of missing data.
+fn ocr_language(language: Language) -> &'static str {
+    match language {
+        Language::En => "English",
+        Language::Es => "Spanish",
+        Language::Ca => "Catalan",
+    }
+}
+
+/// The command that installs Tesseract with the data of `language`.
+pub(crate) fn install_tesseract(language: Language) -> String {
+    format!("sudo dnf install tesseract {}", ocr_package(language))
+}
+
+/// The command that installs the Tesseract data of `language`.
+pub(crate) fn install_language(language: Language) -> String {
+    format!("sudo dnf install {}", ocr_package(language))
+}
 
 /// What the source line says when the snapshot file is not there, whether
 /// the capture or the recognition found it missing.
 const NO_SNAPSHOT_FILE: &str = "The snapshot file was not found.";
 
-/// What the source line says for `failure`, a capture that gave no text.
-/// The portal's code 2, which GNOME also gives for Esc, claims no cause; a
-/// missing Tesseract or missing English data names the command that
-/// installs it. No wildcard arm: a new failure does not compile until it
-/// is given its line.
-pub fn failure_text(failure: &Failure) -> Cow<'static, str> {
+/// What the source line says for `failure`, a capture recognized in
+/// `language` that gave no text. The portal's code 2, which GNOME also gives
+/// for Esc, claims no cause; a missing Tesseract or missing data of the
+/// language names the command that installs it with the package of that
+/// language. No wildcard arm: a new failure does not compile until it is
+/// given its line.
+pub fn failure_text(failure: &Failure, language: Language) -> Cow<'static, str> {
     match failure {
         Failure::Capture(failure) => match failure {
             CaptureFailure::Cancelled => "The capture was cancelled.".into(),
@@ -215,13 +253,17 @@ pub fn failure_text(failure: &Failure) -> Cow<'static, str> {
         Failure::CaptureTimedOut => "No area was chosen in time.".into(),
         Failure::Ocr(failure) => match failure {
             OcrFailure::NoImage => NO_SNAPSHOT_FILE.into(),
-            OcrFailure::TesseractMissing => {
-                format!("Tesseract is not installed. Install it with: {INSTALL_TESSERACT}").into()
-            }
-            OcrFailure::LanguageMissing => {
-                format!("English OCR data is not installed. Install it with: {INSTALL_ENGLISH}")
-                    .into()
-            }
+            OcrFailure::TesseractMissing => format!(
+                "Tesseract is not installed. Install it with: {}",
+                install_tesseract(language)
+            )
+            .into(),
+            OcrFailure::LanguageMissing => format!(
+                "{} OCR data is not installed. Install it with: {}",
+                ocr_language(language),
+                install_language(language)
+            )
+            .into(),
             OcrFailure::Failed(detail) => format!("Text recognition failed: {detail}").into(),
             OcrFailure::Empty => "No text was recognized.".into(),
             OcrFailure::TimedOut => "Text recognition took too long.".into(),
@@ -349,6 +391,9 @@ pub enum Lookup {
     Article(Article),
     /// The dictionary has no entry for `word`.
     NoEntry { word: String },
+    /// No offline dictionary of the reading language is installed, so
+    /// nothing was looked up.
+    NoDictionary(Language),
     /// No index is open: there is nothing to look `word` up in.
     NotImported { word: String },
     /// An open index could not be read, so the word has no answer.
@@ -367,6 +412,22 @@ const UNFINISHED: &str = "The lookup did not finish.";
 /// word and what stands after it.
 const NO_ENTRY_BEFORE: &str = "The dictionary has no entry for “";
 const NO_ENTRY_AFTER: &str = "”.";
+
+/// The line of a reading language without an offline dictionary: what
+/// stands before the name of the language and what stands after it.
+const NO_DICTIONARY_BEFORE: &str = "Оффлайн-словаря для ";
+const NO_DICTIONARY_AFTER: &str = " нет";
+
+/// The name of `language` in the line of a missing dictionary, in the
+/// genitive. No wildcard arm: a new language does not compile until it is
+/// given its name.
+fn dictionary_language(language: Language) -> &'static str {
+    match language {
+        Language::En => "английского",
+        Language::Es => "испанского",
+        Language::Ca => "каталанского",
+    }
+}
 
 /// The line of a word that no imported dictionary could be asked about: what
 /// stands before the word and what stands after it.
@@ -499,6 +560,10 @@ pub fn result_texts<'a>(
         Lookup::Article(article) => article_texts(article, chosen, definition, key_file),
         Lookup::NoEntry { word } => line(Cow::Owned(format!(
             "{NO_ENTRY_BEFORE}{word}{NO_ENTRY_AFTER}"
+        ))),
+        Lookup::NoDictionary(language) => line(Cow::Owned(format!(
+            "{NO_DICTIONARY_BEFORE}{}{NO_DICTIONARY_AFTER}",
+            dictionary_language(*language)
         ))),
         Lookup::NotImported { word } => line(Cow::Owned(format!(
             "{NOT_IMPORTED_BEFORE}{word}{NOT_IMPORTED_AFTER}{IMPORT_COMMAND}."
@@ -675,7 +740,9 @@ fn refusal_text(refusal: Refusal, key_file: Option<&Path>) -> String {
         Refusal::RejectedKey => "DeepL rejected the key.",
         Refusal::Network => "Cannot connect to DeepL.",
         Refusal::Quota => "The DeepL quota is exhausted.",
-        Refusal::UnsupportedLanguage => "DeepL does not support EN→RU translation.",
+        Refusal::UnsupportedLanguage => {
+            "DeepL does not support translation from this language into Russian."
+        }
         Refusal::TimedOut => "Online translation timed out.",
         Refusal::Other => ONLINE_UNAVAILABLE,
     };
@@ -749,7 +816,9 @@ impl Shown {
     /// The request for the definition of the chosen sense, with the number
     /// its answer must carry, when the definition action is enabled; the
     /// definition is then pending. The text is the dictionary's, unchanged,
-    /// and is sent without context. Only the definition action calls this.
+    /// and is sent without context, from English whatever the reading
+    /// language: the definitions are OEWN's. Only the definition action
+    /// calls this.
     pub fn request_definition(&mut self) -> Option<(u64, Request)> {
         if !self.definition_action().1 {
             return None;
@@ -757,6 +826,7 @@ impl Shown {
         let request = Request {
             text: self.selected_definition()?.to_owned(),
             context: None,
+            source: Language::En,
         };
         self.next_definition += 1;
         let number = self.next_definition;
@@ -799,7 +869,7 @@ mod tests {
         dictionary::{Article, Dictionary, Sample, Sense},
         input::{Source, WindowState},
         sentence::words,
-        translation::Refusal,
+        translation::{Refusal, Source as Language},
     };
 
     use super::{
@@ -812,7 +882,7 @@ mod tests {
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
     use super::{
-        Held, INSTALL_ENGLISH, INSTALL_TESSERACT, TURN_ON_ACCESSIBILITY, failure_text,
+        Held, TURN_ON_ACCESSIBILITY, failure_text, install_language, install_tesseract,
         read_failure_text, too_long_text,
     };
     use crate::{
@@ -1190,7 +1260,7 @@ mod tests {
     #[test]
     fn the_capture_texts_are_one_line_each_and_name_no_cause() {
         assert_eq!(CAPTURE_LABEL, "Capture");
-        let empty = failure_text(&Failure::Ocr(OcrFailure::Empty));
+        let empty = failure_text(&Failure::Ocr(OcrFailure::Empty), Language::En);
         assert_eq!(empty, "No text was recognized.");
         for text in [CAPTURE_LABEL, &empty] {
             assert_eq!(text.lines().count(), 1, "{text}");
@@ -1231,7 +1301,7 @@ mod tests {
     fn the_capture_lines_are_as_agreed() {
         let lines: Vec<String> = every_failure()
             .iter()
-            .map(|failure| failure_text(failure).into_owned())
+            .map(|failure| failure_text(failure, Language::En).into_owned())
             .collect();
         assert_eq!(
             lines,
@@ -1267,12 +1337,16 @@ mod tests {
                     )
                 );
                 if !same_file {
-                    assert_ne!(failure_text(a), failure_text(b), "{a:?} and {b:?}");
+                    assert_ne!(
+                        failure_text(a, Language::En),
+                        failure_text(b, Language::En),
+                        "{a:?} and {b:?}"
+                    );
                 }
             }
         }
         for failure in &failures {
-            let text = failure_text(failure);
+            let text = failure_text(failure, Language::En);
             assert_eq!(text.lines().count(), 1, "{text}");
             assert!(!text.is_empty());
         }
@@ -1280,25 +1354,59 @@ mod tests {
 
     #[test]
     fn code_2_claims_no_cause() {
-        let ended = failure_text(&Failure::Capture(CaptureFailure::Ended)).to_lowercase();
+        let ended =
+            failure_text(&Failure::Capture(CaptureFailure::Ended), Language::En).to_lowercase();
         assert!(!ended.contains("cancel"), "{ended}");
         assert!(!ended.contains("esc"), "{ended}");
     }
 
     #[test]
     fn the_install_commands_stand_only_in_their_lines() {
+        for language in Language::ALL {
+            for failure in every_failure() {
+                let text = failure_text(&failure, language);
+                assert_eq!(
+                    text.contains(&install_tesseract(language)),
+                    failure == Failure::Ocr(OcrFailure::TesseractMissing),
+                    "{text}"
+                );
+                assert_eq!(
+                    text.contains(&install_language(language)),
+                    failure == Failure::Ocr(OcrFailure::LanguageMissing),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_ocr_data_names_the_package_of_the_language() {
+        let missing = Failure::Ocr(OcrFailure::LanguageMissing);
+        assert_eq!(
+            failure_text(&missing, Language::Es),
+            "Spanish OCR data is not installed. Install it with: sudo dnf install tesseract-langpack-spa"
+        );
+        assert_eq!(
+            failure_text(&missing, Language::Ca),
+            "Catalan OCR data is not installed. Install it with: sudo dnf install tesseract-langpack-cat"
+        );
+        assert_eq!(
+            failure_text(&Failure::Ocr(OcrFailure::TesseractMissing), Language::Ca),
+            "Tesseract is not installed. Install it with: sudo dnf install tesseract tesseract-langpack-cat"
+        );
+        // Every other line is the same in every language.
         for failure in every_failure() {
-            let text = failure_text(&failure);
-            assert_eq!(
-                text.contains(INSTALL_TESSERACT),
-                failure == Failure::Ocr(OcrFailure::TesseractMissing),
-                "{text}"
-            );
-            assert_eq!(
-                text.contains(INSTALL_ENGLISH),
-                failure == Failure::Ocr(OcrFailure::LanguageMissing),
-                "{text}"
-            );
+            if !matches!(
+                failure,
+                Failure::Ocr(OcrFailure::TesseractMissing | OcrFailure::LanguageMissing)
+            ) {
+                for language in Language::ALL {
+                    assert_eq!(
+                        failure_text(&failure, language),
+                        failure_text(&failure, Language::En)
+                    );
+                }
+            }
         }
     }
 
@@ -1490,6 +1598,7 @@ mod tests {
             Lookup::NoEntry {
                 word: "sat".to_owned(),
             },
+            Lookup::NoDictionary(Language::Es),
             Lookup::NotImported {
                 word: "sat".to_owned(),
             },
@@ -1501,6 +1610,7 @@ mod tests {
                 Lookup::Pending
                 | Lookup::Article(_)
                 | Lookup::NoEntry { .. }
+                | Lookup::NoDictionary(_)
                 | Lookup::NotImported { .. }
                 | Lookup::Unreadable(_)
                 | Lookup::Unfinished => {}
@@ -1827,6 +1937,38 @@ mod tests {
         assert!(label.contains("russian"), "{label}");
         assert!(label.contains("word"), "{label}");
         assert!(!label.contains("sense"), "{label}");
+    }
+
+    #[test]
+    fn the_no_dictionary_line_names_the_language_in_russian() {
+        assert_eq!(
+            details(&Lookup::NoDictionary(Language::Es), None),
+            ["Оффлайн-словаря для испанского нет"]
+        );
+        assert_eq!(
+            details(&Lookup::NoDictionary(Language::Ca), None),
+            ["Оффлайн-словаря для каталанского нет"]
+        );
+        // A line, not an article: no list, no translations.
+        let texts = result_texts(&Lookup::NoDictionary(Language::Ca), Some(0), None, None);
+        assert!(texts.senses.is_empty());
+        assert_eq!(texts.translations, None);
+        assert_eq!(texts.hint, None);
+    }
+
+    #[test]
+    fn the_unsupported_language_line_names_no_pair() {
+        let line = super::refusal_text(Refusal::UnsupportedLanguage, None);
+        assert!(!line.contains("EN"), "{line}");
+        assert!(line.contains("DeepL"), "{line}");
+    }
+
+    #[test]
+    fn a_definition_is_sent_from_english() {
+        let mut shown = definition_shown();
+        shown.choose(1);
+        let (_, request) = shown.request_definition().expect("action");
+        assert_eq!(request.source, Language::En);
     }
 
     #[test]

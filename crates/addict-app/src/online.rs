@@ -174,6 +174,22 @@ impl Kept {
         true
     }
 
+    /// The reading language changed: every online text of this text is
+    /// forgotten, and what was asked is asked anew by the next click or
+    /// submit. The numbers of the requests go on, so the outcome of one sent
+    /// before is not kept. Whether the lone word had been submitted, so that
+    /// it is sent again.
+    pub fn forget(&mut self) -> bool {
+        let submitted = self.lone.is_some();
+        *self = Self {
+            text: self.text,
+            kind: self.kind,
+            next_request: self.next_request,
+            ..Self::default()
+        };
+        submitted
+    }
+
     /// Assigns a fresh identity whenever a request is started or retried.
     fn begin(&mut self, subject: Subject) {
         self.next_request += 1;
@@ -250,6 +266,34 @@ mod tests {
 
     fn sentence() -> Kept {
         Kept::of(TEXT, Kind::Sentence)
+    }
+
+    #[test]
+    fn a_new_language_forgets_every_text_and_keeps_no_old_answer() {
+        let mut kept = sentence();
+        assert_eq!(
+            kept.click(BANK, 0, false).ask,
+            [Subject::Word(BANK), Subject::Sentence(0)]
+        );
+        let old = kept.request_number(Subject::Word(BANK)).expect("pending");
+        assert!(!kept.forget());
+        assert_eq!(kept.shown(Some(BANK)), OnlineTexts::default());
+        // The same click asks for both again.
+        assert_eq!(
+            kept.click(BANK, 0, false).ask,
+            [Subject::Word(BANK), Subject::Sentence(0)]
+        );
+        let new = kept.request_number(Subject::Word(BANK)).expect("pending");
+        assert_ne!(old, new);
+        assert!(!kept.answer(TEXT, Subject::Word(BANK), old, translated("берег")));
+        assert!(kept.answer(TEXT, Subject::Word(BANK), new, translated("банк")));
+
+        let mut lone = Kept::of(TEXT, Kind::Lone);
+        assert!(!lone.forget());
+        assert!(lone.submit());
+        assert!(lone.forget());
+        assert_eq!(lone.shown(None), OnlineTexts::default());
+        assert!(lone.submit());
     }
 
     fn translated(text: &str) -> Online {

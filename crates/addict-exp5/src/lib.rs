@@ -21,7 +21,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use addict_core::translation::{Refusal, Request};
+use addict_core::translation::{Refusal, Request, Source};
 use addict_deepl::{DeepL, Language, Usage};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -502,6 +502,7 @@ async fn ask(
             let request = Request {
                 text: item.word.clone(),
                 context: context.then(|| item.sentence.clone()),
+                source: Source::En,
             };
             let (answer, delay_ms) = timed(limit, client.translate(&request)).await;
             let verdict = answer

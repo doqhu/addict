@@ -1,7 +1,8 @@
 //! The widgets of the window: the source label and the status on one line,
 //! right under them the source line, then the binding row and the line of
 //! the dictionary indexes, then the field for a word or a sentence with the
-//! Capture button beside it, the text of the field with its words as links
+//! switch of the reading language, EN / ES / CA, and the Capture button
+//! beside it, the text of the field with its words as links
 //! and, last, the result, which scrolls: the card of the word with its
 //! translations as pills, the online texts, and the list of senses, a row
 //! for each, the chosen one explained under its row.
@@ -29,15 +30,16 @@ use std::{
 use addict_core::{
     input::{Source, WindowState},
     sentence,
+    translation::Source as Language,
 };
 use gtk::{gio, glib, prelude::*};
 
 use crate::{
     dictionaries::Indexes,
     view::{
-        Binding, CAPTURE_LABEL, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, Listed,
-        OnlineTexts, RETRY_LABEL, SENSES_LABEL, SenseText, Shown, binding_texts, indexes_text,
-        online_markup, result_texts, sentence_markup, texts,
+        Binding, CAPTURE_LABEL, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, LANGUAGE_TOOLTIP,
+        Listed, OnlineTexts, RETRY_LABEL, SENSES_LABEL, SenseText, Shown, binding_texts,
+        indexes_text, language_label, online_markup, result_texts, sentence_markup, texts,
     },
     wrap::Wrap,
 };
@@ -180,10 +182,41 @@ fn meta_row() -> (gtk::Box, gtk::Label, gtk::Label) {
     (meta, source, status)
 }
 
+/// The switch of the reading language: one linked toggle button for each
+/// language, in the order of [`Language::ALL`], English pressed. A click
+/// does not take the focus from the field.
+fn language_switch() -> (gtk::Box, Vec<(Language, gtk::ToggleButton)>) {
+    let switch = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .css_classes(["linked", "language"])
+        .tooltip_text(LANGUAGE_TOOLTIP)
+        .valign(gtk::Align::Center)
+        .build();
+    let mut buttons: Vec<(Language, gtk::ToggleButton)> = Vec::new();
+    for language in Language::ALL {
+        let button = gtk::ToggleButton::builder()
+            .label(language_label(language))
+            .focus_on_click(false)
+            .active(language == Language::default())
+            .build();
+        if let Some((_, first)) = buttons.first() {
+            button.set_group(Some(first));
+        }
+        switch.append(&button);
+        buttons.push((language, button));
+    }
+    (switch, buttons)
+}
+
 /// The field for a word or a sentence, its paste taken over, with the
-/// Capture button beside it. Given back as the row, the field and the
-/// button.
-fn field_row() -> (gtk::Box, gtk::Entry, gtk::Button) {
+/// switch of the reading language and the Capture button beside it. Given
+/// back as the row, the field, the buttons of the switch and Capture.
+fn field_row() -> (
+    gtk::Box,
+    gtk::Entry,
+    Vec<(Language, gtk::ToggleButton)>,
+    gtk::Button,
+) {
     let field = gtk::Entry::builder()
         .placeholder_text(FIELD_PLACEHOLDER)
         .css_classes(["lookup"])
@@ -194,10 +227,12 @@ fn field_row() -> (gtk::Box, gtk::Entry, gtk::Button) {
         .label(CAPTURE_LABEL)
         .css_classes(["capture"])
         .build();
+    let (switch, languages) = language_switch();
     let field_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     field_row.append(&field);
+    field_row.append(&switch);
     field_row.append(&capture);
-    (field_row, field, capture)
+    (field_row, field, languages, capture)
 }
 
 /// What runs with the index of a sense when its row is clicked.
@@ -456,6 +491,12 @@ pub struct View {
     /// The handler that reports the changes of the field; blocked while a
     /// recognized text is put in.
     sentence_handler: RefCell<Option<glib::SignalHandlerId>>,
+    /// Beside the field: the switch of the reading language, a button for
+    /// each language.
+    languages: Vec<(Language, gtk::ToggleButton)>,
+    /// Set while [`View::set_language`] presses a button, so that the
+    /// change is not reported as the user's.
+    setting_language: Rc<Cell<bool>>,
     /// Beside the field: takes a screen capture.
     capture: gtk::Button,
     sentence: gtk::Label,
@@ -492,7 +533,7 @@ impl View {
         let indexes = banner();
         root.append(&indexes);
 
-        let (field_row, field, capture) = field_row();
+        let (field_row, field, languages, capture) = field_row();
         let sentence = wrapping(gtk::Label::builder().use_markup(true))
             .css_classes(["sentence"])
             .visible(false)
@@ -514,6 +555,8 @@ impl View {
             indexes,
             field,
             sentence_handler: RefCell::new(None),
+            languages,
+            setting_language: Rc::new(Cell::new(false)),
             capture,
             sentence,
             result,
@@ -590,6 +633,35 @@ impl View {
             .field
             .connect_changed(move |field| changed(field.text().as_str()));
         self.sentence_handler.replace(Some(handler));
+    }
+
+    /// Runs `chosen` with the language each time the user presses the button
+    /// of another language in the switch; [`View::set_language`] does not
+    /// run it. Called once.
+    pub fn connect_language_chosen(&self, chosen: impl Fn(Language) + 'static) {
+        let chosen = Rc::new(chosen);
+        for (language, button) in &self.languages {
+            let (language, chosen) = (*language, chosen.clone());
+            let setting = self.setting_language.clone();
+            button.connect_toggled(move |button| {
+                // The button let go in a group is toggled too.
+                if button.is_active() && !setting.get() {
+                    chosen(language);
+                }
+            });
+        }
+    }
+
+    /// Presses the button of `language` in the switch, without running the
+    /// handler of [`View::connect_language_chosen`].
+    pub fn set_language(&self, language: Language) {
+        self.setting_language.set(true);
+        for (shown, button) in &self.languages {
+            if *shown == language {
+                button.set_active(true);
+            }
+        }
+        self.setting_language.set(false);
     }
 
     /// Runs `capture` each time Capture is pressed.

@@ -2,7 +2,9 @@
 //!
 //! The key is the first and only thing of the file,
 //! `$XDG_CONFIG_HOME/addict/deepl.key`, or `$HOME/.config/addict/deepl.key`
-//! when the variable is unset or relative. A file that anyone but its owner
+//! when the variable is unset or relative. That directory, [`config_dir`],
+//! is the product's one configuration directory: the other files of the
+//! product are found by the same rule. A file that anyone but its owner
 //! can use, or that its owner can execute, is refused before its content is
 //! read.
 
@@ -33,19 +35,31 @@ const FREE_SUFFIX: &str = ":fx";
 /// The key file of the product: `$XDG_CONFIG_HOME/addict/deepl.key` when the
 /// variable is an absolute path, else `$HOME/.config/addict/deepl.key`.
 pub fn key_path() -> Option<PathBuf> {
-    key_path_from(
+    Some(config_dir()?.join(KEY_FILE))
+}
+
+/// The configuration directory of the product: `$XDG_CONFIG_HOME/addict`
+/// when the variable is an absolute path, else `$HOME/.config/addict`;
+/// `None` when neither names one. Nothing is read or created here.
+pub fn config_dir() -> Option<PathBuf> {
+    config_dir_from(
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
     )
 }
 
-fn key_path_from(config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+fn config_dir_from(config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     let config = match config_home.map(PathBuf::from) {
         Some(config) if config.is_absolute() => config,
         // The base directory specification says to ignore a relative value.
         _ => PathBuf::from(home.filter(|home| !home.is_empty())?).join(".config"),
     };
-    Some(config.join("addict").join(KEY_FILE))
+    Some(config.join("addict"))
+}
+
+#[cfg(test)]
+fn key_path_from(config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    Some(config_dir_from(config_home, home)?.join(KEY_FILE))
 }
 
 /// A DeepL key. Its `Debug` output does not hold it.
@@ -123,7 +137,7 @@ pub fn read(path: &Path) -> Result<Key, KeyError> {
 mod tests {
     use std::{ffi::OsString, path::PathBuf};
 
-    use super::{Key, key_path_from};
+    use super::{Key, config_dir_from, key_path_from};
 
     fn os(text: &str) -> Option<OsString> {
         Some(OsString::from(text))
@@ -154,6 +168,23 @@ mod tests {
             assert_eq!(key_path_from(None, home.clone()), None, "{home:?}");
             assert_eq!(key_path_from(os("relative"), home.clone()), None);
         }
+    }
+
+    #[test]
+    fn the_key_file_lies_in_the_configuration_directory() {
+        for (config_home, home) in [
+            (os("/x/config"), os("/home/u")),
+            (None, os("/home/u")),
+            (os("relative"), os("/home/u")),
+        ] {
+            let dir = config_dir_from(config_home.clone(), home.clone()).expect("a directory");
+            assert!(dir.ends_with("addict"), "{dir:?}");
+            assert_eq!(
+                key_path_from(config_home, home),
+                Some(dir.join("deepl.key"))
+            );
+        }
+        assert_eq!(config_dir_from(None, None), None);
     }
 
     #[test]

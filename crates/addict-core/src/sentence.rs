@@ -2,10 +2,12 @@
 //! rules of the input: the word as the dictionary writes it, a pasted text as
 //! one line, a recognized text as one line and the sentence of a word in it.
 //!
-//! A word is a maximal run of alphabetic characters. Two things continue a
+//! A word is a maximal run of alphabetic characters. Three things continue a
 //! word instead of ending it: an apostrophe, U+0027 or U+2019, that stands
 //! between two letters, so `don't` is one word and the quotation marks of
-//! `'bank'` or the mark of `boys'` stay outside; and a combining mark of
+//! `'bank'` or the mark of `boys'` stay outside; the Catalan middle dot,
+//! U+00B7, between two letters in the same way, so `col·lecció` is one word
+//! and a dot with no letter on one side separates; and a combining mark of
 //! U+0300–U+036F after a letter, so a letter typed with its accent apart is
 //! not cut. Everything else only separates words, a hyphen included:
 //! `well-known` is two words. The ranges are byte ranges of the given text,
@@ -38,6 +40,9 @@ const APOSTROPHE: char = '\'';
 /// The apostrophe of typeset text.
 const TYPOGRAPHIC_APOSTROPHE: char = '\u{2019}';
 
+/// The middle dot of the Catalan `l·l`.
+const MIDDLE_DOT: char = '\u{b7}';
+
 /// Whether `character` is a combining diacritical mark, U+0300–U+036F.
 fn is_combining_mark(character: char) -> bool {
     ('\u{300}'..='\u{36f}').contains(&character)
@@ -61,9 +66,9 @@ pub fn words(sentence: &str) -> Vec<Range<usize>> {
         } else if start.is_none() {
             // Outside a word only a letter starts one.
             false
-        } else if matches!(character, APOSTROPHE | TYPOGRAPHIC_APOSTROPHE) {
+        } else if matches!(character, APOSTROPHE | TYPOGRAPHIC_APOSTROPHE | MIDDLE_DOT) {
             // Inside a word, so after a letter or its mark: the apostrophe
-            // joins when a letter follows as well.
+            // and the middle dot join when a letter follows as well.
             characters.peek().is_some_and(|&(_, next)| is_letter(next))
         } else {
             is_combining_mark(character)
@@ -573,6 +578,41 @@ mod tests {
             ("it's-a", vec!["it's", "a"]),
         ] {
             assert_eq!(texts(sentence), expected, "{sentence:?}");
+        }
+    }
+
+    #[test]
+    fn a_middle_dot_between_two_letters_is_part_of_the_word() {
+        assert_eq!(texts("La col·lecció d'art"), ["La", "col·lecció", "d'art"]);
+        assert_eq!(
+            texts("intel·ligent, paral·lel."),
+            ["intel·ligent", "paral·lel"]
+        );
+    }
+
+    #[test]
+    fn a_middle_dot_not_between_letters_separates() {
+        for (sentence, expected) in [
+            ("col··lecció", vec!["col", "lecció"]),
+            ("col·", vec!["col"]),
+            ("·lecció", vec!["lecció"]),
+            ("a · b", vec!["a", "b"]),
+            ("a·1", vec!["a"]),
+            ("1·a", vec!["a"]),
+            ("a·\u{308}", vec!["a"]),
+            ("·", vec![]),
+        ] {
+            assert_eq!(texts(sentence), expected, "{sentence:?}");
+        }
+    }
+
+    #[test]
+    fn ranges_of_words_with_a_middle_dot_lie_on_character_boundaries() {
+        let sentence = "La col·lecció·";
+        assert_eq!(words(sentence), [0..2, 3..15]);
+        for range in words(sentence) {
+            assert!(sentence.is_char_boundary(range.start), "{range:?}");
+            assert!(sentence.is_char_boundary(range.end), "{range:?}");
         }
     }
 

@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use addict_core::APP_ID;
+use addict_core::{APP_ID, translation::Source as Language};
 use addict_platform::{
     ocr::{self, OcrFailure, Params},
     screenshot::{self, CaptureFailure},
@@ -91,12 +91,24 @@ fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Starts the capture job on `work`. `on_captured` runs on the worker once
-/// the snapshot is there, before its recognition; `on_outcome` runs once on
-/// the worker when the job has ended. Without a runner nothing starts and
-/// the capture's end is given back, with nothing measured.
+/// The traineddata of Tesseract for a text read in `language`. No wildcard
+/// arm: a new language does not compile until it is given its data.
+pub fn ocr_language(language: Language) -> &'static str {
+    match language {
+        Language::En => "eng",
+        Language::Es => "spa",
+        Language::Ca => "cat",
+    }
+}
+
+/// Starts the capture job on `work`, which recognizes the text in
+/// `language`. `on_captured` runs on the worker once the snapshot is there,
+/// before its recognition; `on_outcome` runs once on the worker when the job
+/// has ended. Without a runner nothing starts and the capture's end is given
+/// back, with nothing measured.
 pub fn start(
     work: Option<&Work>,
+    language: Language,
     on_captured: impl FnOnce() + Send + 'static,
     on_outcome: impl FnOnce(Outcome<Capture>) + Send + 'static,
 ) -> Result<Job, Capture> {
@@ -117,19 +129,20 @@ pub fn start(
             Ok(Err(failure)) => return failed(Failure::Capture(failure)),
             Err(_) => return failed(Failure::CaptureTimedOut),
         };
-        let mut capture = recognize_snapshot(path, on_captured).await;
+        let params = Params::in_language(ocr_language(language));
+        let mut capture = recognize_snapshot(path, &params, on_captured).await;
         capture.timing.capture_ms = capture_ms;
         capture
     };
     Ok(work.run(JOB_LIMIT, job, on_outcome))
 }
 
-/// Recognizes the snapshot at `path` and deletes it, however this ends. The
-/// timing holds the recognition alone.
-async fn recognize_snapshot(path: PathBuf, on_captured: impl FnOnce()) -> Capture {
+/// Recognizes the snapshot at `path` with `params` and deletes it, however
+/// this ends. The timing holds the recognition alone.
+async fn recognize_snapshot(path: PathBuf, params: &Params, on_captured: impl FnOnce()) -> Capture {
     let snapshot = Snapshot(path);
     on_captured();
-    let recognition = ocr::recognize(snapshot.path(), &Params::ENGLISH, OCR_LIMIT).await;
+    let recognition = ocr::recognize(snapshot.path(), params, OCR_LIMIT).await;
     drop(snapshot);
     // Without an image nothing was recognized, so nothing was measured.
     let recognition_ms = match &recognition.result {
@@ -189,15 +202,16 @@ pub(crate) mod tests {
         },
     };
 
+    use addict_core::translation::Source as Language;
     use addict_platform::{
-        ocr::OcrFailure,
+        ocr::{OcrFailure, Params},
         screenshot::CaptureFailure,
         work::{Outcome, Work},
     };
 
     use super::{
         CAPTURE_LIMIT, Capture, Captured, Failure, JOB_LIMIT, OCR_LIMIT, Timing, captured_result,
-        recognize_snapshot, start,
+        ocr_language, recognize_snapshot, start,
     };
     use crate::manual::tests::WAIT;
 
@@ -238,7 +252,7 @@ pub(crate) mod tests {
         };
         let _job = work.run(
             JOB_LIMIT,
-            recognize_snapshot(path.clone(), on_captured),
+            recognize_snapshot(path.clone(), &Params::ENGLISH, on_captured),
             move |outcome| {
                 let _ = sender.send(outcome);
             },
@@ -270,7 +284,7 @@ pub(crate) mod tests {
         let (captured, recognizing) = mpsc::channel();
         let job = work.run(
             JOB_LIMIT,
-            recognize_snapshot(path.clone(), move || {
+            recognize_snapshot(path.clone(), &Params::ENGLISH, move || {
                 let _ = captured.send(());
             }),
             move |outcome| {
@@ -291,9 +305,13 @@ pub(crate) mod tests {
         let path = std::env::temp_dir().join("addict-capture-test-absent.png");
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
-        let _job = work.run(JOB_LIMIT, recognize_snapshot(path, || {}), move |outcome| {
-            let _ = sender.send(outcome);
-        });
+        let _job = work.run(
+            JOB_LIMIT,
+            recognize_snapshot(path, &Params::ENGLISH, || {}),
+            move |outcome| {
+                let _ = sender.send(outcome);
+            },
+        );
         let outcome = receiver.recv_timeout(WAIT).expect("outcome");
         // Nothing was recognized, so nothing of a recognition is measured.
         assert_eq!(
@@ -306,8 +324,56 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn every_language_is_recognized_with_its_own_data() {
+        assert_eq!(Language::ALL.map(ocr_language), ["eng", "spa", "cat"]);
+    }
+
+    /// Whether Tesseract lists the data `language` as installed.
+    fn installed(language: &str) -> bool {
+        std::process::Command::new("tesseract")
+            .arg("--list-langs")
+            .output()
+            .is_ok_and(|output| {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.trim() == language)
+            })
+    }
+
+    #[test]
+    fn a_catalan_snapshot_without_catalan_data_is_language_missing() {
+        let _children = children();
+        // Only where Tesseract runs and the Catalan data is not there.
+        if !installed("eng") || installed("cat") {
+            return;
+        }
+        let path = snapshot("catalan");
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = mpsc::channel();
+        let params = Params::in_language(ocr_language(Language::Ca));
+        let _job = work.run(
+            JOB_LIMIT,
+            async move { recognize_snapshot(path, &params, || {}).await },
+            move |outcome| {
+                let _ = sender.send(outcome);
+            },
+        );
+        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+        let (captured, _) = captured_result(outcome).expect("shown");
+        assert_eq!(
+            captured,
+            Captured::Failed(Failure::Ocr(OcrFailure::LanguageMissing))
+        );
+    }
+
+    #[test]
     fn without_a_runner_nothing_starts() {
-        let started = start(None, || panic!("captured"), |_| panic!("ended"));
+        let started = start(
+            None,
+            Language::Ca,
+            || panic!("captured"),
+            |_| panic!("ended"),
+        );
         assert_eq!(
             started.err(),
             Some(Capture {

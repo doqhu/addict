@@ -165,6 +165,7 @@ mod context;
 mod dictionaries;
 mod entries;
 mod evidence;
+mod language;
 mod manual;
 mod online;
 mod presentation;

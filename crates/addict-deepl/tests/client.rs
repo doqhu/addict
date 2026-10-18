@@ -5,7 +5,7 @@ mod common;
 
 use std::{sync::Arc, time::Duration};
 
-use addict_core::translation::{Refusal, Request, Translator};
+use addict_core::translation::{Refusal, Request, Source, Translator};
 use addict_deepl::{
     DeepL, Language, Usage,
     stub::{Reply, Stub},
@@ -23,6 +23,7 @@ fn request() -> Request {
     Request {
         text: "bank".to_owned(),
         context: Some(SENTENCE.to_owned()),
+        source: Source::En,
     }
 }
 
@@ -64,12 +65,58 @@ async fn a_request_without_a_context_sends_none() {
     let request = Request {
         text: "bank".to_owned(),
         context: None,
+        source: Source::En,
     };
     assert_eq!(client.translate(&request).await, Ok("банк".to_owned()));
     let body: serde_json::Value = serde_json::from_str(&stub.seen()[0].body).expect("JSON");
     assert_eq!(
         body,
         serde_json::json!({"text": ["bank"], "source_lang": "EN", "target_lang": "RU"})
+    );
+}
+
+#[tokio::test]
+async fn a_spanish_word_with_its_sentence_is_sent_from_es() {
+    let (_dir, stub, client) = asking("spanish", Reply::translation("банк"));
+    let sentence = "El banco cerró a las tres.";
+    let request = Request {
+        text: "banco".to_owned(),
+        context: Some(sentence.to_owned()),
+        source: Source::Es,
+    };
+    assert_eq!(client.translate(&request).await, Ok("банк".to_owned()));
+    let body: serde_json::Value = serde_json::from_str(&stub.seen()[0].body).expect("JSON");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "text": ["banco"],
+            "context": sentence,
+            "source_lang": "ES",
+            "target_lang": "RU",
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_catalan_sentence_is_sent_from_ca_without_context() {
+    let (_dir, stub, client) = asking("catalan", Reply::translation("Коллекция искусства."));
+    let request = Request {
+        text: "La col·lecció d'art.".to_owned(),
+        context: None,
+        source: Source::Ca,
+    };
+    assert_eq!(
+        client.translate(&request).await,
+        Ok("Коллекция искусства.".to_owned())
+    );
+    let body: serde_json::Value = serde_json::from_str(&stub.seen()[0].body).expect("JSON");
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "text": ["La col·lecció d'art."],
+            "source_lang": "CA",
+            "target_lang": "RU",
+        })
     );
 }
 
