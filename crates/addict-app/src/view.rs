@@ -198,7 +198,7 @@ pub(crate) fn language_label(language: Language) -> &'static str {
 }
 
 /// The tooltip of the switch of the reading language.
-pub(crate) const LANGUAGE_TOOLTIP: &str = "Язык текста, который вы читаете";
+pub(crate) const LANGUAGE_TOOLTIP: &str = "The language of the text you read";
 
 /// What the button beside the field says: it takes a screen capture and
 /// puts the text recognized in it into the field.
@@ -424,17 +424,16 @@ const NO_ENTRY_AFTER: &str = "”.";
 
 /// The line of a reading language without an offline dictionary: what
 /// stands before the name of the language and what stands after it.
-const NO_DICTIONARY_BEFORE: &str = "Оффлайн-словаря для ";
-const NO_DICTIONARY_AFTER: &str = " нет";
+const NO_DICTIONARY_BEFORE: &str = "There is no offline dictionary for ";
+const NO_DICTIONARY_AFTER: &str = ".";
 
-/// The name of `language` in the line of a missing dictionary, in the
-/// genitive. No wildcard arm: a new language does not compile until it is
+/// The name of `language` in the line of a missing dictionary. No wildcard arm: a new language does not compile until it is
 /// given its name.
 fn dictionary_language(language: Language) -> &'static str {
     match language {
-        Language::En => "английского",
-        Language::Es => "испанского",
-        Language::Ca => "каталанского",
+        Language::En => "English",
+        Language::Es => "Spanish",
+        Language::Ca => "Catalan",
     }
 }
 
@@ -486,8 +485,8 @@ pub(crate) const SENSES_LABEL: &str = "English definitions";
 fn definitions_label(language: Language) -> &'static str {
     match language {
         Language::En => SENSES_LABEL,
-        Language::Es => "Толкования на испанском",
-        Language::Ca => "Толкования на каталанском",
+        Language::Es => "Spanish definitions",
+        Language::Ca => "Catalan definitions",
     }
 }
 
@@ -496,8 +495,8 @@ fn definitions_label(language: Language) -> &'static str {
 fn no_definitions(language: Language) -> &'static str {
     match language {
         Language::En => NO_DEFINITIONS,
-        Language::Es => "В испанском словаре нет толкований этого слова.",
-        Language::Ca => "В каталанском словаре нет толкований этого слова.",
+        Language::Es => "The dictionary has no Spanish definitions of this word.",
+        Language::Ca => "The dictionary has no Catalan definitions of this word.",
     }
 }
 
@@ -1990,14 +1989,14 @@ mod tests {
     }
 
     #[test]
-    fn the_no_dictionary_line_names_the_language_in_russian() {
+    fn the_no_dictionary_line_names_the_language() {
         assert_eq!(
             details(&Lookup::NoDictionary(Language::Es), None),
-            ["Оффлайн-словаря для испанского нет"]
+            ["There is no offline dictionary for Spanish."]
         );
         assert_eq!(
             details(&Lookup::NoDictionary(Language::Ca), None),
-            ["Оффлайн-словаря для каталанского нет"]
+            ["There is no offline dictionary for Catalan."]
         );
         // A line, not an article: no list, no translations.
         let texts = result_texts(&Lookup::NoDictionary(Language::Ca), Some(0), None, None);
@@ -2264,10 +2263,10 @@ mod tests {
     }
 
     #[test]
-    fn a_spanish_article_is_labelled_in_russian_by_its_kind_and_language() {
+    fn a_spanish_article_is_labelled_by_its_kind_and_language() {
         let lookup = spanish();
         let texts = result_texts(&lookup, None, None, None);
-        assert_eq!(texts.senses_label, "Толкования на испанском");
+        assert_eq!(texts.senses_label, "Spanish definitions");
         assert_eq!(texts.line, None);
         // No line about Russian: missing kinds are said later.
         assert_eq!(texts.translations, None);
@@ -2303,7 +2302,7 @@ mod tests {
                 .synonyms,
             Listed::Missing(NO_SYNONYMS)
         );
-        // Without senses, the line says so in Russian, about Spanish.
+        // Without senses, the line says so, about Spanish.
         let bare = Lookup::Definitions {
             language: Language::Es,
             article: Article {
@@ -2313,7 +2312,7 @@ mod tests {
         };
         assert_eq!(
             result_texts(&bare, None, None, None).hint,
-            Some("В испанском словаре нет толкований этого слова.")
+            Some("The dictionary has no Spanish definitions of this word.")
         );
     }
 
