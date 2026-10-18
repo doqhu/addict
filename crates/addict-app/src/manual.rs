@@ -432,15 +432,15 @@ pub fn check_indexes(
 
 /// What the window shows for the `outcome` of the lookup of `word` read in
 /// `language`, or `None` when it shows nothing new. English is
-/// [`lookup_result`]. For another language an article is shown as that
-/// language's definitions, and a language whose index was not there after
-/// all has the line that says there is no dictionary. No wildcard arm: a
-/// new language does not compile until it is given its result.
+/// [`lookup_result`]. For another language what its indexes gave is shown
+/// by kind, in that language, and a language whose indexes were not there
+/// after all has the line that says there is no dictionary. No wildcard
+/// arm: a new language does not compile until it is given its result.
 pub fn result_in(outcome: Outcome<Looked>, word: &str, language: Language) -> Option<Lookup> {
     match language {
         Language::En => lookup_result(outcome, word),
         Language::Es | Language::Ca => Some(match lookup_result(outcome, word)? {
-            Lookup::Article(article) => Lookup::Definitions { language, article },
+            Lookup::Grouped { grouped, .. } => Lookup::Grouped { language, grouped },
             Lookup::NotImported { .. } => Lookup::NoDictionary(language),
             other => other,
         }),
@@ -456,6 +456,11 @@ pub fn lookup_result(outcome: Outcome<Looked>, word: &str) -> Option<Lookup> {
     match outcome {
         Outcome::Finished(looked) => Some(match looked.answer {
             Answer::Article(article) => Lookup::Article(article),
+            // Only another language gives one, and [`result_in`] names it.
+            Answer::Grouped(grouped) => Lookup::Grouped {
+                language: Language::En,
+                grouped,
+            },
             Answer::NoEntry => Lookup::NoEntry { word: word() },
             Answer::NotImported => Lookup::NotImported { word: word() },
             Answer::Unreadable(file) => Lookup::Unreadable(file),
@@ -565,6 +570,14 @@ pub(crate) mod tests {
         }
     }
 
+    /// The indexes with the Catalan one as `catalan`.
+    fn with_catalan(catalan: State) -> Indexes {
+        Indexes {
+            catalan,
+            ..Indexes::OPEN
+        }
+    }
+
     #[test]
     fn a_spanish_word_without_its_index_or_a_catalan_word_is_not_looked_up() {
         let work = Work::start().expect("runner");
@@ -589,17 +602,22 @@ pub(crate) mod tests {
                 }
             }
         }
-        // Catalan has no index, whatever the Spanish one does.
-        for spanish in [State::Open, State::Unreadable] {
-            let started = offline(
-                Some(&work),
-                std::sync::Arc::new(Unasked),
-                "real".to_owned(),
-                Language::Ca,
-                Some(with_spanish(spanish)),
-                |_| panic!("a lookup ended"),
-            );
-            assert_eq!(started.err(), Some(Lookup::NoDictionary(Language::Ca)));
+        // Each language by its own indexes, whatever the other's do.
+        for state in [State::Open, State::Unreadable] {
+            for (language, known) in [
+                (Language::Ca, with_spanish(state)),
+                (Language::Es, with_catalan(state)),
+            ] {
+                let started = offline(
+                    Some(&work),
+                    std::sync::Arc::new(Unasked),
+                    "real".to_owned(),
+                    language,
+                    Some(known),
+                    |_| panic!("a lookup ended"),
+                );
+                assert_eq!(started.err(), Some(Lookup::NoDictionary(language)));
+            }
         }
         // Also without a runner: nothing was to run.
         let started = offline(
@@ -613,11 +631,11 @@ pub(crate) mod tests {
         assert_eq!(started.err(), Some(Lookup::NoDictionary(Language::Es)));
     }
 
-    /// A source of articles that answers a Spanish lookup with the article
-    /// of `banco` and says which language it was asked in.
-    struct Spanish(Answer);
+    /// A source of articles that answers a lookup in its language, and in
+    /// no other, with the same answer.
+    struct Speaking(Language, Answer);
 
-    impl Articles for Spanish {
+    impl Articles for Speaking {
         fn indexes(&self) -> Indexes {
             with_spanish(State::Open)
         }
@@ -627,34 +645,37 @@ pub(crate) mod tests {
         }
 
         fn look_up_in(&self, language: Language, _word: &str) -> Looked {
-            assert_eq!(language, Language::Es);
+            assert_eq!(language, self.0);
             Looked {
-                answer: self.0.clone(),
+                answer: self.1.clone(),
                 indexes: with_spanish(State::Open),
             }
         }
     }
 
-    fn banco() -> addict_core::dictionary::Article {
-        addict_core::dictionary::Article {
-            senses: vec![addict_core::dictionary::Sense {
+    fn banco() -> addict_dictionary::lookup::Grouped {
+        addict_dictionary::lookup::Grouped {
+            definitions: Some(vec![addict_core::dictionary::Sense {
                 definition: "Mueble alargado para sentarse.".to_owned(),
                 synonyms: vec!["banca".to_owned()],
-            }],
-            translations: Vec::new(),
+            }]),
+            russian: Some(Vec::new()),
+            synonyms: None,
+            english: None,
         }
     }
 
-    /// The outcome of the offline lookup of `word` read in Spanish with
-    /// `known`, which must start a job.
-    fn looked_up_in_spanish(articles: Spanish, known: Indexes, word: &str) -> Outcome<Looked> {
+    /// The outcome of the offline lookup of `word` read in the language of
+    /// `articles` with `known`, which must start a job.
+    fn looked_up_offline(articles: Speaking, known: Indexes, word: &str) -> Outcome<Looked> {
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
+        let language = articles.0;
         let job = offline(
             Some(&work),
             std::sync::Arc::new(articles),
             word.to_owned(),
-            Language::Es,
+            language,
             Some(known),
             move |outcome| {
                 let _ = sender.send(outcome);
@@ -667,15 +688,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn only_a_spanish_word_without_its_index_asks_for_the_indexes_again() {
-        assert!(checks_again(
-            &Lookup::NoDictionary(Language::Es),
-            Language::Es
-        ));
-        assert!(!checks_again(
-            &Lookup::NoDictionary(Language::Ca),
-            Language::Ca
-        ));
+    fn only_a_word_of_a_language_without_its_indexes_asks_for_them_again() {
+        for language in [Language::Es, Language::Ca] {
+            assert!(checks_again(&Lookup::NoDictionary(language), language));
+        }
         for lookup in [
             Lookup::Pending,
             Lookup::Unfinished,
@@ -690,23 +706,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_spanish_word_with_its_index_is_looked_up_in_spanish() {
-        let outcome = looked_up_in_spanish(
-            Spanish(Answer::Article(banco())),
+    fn a_spanish_word_with_its_index_is_looked_up_offline() {
+        let outcome = looked_up_offline(
+            Speaking(Language::Es, Answer::Grouped(banco())),
             with_spanish(State::Open),
             "banco",
         );
         assert_eq!(
             result_in(outcome, "banco", Language::Es),
-            Some(Lookup::Definitions {
+            Some(Lookup::Grouped {
                 language: Language::Es,
-                article: banco(),
+                grouped: banco(),
             })
         );
         // A file that is no index is looked up too, so that it is named.
         let file = crate::dictionaries::IndexFile::of(addict_dictionary::import::Source::KaikkiEs);
-        let outcome = looked_up_in_spanish(
-            Spanish(Answer::Unreadable(file)),
+        let outcome = looked_up_offline(
+            Speaking(Language::Es, Answer::Unreadable(file)),
             with_spanish(State::Unreadable),
             "banco",
         );
@@ -715,6 +731,40 @@ pub(crate) mod tests {
             Some(Lookup::Unreadable(file))
         );
         assert_eq!(file.index, "kaikki-es-Espanol.index");
+    }
+
+    #[test]
+    fn a_catalan_word_with_its_index_is_looked_up_in_catalan() {
+        for catalan in [State::Open, State::Unreadable] {
+            let outcome = looked_up_offline(
+                Speaking(Language::Ca, Answer::Grouped(banco())),
+                with_catalan(catalan),
+                "banc",
+            );
+            assert_eq!(
+                result_in(outcome, "banc", Language::Ca),
+                Some(Lookup::Grouped {
+                    language: Language::Ca,
+                    grouped: banco(),
+                })
+            );
+        }
+        let finished = |answer: Answer| {
+            Outcome::Finished(Looked {
+                answer,
+                indexes: with_catalan(State::Missing),
+            })
+        };
+        assert_eq!(
+            result_in(finished(Answer::NotImported), "banc", Language::Ca),
+            Some(Lookup::NoDictionary(Language::Ca))
+        );
+        assert_eq!(
+            result_in(finished(Answer::NoEntry), "zzz", Language::Ca),
+            Some(Lookup::NoEntry {
+                word: "zzz".to_owned()
+            })
+        );
     }
 
     #[test]
@@ -743,7 +793,10 @@ pub(crate) mod tests {
         assert_eq!(result_in(Outcome::Cancelled, "banco", Language::Es), None);
         // English is the result it always was.
         for outcome in [
-            finished(Answer::Article(banco())),
+            finished(Answer::Article(addict_core::dictionary::Article {
+                senses: Vec::new(),
+                translations: vec!["банк".to_owned()],
+            })),
             finished(Answer::NotImported),
             Outcome::Panicked,
         ] {
@@ -1141,6 +1194,7 @@ pub(crate) mod tests {
         definitions: State::Missing,
         translations: State::Open,
         spanish: State::Missing,
+        catalan: State::Missing,
     };
 
     impl Articles for Answering {

@@ -294,6 +294,29 @@ fn fill_listed(container: &gtk::Box, listed: Option<Listed<'_>>, pill_classes: &
     }
 }
 
+/// Puts `listed` into `container` as lines: its label as a caption and each
+/// item as a line of its own, which cannot be chosen, or the line of an
+/// empty list; nothing for `None`. For items that are phrases, not words.
+fn fill_lines(container: &gtk::Box, listed: Option<Listed<'_>>) {
+    clear(container);
+    match listed {
+        None => {}
+        Some(Listed::Missing(line)) => {
+            container.append(
+                &wrapping(gtk::Label::builder().label(line))
+                    .css_classes(["hint"])
+                    .build(),
+            );
+        }
+        Some(Listed::Items { label, items }) => {
+            container.append(&caption(label));
+            for item in items {
+                container.append(&wrapping(gtk::Label::builder().label(item.as_str())).build());
+            }
+        }
+    }
+}
+
 /// The row of `sense`: its number and its definition, with the mark above
 /// the definition when it is the chosen one. A click runs `chosen` with its
 /// index; it does not take the focus from the field.
@@ -365,8 +388,9 @@ fn explained_box(explained: &Explained<'_>, action: Option<&gtk::Button>) -> gtk
     below
 }
 
-/// The result area, which scrolls: the card of the word, the online texts
-/// and the list of senses.
+/// The result area, which scrolls: the card of the word, the online texts,
+/// the list of senses and, for a language beside English, the synonyms of
+/// the word and its English glosses.
 struct ResultArea {
     area: gtk::ScrolledWindow,
     article: gtk::Box,
@@ -380,6 +404,12 @@ struct ResultArea {
     senses_caption: gtk::Label,
     hint: gtk::Label,
     rows: gtk::Box,
+    /// Under the senses, for a language beside English: the synonyms of the
+    /// word as a whole, as pills.
+    word_synonyms: gtk::Box,
+    /// Under them, for a language beside English: the English glosses, as
+    /// lines.
+    glosses: gtk::Box,
     definition_action: gtk::Button,
 }
 
@@ -430,9 +460,21 @@ fn result_area() -> ResultArea {
         .orientation(gtk::Orientation::Vertical)
         .spacing(16)
         .build();
+    let word_synonyms = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(8)
+        .visible(false)
+        .build();
+    let glosses = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .visible(false)
+        .build();
     content.append(&article);
     content.append(&online);
     content.append(&senses);
+    content.append(&word_synonyms);
+    content.append(&glosses);
     // Built here, not by the scrolled window: its own viewport scrolls to
     // the child that takes the focus, and a click on a sense must not move
     // the list.
@@ -467,6 +509,8 @@ fn result_area() -> ResultArea {
         senses_caption,
         hint,
         rows,
+        word_synonyms,
+        glosses,
         definition_action,
     }
 }
@@ -765,6 +809,10 @@ impl View {
             result.article.set_visible(false);
             result.senses.set_visible(false);
             fill_listed(&result.translations, None, &[]);
+            fill_listed(&result.word_synonyms, None, &[]);
+            result.word_synonyms.set_visible(false);
+            fill_lines(&result.glosses, None);
+            result.glosses.set_visible(false);
             self.show_area();
             return;
         };
@@ -800,6 +848,13 @@ impl View {
         result
             .senses
             .set_visible(!texts.senses.is_empty() || texts.hint.is_some());
+        // Hidden for English, which has neither.
+        fill_listed(&result.word_synonyms, texts.word_synonyms, &["pill"]);
+        result
+            .word_synonyms
+            .set_visible(texts.word_synonyms.is_some());
+        fill_lines(&result.glosses, texts.glosses);
+        result.glosses.set_visible(texts.glosses.is_some());
         if shown.sense().is_none() {
             result.area.vadjustment().set_value(0.0);
         }

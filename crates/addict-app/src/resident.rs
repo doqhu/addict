@@ -108,14 +108,14 @@
 //! The user reads in one language, chosen with the EN / ES / CA switch
 //! beside the field; English at first. Every online request about the
 //! field's text is sent from it. English is looked up offline in its two
-//! indexes. Spanish is looked up in its own index when the last known state
-//! of the indexes says the Spanish one is there; otherwise, and always for
-//! Catalan, the result is the line that there is no offline dictionary for
-//! the language, and no lookup runs. With Spanish chosen and its index not
-//! known to be there, the indexes are checked again, so that an import done
-//! while the application runs is found by the next pick. The definition of
-//! an English sense is OEWN's and is always sent from English; a Spanish
-//! sense offers none to send. A capture recognizes the
+//! indexes. Spanish and Catalan are each looked up in their own indexes when
+//! the last known state of the indexes says one of that language is there;
+//! otherwise the result is the line that there is no offline dictionary for
+//! the language, and no lookup runs. With Spanish or Catalan chosen and its
+//! indexes not known to be there, the indexes are checked again, so that an
+//! import done while the application runs is found by the next pick. The
+//! definition of an English sense is OEWN's and is always sent from English;
+//! a Spanish or Catalan sense offers none to send. A capture recognizes the
 //! text with the data of the language. A press of another language forgets
 //! the online texts of the field's text and, for the word shown, redoes its
 //! offline result and asks again what its click or its submit asked; with no
@@ -394,8 +394,8 @@ struct Session {
     translating_definition: Option<Job>,
     /// The online texts of the text the field holds.
     online: Kept,
-    /// The check of the indexes at the start, or the last one a Spanish
-    /// word without its index asked for, which replaces any still running;
+    /// The check of the indexes at the start, or the last one a Spanish or
+    /// Catalan word without its indexes asked for, which replaces any still running;
     /// dropping it cancels the check.
     check: Option<Job>,
     /// Where the indexes stood when last asked, by a check or a lookup;

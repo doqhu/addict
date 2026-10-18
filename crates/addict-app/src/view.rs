@@ -23,7 +23,7 @@
 use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 
 use addict_core::{
-    dictionary::Article,
+    dictionary::{Article, Sense},
     input::{Source, WindowState},
     translation::{Refusal, Request, Source as Language},
 };
@@ -32,6 +32,8 @@ use addict_platform::{
     atspi::ContextFailure, foreground::Source as Foregrounded, ocr::OcrFailure,
     screenshot::CaptureFailure,
 };
+
+use addict_dictionary::lookup::Grouped;
 
 use crate::{
     capture::Failure,
@@ -391,12 +393,11 @@ pub enum Lookup {
     Pending,
     /// The English dictionaries have this article of the word.
     Article(Article),
-    /// The definitions index of `language`, not English, has this article
-    /// of the word: its senses in that language, with their synonyms, and
-    /// no translations.
-    Definitions {
+    /// The indexes of `language`, not English, gave this for the word, by
+    /// kind: one of them at least has it.
+    Grouped {
         language: Language,
-        article: Article,
+        grouped: Grouped,
     },
     /// The dictionary has no entry for `word`.
     NoEntry { word: String },
@@ -500,6 +501,67 @@ fn no_definitions(language: Language) -> &'static str {
     }
 }
 
+/// The line of a language beside English with no Russian index imported.
+/// No wildcard arm, as in [`definitions_label`].
+fn missing_russian(language: Language) -> &'static str {
+    match language {
+        Language::En => "No English-Russian dictionary is imported.",
+        Language::Es => "No Spanish-Russian dictionary is imported.",
+        Language::Ca => "No Catalan-Russian dictionary is imported.",
+    }
+}
+
+/// The line of a language with no definitions index imported. No wildcard
+/// arm, as in [`definitions_label`].
+fn missing_definitions(language: Language) -> &'static str {
+    match language {
+        Language::En => "No dictionary of English definitions is imported.",
+        Language::Es => "No dictionary of Spanish definitions is imported.",
+        Language::Ca => "No dictionary of Catalan definitions is imported.",
+    }
+}
+
+/// What stands before the synonyms of the word as a whole, from a synonyms
+/// index of `language`. No wildcard arm, as in [`definitions_label`].
+fn word_synonyms_label(language: Language) -> &'static str {
+    match language {
+        Language::En => "English synonyms of the word",
+        Language::Es => "Spanish synonyms of the word",
+        Language::Ca => "Catalan synonyms of the word",
+    }
+}
+
+/// The line of a language with no synonyms index imported. No wildcard arm,
+/// as in [`definitions_label`].
+fn missing_synonyms(language: Language) -> &'static str {
+    match language {
+        Language::En => "No dictionary of English synonyms is imported.",
+        Language::Es => "No dictionary of Spanish synonyms is imported.",
+        Language::Ca => "No dictionary of Catalan synonyms is imported.",
+    }
+}
+
+/// The line of a word that neither its senses nor a synonyms index give a
+/// synonym for.
+const NO_WORD_SYNONYMS: &str = "The dictionaries give no synonyms for this word.";
+
+/// What stands above the English glosses of a word of another language. They
+/// are English, whatever the language of the word.
+const ENGLISH_LABEL: &str = "English glosses";
+
+/// The line of a word the English glosses index has no gloss for.
+const NO_GLOSS: &str = "The dictionary has no English gloss of this word.";
+
+/// The line of a language beside English with no English glosses index
+/// imported. No wildcard arm, as in [`definitions_label`].
+fn missing_english(language: Language) -> &'static str {
+    match language {
+        Language::En => "No dictionary of English glosses is imported.",
+        Language::Es => "No Spanish-English dictionary is imported.",
+        Language::Ca => "No Catalan-English dictionary is imported.",
+    }
+}
+
 /// Items under their label, or the line that says there are none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Listed<'a> {
@@ -566,6 +628,13 @@ pub struct ResultTexts<'a> {
     pub senses: Vec<SenseText<'a>>,
     /// For an article, its translations, which belong to the word.
     pub translations: Option<Listed<'a>>,
+    /// For an article of a language beside English, the synonyms of the
+    /// word as a whole, shown under its definitions; `None` when there is
+    /// nothing to say.
+    pub word_synonyms: Option<Listed<'a>>,
+    /// For an article of a language beside English, its English glosses:
+    /// lines, not senses to choose.
+    pub glosses: Option<Listed<'a>>,
 }
 
 /// The parts of `lookup` with the sense `chosen` in it; a `chosen` index the
@@ -586,20 +655,14 @@ pub fn result_texts<'a>(
         hint: None,
         senses: Vec::new(),
         translations: None,
+        word_synonyms: None,
+        glosses: None,
     };
     match lookup {
         Lookup::Pending => line(Cow::Borrowed(PENDING)),
         Lookup::Article(article) => article_texts(article, chosen, definition, key_file),
-        Lookup::Definitions { language, article } => {
-            // No definition is translated online, and the article has no
-            // Russian of its own: no line is said about either.
-            let mut texts = article_texts(article, chosen, None, key_file);
-            texts.senses_label = definitions_label(*language);
-            if article.senses.is_empty() {
-                texts.hint = Some(no_definitions(*language));
-            }
-            texts.translations = None;
-            texts
+        Lookup::Grouped { language, grouped } => {
+            grouped_texts(*language, grouped, chosen, key_file)
         }
         Lookup::NoEntry { word } => line(Cow::Owned(format!(
             "{NO_ENTRY_BEFORE}{word}{NO_ENTRY_AFTER}"
@@ -626,16 +689,80 @@ fn article_texts<'a>(
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
 ) -> ResultTexts<'a> {
-    let chosen = chosen.filter(|index| *index < article.senses.len());
-    let hint = if article.senses.is_empty() {
-        Some(NO_DEFINITIONS)
-    } else if chosen.is_none() {
-        Some(CHOOSE_SENSE)
-    } else {
-        None
+    let (hint, senses) = sense_texts(&article.senses, chosen, definition, key_file);
+    ResultTexts {
+        line: None,
+        senses_label: SENSES_LABEL,
+        hint: hint.or(article.senses.is_empty().then_some(NO_DEFINITIONS)),
+        senses,
+        translations: Some(Listed::of(
+            RUSSIAN_LABEL,
+            &article.translations,
+            NO_TRANSLATION,
+        )),
+        word_synonyms: None,
+        glosses: None,
+    }
+}
+
+/// The parts of what the indexes of `language`, not English, gave, each
+/// kind in its own part, a kind with no index or with nothing for the word
+/// said by its own line. No definition is translated online.
+fn grouped_texts<'a>(
+    language: Language,
+    grouped: &'a Grouped,
+    chosen: Option<usize>,
+    key_file: Option<&Path>,
+) -> ResultTexts<'a> {
+    let senses = grouped.definitions.as_deref().unwrap_or_default();
+    let (hint, rows) = sense_texts(senses, chosen, None, key_file);
+    let hint = match &grouped.definitions {
+        None => Some(missing_definitions(language)),
+        Some(senses) if senses.is_empty() => Some(no_definitions(language)),
+        Some(_) => hint,
     };
-    let senses = article
-        .senses
+    let translations = match &grouped.russian {
+        None => Listed::Missing(missing_russian(language)),
+        Some(russian) => Listed::of(RUSSIAN_LABEL, russian, NO_TRANSLATION),
+    };
+    let in_senses = senses.iter().any(|sense| !sense.synonyms.is_empty());
+    let word_synonyms = match &grouped.synonyms {
+        // The senses have their own: nothing to say about the word.
+        None if in_senses => None,
+        None => Some(Listed::Missing(missing_synonyms(language))),
+        Some(synonyms) if synonyms.is_empty() && in_senses => None,
+        Some(synonyms) => Some(Listed::of(
+            word_synonyms_label(language),
+            synonyms,
+            NO_WORD_SYNONYMS,
+        )),
+    };
+    let glosses = match &grouped.english {
+        None => Listed::Missing(missing_english(language)),
+        Some(english) => Listed::of(ENGLISH_LABEL, english, NO_GLOSS),
+    };
+    ResultTexts {
+        line: None,
+        senses_label: definitions_label(language),
+        hint,
+        senses: rows,
+        translations: Some(translations),
+        word_synonyms,
+        glosses: Some(glosses),
+    }
+}
+
+/// The rows of `senses` with the sense `chosen` explained, and the hint that
+/// stands above them while none is chosen; no hint for an empty list.
+fn sense_texts<'a>(
+    senses: &'a [Sense],
+    chosen: Option<usize>,
+    definition: Option<&'a Online>,
+    key_file: Option<&Path>,
+) -> (Option<&'static str>, Vec<SenseText<'a>>) {
+    let chosen = chosen.filter(|index| *index < senses.len());
+    let hint = (!senses.is_empty() && chosen.is_none()).then_some(CHOOSE_SENSE);
+    let rows = senses
         .iter()
         .enumerate()
         .map(|(index, sense)| SenseText {
@@ -653,17 +780,7 @@ fn article_texts<'a>(
             }),
         })
         .collect();
-    ResultTexts {
-        line: None,
-        senses_label: SENSES_LABEL,
-        hint,
-        senses,
-        translations: Some(Listed::of(
-            RUSSIAN_LABEL,
-            &article.translations,
-            NO_TRANSLATION,
-        )),
-    }
+    (hint, rows)
 }
 
 /// Where one online request stands.
@@ -827,12 +944,16 @@ impl Shown {
     /// `false`, with nothing changed, unless the shown result is an article
     /// that has the sense. Choosing the chosen sense again is `true`.
     pub fn choose(&mut self, index: usize) -> bool {
-        let (Some(Lookup::Article(article)) | Some(Lookup::Definitions { article, .. })) =
-            &self.lookup
-        else {
-            return false;
+        let senses = match &self.lookup {
+            Some(Lookup::Article(article)) => &article.senses,
+            // The senses of the definitions kind; the glosses are no senses.
+            Some(Lookup::Grouped { grouped, .. }) => match &grouped.definitions {
+                Some(senses) => senses,
+                None => return false,
+            },
+            _ => return false,
         };
-        if index >= article.senses.len() {
+        if index >= senses.len() {
             return false;
         }
         if self.sense != Some(index) {
@@ -921,11 +1042,12 @@ mod tests {
     };
 
     use super::{
-        Binding, CAPTURE_LABEL, CHOOSE_SENSE, EXPLANATION_MARK, FIELD_PLACEHOLDER, Listed, Lookup,
-        NO_DEFINITIONS, NO_SYNONYMS, NO_TRANSLATION, ONLINE_LONE_LABEL, ONLINE_PENDING,
-        ONLINE_SENTENCE_LABEL, ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online,
-        OnlineTexts, PENDING, RUSSIAN_LABEL, ResultTexts, SYNONYMS_LABEL, Shown, UNFINISHED, Whole,
-        binding_texts, indexes_text, online_markup, result_texts, sentence_markup, texts,
+        Binding, CAPTURE_LABEL, CHOOSE_SENSE, ENGLISH_LABEL, EXPLANATION_MARK, FIELD_PLACEHOLDER,
+        Listed, Lookup, NO_DEFINITIONS, NO_GLOSS, NO_SYNONYMS, NO_TRANSLATION, NO_WORD_SYNONYMS,
+        ONLINE_LONE_LABEL, ONLINE_PENDING, ONLINE_SENTENCE_LABEL, ONLINE_TOO_LONG,
+        ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online, OnlineTexts, PENDING, RUSSIAN_LABEL,
+        ResultTexts, SYNONYMS_LABEL, Shown, UNFINISHED, Whole, binding_texts, indexes_text,
+        online_markup, result_texts, sentence_markup, texts,
     };
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
@@ -940,6 +1062,7 @@ mod tests {
             tests::{FREEDICT, OEWN},
         },
     };
+    use addict_dictionary::lookup::Grouped;
     use addict_platform::{atspi::ContextFailure, foreground::Source as Foregrounded};
 
     fn definition_shown() -> Shown {
@@ -1657,7 +1780,7 @@ mod tests {
             match lookup {
                 Lookup::Pending
                 | Lookup::Article(_)
-                | Lookup::Definitions { .. }
+                | Lookup::Grouped { .. }
                 | Lookup::NoEntry { .. }
                 | Lookup::NoDictionary(_)
                 | Lookup::NotImported { .. }
@@ -2077,6 +2200,7 @@ mod tests {
                     definitions,
                     translations,
                     spanish: State::Missing,
+                    catalan: State::Missing,
                 };
                 assert_eq!(
                     indexes_text(indexes).is_empty(),
@@ -2093,6 +2217,7 @@ mod tests {
             definitions: State::Missing,
             translations: State::Missing,
             spanish: State::Missing,
+            catalan: State::Missing,
         });
         assert_eq!(
             line,
@@ -2110,6 +2235,7 @@ mod tests {
                     definitions,
                     translations,
                     spanish: State::Missing,
+                    catalan: State::Missing,
                 });
                 let named = [(OEWN, definitions), (FREEDICT, translations)];
                 let lines = named.iter().filter(|(_, s)| *s != State::Open).count();
@@ -2143,6 +2269,7 @@ mod tests {
             definitions: State::Open,
             translations: State::Missing,
             spanish: State::Missing,
+            catalan: State::Missing,
         });
         assert_eq!(
             text,
@@ -2153,6 +2280,7 @@ mod tests {
             definitions: State::Unreadable,
             translations: State::Open,
             spanish: State::Missing,
+            catalan: State::Missing,
         });
         assert_eq!(
             text,
@@ -2243,22 +2371,224 @@ mod tests {
         }
     }
 
-    fn spanish() -> Lookup {
-        Lookup::Definitions {
-            language: Language::Es,
-            article: Article {
-                senses: vec![
-                    Sense {
-                        definition: "Empresa que ofrece servicios monetarios.".to_owned(),
-                        synonyms: Vec::new(),
-                    },
-                    Sense {
-                        definition: "Mueble alargado para sentarse.".to_owned(),
-                        synonyms: vec!["banca".to_owned()],
-                    },
-                ],
-                translations: Vec::new(),
+    fn spanish_senses() -> Vec<Sense> {
+        vec![
+            Sense {
+                definition: "Empresa que ofrece servicios monetarios.".to_owned(),
+                synonyms: Vec::new(),
             },
+            Sense {
+                definition: "Mueble alargado para sentarse.".to_owned(),
+                synonyms: vec!["banca".to_owned()],
+            },
+        ]
+    }
+
+    /// `banco` with only a definitions index asked, as the tracer's import
+    /// gives it.
+    fn spanish() -> Lookup {
+        Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                definitions: Some(spanish_senses()),
+                ..Grouped::default()
+            },
+        }
+    }
+
+    /// `banco` with an index of every kind asked and each having it.
+    fn spanish_all() -> Lookup {
+        Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                definitions: Some(spanish_senses()),
+                russian: Some(vec!["банк".to_owned(), "скамейка".to_owned()]),
+                synonyms: Some(vec!["entidad".to_owned(), "asiento".to_owned()]),
+                english: Some(vec![
+                    "bank (financial institution)".to_owned(),
+                    "bench".to_owned(),
+                ]),
+            },
+        }
+    }
+
+    /// The sections of a result beside its senses, top to bottom: the
+    /// Russian, the synonyms of the word and the English glosses, each as
+    /// one line, or nothing where there is no section.
+    fn sections(texts: &ResultTexts<'_>) -> [Option<String>; 3] {
+        [
+            texts.translations.map(listed_line),
+            texts.word_synonyms.map(listed_line),
+            texts.glosses.map(listed_line),
+        ]
+    }
+
+    #[test]
+    fn a_spanish_article_of_every_kind_shows_each_kind_labelled() {
+        let lookup = spanish_all();
+        let texts = result_texts(&lookup, None, None, None);
+        assert_eq!(texts.line, None);
+        assert_eq!(texts.senses_label, "Spanish definitions");
+        assert_eq!(texts.hint, Some(CHOOSE_SENSE));
+        assert_eq!(texts.senses.len(), 2);
+        assert_eq!(
+            sections(&texts),
+            [
+                Some(format!("{RUSSIAN_LABEL} банк, скамейка")),
+                Some("Spanish synonyms of the word entidad, asiento".to_owned()),
+                Some(format!(
+                    "{ENGLISH_LABEL} bank (financial institution), bench"
+                )),
+            ]
+        );
+        assert_eq!(ENGLISH_LABEL, "English glosses");
+        // A sense keeps its own synonyms.
+        let chosen = result_texts(&lookup, Some(1), None, None);
+        let explained = chosen.senses[1].explained.as_ref().expect("explained");
+        assert_eq!(
+            explained.synonyms,
+            Listed::Items {
+                label: SYNONYMS_LABEL,
+                items: &["banca".to_owned()],
+            }
+        );
+    }
+
+    #[test]
+    fn a_catalan_definitions_index_alone_names_every_other_kind_as_missing() {
+        let lookup = Lookup::Grouped {
+            language: Language::Ca,
+            grouped: Grouped {
+                definitions: Some(vec![Sense {
+                    definition: "Conjunt de coses.".to_owned(),
+                    // No synonym on the sense: the missing index is named.
+                    synonyms: Vec::new(),
+                }]),
+                ..Grouped::default()
+            },
+        };
+        let texts = result_texts(&lookup, None, None, None);
+        assert_eq!(texts.senses_label, "Catalan definitions");
+        assert_eq!(texts.senses.len(), 1);
+        assert_eq!(
+            sections(&texts),
+            [
+                Some("No Catalan-Russian dictionary is imported.".to_owned()),
+                Some("No dictionary of Catalan synonyms is imported.".to_owned()),
+                Some("No Catalan-English dictionary is imported.".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_kind_without_the_word_says_so_and_one_not_imported_says_that() {
+        let lookup = Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                definitions: Some(spanish_senses()),
+                russian: Some(Vec::new()),
+                synonyms: Some(Vec::new()),
+                english: Some(Vec::new()),
+            },
+        };
+        let texts = result_texts(&lookup, None, None, None);
+        assert_eq!(texts.senses.len(), 2);
+        assert_eq!(
+            sections(&texts),
+            [
+                Some(NO_TRANSLATION.to_owned()),
+                // A sense has synonyms: nothing is said of the word.
+                None,
+                Some(NO_GLOSS.to_owned()),
+            ]
+        );
+        // Russian alone has the word: the definitions are said missing, by
+        // kind and language, and there is no sense to choose.
+        let russian = Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                definitions: Some(Vec::new()),
+                russian: Some(vec!["стол".to_owned()]),
+                ..Grouped::default()
+            },
+        };
+        let texts = result_texts(&russian, None, None, None);
+        assert_eq!(
+            texts.hint,
+            Some("The dictionary has no Spanish definitions of this word.")
+        );
+        assert!(texts.senses.is_empty());
+        let unimported = Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                russian: Some(vec!["стол".to_owned()]),
+                ..Grouped::default()
+            },
+        };
+        assert_eq!(
+            result_texts(&unimported, None, None, None).hint,
+            Some("No dictionary of Spanish definitions is imported.")
+        );
+        let mut shown = Shown::default();
+        shown.show(Some(unimported));
+        assert!(!shown.choose(0));
+    }
+
+    #[test]
+    fn a_word_with_no_synonyms_anywhere_says_so_for_the_word() {
+        let lookup = Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                definitions: Some(vec![Sense {
+                    definition: "Lo que existe.".to_owned(),
+                    synonyms: Vec::new(),
+                }]),
+                synonyms: Some(Vec::new()),
+                ..Grouped::default()
+            },
+        };
+        let texts = result_texts(&lookup, None, None, None);
+        assert_eq!(texts.word_synonyms, Some(Listed::Missing(NO_WORD_SYNONYMS)));
+        assert_eq!(
+            NO_WORD_SYNONYMS,
+            "The dictionaries give no synonyms for this word."
+        );
+    }
+
+    #[test]
+    fn a_spanish_word_in_no_index_or_without_one_has_the_lines_it_had() {
+        let no_entry = Lookup::NoEntry {
+            word: "zzz".to_owned(),
+        };
+        let texts = result_texts(&no_entry, None, None, None);
+        assert_eq!(
+            texts.line.as_deref(),
+            Some("The dictionary has no entry for “zzz”.")
+        );
+        assert_eq!(sections(&texts), [None, None, None]);
+        let none = result_texts(&Lookup::NoDictionary(Language::Ca), None, None, None);
+        assert_eq!(
+            none.line.as_deref(),
+            Some("There is no offline dictionary for Catalan.")
+        );
+        assert_eq!(sections(&none), [None, None, None]);
+    }
+
+    #[test]
+    fn an_english_article_has_no_section_of_another_language() {
+        let lookup = Lookup::Article(article());
+        let texts = result_texts(&lookup, Some(0), None, None);
+        assert_eq!(texts.word_synonyms, None);
+        assert_eq!(texts.glosses, None);
+        assert_eq!(texts.senses_label, "English definitions");
+        assert_eq!(
+            texts.translations.map(listed_line),
+            Some(format!("{RUSSIAN_LABEL} раз, два"))
+        );
+        for lookup in every_lookup() {
+            let texts = result_texts(&lookup, None, None, None);
+            assert_eq!(texts.word_synonyms, None, "{lookup:?}");
+            assert_eq!(texts.glosses, None, "{lookup:?}");
         }
     }
 
@@ -2268,8 +2598,21 @@ mod tests {
         let texts = result_texts(&lookup, None, None, None);
         assert_eq!(texts.senses_label, "Spanish definitions");
         assert_eq!(texts.line, None);
-        // No line about Russian: missing kinds are said later.
-        assert_eq!(texts.translations, None);
+        // The kinds not imported are named, but for the synonyms: a sense
+        // has its own, so nothing is said of a synonyms index.
+        assert_eq!(
+            texts.translations,
+            Some(Listed::Missing(
+                "No Spanish-Russian dictionary is imported."
+            ))
+        );
+        assert_eq!(texts.word_synonyms, None);
+        assert_eq!(
+            texts.glosses,
+            Some(Listed::Missing(
+                "No Spanish-English dictionary is imported."
+            ))
+        );
         assert_eq!(texts.hint, Some(CHOOSE_SENSE));
         assert_eq!(
             rows(&lookup, None),
@@ -2303,11 +2646,11 @@ mod tests {
             Listed::Missing(NO_SYNONYMS)
         );
         // Without senses, the line says so, about Spanish.
-        let bare = Lookup::Definitions {
+        let bare = Lookup::Grouped {
             language: Language::Es,
-            article: Article {
-                senses: Vec::new(),
-                translations: Vec::new(),
+            grouped: Grouped {
+                definitions: Some(Vec::new()),
+                ..Grouped::default()
             },
         };
         assert_eq!(
@@ -2353,6 +2696,7 @@ mod tests {
                     definitions,
                     translations,
                     spanish: State::Missing,
+                    catalan: State::Missing,
                 };
                 for spanish in STATES {
                     assert_eq!(
