@@ -4,10 +4,12 @@
 //!
 //! [`atspi`] reads the word selected in Android Studio and its sentence over
 //! AT-SPI; [`shortcut`] binds the global shortcut; [`screenshot`] takes one
-//! interactive screen capture through the portal; [`foreground`] remembers from
-//! the accessibility bus which application was activated last, so that
-//! [`atspi`] reads text only when that was Android Studio; [`ocr`] recognizes
-//! the text of an image in a Tesseract child with a limit; [`work`] runs slow
+//! interactive screen capture through the portal; [`foreground`] remembers
+//! from the accessibility bus which application was activated last and, at
+//! a press, probes whether a frame of Android Studio is `ACTIVE`, since
+//! Android Studio sends no activation, so that [`atspi`] reads text only
+//! when the application in front was Android Studio; [`ocr`] recognizes the
+//! text of an image in a Tesseract child with a limit; [`work`] runs slow
 //! jobs off the caller's thread; [`desktop`] writes the desktop entries;
 //! [`tray`] puts the icon and its menu in the top bar.
 //!

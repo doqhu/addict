@@ -195,26 +195,22 @@ impl Object {
     /// Children as the object lists them; falls back to asking one index at
     /// a time when `GetChildren` is not answered.
     async fn children(&self) -> Result<Vec<Object>, String> {
-        let listed: Result<Vec<(String, OwnedObjectPath)>, String> =
-            self.call(ACCESSIBLE, "GetChildren", &()).await;
-        let pairs = match listed {
-            Ok(pairs) => pairs,
-            Err(first) => {
-                let count: i32 = self
-                    .property(ACCESSIBLE, "ChildCount")
-                    .await
-                    .map_err(|second| format!("GetChildren: {first}; ChildCount: {second}"))?;
-                let mut pairs = Vec::new();
-                for index in 0..count.max(0) {
-                    let pair: (String, OwnedObjectPath) = self
-                        .call(ACCESSIBLE, "GetChildAtIndex", &(index,))
-                        .await
-                        .map_err(|e| format!("GetChildAtIndex({index}): {e}"))?;
-                    pairs.push(pair);
-                }
-                pairs
-            }
+        let first = match self.listed().await {
+            Ok(children) => return Ok(children),
+            Err(first) => first,
         };
+        let count: i32 = self
+            .property(ACCESSIBLE, "ChildCount")
+            .await
+            .map_err(|second| format!("GetChildren: {first}; ChildCount: {second}"))?;
+        let mut pairs = Vec::new();
+        for index in 0..count.max(0) {
+            let pair: (String, OwnedObjectPath) = self
+                .call(ACCESSIBLE, "GetChildAtIndex", &(index,))
+                .await
+                .map_err(|e| format!("GetChildAtIndex({index}): {e}"))?;
+            pairs.push(pair);
+        }
         Ok(self.objects(pairs))
     }
 }

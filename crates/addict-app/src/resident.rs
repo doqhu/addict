@@ -46,37 +46,41 @@
 //!
 //! The shortcut also starts the read of the focused editor, when that is
 //! Android Studio. The press first takes the source: the application the
-//! listener of [`addict_platform::foreground`] saw activated last, or, when the
-//! product's own window is active at the press, the source kept from the press
-//! that opened it. When the window is not active, the press also asks the
-//! listener, at once and before anything of the window changes, to probe
+//! listener of [`addict_platform::foreground`] saw activated last, or, when
+//! the product's own window is active at the press, the source kept from the
+//! press that opened it. When the window is not active, the press also asks
+//! the listener, at once and before anything of the window changes, to probe
 //! whether a frame of Android Studio is active: Android Studio sends no
 //! activation, but its frame's state follows the focus. The job waits for
 //! that answer, and an active frame makes the source Android Studio; any
 //! other answer leaves the observed source. The job tells the source it
 //! settled on, and the session keeps it for the press of the running read,
-//! so a later press in the window keeps Android Studio. The press also takes
-//! whether accessibility is on, as the listener last read it; that is a
-//! property of the session and is not kept. The window is shown at once, in
-//! the waiting state with the source AT-SPI and the field cleared (the lookup
-//! and the online requests of the old text are given up), and one job on the
-//! runner asks the accessibility bus for the selected word and its sentence;
-//! nothing waits for it, nor for the probe, before the window is presented.
-//! With accessibility off, or with another source or none, the job ends
-//! without reading text. The sentence replaces the field as a new text
-//! with that word chosen, and the lookup of the word starts; as the click of a
-//! word it is the click path, but it asks nothing online: the online texts are
-//! asked when a word is clicked. A read that gives nothing is written to
-//! stderr and is followed by the read of the clipboard (below); when that
-//! gives nothing too, the waiting ends, the empty state stays with its
-//! focused field, and the source line says why the read of the bus gave
-//! nothing; the capture shares the line: they never run together. The line
-//! names the cause and the manual path, and goes, like the capture's, when
-//! the field is edited, Capture or the shortcut is pressed.
+//! so a later press in the window keeps Android Studio.
+//!
+//! The press also takes whether accessibility is on, as the listener last
+//! read it; that is a property of the session and is not kept. The window is
+//! shown at once, in the waiting state with the source AT-SPI and the field
+//! cleared (the lookup and the online requests of the old text are given
+//! up), and one job on the runner asks the accessibility bus for the
+//! selected word and its sentence; nothing waits for it, nor for the probe,
+//! before the window is presented. With accessibility off, or with another
+//! source or none, the job ends without reading text.
+//!
+//! The sentence replaces the field as a new text with that word chosen, and
+//! the lookup of the word starts; as the click of a word it is the click
+//! path, but it asks nothing online: the online texts are asked when a word
+//! is clicked. A read that gives nothing is written to stderr and is
+//! followed by the read of the clipboard (below); when that gives nothing
+//! too, the waiting ends, the empty state stays with its focused field, and
+//! the source line says why the read of the bus gave nothing; the capture
+//! shares the line: they never run together. The line names the cause and
+//! the manual path, and goes, like the capture's, when the field is edited,
+//! Capture or the shortcut is pressed.
+//!
 //! Each read has a number; a new press, an edit of the field and a capture
 //! give up the read that runs, and whatever it reports later is ignored and
-//! shows no line. A press also gives up a running capture. Every end of
-//! the read of the bus, also a given-up one and one that could not start, is
+//! shows no line. A press also gives up a running capture. Every end of the
+//! read of the bus, also a given-up one and one that could not start, is
 //! recorded with `--evidence` as one `context` record, timed on the worker;
 //! the read of the clipboard after it is not. The job is
 //! [`context`](crate::context)'s.
@@ -629,8 +633,7 @@ impl Session {
         };
         self.view.clear_source_failure();
         let edit = self.manual.recognized(line);
-        self.view.set_field_text(self.manual.sentence());
-        self.text_replaced(edit);
+        self.replace_field(edit);
         self.reveal();
     }
 
@@ -787,8 +790,7 @@ impl Session {
         match read {
             Ok(context) => {
                 let edit = self.manual.arrived(context);
-                self.view.set_field_text(self.manual.sentence());
-                self.text_replaced(edit);
+                self.replace_field(edit);
             }
             Err(failure) => self.read_failed(&failure),
         }
@@ -890,8 +892,7 @@ impl Session {
         match line {
             Ok(line) => {
                 let edit = self.manual.copied(&line);
-                self.view.set_field_text(self.manual.sentence());
-                self.text_replaced(edit);
+                self.replace_field(edit);
             }
             Err(missed) => {
                 eprintln!(
@@ -944,6 +945,14 @@ impl Session {
         if gave_up_capture || gave_up_read {
             self.view.render(self.manual.state(), self.manual.source());
         }
+    }
+
+    /// A text that did not come from the field, recognized, read from the
+    /// accessibility bus or copied, replaced the manual input as `edit`: the
+    /// field shows it, and what follows a new text follows.
+    fn replace_field(&mut self, edit: Edit) {
+        self.view.set_field_text(self.manual.sentence());
+        self.text_replaced(edit);
     }
 
     /// What follows a new text in the field, typed, pasted or recognized:
@@ -1564,6 +1573,50 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     });
 }
 
+/// The style, the view and the hidden window around it, for `binding`: what
+/// the user does in the view goes to `sender`, and so does the window
+/// becoming active.
+fn build_ui(
+    application: &gtk::Application,
+    binding: &Binding,
+    sender: &UnboundedSender<Event>,
+) -> (View, gtk::ApplicationWindow) {
+    style::install();
+    let view = View::new(window_state(None, None), binding);
+    connect_view(&view, sender);
+    let window = build_window(application, &view);
+    let active = sender.clone();
+    window.connect_is_active_notify(move |window| {
+        if window.is_active() {
+            let _ = active.unbounded_send(Event::Active);
+        }
+    });
+    (view, window)
+}
+
+/// The Settings window above `window`, hidden, naming `key_file`; Change
+/// shortcut goes to `sender` as an event.
+fn start_settings(
+    window: &gtk::ApplicationWindow,
+    key_file: Option<&std::path::Path>,
+    sender: &UnboundedSender<Event>,
+) -> Settings {
+    let change = sender.clone();
+    Settings::new(window, key_file, move || {
+        let _ = change.unbounded_send(Event::ChangeShortcut);
+    })
+}
+
+/// Starts the icon in the top bar; the choices of its menu and the tray
+/// being unavailable go to `sender` as events.
+fn start_tray(sender: &UnboundedSender<Event>) -> TrayHandle {
+    let told = sender.clone();
+    tray::start(APP_ID, move |event| {
+        // On the worker: the UI thread wakes for the event.
+        let _ = told.unbounded_send(Event::Tray(event));
+    })
+}
+
 /// Starts the runner of the lookups. Without it the window still works; a
 /// click says that the lookup did not finish.
 fn start_work() -> Option<Rc<Work>> {
@@ -1621,16 +1674,7 @@ fn start(
 
     // The first attempt starts below, with the window still hidden.
     let binding = Binding::Attempting;
-    style::install();
-    let view = View::new(window_state(None, None), &binding);
-    connect_view(&view, &sender);
-    let window = build_window(application, &view);
-    let active = sender.clone();
-    window.connect_is_active_notify(move |window| {
-        if window.is_active() {
-            let _ = active.unbounded_send(Event::Active);
-        }
-    });
+    let (view, window) = build_ui(application, &binding, &sender);
 
     // Only the primary instance gets here, so a second launch records no
     // session.
@@ -1647,10 +1691,7 @@ fn start(
     let listener = Rc::new(foreground::watch(|_| {}));
     let check = start_check(work.as_deref(), articles.clone(), &sender);
     let (translator, key_file) = online_translator();
-    let change = sender.clone();
-    let settings = Settings::new(&window, key_file.as_deref(), move || {
-        let _ = change.unbounded_send(Event::ChangeShortcut);
-    });
+    let settings = start_settings(&window, key_file.as_deref(), &sender);
     let session = Session {
         binding,
         view,
@@ -1681,11 +1722,7 @@ fn start(
         kept: Foregrounded::Unknown,
     };
     serve(session, receiver);
-    let told = events.clone();
-    let tray = tray::start(APP_ID, move |event| {
-        // On the worker: the UI thread wakes for the event.
-        let _ = told.unbounded_send(Event::Tray(event));
-    });
+    let tray = start_tray(&events);
     Resident {
         _hold: application.hold(),
         _shortcut: handle,

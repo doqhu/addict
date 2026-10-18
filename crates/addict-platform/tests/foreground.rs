@@ -186,13 +186,22 @@ fn both_signals_of_one_activation_are_one_activation() {
 #[test]
 fn an_application_without_a_name_is_unknown() {
     let world = a11y("fg-nameless");
+    let studio = world.open_app(STUDIO);
     let (foreground, receiver) = listen(&world);
     subscribed(&world);
+    // Studio first, so that the activation of the client is a change.
+    studio.window_activated();
+    assert_eq!(next(&receiver), Source::AndroidStudio);
     // A client that serves no root: its name cannot be had.
     let mute = world.open_mute_client();
     mute.window_activated();
+    // Its activation was heard, and its name lookup changes nothing: the
+    // wait outlasts the lookup, which ends at the adapter's call limit of
+    // 500 ms.
+    assert_eq!(next(&receiver), Source::Unknown);
+    let lookup = Duration::from_millis(800);
     assert_eq!(
-        receiver.recv_timeout(QUIET),
+        receiver.recv_timeout(lookup),
         Err(mpsc::RecvTimeoutError::Timeout)
     );
     assert_eq!(foreground.source(), Source::Unknown);
@@ -279,6 +288,16 @@ fn a_status_that_cannot_be_read_is_unknown() {
     );
     assert_eq!(foreground.accessibility(), Accessibility::Unknown);
     assert_eq!(foreground.source(), Source::Unknown);
+
+    // A status read once and then lost is unknown again: the bus of the
+    // status goes, with its daemon, and the worker gives up.
+    let status = status_world("fg-a11y-lost-status", true);
+    let a11y = a11y("fg-a11y-lost");
+    let (foreground, _receiver) = listen_with(Some(&status.bus.address), &a11y);
+    accessibility_is(&foreground, Accessibility::On);
+    subscribed(&a11y);
+    drop(status);
+    accessibility_is(&foreground, Accessibility::Unknown);
 }
 
 #[test]
