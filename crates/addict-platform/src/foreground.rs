@@ -33,7 +33,7 @@
 use std::{
     cell::Cell,
     collections::HashMap,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     thread::JoinHandle,
     time::Duration,
 };
@@ -109,6 +109,14 @@ pub enum Accessibility {
 struct Shared {
     tracker: Tracker,
     accessibility: Accessibility,
+}
+
+impl Shared {
+    /// Locks `shared`; a worker or a caller that panicked holding it leaves
+    /// what it wrote, which is still a state of its own.
+    fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
+        shared.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// The application activated last, by its bus name, and what it is. A pure
@@ -203,7 +211,7 @@ struct Observer {
 impl Observer {
     /// Runs `update` on the tracker and reports the source if it changed.
     fn with<R>(&self, update: impl FnOnce(&mut Tracker) -> R) -> R {
-        let mut shared = self.shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut shared = Shared::lock(&self.shared);
         let result = update(&mut shared.tracker);
         let now = shared.tracker.source();
         drop(shared);
@@ -216,10 +224,7 @@ impl Observer {
     /// What `IsEnabled` was read as, or [`Accessibility::Unknown`] when the
     /// status can no longer be had.
     fn set_accessibility(&self, accessibility: Accessibility) {
-        self.shared
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .accessibility = accessibility;
+        Shared::lock(&self.shared).accessibility = accessibility;
     }
 }
 
@@ -244,19 +249,12 @@ pub struct Foreground {
 impl Foreground {
     /// What the application activated last is, now.
     pub fn source(&self) -> Source {
-        self.shared
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .tracker
-            .source()
+        Shared::lock(&self.shared).tracker.source()
     }
 
     /// Whether accessibility is on, as the worker last read it.
     pub fn accessibility(&self) -> Accessibility {
-        self.shared
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .accessibility
+        Shared::lock(&self.shared).accessibility
     }
 
     /// Asks the worker once whether a frame of Android Studio is `ACTIVE`

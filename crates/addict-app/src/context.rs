@@ -4,21 +4,24 @@
 //! press.
 //!
 //! [`start`] starts the job with the [`Accessibility`] the listener read and
-//! the [`Source`] the press settled on ([`choose_source`]). When the product's
-//! window was not active at the press, the listener's probe of Android
-//! Studio's frames goes with it: the job first waits for its answer, for at
-//! most [`PROBE_WAIT`], and an active frame makes the source Android Studio
-//! ([`resolve`]); any other answer, none or a dropped probe leaves the
+//! the [`Source`] the press settled on ([`choose_source`]). When the
+//! product's window was not active at the press, the listener's probe of
+//! Android Studio's frames goes with it: the job first waits for its answer,
+//! for at most [`PROBE_WAIT`], and an active frame makes the source Android
+//! Studio ([`resolve`]); any other answer, none or a dropped probe leaves the
 //! source as observed. The job tells the source it settled on before it
-//! reads, so that the session keeps it. The job ends with one
-//! [`Read`], what the adapter gave, or why it gave nothing: accessibility
-//! that is off ends it at once as `AccessibilityOff`, another application in
-//! front as `NotFromStudio`, and an unknown one as `NotFromStudio`,
-//! `AppNotFound` or `Unavailable`, never `TimedOut`; no text is read in any
-//! of these. [`read_result`] says what an outcome of the job is for the
-//! window. The job only reads. What the window does
-//! with the context is [`resident`](crate::resident)'s; what the adapter does
-//! on the bus is [`addict_platform::atspi`]'s, and what was in front is
+//! reads, so that the session keeps it.
+//!
+//! The job ends with one [`Read`], what the adapter gave, or why it gave
+//! nothing: accessibility that is off ends it at once as `AccessibilityOff`,
+//! another application in front as `NotFromStudio`, and an unknown one as
+//! `NotFromStudio`, `AppNotFound` or `Unavailable`, never `TimedOut`; no text
+//! is read in any of these. [`read_result`] says what an outcome of the job
+//! is for the window.
+//!
+//! The job only reads. What the window does with the context is
+//! [`resident`](crate::resident)'s; what the adapter does on the bus is
+//! [`addict_platform::atspi`]'s, and what was in front is
 //! [`addict_platform::foreground`]'s.
 
 use std::{fmt::Debug, future::Future, time::Duration};
