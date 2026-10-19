@@ -7,7 +7,9 @@
 //! and the result of the lookup of the chosen word: what is said about the
 //! word, its translations among it, and the senses of the word in a list,
 //! with what is said about the sense that was clicked under it and its
-//! definition translated online once that is asked for. Below the result, apart from
+//! definition translated online once that is asked for, and, for a language
+//! beside English, its English glosses, one of which can be chosen and
+//! translated instead. Below the result, apart from
 //! it, stand the online texts, each under a label that says what it is: the
 //! chosen word translated in its sentence, the sentence itself, or a word
 //! translated without a sentence.
@@ -15,7 +17,7 @@
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
 //! [`binding_texts`], [`indexes_text`], [`failure_text`], [`read_failure_text`], [`too_long_text`],
 //! [`sentence_markup`],
-//! [`result_texts`] and [`online_markup`] are pure, and
+//! [`choice_texts`] and [`online_markup`] are pure, and
 //! so is [`Shown`], the result with the sense chosen in it; they are tested
 //! without a display. This module owns no
 //! widget: [`View`](crate::widgets::View) puts the results into its own.
@@ -633,22 +635,61 @@ pub struct ResultTexts<'a> {
     /// nothing to say.
     pub word_synonyms: Option<Listed<'a>>,
     /// For an article of a language beside English, its English glosses:
-    /// lines, not senses to choose.
+    /// rows to choose, one at a time with the senses.
     pub glosses: Option<Listed<'a>>,
+    /// The chosen English gloss, when one of [`ResultTexts::glosses`] is.
+    pub gloss: Option<ChosenGloss<'a>>,
 }
 
-/// The parts of `lookup` with the sense `chosen` in it; a `chosen` index the
-/// article does not have is no choice. The online translation of the
-/// definition, `definition`, stands under the chosen sense when its
-/// definition is not blank. A refusal about the key names `key_file`, as in
-/// [`online_markup`]. No wildcard arm: a new variant does not compile until
-/// it is given its text.
+/// The English gloss chosen in an article of a language beside English.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChosenGloss<'a> {
+    /// Its index among the glosses.
+    pub index: usize,
+    /// The online translation of the gloss, once asked for; never for a
+    /// blank gloss.
+    pub definition: Option<Block<'a>>,
+}
+
+/// What is chosen in the shown result: a sense of its definitions or, in an
+/// article of a language beside English, one of its English glosses. One at
+/// a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    /// The sense with this index.
+    Sense(usize),
+    /// The English gloss with this index.
+    Gloss(usize),
+}
+
+/// The parts of `lookup` with the sense `chosen` in it, as
+/// [`choice_texts`] gives them; for the tests.
+#[cfg(test)]
 pub fn result_texts<'a>(
     lookup: &'a Lookup,
     chosen: Option<usize>,
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
 ) -> ResultTexts<'a> {
+    choice_texts(lookup, chosen.map(Choice::Sense), definition, key_file)
+}
+
+/// The parts of `lookup` with `choice` in it; a choice the result does not
+/// have is no choice. The online translation of the definition,
+/// `definition`, stands under the chosen sense or gloss when its text is not
+/// blank. A refusal about the key names `key_file`, as in
+/// [`online_markup`]. No wildcard arm: a new variant does not compile until
+/// it is given its text.
+pub fn choice_texts<'a>(
+    lookup: &'a Lookup,
+    choice: Option<Choice>,
+    definition: Option<&'a Online>,
+    key_file: Option<&Path>,
+) -> ResultTexts<'a> {
+    let chosen = match choice {
+        Some(Choice::Sense(index)) => Some(index),
+        Some(Choice::Gloss(_)) | None => None,
+    };
     let line = |text: Cow<'a, str>| ResultTexts {
         line: Some(text),
         senses_label: SENSES_LABEL,
@@ -657,12 +698,13 @@ pub fn result_texts<'a>(
         translations: None,
         word_synonyms: None,
         glosses: None,
+        gloss: None,
     };
     match lookup {
         Lookup::Pending => line(Cow::Borrowed(PENDING)),
         Lookup::Article(article) => article_texts(article, chosen, definition, key_file),
         Lookup::Grouped { language, grouped } => {
-            grouped_texts(*language, grouped, chosen, key_file)
+            grouped_texts(*language, grouped, choice, definition, key_file)
         }
         Lookup::NoEntry { word } => line(Cow::Owned(format!(
             "{NO_ENTRY_BEFORE}{word}{NO_ENTRY_AFTER}"
@@ -682,7 +724,7 @@ pub fn result_texts<'a>(
     }
 }
 
-/// The parts of `article`; see [`result_texts`].
+/// The parts of `article`; see [`choice_texts`].
 fn article_texts<'a>(
     article: &'a Article,
     chosen: Option<usize>,
@@ -702,24 +744,31 @@ fn article_texts<'a>(
         )),
         word_synonyms: None,
         glosses: None,
+        gloss: None,
     }
 }
 
 /// The parts of what the indexes of `language`, not English, gave, each
 /// kind in its own part, a kind with no index or with nothing for the word
-/// said by its own line. No definition is translated online.
+/// said by its own line. `choice` is a sense of the definitions or an
+/// English gloss, and the online translation `definition` stands under it.
 fn grouped_texts<'a>(
     language: Language,
     grouped: &'a Grouped,
-    chosen: Option<usize>,
+    choice: Option<Choice>,
+    definition: Option<&'a Online>,
     key_file: Option<&Path>,
 ) -> ResultTexts<'a> {
     let senses = grouped.definitions.as_deref().unwrap_or_default();
-    let (hint, rows) = sense_texts(senses, chosen, None, key_file);
+    let chosen = match choice {
+        Some(Choice::Sense(index)) => Some(index),
+        Some(Choice::Gloss(_)) | None => None,
+    };
+    let (hint, rows) = sense_texts(senses, chosen, definition, key_file);
     let hint = match &grouped.definitions {
         None => Some(missing_definitions(language)),
         Some(senses) if senses.is_empty() => Some(no_definitions(language)),
-        Some(_) => hint,
+        Some(_) => hint.filter(|_| !matches!(choice, Some(Choice::Gloss(_)))),
     };
     let translations = match &grouped.russian {
         None => Listed::Missing(missing_russian(language)),
@@ -741,6 +790,22 @@ fn grouped_texts<'a>(
         None => Listed::Missing(missing_english(language)),
         Some(english) => Listed::of(ENGLISH_LABEL, english, NO_GLOSS),
     };
+    let gloss = match choice {
+        Some(Choice::Gloss(index)) => grouped
+            .english
+            .as_deref()
+            .and_then(|english| english.get(index))
+            .map(|text| ChosenGloss {
+                index,
+                definition: definition
+                    .filter(|_| !text.trim().is_empty())
+                    .map(|online| Block {
+                        label: DEFINITION_LABEL,
+                        line: online_line(online, key_file),
+                    }),
+            }),
+        Some(Choice::Sense(_)) | None => None,
+    };
     ResultTexts {
         line: None,
         senses_label: definitions_label(language),
@@ -749,6 +814,7 @@ fn grouped_texts<'a>(
         translations: Some(translations),
         word_synonyms,
         glosses: Some(glosses),
+        gloss,
     }
 }
 
@@ -922,22 +988,31 @@ fn refusal_text(refusal: Refusal, key_file: Option<&Path>) -> String {
     }
 }
 
-/// The result the window shows and the sense chosen in it.
+/// The result the window shows and the sense or gloss chosen in it.
 #[derive(Debug, Default)]
 pub struct Shown {
     lookup: Option<Lookup>,
-    sense: Option<usize>,
+    choice: Option<Choice>,
     definition: Option<(u64, Online)>,
     next_definition: u64,
 }
 
 impl Shown {
-    /// Another result, or none, is shown: the sense chosen in the one before
-    /// is forgotten.
+    /// Another result, or none, is shown: the sense or gloss chosen in the
+    /// one before is forgotten.
     pub fn show(&mut self, lookup: Option<Lookup>) {
         self.lookup = lookup;
-        self.sense = None;
+        self.choice = None;
         self.definition = None;
+    }
+
+    /// Makes `choice` the chosen one; the translation of the definition of
+    /// another one is forgotten.
+    fn select(&mut self, choice: Choice) {
+        if self.choice != Some(choice) {
+            self.definition = None;
+        }
+        self.choice = Some(choice);
     }
 
     /// Chooses the sense with this index and says whether it is chosen now:
@@ -956,10 +1031,22 @@ impl Shown {
         if index >= senses.len() {
             return false;
         }
-        if self.sense != Some(index) {
-            self.definition = None;
+        self.select(Choice::Sense(index));
+        true
+    }
+
+    /// Chooses the English gloss with this index, instead of any sense, and
+    /// says whether it is chosen now: `false`, with nothing changed, unless
+    /// the shown result is an article of a language beside English that has
+    /// the gloss. Choosing the chosen gloss again is `true`.
+    pub fn choose_gloss(&mut self, index: usize) -> bool {
+        let Some(Lookup::Grouped { grouped, .. }) = &self.lookup else {
+            return false;
+        };
+        if index >= grouped.english.as_ref().map_or(0, Vec::len) {
+            return false;
         }
-        self.sense = Some(index);
+        self.select(Choice::Gloss(index));
         true
     }
 
@@ -970,32 +1057,44 @@ impl Shown {
         (available, enabled)
     }
 
-    /// The definition of the chosen sense, as the dictionary gives it, or
-    /// `None` when no sense is chosen or its definition is blank. A sense
-    /// of another language's definitions has none to send: its request
-    /// would go as English.
-    fn selected_definition(&self) -> Option<&str> {
-        let Lookup::Article(article) = self.lookup.as_ref()? else {
-            return None;
+    /// The definition of the chosen sense or the chosen English gloss, as
+    /// the dictionary gives it, with the language it is in, or `None` when
+    /// nothing is chosen or the text is blank. A sense of an English article
+    /// is OEWN's, so English; a sense of another language's definitions is
+    /// in that language; a gloss is English.
+    fn selected_definition(&self) -> Option<(&str, Language)> {
+        let (text, language) = match (self.lookup.as_ref()?, self.choice?) {
+            (Lookup::Article(article), Choice::Sense(index)) => {
+                (&article.senses.get(index)?.definition, Language::En)
+            }
+            (Lookup::Grouped { language, grouped }, Choice::Sense(index)) => (
+                &grouped.definitions.as_ref()?.get(index)?.definition,
+                *language,
+            ),
+            (Lookup::Grouped { grouped, .. }, Choice::Gloss(index)) => {
+                (grouped.english.as_ref()?.get(index)?, Language::En)
+            }
+            _ => return None,
         };
-        let text = &article.senses.get(self.sense?)?.definition;
-        (!text.trim().is_empty()).then_some(text.as_str())
+        (!text.trim().is_empty()).then_some((text.as_str(), language))
     }
 
-    /// The request for the definition of the chosen sense, with the number
-    /// its answer must carry, when the definition action is enabled; the
-    /// definition is then pending. The text is the dictionary's, unchanged,
-    /// and is sent without context, from English whatever the reading
-    /// language: the definitions are OEWN's. Only the definition action
-    /// calls this.
+    /// The request for the definition of the chosen sense or gloss, with
+    /// the number its answer must carry, when the definition action is
+    /// enabled; the definition is then pending. The text is the
+    /// dictionary's, unchanged, and is sent without context, from the
+    /// language it is in: English for OEWN and for a gloss, the article's
+    /// language for its own definitions. Only the definition action calls
+    /// this.
     pub fn request_definition(&mut self) -> Option<(u64, Request)> {
         if !self.definition_action().1 {
             return None;
         }
+        let (text, source) = self.selected_definition()?;
         let request = Request {
-            text: self.selected_definition()?.to_owned(),
+            text: text.to_owned(),
             context: None,
-            source: Language::En,
+            source,
         };
         self.next_definition += 1;
         let number = self.next_definition;
@@ -1005,8 +1104,8 @@ impl Shown {
 
     /// Keeps `online` as the translation of the definition when the request
     /// with `number` is the one still pending, and says whether it was kept.
-    /// The answer of a request that was replaced, by another sense, another
-    /// result or a retry, is not.
+    /// The answer of a request that was replaced, by another sense or gloss,
+    /// another result or a retry, is not.
     pub fn answer_definition(&mut self, number: u64, online: Online) -> bool {
         if !matches!(self.definition, Some((current, Online::Pending)) if current == number) {
             return false;
@@ -1015,8 +1114,8 @@ impl Shown {
         true
     }
 
-    /// Where the translation of the definition of the chosen sense stands;
-    /// `None` until it is asked for.
+    /// Where the translation of the definition of the chosen sense or gloss
+    /// stands; `None` until it is asked for.
     pub fn definition(&self) -> Option<&Online> {
         self.definition.as_ref().map(|(_, online)| online)
     }
@@ -1027,8 +1126,26 @@ impl Shown {
     }
 
     /// The index of the chosen sense.
+    #[cfg(test)]
     pub fn sense(&self) -> Option<usize> {
-        self.sense
+        match self.choice? {
+            Choice::Sense(index) => Some(index),
+            Choice::Gloss(_) => None,
+        }
+    }
+
+    /// The index of the chosen English gloss.
+    #[cfg(test)]
+    pub fn gloss(&self) -> Option<usize> {
+        match self.choice? {
+            Choice::Gloss(index) => Some(index),
+            Choice::Sense(_) => None,
+        }
+    }
+
+    /// What is chosen in the shown result.
+    pub fn choice(&self) -> Option<Choice> {
+        self.choice
     }
 }
 
@@ -1038,7 +1155,7 @@ mod tests {
         dictionary::{Article, Dictionary, Sample, Sense},
         input::{Source, WindowState},
         sentence::words,
-        translation::{Refusal, Source as Language},
+        translation::{Refusal, Request, Source as Language},
     };
 
     use super::{
@@ -2671,21 +2788,190 @@ mod tests {
     }
 
     #[test]
-    fn a_chosen_spanish_sense_offers_no_definition_translation() {
+    fn a_chosen_spanish_or_catalan_definition_is_sent_from_its_language() {
+        for language in [Language::Es, Language::Ca] {
+            let mut shown = Shown::default();
+            shown.show(Some(Lookup::Grouped {
+                language,
+                grouped: Grouped {
+                    definitions: Some(spanish_senses()),
+                    ..Grouped::default()
+                },
+            }));
+            // Nothing chosen: no action.
+            assert_eq!(shown.definition_action(), (false, false));
+            assert_eq!(shown.request_definition(), None);
+            assert!(shown.choose(1));
+            assert!(!shown.choose(2));
+            assert_eq!(shown.sense(), Some(1));
+            assert_eq!(shown.definition_action(), (true, true));
+            let (number, request) = shown.request_definition().expect("request");
+            assert_eq!(
+                request,
+                Request {
+                    text: "Mueble alargado para sentarse.".to_owned(),
+                    context: None,
+                    source: language,
+                }
+            );
+            assert_eq!(shown.definition_action(), (true, false));
+            // A refusal stands under it and the action can be pressed again.
+            assert!(shown.answer_definition(number, Online::Refused(Refusal::Network)));
+            assert_eq!(shown.definition_action(), (true, true));
+            let (retry, request) = shown.request_definition().expect("retry");
+            assert_eq!(request.source, language);
+            assert!(shown.answer_definition(retry, translated("скамья")));
+        }
+        // The English article still sends from English.
         let mut shown = Shown::default();
-        shown.show(Some(spanish()));
-        assert!(shown.choose(1));
-        assert!(!shown.choose(2));
-        assert_eq!(shown.sense(), Some(1));
-        assert_eq!(shown.definition_action(), (false, false));
-        assert_eq!(shown.request_definition(), None);
-        assert_eq!(shown.definition(), None);
-        // The English article still offers it.
         shown.show(Some(Lookup::Article(article())));
         assert!(shown.choose(0));
         assert_eq!(shown.definition_action(), (true, true));
         let (_, request) = shown.request_definition().expect("request");
         assert_eq!(request.source, Language::En);
+    }
+
+    #[test]
+    fn a_blank_spanish_definition_or_gloss_offers_no_action() {
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                definitions: Some(vec![Sense {
+                    definition: " \n ".to_owned(),
+                    synonyms: Vec::new(),
+                }]),
+                english: Some(vec!["\t".to_owned()]),
+                ..Grouped::default()
+            },
+        }));
+        assert!(shown.choose(0));
+        assert_eq!(shown.definition_action(), (false, false));
+        assert_eq!(shown.request_definition(), None);
+        assert!(shown.choose_gloss(0));
+        assert_eq!(shown.definition_action(), (false, false));
+        assert_eq!(shown.request_definition(), None);
+        // Even with an answer at hand, a blank text has no block.
+        let lookup = shown.lookup().expect("article");
+        let texts = super::choice_texts(lookup, shown.choice(), Some(&Online::Pending), None);
+        assert_eq!(texts.gloss.expect("chosen").definition, None);
+        let texts = result_texts(lookup, Some(0), Some(&Online::Pending), None);
+        assert_eq!(
+            texts.senses[0]
+                .explained
+                .as_ref()
+                .expect("explained")
+                .definition,
+            None
+        );
+    }
+
+    #[test]
+    fn an_english_gloss_is_chosen_alone_and_sent_from_english() {
+        for language in [Language::Es, Language::Ca] {
+            let mut shown = Shown::default();
+            let mut lookup = spanish_all();
+            if let Lookup::Grouped {
+                language: shown_language,
+                ..
+            } = &mut lookup
+            {
+                *shown_language = language;
+            }
+            shown.show(Some(lookup));
+            assert!(!shown.choose_gloss(2));
+            assert_eq!(shown.choice(), None);
+            assert!(shown.choose(0));
+            let (old, _) = shown.request_definition().expect("definition");
+            // The gloss takes the place of the sense, and the pending
+            // definition is forgotten.
+            assert!(shown.choose_gloss(1));
+            assert_eq!(shown.sense(), None);
+            assert_eq!(shown.gloss(), Some(1));
+            assert_eq!(shown.definition(), None);
+            assert!(!shown.answer_definition(old, translated("stale")));
+            assert_eq!(shown.definition_action(), (true, true));
+            let (number, request) = shown.request_definition().expect("gloss");
+            assert_eq!(
+                request,
+                Request {
+                    text: "bench".to_owned(),
+                    context: None,
+                    source: Language::En,
+                }
+            );
+            assert!(shown.answer_definition(number, translated("скамья")));
+            let texts = super::choice_texts(
+                shown.lookup().expect("article"),
+                shown.choice(),
+                shown.definition(),
+                None,
+            );
+            // Under the gloss, not under a sense.
+            assert!(texts.senses.iter().all(|sense| sense.explained.is_none()));
+            assert_eq!(texts.hint, None);
+            assert_eq!(
+                texts.gloss,
+                Some(super::ChosenGloss {
+                    index: 1,
+                    definition: Some(super::Block {
+                        label: super::DEFINITION_LABEL,
+                        line: "скамья".into(),
+                    }),
+                })
+            );
+            // The same gloss again keeps its answer; a sense takes its place.
+            assert!(shown.choose_gloss(1));
+            assert_eq!(shown.definition(), Some(&translated("скамья")));
+            assert!(shown.choose(1));
+            assert_eq!(shown.gloss(), None);
+            assert_eq!(shown.definition(), None);
+            // A new result forgets the gloss.
+            assert!(shown.choose_gloss(0));
+            shown.show(Some(spanish_all()));
+            assert_eq!(shown.choice(), None);
+        }
+    }
+
+    #[test]
+    fn a_gloss_is_chosen_only_in_an_article_that_has_it() {
+        let mut shown = Shown::default();
+        assert!(!shown.choose_gloss(0));
+        // No English glosses index, or no gloss of the word.
+        shown.show(Some(spanish()));
+        assert!(!shown.choose_gloss(0));
+        let mut lookup = spanish_all();
+        if let Lookup::Grouped { grouped, .. } = &mut lookup {
+            grouped.english = Some(Vec::new());
+        }
+        shown.show(Some(lookup));
+        assert!(!shown.choose_gloss(0));
+        for lookup in every_lookup() {
+            shown.show(Some(lookup.clone()));
+            assert!(!shown.choose_gloss(0), "{lookup:?}");
+            assert_eq!(shown.choice(), None, "{lookup:?}");
+        }
+    }
+
+    #[test]
+    fn the_online_block_stands_under_a_chosen_spanish_definition() {
+        let lookup = spanish_all();
+        let online = translated("скамья");
+        let texts = result_texts(&lookup, Some(1), Some(&online), None);
+        let explained = texts.senses[1].explained.as_ref().expect("explained");
+        assert_eq!(
+            explained.definition,
+            Some(super::Block {
+                label: super::DEFINITION_LABEL,
+                line: "скамья".into(),
+            })
+        );
+        assert!(texts.senses[0].explained.is_none());
+        assert_eq!(texts.gloss, None);
+        assert_eq!(
+            super::DEFINITION_LABEL,
+            "Online, this definition in Russian:"
+        );
     }
 
     #[test]
