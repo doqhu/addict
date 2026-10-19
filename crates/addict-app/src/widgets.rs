@@ -883,11 +883,19 @@ impl View {
             self.show_area();
             return;
         };
-        let texts = choice_texts(lookup, shown.choice(), shown.definition(), key_file);
-        result
-            .line
-            .set_text(texts.line.as_deref().unwrap_or_default());
-        result.line.set_visible(texts.line.is_some());
+        let texts = choice_texts(
+            lookup,
+            shown.choice(),
+            shown.definition(),
+            key_file,
+            shown.elsewhere(),
+        );
+        // A result that is not an article has its line; an article of
+        // another language than the chosen one has the line that says so,
+        // in the same place, above the article.
+        let line = texts.line.as_deref().or(texts.elsewhere.as_deref());
+        result.line.set_text(line.unwrap_or_default());
+        result.line.set_visible(line.is_some());
         fill_listed(&result.translations, texts.translations, &["pill"]);
         result
             .translations

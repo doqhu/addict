@@ -22,9 +22,10 @@
 //! being read.
 //!
 //! [`Manual`] is the state and holds no widget, so what an edit or a click
-//! does to it is tested without a display. [`look_up`] starts a lookup on the
-//! work runner, [`offline`] starts it for English, and for Spanish only when
-//! the last known state of its index says there is one, and
+//! does to it is tested without a display. [`offline`] starts a lookup on
+//! the work runner, for English, and for Spanish or Catalan only when the
+//! last known state of its indexes says there is one; it tries the chosen
+//! language first and the others after it, and tells which answered; and
 //! [`lookup_result`] and [`result_in`] say what the window shows for its
 //! outcome; [`check_indexes`] asks on the runner where the dictionary indexes
 //! stand. The online requests about the input are
@@ -338,9 +339,10 @@ impl Manual {
     }
 }
 
-/// Starts the lookup of `word` in `articles` on `work`, with a deadline.
-/// `on_outcome` runs once on the worker thread. Without a runner nothing
-/// starts and the result to show is given back.
+/// Starts the English lookup of `word` in `articles` on `work`, with a
+/// deadline. `on_outcome` runs once on the worker thread. Without a runner
+/// nothing starts and the result to show is given back.
+#[cfg(test)]
 pub fn look_up(
     work: Option<&Work>,
     articles: Arc<dyn Articles>,
@@ -355,48 +357,70 @@ pub fn look_up(
     ))
 }
 
-/// Starts the lookup of `word` read in `language` in `articles` on `work`,
-/// as [`look_up`] starts the English one.
-fn look_up_in(
+/// Starts the lookup of `word` read first in `chosen` in `articles` on
+/// `work`, with a deadline, through [`Articles::look_up_first`].
+/// `on_outcome` runs once on the worker thread with the language that
+/// answered, or `chosen` when the lookup did not finish. Without a runner
+/// nothing starts and the result to show is given back.
+fn look_up_first(
     work: Option<&Work>,
     articles: Arc<dyn Articles>,
     word: String,
-    language: Language,
-    on_outcome: impl FnOnce(Outcome<Looked>) + Send + 'static,
+    chosen: Language,
+    on_outcome: impl FnOnce(Language, Outcome<Looked>) + Send + 'static,
 ) -> Result<Job, Lookup> {
     let work = work.ok_or(Lookup::Unfinished)?;
     Ok(work.run(
         LOOKUP_LIMIT,
-        async move { articles.look_up_in(language, &word) },
-        on_outcome,
+        async move { articles.look_up_first(chosen, &word) },
+        move |outcome| {
+            let (language, outcome) = answering(chosen, outcome);
+            on_outcome(language, outcome);
+        },
     ))
 }
 
-/// The offline result of `word` read in `language`; `known` is where the
-/// indexes stood when last asked, `None` before the first answer. For
-/// English, the lookup, started as [`look_up`] starts it. For another
-/// language, its lookup when `known` says its index is there, open or not
-/// readable, so that a damaged file is named. Otherwise nothing starts and
-/// nothing is asked of `articles`: the line that says there is no
-/// dictionary is given back, so no English article of a word spelt alike is
-/// shown. No wildcard arm: a new language does not compile until it is
-/// given its offline result.
+/// The language that answered in `outcome` and the outcome of the lookup
+/// alone; `chosen` when the lookup did not finish.
+fn answering(
+    chosen: Language,
+    outcome: Outcome<(Language, Looked)>,
+) -> (Language, Outcome<Looked>) {
+    match outcome {
+        Outcome::Finished((language, looked)) => (language, Outcome::Finished(looked)),
+        Outcome::Cancelled => (chosen, Outcome::Cancelled),
+        Outcome::TimedOut => (chosen, Outcome::TimedOut),
+        Outcome::Panicked => (chosen, Outcome::Panicked),
+    }
+}
+
+/// The offline result of `word` read in the `chosen` language; `known` is
+/// where the indexes stood when last asked, `None` before the first answer.
+/// For English, the lookup. For another language, its lookup when `known`
+/// says its index is there, open or not readable, so that a damaged file is
+/// named. The lookup tries the chosen language first and, when it has no
+/// entry for the word, the other languages
+/// ([`Articles::look_up_first`]); `on_outcome` is given the language that
+/// answered. Otherwise nothing starts and nothing is asked of `articles`:
+/// the line that says there is no dictionary is given back, so no article
+/// of a word spelt alike in another language is shown. No wildcard arm: a
+/// new language does not compile until it is given its offline result.
 pub fn offline(
     work: Option<&Work>,
     articles: Arc<dyn Articles>,
     word: String,
-    language: Language,
+    chosen: Language,
     known: Option<Indexes>,
-    on_outcome: impl FnOnce(Outcome<Looked>) + Send + 'static,
+    on_outcome: impl FnOnce(Language, Outcome<Looked>) + Send + 'static,
 ) -> Result<Job, Lookup> {
-    match language {
-        Language::En => look_up(work, articles, word, on_outcome),
+    match chosen {
+        Language::En => look_up_first(work, articles, word, chosen, on_outcome),
         Language::Es | Language::Ca => {
-            match known.and_then(|indexes| indexes.of_language(language)) {
+            match known.and_then(|indexes| indexes.of_language(chosen)) {
                 Some(State::Open | State::Unreadable) => {
-                    look_up_in(work, articles, word, language, on_outcome)
+                    look_up_first(work, articles, word, chosen, on_outcome)
                 }
-                Some(State::Missing) | None => Err(Lookup::NoDictionary(language)),
+                Some(State::Missing) | None => Err(Lookup::NoDictionary(chosen)),
             }
         }
     }
@@ -430,8 +454,8 @@ pub fn check_indexes(
     Some(job)
 }
 
-/// What the window shows for the `outcome` of the lookup of `word` read in
-/// `language`, or `None` when it shows nothing new. English is
+/// What the window shows for the `outcome` of the lookup of `word`
+/// answered in `language`, or `None` when it shows nothing new. English is
 /// [`lookup_result`]. For another language what its indexes gave is shown
 /// by kind, in that language, and a language whose indexes were not there
 /// after all has the line that says there is no dictionary. No wildcard
@@ -596,7 +620,7 @@ pub(crate) mod tests {
                         word.to_owned(),
                         language,
                         indexes,
-                        |_| panic!("a lookup ended"),
+                        |_, _| panic!("a lookup ended"),
                     );
                     assert_eq!(started.err(), Some(Lookup::NoDictionary(language)));
                 }
@@ -614,7 +638,7 @@ pub(crate) mod tests {
                     "real".to_owned(),
                     language,
                     Some(known),
-                    |_| panic!("a lookup ended"),
+                    |_, _| panic!("a lookup ended"),
                 );
                 assert_eq!(started.err(), Some(Lookup::NoDictionary(language)));
             }
@@ -626,7 +650,7 @@ pub(crate) mod tests {
             "real".to_owned(),
             Language::Es,
             None,
-            |_| {},
+            |_, _| {},
         );
         assert_eq!(started.err(), Some(Lookup::NoDictionary(Language::Es)));
     }
@@ -677,14 +701,111 @@ pub(crate) mod tests {
             word.to_owned(),
             language,
             Some(known),
-            move |outcome| {
-                let _ = sender.send(outcome);
+            move |answered, outcome| {
+                let _ = sender.send((answered, outcome));
             },
         )
         .expect("job");
-        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+        let (answered, outcome) = receiver.recv_timeout(WAIT).expect("outcome");
         drop(job);
+        assert_eq!(answered, language);
         outcome
+    }
+
+    /// A source of articles whose Spanish alone has the word: English and
+    /// Catalan have no entry for it.
+    struct SpanishOnly;
+
+    impl Articles for SpanishOnly {
+        fn indexes(&self) -> Indexes {
+            Indexes {
+                spanish: State::Open,
+                catalan: State::Open,
+                ..Indexes::OPEN
+            }
+        }
+
+        fn look_up(&self, _word: &str) -> Looked {
+            Looked {
+                answer: Answer::NoEntry,
+                indexes: self.indexes(),
+            }
+        }
+
+        fn look_up_in(&self, language: Language, word: &str) -> Looked {
+            match language {
+                Language::Es => Looked {
+                    answer: Answer::Grouped(banco()),
+                    indexes: self.indexes(),
+                },
+                Language::En | Language::Ca => self.look_up(word),
+            }
+        }
+    }
+
+    /// The language that answered the offline lookup of `word` read first
+    /// in `chosen`, and its outcome.
+    fn answered_offline(
+        articles: impl Articles + 'static,
+        chosen: Language,
+        known: Option<Indexes>,
+        word: &str,
+    ) -> (Language, Outcome<Looked>) {
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = mpsc::channel();
+        let job = offline(
+            Some(&work),
+            std::sync::Arc::new(articles),
+            word.to_owned(),
+            chosen,
+            known,
+            move |answered, outcome| {
+                let _ = sender.send((answered, outcome));
+            },
+        )
+        .expect("job");
+        let reported = receiver.recv_timeout(WAIT).expect("outcome");
+        drop(job);
+        reported
+    }
+
+    #[test]
+    fn a_word_the_chosen_language_lacks_is_answered_and_named_in_another() {
+        let known = Some(SpanishOnly.indexes());
+        for chosen in Language::ALL {
+            let (answered, outcome) = answered_offline(SpanishOnly, chosen, known, "cerró");
+            assert_eq!(answered, Language::Es, "{chosen:?}");
+            assert_eq!(
+                result_in(outcome, "cerró", answered),
+                Some(Lookup::Grouped {
+                    language: Language::Es,
+                    grouped: banco(),
+                }),
+                "{chosen:?}"
+            );
+        }
+        // No language has it: the chosen one's miss.
+        let (answered, outcome) = answered_offline(Sampled, Language::En, None, "sat");
+        assert_eq!(answered, Language::En);
+        assert_eq!(
+            lookup_result(outcome, "sat"),
+            Some(Lookup::NoEntry {
+                word: "sat".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_lookup_that_did_not_finish_is_the_chosen_language_s() {
+        for (outcome, shown) in [
+            (Outcome::TimedOut, Some(Lookup::Unfinished)),
+            (Outcome::Panicked, Some(Lookup::Unfinished)),
+            (Outcome::Cancelled, None),
+        ] {
+            let (language, outcome) = super::answering(Language::Ca, outcome);
+            assert_eq!(language, Language::Ca);
+            assert_eq!(lookup_result(outcome, "banc"), shown);
+        }
     }
 
     #[test]
@@ -817,13 +938,14 @@ pub(crate) mod tests {
             "bank".to_owned(),
             Language::En,
             None,
-            move |outcome| {
-                let _ = sender.send(outcome);
+            move |answered, outcome| {
+                let _ = sender.send((answered, outcome));
             },
         )
         .expect("job");
-        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+        let (answered, outcome) = receiver.recv_timeout(WAIT).expect("outcome");
         drop(job);
+        assert_eq!(answered, Language::En);
         assert_eq!(
             lookup_result(outcome, "bank"),
             Some(Lookup::Article(Sample.lookup("bank").expect("bank")))
@@ -834,7 +956,7 @@ pub(crate) mod tests {
             "bank".to_owned(),
             Language::En,
             None,
-            |_| {},
+            |_, _| {},
         );
         assert_eq!(started.err(), Some(Lookup::Unfinished));
     }

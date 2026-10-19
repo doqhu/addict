@@ -440,6 +440,23 @@ fn dictionary_language(language: Language) -> &'static str {
     }
 }
 
+/// The line above an article of another language than the chosen one,
+/// which had no entry for the word: what stands before the chosen
+/// language, between it and the language that answered, and after that.
+const ELSEWHERE_BEFORE: &str = "Not in the ";
+const ELSEWHERE_BETWEEN: &str = " dictionaries: the ";
+const ELSEWHERE_AFTER: &str = " article.";
+
+/// The line above an article that `found` gave for a word the `chosen`
+/// language had no entry for.
+fn elsewhere_text(chosen: Language, found: Language) -> String {
+    format!(
+        "{ELSEWHERE_BEFORE}{}{ELSEWHERE_BETWEEN}{}{ELSEWHERE_AFTER}",
+        dictionary_language(chosen),
+        dictionary_language(found)
+    )
+}
+
 /// The line of a word that no imported dictionary could be asked about: what
 /// stands before the word and what stands after it.
 const NOT_IMPORTED_BEFORE: &str = "There is no imported dictionary to look “";
@@ -621,6 +638,9 @@ pub struct SenseText<'a> {
 pub struct ResultTexts<'a> {
     /// The one line of a result that is not an article.
     pub line: Option<Cow<'a, str>>,
+    /// For an article of another language than the chosen one, which had no
+    /// entry for the word, the line that names both.
+    pub elsewhere: Option<String>,
     /// What stands above the list of senses: their kind and language.
     pub senses_label: &'static str,
     /// For an article, what stands above its list while no sense is chosen
@@ -671,16 +691,48 @@ pub fn result_texts<'a>(
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
 ) -> ResultTexts<'a> {
-    choice_texts(lookup, chosen.map(Choice::Sense), definition, key_file)
+    choice_texts(
+        lookup,
+        chosen.map(Choice::Sense),
+        definition,
+        key_file,
+        None,
+    )
 }
 
 /// The parts of `lookup` with `choice` in it; a choice the result does not
 /// have is no choice. The online translation of the definition,
 /// `definition`, stands under the chosen sense or gloss when its text is not
 /// blank. A refusal about the key names `key_file`, as in
-/// [`online_markup`]. No wildcard arm: a new variant does not compile until
+/// [`online_markup`]. An article that the language `elsewhere.1` gave for a
+/// word the chosen language `elsewhere.0` had no entry for has the line
+/// that names both. No wildcard arm: a new variant does not compile until
 /// it is given its text.
 pub fn choice_texts<'a>(
+    lookup: &'a Lookup,
+    choice: Option<Choice>,
+    definition: Option<&'a Online>,
+    key_file: Option<&Path>,
+    elsewhere: Option<(Language, Language)>,
+) -> ResultTexts<'a> {
+    let elsewhere = elsewhere
+        .filter(|(chosen, found)| chosen != found)
+        .map(|(chosen, found)| elsewhere_text(chosen, found));
+    let texts = lookup_texts(lookup, choice, definition, key_file);
+    match lookup {
+        Lookup::Article(_) | Lookup::Grouped { .. } => ResultTexts { elsewhere, ..texts },
+        Lookup::Pending
+        | Lookup::NoEntry { .. }
+        | Lookup::NoDictionary(_)
+        | Lookup::NotImported { .. }
+        | Lookup::Unreadable(_)
+        | Lookup::Unfinished => texts,
+    }
+}
+
+/// The parts of `lookup` with `choice` in it, with no line about another
+/// language; see [`choice_texts`].
+fn lookup_texts<'a>(
     lookup: &'a Lookup,
     choice: Option<Choice>,
     definition: Option<&'a Online>,
@@ -692,6 +744,7 @@ pub fn choice_texts<'a>(
     };
     let line = |text: Cow<'a, str>| ResultTexts {
         line: Some(text),
+        elsewhere: None,
         senses_label: SENSES_LABEL,
         hint: None,
         senses: Vec::new(),
@@ -734,6 +787,7 @@ fn article_texts<'a>(
     let (hint, senses) = sense_texts(&article.senses, chosen, definition, key_file);
     ResultTexts {
         line: None,
+        elsewhere: None,
         senses_label: SENSES_LABEL,
         hint: hint.or(article.senses.is_empty().then_some(NO_DEFINITIONS)),
         senses,
@@ -808,6 +862,7 @@ fn grouped_texts<'a>(
     };
     ResultTexts {
         line: None,
+        elsewhere: None,
         senses_label: definitions_label(language),
         hint,
         senses: rows,
@@ -992,6 +1047,9 @@ fn refusal_text(refusal: Refusal, key_file: Option<&Path>) -> String {
 #[derive(Debug, Default)]
 pub struct Shown {
     lookup: Option<Lookup>,
+    /// The chosen language and the one that gave the shown result, when
+    /// the chosen one had no entry for the word.
+    elsewhere: Option<(Language, Language)>,
     choice: Option<Choice>,
     definition: Option<(u64, Online)>,
     next_definition: u64,
@@ -1002,8 +1060,23 @@ impl Shown {
     /// one before is forgotten.
     pub fn show(&mut self, lookup: Option<Lookup>) {
         self.lookup = lookup;
+        self.elsewhere = None;
         self.choice = None;
         self.definition = None;
+    }
+
+    /// As [`Shown::show`], for a result that the language `found` gave for
+    /// a word read in `chosen`: when they differ, the chosen one had no
+    /// entry for it, and an article says so.
+    pub fn show_elsewhere(&mut self, lookup: Option<Lookup>, chosen: Language, found: Language) {
+        self.show(lookup);
+        self.elsewhere = (chosen != found).then_some((chosen, found));
+    }
+
+    /// The chosen language and the one that gave the shown result, when
+    /// the chosen one had no entry for the word.
+    pub fn elsewhere(&self) -> Option<(Language, Language)> {
+        self.elsewhere
     }
 
     /// Makes `choice` the chosen one; the translation of the definition of
@@ -2540,6 +2613,90 @@ mod tests {
         ]
     }
 
+    /// The texts of what `shown` shows with what is chosen in it.
+    fn shown_texts(shown: &Shown) -> ResultTexts<'_> {
+        super::choice_texts(
+            shown.lookup().expect("a result"),
+            shown.choice(),
+            shown.definition(),
+            None,
+            shown.elsewhere(),
+        )
+    }
+
+    #[test]
+    fn an_article_of_another_language_names_the_chosen_one_and_its_own() {
+        // Catalan chosen, a Spanish article.
+        let mut shown = Shown::default();
+        shown.show_elsewhere(Some(spanish_all()), Language::Ca, Language::Es);
+        let texts = shown_texts(&shown);
+        assert_eq!(
+            texts.elsewhere.as_deref(),
+            Some("Not in the Catalan dictionaries: the Spanish article.")
+        );
+        assert_eq!(texts.line, None);
+        // Spanish chosen, an English article.
+        let english = Lookup::Article(Sample.lookup("bank").expect("bank"));
+        shown.show_elsewhere(Some(english.clone()), Language::Es, Language::En);
+        assert_eq!(
+            shown_texts(&shown).elsewhere.as_deref(),
+            Some("Not in the Spanish dictionaries: the English article.")
+        );
+        // The rest of the article is as it is without the line.
+        assert_eq!(
+            ResultTexts {
+                elsewhere: None,
+                ..shown_texts(&shown)
+            },
+            result_texts(&english, None, None, None)
+        );
+        // The next result forgets it.
+        shown.show(Some(english.clone()));
+        assert_eq!(shown.elsewhere(), None);
+        assert_eq!(shown_texts(&shown).elsewhere, None);
+    }
+
+    #[test]
+    fn the_chosen_language_s_own_result_has_no_line_about_another() {
+        let mut shown = Shown::default();
+        let english = Lookup::Article(Sample.lookup("bank").expect("bank"));
+        for (lookup, language) in [(spanish_all(), Language::Es), (english, Language::En)] {
+            shown.show_elsewhere(Some(lookup.clone()), language, language);
+            assert_eq!(shown.elsewhere(), None);
+            let texts = shown_texts(&shown);
+            assert_eq!(texts.elsewhere, None);
+            assert_eq!(texts, result_texts(&lookup, None, None, None));
+        }
+        // A result that is no article has its own line only.
+        for lookup in [
+            Lookup::NoEntry {
+                word: "zzz".to_owned(),
+            },
+            Lookup::Unfinished,
+            Lookup::Pending,
+        ] {
+            shown.show_elsewhere(Some(lookup.clone()), Language::Ca, Language::Es);
+            let texts = shown_texts(&shown);
+            assert_eq!(texts.elsewhere, None);
+            assert_eq!(texts, result_texts(&lookup, None, None, None));
+        }
+    }
+
+    #[test]
+    fn a_definition_of_a_spanish_article_shown_for_catalan_is_sent_from_spanish() {
+        let mut shown = Shown::default();
+        shown.show_elsewhere(Some(spanish_all()), Language::Ca, Language::Es);
+        assert!(shown.choose(0));
+        let (_, request) = shown.request_definition().expect("definition");
+        assert_eq!(request.source, Language::Es);
+        assert_eq!(request.context, None);
+        // Its English gloss goes as English.
+        assert!(shown.choose_gloss(1));
+        let (_, request) = shown.request_definition().expect("gloss");
+        assert_eq!(request.source, Language::En);
+        assert_eq!(request.text, "bench");
+    }
+
     #[test]
     fn a_spanish_article_of_every_kind_shows_each_kind_labelled() {
         let lookup = spanish_all();
@@ -2853,7 +3010,7 @@ mod tests {
         assert_eq!(shown.request_definition(), None);
         // Even with an answer at hand, a blank text has no block.
         let lookup = shown.lookup().expect("article");
-        let texts = super::choice_texts(lookup, shown.choice(), Some(&Online::Pending), None);
+        let texts = super::choice_texts(lookup, shown.choice(), Some(&Online::Pending), None, None);
         assert_eq!(texts.gloss.expect("chosen").definition, None);
         let texts = result_texts(lookup, Some(0), Some(&Online::Pending), None);
         assert_eq!(
@@ -2905,6 +3062,7 @@ mod tests {
                 shown.lookup().expect("article"),
                 shown.choice(),
                 shown.definition(),
+                None,
                 None,
             );
             // Under the gloss, not under a sense.

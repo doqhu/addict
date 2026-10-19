@@ -45,6 +45,13 @@
 //! on the same one or an edit of the field replaces the lookup, and the
 //! outcome of a replaced lookup is never shown.
 //!
+//! The word is looked up in the reading language first. When that language
+//! has indexes and none has the word, the other languages are asked in the
+//! order English, Spanish, Catalan, and the first that has it gives the
+//! article, under a line that names the chosen language and the one that
+//! answered. The reading language stays the user's: the next word starts
+//! from it.
+//!
 //! An article is shown as the list of its senses, numbered, each definition
 //! a link; the list scrolls when it is taller than its area. No sense is
 //! chosen when the article arrives, and a line below the list asks to choose
@@ -68,7 +75,9 @@
 //! appears below it, before synonyms; changing the choice or replacing the
 //! article cancels and clears it. Each
 //! stands below the result under a label that says what it is, apart from
-//! the article, which is shown as before and does not wait for them. What
+//! the article, which is shown as before and does not wait for them; the
+//! word's request waits for its lookup and is sent from the language that
+//! answered, the sentence's from the reading language. What
 //! was answered or is still awaited is not asked for again: a second click
 //! on the word sends nothing, another word sends only itself and keeps the
 //! translation of the sentence, and going back to a word shows what was

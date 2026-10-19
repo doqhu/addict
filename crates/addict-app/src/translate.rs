@@ -3,7 +3,8 @@
 //!
 //! [`request`] builds the one online request about a [`Subject`]: the word
 //! with its sentence as context, the sentence itself, or a lone word, in the
-//! reading language the window has chosen;
+//! language [`source_of`] says: the sentence in the reading language the
+//! window has chosen, the word in the language that answered its lookup;
 //! [`translate`] starts a request as a job of its own on the work runner,
 //! with its own deadline, and [`translation_result`] says what the window
 //! shows for its outcome. [`translation_ended`] and [`translation_unstarted`]
@@ -39,6 +40,20 @@ pub const SENTENCE_LIMIT: usize = 500;
 
 /// What an online translation ends with.
 pub type Translated = Result<String, Refusal>;
+
+/// The language the online request about `subject` is sent from, for a
+/// word read in the `chosen` language whose lookup was `answered` by a
+/// language, or by none (it did not finish, or none ran). The sentence is
+/// sent from the chosen language; the word, alone or in its sentence, from
+/// the language that answered, and from the chosen one when none did. No
+/// wildcard arm: a new subject does not compile until it is given its
+/// language.
+pub fn source_of(subject: Subject, chosen: Source, answered: Option<Source>) -> Source {
+    match subject {
+        Subject::Sentence(_) => chosen,
+        Subject::Word(_) | Subject::Lone => answered.unwrap_or(chosen),
+    }
+}
 
 /// The online request about `subject` for `input`, read in `source`, with
 /// nothing in it but what is named here. For a word of a sentence: the word,
@@ -162,8 +177,8 @@ pub(crate) mod tests {
     use addict_platform::work::{Outcome, Work};
 
     use super::{
-        SENTENCE_LIMIT, TRANSLATE_LIMIT, Translated, request, translate, translate_within,
-        translation_ended, translation_result, translation_unstarted,
+        SENTENCE_LIMIT, TRANSLATE_LIMIT, Translated, request, source_of, translate,
+        translate_within, translation_ended, translation_result, translation_unstarted,
     };
     use crate::{
         dictionaries::{Looked, tests::Sampled},
@@ -1448,6 +1463,84 @@ pub(crate) mod tests {
                 }),
             ]
         );
+    }
+
+    #[test]
+    fn a_word_answered_in_another_language_is_sent_and_recorded_from_it() {
+        // Catalan chosen, `cerró` answered by Spanish: the word goes as
+        // Spanish, its sentence as Catalan.
+        const CERRO: usize = 2;
+        assert_eq!(
+            source_of(Subject::Word(CERRO), Language::Ca, Some(Language::Es)),
+            Language::Es
+        );
+        assert_eq!(
+            source_of(Subject::Lone, Language::Ca, Some(Language::Es)),
+            Language::Es
+        );
+        assert_eq!(
+            source_of(Subject::Sentence(0), Language::Ca, Some(Language::Es)),
+            Language::Ca
+        );
+        // No language answered: the chosen one.
+        for subject in [Subject::Word(CERRO), Subject::Lone, Subject::Sentence(0)] {
+            for chosen in Language::ALL {
+                assert_eq!(source_of(subject, chosen, None), chosen);
+                assert_eq!(source_of(subject, chosen, Some(chosen)), chosen);
+            }
+        }
+        let stub = Stub::start(Reply::translation("закрылся")).expect("stub");
+        let key = KeyFile::new("fallback", 0o600);
+        let translator: Arc<dyn Translator> =
+            Arc::new(DeepL::with_base_url(&key.0, stub.base_url()));
+        let mut manual = Manual::default();
+        manual.edit(BANCO_SENTENCE.to_owned());
+        manual.choose(CERRO).expect("run");
+        let input = manual.input().expect("input");
+        assert_eq!(input.word(), "cerró");
+        let work = Work::start().expect("runner");
+        let mut records = Vec::new();
+        for subject in [Subject::Word(CERRO), Subject::Sentence(0)] {
+            let source = source_of(subject, Language::Ca, Some(Language::Es));
+            let (sender, receiver) = mpsc::channel();
+            let probe = Probe::start(true);
+            let _job = translate(
+                Some(&work),
+                translator.clone(),
+                request(input, subject, source),
+                move |outcome| {
+                    let _ = sender.send((outcome, probe.ended()));
+                },
+            )
+            .expect("job");
+            let (outcome, elapsed) = receiver.recv_timeout(WAIT).expect("outcome");
+            let (online, record) =
+                translation_ended(outcome, subject.into(), source, elapsed).expect("ended");
+            assert_eq!(online, Online::Translated("закрылся".to_owned()));
+            records.push(record.expect("a record").details()["source"].clone());
+        }
+        let bodies: Vec<serde_json::Value> = stub
+            .seen()
+            .iter()
+            .map(|seen| serde_json::from_str(&seen.body).expect("JSON"))
+            .collect();
+        assert_eq!(
+            bodies,
+            [
+                serde_json::json!({
+                    "text": ["cerró"],
+                    "context": BANCO_SENTENCE,
+                    "source_lang": "ES",
+                    "target_lang": "RU",
+                }),
+                serde_json::json!({
+                    "text": [BANCO_SENTENCE],
+                    "source_lang": "CA",
+                    "target_lang": "RU",
+                }),
+            ]
+        );
+        assert_eq!(records, ["es", "ca"]);
     }
 
     #[test]
