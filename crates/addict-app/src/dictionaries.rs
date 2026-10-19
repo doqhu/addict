@@ -702,10 +702,10 @@ pub mod tests {
             assert_eq!(looked.answer, spanish_banco(), "{word}");
             assert_eq!(looked.indexes, all, "{word}");
         }
-        // As written: the form table is not read yet.
+        // A form reaches its headword: `bancos` gives the article of `banco`.
         assert_eq!(
             dictionaries.look_up_in(Language::Es, "bancos").answer,
-            Answer::NoEntry
+            spanish_banco()
         );
         assert_eq!(
             dictionaries.look_up_in(Language::Es, "zzz").answer,

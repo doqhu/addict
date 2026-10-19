@@ -2,24 +2,35 @@
 //! reading language, and the lookup of one index through them.
 //!
 //! [`headwords`] is the one place that says how a word reaches its
-//! headwords in each language:
+//! headwords in each language. Each gives the word without the punctuation
+//! around it, then its lowercase, then the dictionary forms of the
+//! lowercase word, each once:
 //!
-//! - English: the word without the punctuation around it, its lowercase,
-//!   then the dictionary forms of `addict_core::reduction`, the lemmas of an
+//! - English: the forms of `addict_core::reduction`, the lemmas of an
 //!   exception list first. [`Combined`](crate::Combined) looks up through
 //!   it.
-//! - Spanish and Catalan: the word as written, without the punctuation
-//!   around it, and its lowercase, with no dictionary-form rule and no
-//!   exception list. The rules and the lists of a later entry replace this
-//!   arm; the form tables of the ES and CA indexes are written already.
+//! - Spanish and Catalan: the forms of `addict_core::reduction_es_ca`, the
+//!   port of EXP-9's `rules.py` (elision, enclitic pronouns, suffix rules,
+//!   accents, the Catalan bare stem), with the exception lemmas of the word
+//!   and of each of its bases.
+//!
+//! The exception lemmas come from the form tables of the indexes, through a
+//! [`Lemmas`] map the caller reads for the forms [`asked_forms`] names. For
+//! Spanish and Catalan it is the union of the form tables of every index of
+//! the language that is asked, so an index without a form table (WikDict,
+//! OMW) still answers for `fue` the `ser` and `ir` another index lists. The
+//! tables are used whole, as imported: EXP-9 measured the same coverage
+//! with the full tables as with their irregular-only part.
 //!
 //! [`article`] answers from one index of an ES or CA source with the
 //! headwords of its language, and [`grouped`] answers from every index of
 //! one language at once, what each gives under its [`Kind`].
 
+use std::collections::BTreeMap;
+
 use addict_core::{
     dictionary::{Article, Sense},
-    reduction,
+    reduction, reduction_es_ca,
     translation::Source as Language,
 };
 
@@ -29,19 +40,27 @@ use crate::{
     index::{Error, Index},
 };
 
+/// The exception lemmas of a form, by form: sorted, each once. A form that
+/// is not there has none.
+pub type Lemmas = BTreeMap<String, Vec<String>>;
+
 /// The headwords to try for `word` read in `language`, in order, each once;
-/// empty when nothing of the word is left. `lemmas` are what an exception
-/// list gives for the lowercase word; only English uses them. No wildcard
-/// arm: a new language does not compile until it is given its hook.
-pub fn headwords(language: Language, word: &str, lemmas: &[String]) -> Vec<String> {
+/// empty when nothing of the word is left: the word without the punctuation
+/// around it, its lowercase, then the dictionary forms of the lowercase
+/// word. `lemmas` holds the exception lemmas of the forms [`asked_forms`]
+/// names. No wildcard arm: a new language does not compile until it is
+/// given its hook.
+pub fn headwords(language: Language, word: &str, lemmas: &Lemmas) -> Vec<String> {
     let written = reduction::stripped(word);
     if written.is_empty() {
         return Vec::new();
     }
     let lowercase = reduction::lowercase(written);
+    let of = |form: &str| lemmas.get(form).cloned().unwrap_or_default();
     let forms = match language {
-        Language::En => reduction::forms(&lowercase, lemmas),
-        Language::Es | Language::Ca => Vec::new(),
+        Language::En => reduction::forms(&lowercase, &of(&lowercase)),
+        Language::Es => reduction_es_ca::forms(&lowercase, reduction_es_ca::Language::Es, of),
+        Language::Ca => reduction_es_ca::forms(&lowercase, reduction_es_ca::Language::Ca, of),
     };
     let mut candidates = vec![written.to_owned()];
     for candidate in std::iter::once(lowercase).chain(forms) {
@@ -52,35 +71,68 @@ pub fn headwords(language: Language, word: &str, lemmas: &[String]) -> Vec<Strin
     candidates
 }
 
-/// Whether `language` reads the exception list of an index for its
-/// headwords. No wildcard arm, as in [`headwords`].
-pub fn uses_exceptions(language: Language) -> bool {
-    match language {
-        Language::En => true,
-        Language::Es | Language::Ca => false,
+/// The forms whose exception lemmas [`headwords`] reads for `word` read in
+/// `language`: the lowercase word, and in Spanish and Catalan its bases as
+/// well. Empty when nothing of the word is left. No wildcard arm, as in
+/// [`headwords`].
+pub fn asked_forms(language: Language, word: &str) -> Vec<String> {
+    let written = reduction::stripped(word);
+    if written.is_empty() {
+        return Vec::new();
     }
+    let lowercase = reduction::lowercase(written);
+    let bases = match language {
+        Language::En => Vec::new(),
+        Language::Es => reduction_es_ca::bases(&lowercase, reduction_es_ca::Language::Es),
+        Language::Ca => reduction_es_ca::bases(&lowercase, reduction_es_ca::Language::Ca),
+    };
+    std::iter::once(lowercase).chain(bases).collect()
+}
+
+/// The exception lemmas `indexes` give for each of the [`asked_forms`] of
+/// `word` read in `language`: their union per form, sorted, each once. An
+/// error of an index is the error of the lookup.
+fn lemmas_of<'a>(
+    indexes: impl IntoIterator<Item = &'a Index> + Clone,
+    language: Language,
+    word: &str,
+) -> Result<Lemmas, Error> {
+    let mut lemmas = Lemmas::new();
+    for form in asked_forms(language, word) {
+        let mut union = Vec::new();
+        for index in indexes.clone() {
+            union.extend(index.exception_lemmas(&form)?);
+        }
+        union.sort();
+        union.dedup();
+        if !union.is_empty() {
+            lemmas.insert(form, union);
+        }
+    }
+    Ok(lemmas)
 }
 
 /// The article of `word` read in `language` from `index` alone: the senses
 /// and translations of every headword [`headwords`] gives that the index
 /// has, merged in that order, a sense whose definition is already there
-/// skipped. `None` when the index has none of them. An error of the index
-/// is the error of the lookup.
+/// skipped; the exception lemmas are those of this index's form table.
+/// `None` when the index has none of them. An error of the index is the
+/// error of the lookup.
 pub fn article(index: &Index, language: Language, word: &str) -> Result<Option<Article>, Error> {
-    Ok(merged(found(index, language, word)?))
+    let lemmas = lemmas_of([index], language, word)?;
+    Ok(merged(found(index, language, word, &lemmas)?))
 }
 
 /// The headwords of `index` that [`headwords`] gives for `word` read in
-/// `language`, with their articles, in that order.
-fn found(index: &Index, language: Language, word: &str) -> Result<Vec<Found>, Error> {
-    let lemmas = if uses_exceptions(language) {
-        let lowercase = reduction::lowercase(reduction::stripped(word));
-        index.exception_lemmas(&lowercase)?
-    } else {
-        Vec::new()
-    };
+/// `language` with `lemmas`, with their articles, in that order.
+fn found(
+    index: &Index,
+    language: Language,
+    word: &str,
+    lemmas: &Lemmas,
+) -> Result<Vec<Found>, Error> {
     let mut found = Vec::new();
-    for headword in headwords(language, word, &lemmas) {
+    for headword in headwords(language, word, lemmas) {
         if let Some(article) = index.find(&headword)? {
             found.push(Found { headword, article });
         }
@@ -107,10 +159,11 @@ pub struct Grouped {
 }
 
 /// What `indexes`, each with its kind, give for `word` read in `language`,
-/// grouped by kind in the order of the list. Each index is asked for the
-/// headwords [`headwords`] gives, as [`article`] asks, and every sense of
-/// every headword found is kept; only the definitions are merged, a
-/// definition already there skipped.
+/// grouped by kind in the order of the list. Every index is asked for the
+/// same headwords: those [`headwords`] gives with the exception lemmas of
+/// all the indexes together, read once. Every sense of every headword found
+/// is kept; only the definitions are merged, a definition already there
+/// skipped.
 /// `None` when no index has a headword for the word. An error of an index
 /// is the error of the lookup; it carries the path of that index.
 pub fn grouped(
@@ -121,10 +174,14 @@ pub fn grouped(
     let mut grouped = Grouped::default();
     let mut found_any = false;
     let mut definitions = Vec::new();
-    // The word as it may stand among the members of a sense.
-    let itself = headwords(language, word, &[]);
+    let lemmas = lemmas_of(indexes.iter().map(|(_, index)| *index), language, word)?;
+    // The word as it may stand among the members of a sense: as written and
+    // in lowercase, never its forms, so the members of a form found keep
+    // the synonyms of the word.
+    let written = reduction::stripped(word);
+    let itself = [written.to_owned(), reduction::lowercase(written)];
     for (kind, index) in indexes {
-        let found = found(index, language, word)?;
+        let found = found(index, language, word, &lemmas)?;
         found_any |= !found.is_empty();
         // Every sense of every headword: the senses of a synonyms index may
         // all have the same definition, or none.
@@ -147,6 +204,8 @@ pub fn grouped(
             }
             Kind::Synonyms => {
                 let synonyms = grouped.synonyms.get_or_insert_with(Vec::new);
+                // `Index::find` already leaves each headword out of its own
+                // members, so a lemma reached through a form is not listed.
                 let members = senses.flat_map(|sense| &sense.synonyms);
                 push_new(
                     synonyms,
@@ -188,29 +247,73 @@ mod tests {
         testdir::TempDir,
     };
 
+    fn lemmas(entries: &[(&str, &[&str])]) -> Lemmas {
+        entries
+            .iter()
+            .map(|(form, lemmas)| ((*form).to_owned(), texts(lemmas)))
+            .collect()
+    }
+
     #[test]
-    fn english_keeps_the_reduction_and_spanish_and_catalan_take_the_word_as_written() {
-        let lemmas = texts(&["go"]);
-        let english = headwords(Language::En, "“Went,”", &lemmas);
+    fn english_headwords_are_what_they_were() {
+        let went = lemmas(&[("went", &["go"])]);
+        let english = headwords(Language::En, "“Went,”", &went);
         assert_eq!(english[..3], texts(&["Went", "went", "go"]));
         assert_eq!(
-            headwords(Language::En, "banks", &[]),
+            headwords(Language::En, "banks", &Lemmas::new()),
             [vec!["banks".to_owned()], reduction::forms("banks", &[])].concat()
         );
+        // Only the entry of the lowercase word is read.
+        let other = lemmas(&[("Went", &["walk"]), ("wen", &["x"])]);
+        assert_eq!(
+            headwords(Language::En, "Went", &other),
+            [texts(&["Went", "went"]), reduction::forms("went", &[])].concat()
+        );
+        assert_eq!(asked_forms(Language::En, "“Went,”"), texts(&["went"]));
+        assert!(headwords(Language::En, "…", &went).is_empty());
+    }
+
+    #[test]
+    fn spanish_and_catalan_words_reach_their_forms_after_the_word_and_its_lowercase() {
+        let none = Lemmas::new();
+        let cerró = headwords(Language::Es, "«Cerró»,", &none);
+        assert_eq!(cerró[..2], texts(&["Cerró", "cerró"]));
+        assert_eq!(
+            cerró[2..],
+            reduction_es_ca::forms("cerró", reduction_es_ca::Language::Es, |_| Vec::new())
+        );
+        assert!(cerró.contains(&"cerrar".to_owned()));
+        let dámelo = headwords(Language::Es, "dámelo", &none);
+        assert!(dámelo.contains(&"dar".to_owned()), "{dámelo:?}");
+        assert_eq!(
+            headwords(Language::Ca, "col·leccions", &none)[1],
+            "col·lecció"
+        );
+        assert_eq!(headwords(Language::Ca, "d'art", &none)[1], "art");
+        // Typeset text: the word as the app looks it up.
+        let typeset = addict_core::sentence::lookup_word("d\u{2019}art");
+        assert_eq!(headwords(Language::Ca, &typeset, &none)[1], "art");
+        // The exception lemmas of the word come first among the forms.
+        let fue = lemmas(&[("fue", &["ir", "ser"])]);
+        assert_eq!(
+            headwords(Language::Es, "Fue", &fue)[..4],
+            texts(&["Fue", "fue", "ir", "ser"])
+        );
+        // A base's own lemmas follow the base.
+        let havia = lemmas(&[("havia", &["haver"])]);
+        assert_eq!(
+            headwords(Language::Ca, "n'havia", &havia)[..3],
+            texts(&["n'havia", "havia", "haver"])
+        );
         for language in [Language::Es, Language::Ca] {
-            assert_eq!(
-                headwords(language, "«Bancos»,", &lemmas),
-                texts(&["Bancos", "bancos"])
-            );
-            assert_eq!(headwords(language, "cerró", &lemmas), texts(&["cerró"]));
-            assert_eq!(
-                headwords(language, "col·leccions", &[]),
-                texts(&["col·leccions"])
-            );
-            assert!(headwords(language, "…", &[]).is_empty());
-            assert!(!uses_exceptions(language));
+            assert!(headwords(language, "…", &none).is_empty());
+            assert!(asked_forms(language, "…").is_empty());
         }
-        assert!(uses_exceptions(Language::En));
+        assert_eq!(
+            asked_forms(Language::Ca, "D'aigua'l"),
+            texts(&["d'aigua'l", "d'aigua", "aigua'l", "aigua"])
+        );
+        assert_eq!(asked_forms(Language::Es, "bancos"), texts(&["bancos"]));
     }
 
     fn spanish() -> Contents {
@@ -250,34 +353,36 @@ mod tests {
     }
 
     #[test]
-    fn a_spanish_word_is_found_as_written_and_not_through_its_forms() {
+    fn a_spanish_word_reaches_its_lemma_through_its_forms() {
         let dir = TempDir::new("lookup-es");
         let path = dir.path().join("es.index");
         std::fs::write(&path, encode(&spanish()).expect("encode")).expect("write");
         let index = Index::open(&path).expect("open");
+        let banco_senses = vec![
+            Sense {
+                definition: "Empresa que ofrece servicios monetarios.".to_owned(),
+                synonyms: Vec::new(),
+            },
+            Sense {
+                definition: "Mueble alargado para sentarse.".to_owned(),
+                synonyms: texts(&["banca"]),
+            },
+        ];
         let banco = article(&index, Language::Es, "Banco").expect("find");
         assert_eq!(
             banco,
             Some(Article {
-                senses: vec![
-                    Sense {
-                        definition: "Empresa que ofrece servicios monetarios.".to_owned(),
-                        synonyms: Vec::new(),
-                    },
-                    Sense {
-                        definition: "Mueble alargado para sentarse.".to_owned(),
-                        synonyms: texts(&["banca"]),
-                    },
-                ],
+                senses: banco_senses.clone(),
                 translations: Vec::new(),
             })
         );
-        // The form table names `banco`, and is not read: only `bancos`.
+        // `bancos` itself first, then `banco`, which the form table and the
+        // `-s` rule both give.
         let bancos = article(&index, Language::Es, "bancos")
             .expect("find")
             .expect("bancos");
-        assert_eq!(bancos.senses.len(), 1);
         assert_eq!(bancos.senses[0].definition, "Plural de banco.");
+        assert_eq!(bancos.senses[1..], banco_senses[..]);
         assert_eq!(article(&index, Language::Es, "zzz").expect("find"), None);
     }
 
@@ -287,13 +392,32 @@ mod tests {
 
     /// Writes an index of `entries` named `name` into `dir` and opens it.
     fn canned(dir: &TempDir, name: &str, entries: &[Entry<'_>]) -> Index {
+        canned_with_forms(dir, name, entries, &[])
+    }
+
+    /// [`canned`] with a form table of `forms`, each a form and its lemmas.
+    fn canned_with_forms(
+        dir: &TempDir,
+        name: &str,
+        entries: &[Entry<'_>],
+        forms: &[(&str, &[&str])],
+    ) -> Index {
+        let mut forms = forms.to_vec();
+        forms.sort_by_key(|(form, _)| *form);
+        let forms = forms
+            .into_iter()
+            .map(|(form, lemmas)| ExceptionForm {
+                form: form.to_owned(),
+                lemmas: texts(lemmas),
+            })
+            .collect();
         let mut entries = entries.to_vec();
         entries.sort_by_key(|(word, _, _)| *word);
         let mut contents = Contents {
             source: name.to_owned(),
             senses: Vec::new(),
             headwords: Vec::new(),
-            forms: Vec::new(),
+            forms,
         };
         for (word, senses, translations) in entries {
             let mut numbers = Vec::new();
@@ -412,6 +536,103 @@ mod tests {
             banco.english,
             Some(texts(&["bank (financial institution)", "bench"]))
         );
+    }
+
+    #[test]
+    fn a_spanish_verb_form_reaches_the_russian_of_its_infinitive() {
+        let dir = TempDir::new("grouped-cerro");
+        let russian = canned(&dir, "es-ru.index", &[("cerrar", &[], &["закрыть"])]);
+        let cerró = grouped(&[(Kind::Russian, &russian)], Language::Es, "cerró")
+            .expect("look up")
+            .expect("cerró");
+        assert_eq!(cerró.russian, Some(texts(&["закрыть"])));
+    }
+
+    #[test]
+    fn the_form_table_of_one_index_serves_every_index_of_the_language() {
+        let dir = TempDir::new("grouped-fue");
+        // WikDict has no form table; the Kaikki index lists `fue`.
+        let russian = canned(
+            &dir,
+            "es-ru.index",
+            &[("ir", &[], &["идти"]), ("ser", &[], &["быть"])],
+        );
+        let definitions = canned_with_forms(
+            &dir,
+            "es-def.index",
+            &[("ser", &[("Existir.", &[])], &[])],
+            &[("fue", &["ser", "ir"])],
+        );
+        let indexes = [(Kind::Russian, &russian), (Kind::Definitions, &definitions)];
+        let fue = grouped(&indexes, Language::Es, "fue")
+            .expect("look up")
+            .expect("fue");
+        // The lemmas sorted: `ir`, then `ser`.
+        assert_eq!(fue.russian, Some(texts(&["идти", "быть"])));
+        assert_eq!(
+            fue.definitions.expect("definitions")[0].definition,
+            "Existir."
+        );
+        // One index alone reads only its own form table.
+        assert_eq!(article(&russian, Language::Es, "fue").expect("find"), None);
+    }
+
+    #[test]
+    fn a_capitalised_word_is_tried_as_written_then_in_lowercase_then_by_its_forms() {
+        let dir = TempDir::new("grouped-order");
+        let definitions = canned(
+            &dir,
+            "es-def.index",
+            &[
+                ("Cerró", &[("As written.", &[])], &[]),
+                ("cerrar", &[("The infinitive.", &[])], &[]),
+                ("cerró", &[("In lowercase.", &[])], &[]),
+            ],
+        );
+        let found = grouped(&[(Kind::Definitions, &definitions)], Language::Es, "Cerró")
+            .expect("look up")
+            .expect("Cerró");
+        let order: Vec<_> = found
+            .definitions
+            .expect("definitions")
+            .into_iter()
+            .map(|sense| sense.definition)
+            .collect();
+        assert_eq!(
+            order,
+            texts(&["As written.", "In lowercase.", "The infinitive."])
+        );
+    }
+
+    #[test]
+    fn a_synonym_that_is_also_a_form_of_the_word_is_kept() {
+        let dir = TempDir::new("grouped-own-synonyms");
+        // `banco` is a rule form of `banca` (a -> o), and its synonym too.
+        let synonyms = canned(
+            &dir,
+            "es-syn.index",
+            &[("banca", &[("", &["banca", "banco", "asiento"])], &[])],
+        );
+        let banca = grouped(&[(Kind::Synonyms, &synonyms)], Language::Es, "Banca")
+            .expect("look up")
+            .expect("banca");
+        assert_eq!(banca.synonyms, Some(texts(&["banco", "asiento"])));
+    }
+
+    #[test]
+    fn a_lemma_reached_through_a_form_is_not_its_own_synonym() {
+        let dir = TempDir::new("grouped-lemma-synonym");
+        let synonyms = canned(
+            &dir,
+            "es-syn.index",
+            &[("banco", &[("", &["banco", "entidad", "asiento"])], &[])],
+        );
+        let bancos = grouped(&[(Kind::Synonyms, &synonyms)], Language::Es, "bancos")
+            .expect("look up")
+            .expect("bancos");
+        let list = bancos.synonyms.expect("synonyms");
+        assert!(!list.contains(&"banco".to_owned()), "{list:?}");
+        assert_eq!(list, texts(&["entidad", "asiento"]));
     }
 
     #[test]

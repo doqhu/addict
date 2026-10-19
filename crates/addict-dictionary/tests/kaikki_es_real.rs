@@ -1,5 +1,5 @@
 //! The imported `kaikki-es-Espanol` index: `banco` as the tracer shows it,
-//! the ES target list of EXP-9 looked up as written, and the memory of a
+//! the ES target list of EXP-9 looked up through its forms, and the memory of a
 //! process that holds the index open.
 //!
 //! Ignored by default: it needs the index, which is not in the repository.
@@ -30,10 +30,13 @@ fn banco_and_the_target_list_are_read_from_the_spanish_index() {
     assert_eq!(synonyms[1], ["banca"], "{synonyms:?}");
     assert_eq!(synonyms[2], ["banquillo"], "{synonyms:?}");
     assert_eq!(synonyms[3], ["cardumen"], "{synonyms:?}");
-    assert_eq!(
-        lookup::article(&index, Language::Es, "Banco").expect("lookup"),
-        Some(banco)
-    );
+    // The article also holds the senses of the rule forms the index has
+    // (such as `bancar`), after those of `banco`.
+    let article = lookup::article(&index, Language::Es, "Banco")
+        .expect("lookup")
+        .expect("Banco");
+    assert_eq!(article.senses[..banco.senses.len()], banco.senses[..]);
+    assert!(article.translations.is_empty());
     // `zzz` is a headword here (an onomatopoeia): the miss is another word.
     assert_eq!(index.find("qzxv").expect("lookup"), None);
     assert!(
@@ -58,10 +61,7 @@ fn banco_and_the_target_list_are_read_from_the_spanish_index() {
                     .is_some()
             })
             .count();
-        println!(
-            "target list: {} words, {found} found as written",
-            words.len()
-        );
+        println!("target list: {} words, {found} found", words.len());
     }
     let after_lookups = pss_kb();
 

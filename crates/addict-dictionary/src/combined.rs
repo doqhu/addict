@@ -122,7 +122,11 @@ impl Combined {
             Some(definitions) => definitions.exception_lemmas(&lowercase)?,
             None => Vec::new(),
         };
-        let candidates = lookup::headwords(Language::En, word, &lemmas);
+        let candidates = lookup::headwords(
+            Language::En,
+            word,
+            &lookup::Lemmas::from([(lowercase, lemmas)]),
+        );
         let mut found = Vec::new();
         for headword in candidates {
             if let Some(article) = self.find(&headword)? {
