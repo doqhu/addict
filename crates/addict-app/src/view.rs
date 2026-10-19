@@ -307,8 +307,12 @@ pub fn read_failure_text(failure: &ContextFailure) -> Cow<'static, str> {
             // ever say otherwise, nothing was read all the same.
             Foregrounded::AndroidStudio => "Android Studio could not be read.".into(),
         },
-        ContextFailure::AppNotFound => "Android Studio is not on the accessibility bus. Start \
-             it with the AtkWrapper VM option and screen reader support."
+        // Only a read whose application in front is not known looks for
+        // Android Studio on the bus: say that first, as for an unknown one,
+        // and how to make Android Studio readable after it.
+        ContextFailure::AppNotFound => "The application in front is not known, so nothing was \
+             read. To read Android Studio, start it with the AtkWrapper VM option and screen \
+             reader support."
             .into(),
         ContextFailure::NoSelection => "Nothing is selected in Android Studio.".into(),
         ContextFailure::Ambiguous(_) => "Android Studio reports more than one selection.".into(),
@@ -1878,7 +1882,7 @@ mod tests {
                 "Super+Q was pressed outside Android Studio; only its editor is read. Type or paste the sentence.",
                 "The application in front is not known, so nothing was read. Type or paste the sentence.",
                 "Android Studio could not be read. Type or paste the sentence.",
-                "Android Studio is not on the accessibility bus. Start it with the AtkWrapper VM option and screen reader support. Type or paste the sentence.",
+                "The application in front is not known, so nothing was read. To read Android Studio, start it with the AtkWrapper VM option and screen reader support. Type or paste the sentence.",
                 "Nothing is selected in Android Studio. Type or paste the sentence.",
                 "Android Studio reports more than one selection. Type or paste the sentence.",
                 "Android Studio did not answer in time. Type or paste the sentence.",
