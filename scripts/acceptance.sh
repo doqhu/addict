@@ -10,7 +10,7 @@
 #                                            an OCR cycle (a cancelled capture, then a
 #                                            recognized one), 60 s idle sample, online, OCR
 #                                            and context digests, summary
-# A session is of the product with both dictionary indexes imported and records them; it
+# A session is of the product with all ten dictionary indexes imported and records them; it
 # sends text to DeepL and does not start without the key file, nor without Tesseract's
 # English data. Calibration sends nothing. The certificate lives in the output directory,
 # so this directory needs its own calibration. The idle samples are of the process with
@@ -21,7 +21,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 action=${1:-}
 app="$root/target/release/addict"
 exp="$root/target/release/addict-exp4"
-out="$root/_bmad-output/initiative-linux-rust-translator/acceptance-android-studio-context"
+out="$root/_bmad-output/initiative-linux-rust-translator/acceptance-es-ca-offline-dictionary"
 results="$out/results.jsonl"
 calibration="$out/calibration.jsonl"
 boot=$(cat /proc/sys/kernel/random/boot_id)
@@ -33,9 +33,15 @@ build='cargo build --release -p addict-app -p addict-exp4'
 data=${XDG_DATA_HOME:-}
 [[ $data == /* ]] || data=$HOME/.local/share
 entry="$data/applications/dev.addict.Addict.desktop"
-# Each index with the published file it is imported from.
-indexes=("$data/addict/oewn.index" "$data/addict/freedict.index")
-published=(english-wordnet-2025.xml.gz freedict-eng-rus-2025.11.23.src.tar.xz)
+# Each index with the published file it is imported from, in the order of import::KNOWN.
+indexes=(oewn freedict wikdict-es-ru kaikki-es-Espanol omw-es kaikki-en-Spanish
+  wikdict-ca-ru dbnary-ca sinonims-cat kaikki-en-Catalan)
+indexes=("${indexes[@]/#/"$data/addict/"}")
+indexes=("${indexes[@]/%/.index}")
+published=(english-wordnet-2025.xml.gz freedict-eng-rus-2025.11.23.src.tar.xz
+  es-ru.sqlite3 kaikki.org-dictionary-Español.jsonl.gz omw-es-2.0.tar.xz
+  kaikki.org-dictionary-Spanish.jsonl.gz ca-ru.sqlite3 ca_dbnary_ontolex_2026-10-01.ttl.bz2
+  th_ca_ES.dat kaikki.org-dictionary-Catalan.jsonl.gz)
 lookups=30
 # The key file as the application finds it: a relative XDG_CONFIG_HOME is ignored.
 config=${XDG_CONFIG_HOME:-}
@@ -49,7 +55,7 @@ case $action in
   *) echo 'usage: acceptance.sh <calibrate|foliate|android-studio>' >&2; exit 2 ;;
 esac
 
-# A session without both indexes would measure another state of the program.
+# A session without every index would measure another state of the program.
 if [[ $action != calibrate ]]; then
   missing=0
   for i in "${!indexes[@]}"; do
@@ -226,18 +232,18 @@ sample before-invocation
 echo "2. From $name: Super+Q, wait for the window, Esc. Exactly 30 times, no extra presses."
 wait_for 'warm activations' 30 2
 echo 'Stop pressing.'
-echo "3. Super+Q once more (this press is measured too, as an extra attempt), paste a sentence into"
-echo "   the field and click its words, one after another, waiting for each result, until $lookups lookups"
-echo "   are counted. The window stays open meanwhile."
+echo "3. Super+Q once more (this press is measured too, as an extra attempt), choose ES, paste a"
+echo "   Spanish sentence into the field and click its words, one after another, waiting for each"
+echo "   result, until $lookups lookups are counted. The window stays open meanwhile."
 # Only a lookup after the 30 presses counts.
 base=$(looked)
 wait_for 'lookups' "$lookups" 5
 base=0
 echo 'Stop clicking.'
 echo '4. Online requests, in the same window. First, as asked below, let the requests of step 3 end.'
-echo '   After Enter: paste another sentence, click a word of it and wait for its online lines, of'
-echo '   the word and of the sentence. Then click a sense of the article and press'
-echo '   "Translate definition into Russian". A refusal counts as an answer.'
+echo '   After Enter: with ES still chosen, paste another Spanish sentence, click a word of it and wait'
+echo '   for its online lines, of the word and of the sentence. Then click a Spanish definition of the'
+echo '   article and press "Translate definition into Russian". A refusal counts as an answer.'
 wait_online
 echo 'Stop clicking and wait until every online line has its answer.'
 if [[ $action == android-studio ]]; then
