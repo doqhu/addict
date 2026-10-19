@@ -5,7 +5,9 @@
 //! beside it, the text of the field with its words as links
 //! and, last, the result, which scrolls: the card of the word with its
 //! translations as pills, the online texts, and the list of senses, a row
-//! for each, the chosen one explained under its row.
+//! for each, the chosen one explained under its row; for a language beside
+//! English, the English glosses are rows too, and the chosen one has the
+//! button that translates it under its row.
 //!
 //! This module owns the widgets, their layout and their signals, and no
 //! text: what the widgets say is [`view`](crate::view)'s, and [`View`] puts
@@ -37,9 +39,10 @@ use gtk::{gio, glib, prelude::*};
 use crate::{
     dictionaries::Indexes,
     view::{
-        Binding, CAPTURE_LABEL, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, LANGUAGE_TOOLTIP,
-        Listed, OnlineTexts, RETRY_LABEL, SENSES_LABEL, SenseText, Shown, binding_texts,
-        indexes_text, language_label, online_markup, result_texts, sentence_markup, texts,
+        Binding, Block, CAPTURE_LABEL, ChosenGloss, DEFINITION_ACTION, Explained,
+        FIELD_PLACEHOLDER, LANGUAGE_TOOLTIP, Listed, OnlineTexts, RETRY_LABEL, SENSES_LABEL,
+        SenseText, Shown, binding_texts, choice_texts, indexes_text, language_label, online_markup,
+        sentence_markup, texts,
     },
     wrap::Wrap,
 };
@@ -235,8 +238,20 @@ fn field_row() -> (
     (field_row, field, languages, capture)
 }
 
-/// What runs with the index of a sense when its row is clicked.
+/// What runs with the index of a sense or a gloss when its row is clicked.
 type SenseChosen = Rc<dyn Fn(usize)>;
+
+/// A handler that runs the one `slot` holds when it is called, if any.
+fn forwarding(slot: &Rc<RefCell<Option<SenseChosen>>>) -> SenseChosen {
+    let slot = slot.clone();
+    Rc::new(move |index| {
+        // Cloned out first: the handler builds the rows anew.
+        let handler = slot.borrow().clone();
+        if let Some(handler) = handler {
+            handler(index);
+        }
+    })
+}
 
 /// Takes every child out of `container`.
 fn clear(container: &gtk::Box) {
@@ -294,10 +309,18 @@ fn fill_listed(container: &gtk::Box, listed: Option<Listed<'_>>, pill_classes: &
     }
 }
 
-/// Puts `listed` into `container` as lines: its label as a caption and each
-/// item as a line of its own, which cannot be chosen, or the line of an
-/// empty list; nothing for `None`. For items that are phrases, not words.
-fn fill_lines(container: &gtk::Box, listed: Option<Listed<'_>>) {
+/// Puts the English glosses `listed` into `container`: its label as a
+/// caption and each gloss as a row of its own, which a click chooses, with
+/// the button that translates it, when `action` is given, and its online
+/// translation under the `chosen` one; or the line of an empty list;
+/// nothing for `None`. A click runs `clicked` with the index of the gloss.
+fn fill_glosses(
+    container: &gtk::Box,
+    listed: Option<Listed<'_>>,
+    chosen: Option<&ChosenGloss<'_>>,
+    clicked: &SenseChosen,
+    action: Option<&gtk::Button>,
+) {
     clear(container);
     match listed {
         None => {}
@@ -310,9 +333,38 @@ fn fill_lines(container: &gtk::Box, listed: Option<Listed<'_>>) {
         }
         Some(Listed::Items { label, items }) => {
             container.append(&caption(label));
-            for item in items {
-                container.append(&wrapping(gtk::Label::builder().label(item.as_str())).build());
+            let rows = gtk::Box::new(gtk::Orientation::Vertical, 2);
+            for (index, item) in items.iter().enumerate() {
+                let row = gtk::Button::builder()
+                    .child(
+                        &wrapping(gtk::Label::builder().label(item.as_str()))
+                            .css_classes(["definition-text"])
+                            .build(),
+                    )
+                    .focus_on_click(false)
+                    .css_classes(["sense"])
+                    .build();
+                let clicked = clicked.clone();
+                row.connect_clicked(move |_| clicked(index));
+                rows.append(&row);
+                let Some(chosen) = chosen.filter(|chosen| chosen.index == index) else {
+                    continue;
+                };
+                row.add_css_class("chosen");
+                let below = gtk::Box::builder()
+                    .orientation(gtk::Orientation::Vertical)
+                    .spacing(10)
+                    .css_classes(["explained"])
+                    .build();
+                if let Some(action) = action {
+                    below.append(action);
+                }
+                if let Some(block) = &chosen.definition {
+                    below.append(&definition_block(block));
+                }
+                rows.append(&below);
             }
+            container.append(&rows);
         }
     }
 }
@@ -372,20 +424,26 @@ fn explained_box(explained: &Explained<'_>, action: Option<&gtk::Button>) -> gtk
         below.append(action);
     }
     if let Some(block) = &explained.definition {
-        let translated = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(4)
-            .css_classes(["online-definition"])
-            .build();
-        translated.append(&caption(block.label));
-        translated.append(
-            &wrapping(gtk::Label::builder().label(block.line.as_ref()))
-                .selectable(true)
-                .build(),
-        );
-        below.append(&translated);
+        below.append(&definition_block(block));
     }
     below
+}
+
+/// The online translation of a definition or a gloss: its label and, under
+/// it, its line.
+fn definition_block(block: &Block<'_>) -> gtk::Box {
+    let translated = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .css_classes(["online-definition"])
+        .build();
+    translated.append(&caption(block.label));
+    translated.append(
+        &wrapping(gtk::Label::builder().label(block.line.as_ref()))
+            .selectable(true)
+            .build(),
+    );
+    translated
 }
 
 /// The result area, which scrolls: the card of the word, the online texts,
@@ -408,7 +466,7 @@ struct ResultArea {
     /// word as a whole, as pills.
     word_synonyms: gtk::Box,
     /// Under them, for a language beside English: the English glosses, as
-    /// lines.
+    /// rows to choose.
     glosses: gtk::Box,
     definition_action: gtk::Button,
 }
@@ -553,6 +611,8 @@ pub struct View {
     /// Runs with the index of a sense when its row is clicked; the rows are
     /// built anew for each result and each choice.
     sense_chosen: Rc<RefCell<Option<SenseChosen>>>,
+    /// Runs with the index of an English gloss when its row is clicked.
+    gloss_chosen: Rc<RefCell<Option<SenseChosen>>>,
 }
 
 impl View {
@@ -610,6 +670,7 @@ impl View {
             sentence,
             result,
             sense_chosen: Rc::new(RefCell::new(None)),
+            gloss_chosen: Rc::new(RefCell::new(None)),
         };
         view.render(state, Source::Manual);
         view.render_binding(binding);
@@ -754,8 +815,14 @@ impl View {
         self.sense_chosen.replace(Some(Rc::new(chosen)));
     }
 
+    /// Runs `chosen` with the index of an English gloss each time its row is
+    /// clicked.
+    pub fn connect_gloss_chosen(&self, chosen: impl Fn(usize) + 'static) {
+        self.gloss_chosen.replace(Some(Rc::new(chosen)));
+    }
+
     /// Runs `action` each time the button that translates the definition of
-    /// the chosen sense is clicked.
+    /// the chosen sense or gloss is clicked.
     pub fn connect_definition_action(&self, action: impl Fn() + 'static) {
         self.result
             .definition_action
@@ -811,12 +878,12 @@ impl View {
             fill_listed(&result.translations, None, &[]);
             fill_listed(&result.word_synonyms, None, &[]);
             result.word_synonyms.set_visible(false);
-            fill_lines(&result.glosses, None);
+            clear(&result.glosses);
             result.glosses.set_visible(false);
             self.show_area();
             return;
         };
-        let texts = result_texts(lookup, shown.sense(), shown.definition(), key_file);
+        let texts = choice_texts(lookup, shown.choice(), shown.definition(), key_file);
         result
             .line
             .set_text(texts.line.as_deref().unwrap_or_default());
@@ -830,14 +897,7 @@ impl View {
         result.senses_caption.set_text(texts.senses_label);
         result.hint.set_text(texts.hint.unwrap_or_default());
         result.hint.set_visible(texts.hint.is_some());
-        let chosen = self.sense_chosen.clone();
-        let chosen: SenseChosen = Rc::new(move |index| {
-            // Cloned out first: the handler builds the rows anew.
-            let handler = chosen.borrow().clone();
-            if let Some(handler) = handler {
-                handler(index);
-            }
-        });
+        let chosen = forwarding(&self.sense_chosen);
         for sense in &texts.senses {
             result.rows.append(&sense_row(sense, &chosen));
             if let Some(explained) = &sense.explained {
@@ -853,9 +913,15 @@ impl View {
         result
             .word_synonyms
             .set_visible(texts.word_synonyms.is_some());
-        fill_lines(&result.glosses, texts.glosses);
+        fill_glosses(
+            &result.glosses,
+            texts.glosses,
+            texts.gloss.as_ref(),
+            &forwarding(&self.gloss_chosen),
+            visible.then_some(&result.definition_action),
+        );
         result.glosses.set_visible(texts.glosses.is_some());
-        if shown.sense().is_none() {
+        if shown.choice().is_none() {
             result.area.vadjustment().set_value(0.0);
         }
         self.show_area();

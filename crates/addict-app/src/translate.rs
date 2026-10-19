@@ -465,6 +465,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_definition_of_another_language_is_sent_and_recorded_from_it() {
+        use crate::view::Shown;
+        use addict_core::dictionary::Sense;
+        use addict_dictionary::lookup::Grouped;
+        let work = Work::start().expect("runner");
+        let grouped = Grouped {
+            definitions: Some(vec![Sense {
+                definition: "Asiento largo.".to_owned(),
+                synonyms: Vec::new(),
+            }]),
+            english: Some(vec!["bench".to_owned()]),
+            ..Grouped::default()
+        };
+        for (language, gloss, text, code) in [
+            (Language::Es, false, "Asiento largo.", "es"),
+            (Language::Ca, false, "Asiento largo.", "ca"),
+            (Language::Es, true, "bench", "en"),
+        ] {
+            let canned = Arc::new(Canned::new(Ok("скамья")));
+            let mut shown = Shown::default();
+            shown.show(Some(Lookup::Grouped {
+                language,
+                grouped: grouped.clone(),
+            }));
+            assert!(if gloss {
+                shown.choose_gloss(0)
+            } else {
+                shown.choose(0)
+            });
+            let (number, request) = shown.request_definition().expect("action");
+            let source = request.source;
+            let (outcome, elapsed) =
+                probed(&work, canned.clone(), request, Probe::start(true), false);
+            assert_eq!(
+                canned.asked(),
+                [Request {
+                    text: text.to_owned(),
+                    context: None,
+                    source,
+                }]
+            );
+            let (online, record) =
+                translation_ended(outcome, Requested::Definition, source, elapsed).expect("ended");
+            let details = record.expect("a record").details().clone();
+            assert_eq!(details["subject"], "definition");
+            assert_eq!(details["source"], code);
+            assert!(shown.answer_definition(number, online));
+            assert_eq!(
+                shown.definition(),
+                Some(&Online::Translated("скамья".to_owned()))
+            );
+        }
+    }
+
+    #[test]
     fn without_the_flag_nothing_is_measured_and_nothing_is_recorded() {
         let work = Work::start().expect("runner");
         let probe = Probe::start(false);

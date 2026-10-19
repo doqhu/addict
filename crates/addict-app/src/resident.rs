@@ -12,11 +12,12 @@
 //! The module keeps the shown result with the sense chosen in it, and a
 //! click on a sense only changes that choice.
 //!
-//! Only the explicit definition action sends its English definition without
-//! context; a separate job is cancelled on a changed sense or replacement
-//! article and guards its outcome by request identity. A click on a word of
-//! a sentence also asks online for the word in its sentence and, once for
-//! that sentence, for the sentence itself; a typed text is one sentence,
+//! Only the explicit definition action sends the chosen definition or
+//! English gloss without context, from the language it is in; a separate
+//! job is cancelled on a changed sense or replacement article and guards
+//! its outcome by request identity. A click on a word of a sentence also
+//! asks online for the word in its sentence and, once for that sentence,
+//! for the sentence itself; a typed text is one sentence,
 //! while in a recognized one it is the sentence around the word, and a word
 //! that is a sentence alone there asks nothing online; Enter in the field,
 //! or a paste, asks for a lone word. Each request is a job of its own on the
@@ -114,13 +115,14 @@
 //! the language, and no lookup runs. With Spanish or Catalan chosen and its
 //! indexes not known to be there, the indexes are checked again, so that an
 //! import done while the application runs is found by the next pick. The
-//! definition of an English sense is OEWN's and is always sent from English;
-//! a Spanish or Catalan sense offers none to send. A capture recognizes the
-//! text with the data of the language. A press of another language forgets
-//! the online texts of the field's text and, for the word shown, redoes its
-//! offline result and asks again what its click or its submit asked; with no
-//! word nothing is sent. The choice is kept in the language file, read once
-//! on the runner after the start and written on the runner at each change
+//! definition of an English sense is OEWN's and is sent from English; that
+//! of a Spanish or Catalan sense from its language, and an English gloss
+//! from English, each recorded with the source it was sent from. A capture
+//! recognizes the text with the data of the language. A press of another
+//! language forgets the online texts of the field's text and, for the word
+//! shown, redoes its offline result and asks again what its click or its
+//! submit asked; with no word nothing is sent. The choice is kept in the
+//! language file, read once on the runner after the start and written on the runner at each change
 //! ([`language`](crate::language)); a read that comes after the user chose
 //! changes nothing.
 //!
@@ -169,7 +171,10 @@ use crate::{
     settings::{self, KeyState, Settings},
     style,
     translate::{self, Translated},
-    view::{Binding, Held, Lookup, Online, Shown, failure_text, read_failure_text, too_long_text},
+    view::{
+        Binding, Choice, Held, Lookup, Online, Shown, failure_text, read_failure_text,
+        too_long_text,
+    },
     widgets::View,
 };
 
@@ -216,15 +221,18 @@ enum Event {
     Word(usize),
     /// The sense with this index in the shown list was clicked.
     Sense(usize),
+    /// The English gloss with this index in the shown article was clicked.
+    Gloss(usize),
     /// The text of the field was submitted, by Enter or by a paste.
     Submitted,
     /// The user explicitly requested the selected dictionary definition.
     DefinitionAction,
-    /// The separate definition job ended with its individual request number.
-    /// `elapsed` is the time the request took, as the worker saw it; taken
-    /// only when evidence is recorded.
+    /// The separate definition job ended with its individual request number;
+    /// it was sent from `source`. `elapsed` is the time the request took, as
+    /// the worker saw it; taken only when evidence is recorded.
     DefinitionTranslated {
         number: u64,
+        source: Language,
         outcome: Outcome<Translated>,
         elapsed: Option<evidence::Elapsed>,
     },
@@ -521,13 +529,15 @@ impl Session {
             Event::Sentence(text) => self.sentence_changed(text),
             Event::Word(index) => self.word_chosen(index),
             Event::Sense(index) => self.sense_chosen(index),
+            Event::Gloss(index) => self.gloss_chosen(index),
             Event::Submitted => self.submitted(),
             Event::DefinitionAction => self.definition_action(),
             Event::DefinitionTranslated {
                 number,
+                source,
                 outcome,
                 elapsed,
-            } => self.definition_translated(number, outcome, elapsed),
+            } => self.definition_translated(number, source, outcome, elapsed),
             Event::Lookup {
                 run,
                 language,
@@ -1332,17 +1342,35 @@ impl Session {
     /// chosen sense renders too: GTK keeps a clicked link in the visited
     /// colour until the markup is set again.
     fn sense_chosen(&mut self, index: usize) {
-        let previous = self.shown.sense();
+        let previous = self.shown.choice();
         if self.shown.choose(index) {
-            if previous != self.shown.sense() {
-                self.translating_definition = None;
-            }
-            self.render_shown();
+            self.chosen(previous);
         }
     }
 
+    /// An English gloss was clicked: it is the chosen one, instead of any
+    /// sense, when the shown result is an article of a language beside
+    /// English that has it. Nothing is looked up or read.
+    fn gloss_chosen(&mut self, index: usize) {
+        let previous = self.shown.choice();
+        if self.shown.choose_gloss(index) {
+            self.chosen(previous);
+        }
+    }
+
+    /// Something was chosen where `previous` was: the job translating the
+    /// definition of another choice is cancelled, and the result is shown
+    /// anew.
+    fn chosen(&mut self, previous: Option<Choice>) {
+        if previous != self.shown.choice() {
+            self.translating_definition = None;
+        }
+        self.render_shown();
+    }
+
     /// "Translate definition into Russian" was pressed: the definition of
-    /// the chosen sense is sent alone, as a job of its own, unless the field
+    /// the chosen sense or gloss is sent alone, from its own language, as a
+    /// job of its own, unless the field
     /// holds a newer text or the shown result offers no definition to send.
     fn definition_action(&mut self) {
         // As for a click: the field may hold a newer text already.
@@ -1352,11 +1380,13 @@ impl Session {
         let Some((number, request)) = self.shown.request_definition() else {
             return;
         };
+        let source = request.source;
         let started = self.send_online(
             Some(request),
             evidence::Requested::Definition,
             move |outcome, elapsed| Event::DefinitionTranslated {
                 number,
+                source,
                 outcome,
                 elapsed,
             },
@@ -1370,20 +1400,18 @@ impl Session {
         self.render_shown();
     }
 
-    /// The definition request ended; it is recorded as a word's is.
+    /// The definition request, sent from `source`, ended; it is recorded as
+    /// a word's is, with that source.
     fn definition_translated(
         &mut self,
         number: u64,
+        source: Language,
         outcome: Outcome<Translated>,
         elapsed: Option<evidence::Elapsed>,
     ) {
-        // A definition is OEWN's, so always sent from English.
-        let Some(online) = self.online_ended(
-            outcome,
-            evidence::Requested::Definition,
-            Language::En,
-            elapsed,
-        ) else {
+        let Some(online) =
+            self.online_ended(outcome, evidence::Requested::Definition, source, elapsed)
+        else {
             return;
         };
         if self.shown.answer_definition(number, online) {
@@ -1751,6 +1779,10 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     let sense = sender.clone();
     view.connect_sense_chosen(move |index| {
         let _ = sense.unbounded_send(Event::Sense(index));
+    });
+    let gloss = sender.clone();
+    view.connect_gloss_chosen(move |index| {
+        let _ = gloss.unbounded_send(Event::Gloss(index));
     });
     let language = sender.clone();
     view.connect_language_chosen(move |chosen| {

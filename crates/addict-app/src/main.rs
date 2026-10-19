@@ -61,9 +61,12 @@
 //! texts: the word translated in that sentence, for which the word and the
 //! sentence as its context are sent, and, once for the text of the field,
 //! the sentence itself, sent without context. A selected nonblank dictionary
-//! definition is sent without context only by Translate definition into Russian.
-//! Its labelled Russian answer appears below English, before synonyms; changing
-//! sense or replacing the article cancels and clears it. Each
+//! definition, or English gloss of a Spanish or Catalan word, is sent without
+//! context only by Translate definition into Russian, from the language it
+//! is in: English for an English definition and for a gloss, Spanish or
+//! Catalan for a definition of that language. Its labelled Russian answer
+//! appears below it, before synonyms; changing the choice or replacing the
+//! article cancels and clears it. Each
 //! stands below the result under a label that says what it is, apart from
 //! the article, which is shown as before and does not wait for them. What
 //! was answered or is still awaited is not asked for again: a second click
