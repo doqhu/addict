@@ -40,9 +40,9 @@ use crate::{
     dictionaries::Indexes,
     view::{
         Binding, Block, CAPTURE_LABEL, ChosenGloss, DEFINITION_ACTION, Explained,
-        FIELD_PLACEHOLDER, LANGUAGE_TOOLTIP, Listed, OnlineTexts, RETRY_LABEL, SENSES_LABEL,
-        SenseText, Shown, binding_texts, choice_texts, indexes_text, language_label, online_markup,
-        sentence_markup, texts,
+        FIELD_PLACEHOLDER, LANGUAGE_TOOLTIP, Listed, OnlineTexts, RETRY_LABEL, ResultTexts,
+        SENSES_LABEL, SenseText, Shown, binding_texts, choice_texts, indexes_text, language_label,
+        online_markup, sentence_markup, texts,
     },
     wrap::Wrap,
 };
@@ -351,18 +351,7 @@ fn fill_glosses(
                     continue;
                 };
                 row.add_css_class("chosen");
-                let below = gtk::Box::builder()
-                    .orientation(gtk::Orientation::Vertical)
-                    .spacing(10)
-                    .css_classes(["explained"])
-                    .build();
-                if let Some(action) = action {
-                    below.append(action);
-                }
-                if let Some(block) = &chosen.definition {
-                    below.append(&definition_block(block));
-                }
-                rows.append(&below);
+                rows.append(&explained_tail(action, chosen.definition.as_ref()));
             }
             container.append(&rows);
         }
@@ -412,18 +401,26 @@ fn sense_row(sense: &SenseText<'_>, chosen: &SenseChosen) -> gtk::Button {
 /// translates its definition when `action` is shown, and the online
 /// translation of the definition once asked for.
 fn explained_box(explained: &Explained<'_>, action: Option<&gtk::Button>) -> gtk::Box {
+    let below = explained_tail(action, explained.definition.as_ref());
+    let synonyms = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    fill_listed(&synonyms, Some(explained.synonyms), &["pill", "outline"]);
+    below.prepend(&synonyms);
+    below
+}
+
+/// What stands under a chosen sense or gloss without its synonyms: the
+/// button that translates it when `action` is shown, and the online
+/// translation `definition` once asked for.
+fn explained_tail(action: Option<&gtk::Button>, definition: Option<&Block<'_>>) -> gtk::Box {
     let below = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
         .css_classes(["explained"])
         .build();
-    let synonyms = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    fill_listed(&synonyms, Some(explained.synonyms), &["pill", "outline"]);
-    below.append(&synonyms);
     if let Some(action) = action {
         below.append(action);
     }
-    if let Some(block) = &explained.definition {
+    if let Some(block) = definition {
         below.append(&definition_block(block));
     }
     below
@@ -873,14 +870,7 @@ impl View {
         }
         clear(&result.rows);
         let Some(lookup) = shown.lookup() else {
-            result.article.set_visible(false);
-            result.senses.set_visible(false);
-            fill_listed(&result.translations, None, &[]);
-            fill_listed(&result.word_synonyms, None, &[]);
-            result.word_synonyms.set_visible(false);
-            clear(&result.glosses);
-            result.glosses.set_visible(false);
-            self.show_area();
+            self.hide_result();
             return;
         };
         let texts = choice_texts(
@@ -902,20 +892,7 @@ impl View {
             .set_visible(texts.translations.is_some());
         result.article.set_visible(true);
 
-        result.senses_caption.set_text(texts.senses_label);
-        result.hint.set_text(texts.hint.unwrap_or_default());
-        result.hint.set_visible(texts.hint.is_some());
-        let chosen = forwarding(&self.sense_chosen);
-        for sense in &texts.senses {
-            result.rows.append(&sense_row(sense, &chosen));
-            if let Some(explained) = &sense.explained {
-                let action = visible.then_some(&result.definition_action);
-                result.rows.append(&explained_box(explained, action));
-            }
-        }
-        result
-            .senses
-            .set_visible(!texts.senses.is_empty() || texts.hint.is_some());
+        self.render_senses(&texts, visible);
         // Hidden for English, which has neither.
         fill_listed(&result.word_synonyms, texts.word_synonyms, &["pill"]);
         result
@@ -933,6 +910,42 @@ impl View {
             result.area.vadjustment().set_value(0.0);
         }
         self.show_area();
+    }
+
+    /// Hides what [`render_result`](Self::render_result) shows when there
+    /// is no lookup: the article, the senses, the word-level synonyms and
+    /// the glosses.
+    fn hide_result(&self) {
+        let result = &self.result;
+        result.article.set_visible(false);
+        result.senses.set_visible(false);
+        fill_listed(&result.translations, None, &[]);
+        fill_listed(&result.word_synonyms, None, &[]);
+        result.word_synonyms.set_visible(false);
+        clear(&result.glosses);
+        result.glosses.set_visible(false);
+        self.show_area();
+    }
+
+    /// Shows the senses of `texts`: their caption, the hint, and a row per
+    /// sense with what stands under the chosen one, the definition action
+    /// among it when `visible`.
+    fn render_senses(&self, texts: &ResultTexts<'_>, visible: bool) {
+        let result = &self.result;
+        result.senses_caption.set_text(texts.senses_label);
+        result.hint.set_text(texts.hint.unwrap_or_default());
+        result.hint.set_visible(texts.hint.is_some());
+        let chosen = forwarding(&self.sense_chosen);
+        for sense in &texts.senses {
+            result.rows.append(&sense_row(sense, &chosen));
+            if let Some(explained) = &sense.explained {
+                let action = visible.then_some(&result.definition_action);
+                result.rows.append(&explained_box(explained, action));
+            }
+        }
+        result
+            .senses
+            .set_visible(!texts.senses.is_empty() || texts.hint.is_some());
     }
 
     /// Shows the blocks of `online`, or hides them when there is none.

@@ -29,7 +29,7 @@ use std::{
     io::{self, BufRead},
 };
 
-use crate::format::{Contents, Headword, SenseRecord};
+use crate::format::{Contents, SenseRecord};
 
 /// Why a DBnary file gave no contents.
 #[derive(Debug)]
@@ -118,20 +118,7 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
             headwords.entry(entry.label).or_default().extend(senses);
         }
     }
-    let mut contents = Contents {
-        source: source.to_owned(),
-        ..Contents::default()
-    };
-    for (word, senses) in headwords {
-        let first = contents.senses.len() as u32;
-        contents.senses.extend(senses);
-        contents.headwords.push(Headword {
-            word,
-            senses: (first..contents.senses.len() as u32).collect(),
-            translations: Vec::new(),
-        });
-    }
-    Ok(contents)
+    Ok(Contents::of_senses(source, headwords))
 }
 
 /// The lines of `reader` without their line ends; bytes that are not UTF-8

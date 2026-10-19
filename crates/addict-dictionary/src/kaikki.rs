@@ -39,7 +39,7 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::format::{Contents, ExceptionForm, Headword, SenseRecord};
+use crate::format::{Contents, ExceptionForm, SenseRecord};
 
 /// The tags of a `forms` item that is no inflected form of the word.
 const FORMS_SKIPPED: [&str; 5] = [
@@ -153,14 +153,6 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
     let mut entries = 0;
     let mut headwords: BTreeMap<String, Vec<SenseRecord>> = BTreeMap::new();
     let mut forms: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut pair = |form: &str, lemma: &str| {
-        if form != lemma && is_word(form) && is_word(lemma) {
-            let lemmas = forms.entry(form.to_owned()).or_default();
-            if !lemmas.iter().any(|known| known == lemma) {
-                lemmas.push(lemma.to_owned());
-            }
-        }
-    };
     for (at, line) in reader.lines().enumerate() {
         let line = line.map_err(ParseError::Io)?;
         if line.trim().is_empty() {
@@ -178,107 +170,119 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
         };
         entries += 1;
 
-        for sense in &entry.senses {
-            for target in sense.form_of.iter().chain(&sense.alt_of) {
-                if let Some(lemma) = &target.word {
-                    pair(&word, lemma);
-                }
-            }
-        }
-        for form in &entry.forms {
-            let skipped = form
-                .tags
-                .iter()
-                .any(|tag| FORMS_SKIPPED.contains(&tag.as_str()));
-            if let (Some(text), false) = (&form.form, skipped) {
-                pair(text, &word);
-            }
-        }
-
-        let mut senses: Vec<(Option<&str>, SenseRecord)> = entry
-            .senses
-            .iter()
-            .filter(|sense| has_gloss(sense))
-            .map(|sense| {
-                let definition = sense
-                    .glosses
-                    .iter()
-                    .map(|gloss| gloss.trim())
-                    .filter(|gloss| !gloss.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                (
-                    sense.sense_index.as_deref(),
-                    SenseRecord {
-                        definition,
-                        members: Vec::new(),
-                    },
-                )
-            })
-            .collect();
-        // The place of a sense among all senses of the entry, glossless ones
-        // too: a `sense_index` without a field to match counts them.
-        let places: Vec<usize> = entry
-            .senses
-            .iter()
-            .enumerate()
-            .filter(|(_, sense)| has_gloss(sense))
-            .map(|(place, _)| place + 1)
-            .collect();
-        let indexed = senses.iter().any(|(index, _)| index.is_some());
-        for synonym in &entry.synonyms {
-            let (Some(text), Some(index)) = (&synonym.word, &synonym.sense_index) else {
-                continue;
-            };
-            if text.is_empty() || *text == word {
-                continue;
-            }
-            let at = if indexed {
-                senses
-                    .iter()
-                    .position(|(own, _)| own.is_some_and(|own| own == index.trim()))
-            } else {
-                index
-                    .trim()
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|number| places.iter().position(|place| *place == number))
-            };
-            if let Some((_, record)) = at.and_then(|at| senses.get_mut(at))
-                && !record.members.contains(text)
-            {
-                record.members.push(text.clone());
-            }
-        }
+        add_pairs(&mut forms, &word, &entry.senses, &entry.forms);
+        let senses = sense_records(&word, &entry.senses, &entry.synonyms);
         if !senses.is_empty() {
-            headwords
-                .entry(word)
-                .or_default()
-                .extend(senses.into_iter().map(|(_, record)| record));
+            headwords.entry(word).or_default().extend(senses);
         }
     }
     if entries == 0 {
         return Err(ParseError::NoEntry);
     }
 
-    let mut contents = Contents {
-        source: source.to_owned(),
-        ..Contents::default()
-    };
-    for (word, senses) in headwords {
-        let first = contents.senses.len() as u32;
-        contents.senses.extend(senses);
-        contents.headwords.push(Headword {
-            word,
-            senses: (first..contents.senses.len() as u32).collect(),
-            translations: Vec::new(),
-        });
-    }
+    let mut contents = Contents::of_senses(source, headwords);
     contents.forms = forms
         .into_iter()
         .map(|(form, lemmas)| ExceptionForm { form, lemmas })
         .collect();
     Ok(contents)
+}
+
+/// Adds to `forms` the form→lemma pairs of the entry of `word` with
+/// `senses` and `forms_of_entry`: the word its `form_of` and `alt_of`
+/// senses point at, then its `forms` without the skipped tags.
+fn add_pairs(
+    forms: &mut BTreeMap<String, Vec<String>>,
+    word: &str,
+    senses: &[Sense],
+    forms_of_entry: &[Form],
+) {
+    for sense in senses {
+        for target in sense.form_of.iter().chain(&sense.alt_of) {
+            if let Some(lemma) = &target.word {
+                pair(forms, word, lemma);
+            }
+        }
+    }
+    for form in forms_of_entry {
+        let skipped = form
+            .tags
+            .iter()
+            .any(|tag| FORMS_SKIPPED.contains(&tag.as_str()));
+        if let (Some(text), false) = (&form.form, skipped) {
+            pair(forms, text, word);
+        }
+    }
+}
+
+/// Adds `lemma` to the lemmas of `form` in `forms`, once, when the two
+/// differ and both are one word.
+fn pair(forms: &mut BTreeMap<String, Vec<String>>, form: &str, lemma: &str) {
+    if form != lemma && is_word(form) && is_word(lemma) {
+        let lemmas = forms.entry(form.to_owned()).or_default();
+        if !lemmas.iter().any(|known| known == lemma) {
+            lemmas.push(lemma.to_owned());
+        }
+    }
+}
+
+/// The sense records of the entry of `word` with `senses` and `synonyms`:
+/// one per sense with a gloss, its synonyms as members.
+fn sense_records(word: &str, senses: &[Sense], synonyms: &[Synonym]) -> Vec<SenseRecord> {
+    let mut records: Vec<(Option<&str>, SenseRecord)> = senses
+        .iter()
+        .filter(|sense| has_gloss(sense))
+        .map(|sense| {
+            let definition = sense
+                .glosses
+                .iter()
+                .map(|gloss| gloss.trim())
+                .filter(|gloss| !gloss.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            (
+                sense.sense_index.as_deref(),
+                SenseRecord {
+                    definition,
+                    members: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    // The place of a sense among all senses of the entry, glossless ones
+    // too: a `sense_index` without a field to match counts them.
+    let places: Vec<usize> = senses
+        .iter()
+        .enumerate()
+        .filter(|(_, sense)| has_gloss(sense))
+        .map(|(place, _)| place + 1)
+        .collect();
+    let indexed = records.iter().any(|(index, _)| index.is_some());
+    for synonym in synonyms {
+        let (Some(text), Some(index)) = (&synonym.word, &synonym.sense_index) else {
+            continue;
+        };
+        if text.is_empty() || *text == word {
+            continue;
+        }
+        let at = if indexed {
+            records
+                .iter()
+                .position(|(own, _)| own.is_some_and(|own| own == index.trim()))
+        } else {
+            index
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .and_then(|number| places.iter().position(|place| *place == number))
+        };
+        if let Some((_, record)) = at.and_then(|at| records.get_mut(at))
+            && !record.members.contains(text)
+        {
+            record.members.push(text.clone());
+        }
+    }
+    records.into_iter().map(|(_, record)| record).collect()
 }
 
 #[cfg(test)]

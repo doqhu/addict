@@ -15,7 +15,7 @@ use addict_core::translation::Source as Language;
 use addict_dictionary::{
     Index,
     import::{KNOWN, Kind},
-    lookup::{self, Lemmas},
+    lookup,
 };
 use common::path_from;
 
@@ -39,16 +39,8 @@ fn target_words(text: &str) -> Vec<(String, String)> {
 /// The headwords of `indexes` that `word` reaches, as `grouped` asks them:
 /// the exception lemmas of all the indexes together.
 fn headwords_found(indexes: &[(Kind, Index)], language: Language, word: &str) -> Vec<String> {
-    let mut lemmas = Lemmas::new();
-    for form in lookup::asked_forms(language, word) {
-        let mut union = Vec::new();
-        for (_, index) in indexes {
-            union.extend(index.exception_lemmas(&form).expect("form table"));
-        }
-        union.sort();
-        union.dedup();
-        lemmas.insert(form, union);
-    }
+    let lemmas = lookup::lemmas_of(indexes.iter().map(|(_, index)| index), language, word)
+        .expect("form table");
     let mut found = Vec::new();
     for headword in lookup::headwords(language, word, &lemmas) {
         let any = indexes
