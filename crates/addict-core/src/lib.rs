@@ -3,6 +3,7 @@
 pub mod dictionary;
 pub mod input;
 pub mod reduction;
+pub mod reduction_es_ca;
 pub mod sentence;
 pub mod translation;
 
