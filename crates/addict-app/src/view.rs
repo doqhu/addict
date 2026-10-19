@@ -323,6 +323,26 @@ pub fn read_failure_text(failure: &ContextFailure) -> Cow<'static, str> {
     format!("{cause}{TYPE_OR_PASTE}").into()
 }
 
+/// What the button beside a source line that names a command says: it puts
+/// that command on the clipboard.
+pub(crate) const COPY_LABEL: &str = "Copy";
+
+/// What that button says once pressed, until the line changes.
+pub(crate) const COPIED_LABEL: &str = "Copied";
+
+/// The runnable command `line` names, built by the same functions that
+/// wrote it into the line: the install of Tesseract for a language, then the
+/// install of a language's data, then the command that turns accessibility
+/// on. `None` for a line that names none.
+pub(crate) fn command_in(line: &str) -> Option<String> {
+    let tesseract = Language::ALL.into_iter().map(install_tesseract);
+    let data = Language::ALL.into_iter().map(install_language);
+    tesseract
+        .chain(data)
+        .chain(std::iter::once(TURN_ON_ACCESSIBILITY.to_owned()))
+        .find(|command| line.contains(command.as_str()))
+}
+
 /// Where a text too long to take was held after a press without context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Held {
@@ -1242,7 +1262,7 @@ mod tests {
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
     use super::{
-        Held, TURN_ON_ACCESSIBILITY, failure_text, install_language, install_tesseract,
+        Held, TURN_ON_ACCESSIBILITY, command_in, failure_text, install_language, install_tesseract,
         read_failure_text, too_long_text,
     };
     use crate::{
@@ -1769,6 +1789,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_line_naming_an_install_gives_exactly_that_command() {
+        for language in Language::ALL {
+            for failure in every_failure() {
+                let text = failure_text(&failure, language);
+                let expected = match failure {
+                    Failure::Ocr(OcrFailure::TesseractMissing) => Some(install_tesseract(language)),
+                    Failure::Ocr(OcrFailure::LanguageMissing) => Some(install_language(language)),
+                    _ => None,
+                };
+                assert_eq!(command_in(&text), expected, "{text}");
+            }
+        }
+        assert_eq!(
+            command_in(&failure_text(
+                &Failure::Ocr(OcrFailure::LanguageMissing),
+                Language::Ca
+            ))
+            .as_deref(),
+            Some("sudo dnf install tesseract-langpack-cat")
+        );
+        assert_eq!(
+            command_in(&failure_text(
+                &Failure::Ocr(OcrFailure::TesseractMissing),
+                Language::En
+            ))
+            .as_deref(),
+            Some("sudo dnf install tesseract tesseract-langpack-eng")
+        );
+    }
+
+    #[test]
+    fn a_read_line_gives_the_accessibility_command_without_the_manual_path() {
+        for failure in &every_read_failure() {
+            let text = read_failure_text(failure);
+            let expected = (*failure == ContextFailure::AccessibilityOff)
+                .then(|| TURN_ON_ACCESSIBILITY.to_owned());
+            assert_eq!(command_in(&text), expected, "{text}");
+        }
+        assert_eq!(
+            command_in(&read_failure_text(&ContextFailure::AccessibilityOff)).as_deref(),
+            Some("gsettings set org.gnome.desktop.interface toolkit-accessibility true")
+        );
+    }
+
+    #[test]
+    fn a_too_long_line_gives_no_command() {
+        assert_eq!(
+            command_in(&too_long_text(Held::Selection, 1234, 1000)),
+            None
+        );
+        assert_eq!(
+            command_in(&too_long_text(Held::Clipboard, 54828, 1000)),
+            None
+        );
+        assert_eq!(command_in(""), None);
     }
 
     /// Every failure of a read, each once.

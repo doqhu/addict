@@ -78,6 +78,23 @@ window.addict .banner label {
   color: var(--warn);
 }
 
+/* Copy beside a source line that names a command: small, in the warning's
+ * colour. */
+window.addict .banner button.copy {
+  min-height: 0;
+  padding: 2px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--warn);
+  background: transparent;
+  color: var(--warn);
+  box-shadow: none;
+  font-size: 0.85em;
+}
+
+window.addict .banner button.copy:hover {
+  background: alpha(currentColor, 0.1);
+}
+
 /* The field, the switch of the language and Capture: one height, one
  * radius. */
 window.addict entry.lookup {
