@@ -317,9 +317,13 @@ fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandl
 /// animation and a frame without the window.
 const HIDE_SETTLE: Duration = Duration::from_millis(300);
 
+/// The width the window starts with, in pixels: a sentence of a dozen
+/// words fits in the field beside the switch and Capture.
+const WINDOW_WIDTH: i32 = 800;
+
 /// The height the window starts with, in pixels: an article of a few
 /// senses with one of them chosen fits without scrolling its list.
-const WINDOW_HEIGHT: i32 = 480;
+const WINDOW_HEIGHT: i32 = 680;
 
 /// The header bar: the name of the application beside its accent mark, and
 /// the window's buttons.
@@ -343,7 +347,7 @@ fn build_window(application: &gtk::Application, view: &View) -> gtk::Application
     let window = gtk::ApplicationWindow::builder()
         .application(application)
         .title("Addict")
-        .default_width(480)
+        .default_width(WINDOW_WIDTH)
         .default_height(WINDOW_HEIGHT)
         .child(view.root())
         .css_classes(["addict"])
