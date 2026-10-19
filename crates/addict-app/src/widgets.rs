@@ -1,13 +1,13 @@
 //! The widgets of the window: the source label and the status on one line,
 //! right under them the source line, then the binding row and the line of
-//! the dictionary indexes, then the field for a word or a sentence with the
-//! switch of the reading language, EN / ES / CA, and the Capture button
-//! beside it, the text of the field with its words as links
-//! and, last, the result, which scrolls: the card of the word with its
-//! translations as pills, the online texts, and the list of senses, a row
-//! for each, the chosen one explained under its row; for a language beside
-//! English, the English glosses are rows too, and the chosen one has the
-//! button that translates it under its row.
+//! the dictionary indexes, then the field for a word or a sentence, with
+//! Back and Forward left of it and the switch of the reading language,
+//! EN / ES / CA, and the Capture button beside it, the text of the field
+//! with its words as links and, last, the result, which scrolls: the card
+//! of the word with its translations as pills, the online texts, and the
+//! list of senses, a row for each, the chosen one explained under its row;
+//! for a language beside English, the English glosses are rows too, and the
+//! chosen one has the button that translates it under its row.
 //!
 //! This module owns the widgets, their layout and their signals, and no
 //! text: what the widgets say is [`view`](crate::view)'s, and [`View`] puts
@@ -21,7 +21,10 @@
 //! after a press of the shortcut that gave no context, which is
 //! [`resident`](crate::resident)'s. A text recognized in a capture, or read
 //! that way, is put into the field without being reported as an edit of it,
-//! and is not submitted.
+//! and is not submitted. Back and Forward only report their press; the text
+//! they lead to is put into the field as a paste puts it, by
+//! [`View::put_into_field`], and neither button takes the focus from the
+//! field.
 
 use std::{
     cell::{Cell, RefCell},
@@ -34,15 +37,16 @@ use addict_core::{
     sentence,
     translation::Source as Language,
 };
-use gtk::{gio, glib, prelude::*};
+use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     dictionaries::Indexes,
     view::{
-        Binding, Block, CAPTURE_LABEL, COPIED_LABEL, COPY_LABEL, ChosenGloss, DEFINITION_ACTION,
-        Explained, FIELD_PLACEHOLDER, LANGUAGE_TOOLTIP, Listed, OnlineTexts, RETRY_LABEL,
-        ResultTexts, SENSES_LABEL, SenseText, Shown, binding_texts, choice_texts, command_in,
-        indexes_text, language_label, online_markup, sentence_markup, texts,
+        BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COPIED_LABEL, COPY_LABEL, ChosenGloss,
+        DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, FORWARD_TOOLTIP, LANGUAGE_TOOLTIP, Listed,
+        OnlineTexts, RETRY_LABEL, ResultTexts, SENSES_LABEL, SenseText, Shown, binding_texts,
+        choice_texts, command_in, indexes_text, language_label, online_markup, sentence_markup,
+        texts,
     },
     wrap::Wrap,
 };
@@ -217,15 +221,34 @@ fn language_switch() -> (gtk::Box, Vec<(Language, gtk::ToggleButton)>) {
     (switch, buttons)
 }
 
-/// The field for a word or a sentence, its paste taken over, with the
-/// switch of the reading language and the Capture button beside it. Given
-/// back as the row, the field, the buttons of the switch and Capture.
-fn field_row() -> (
-    gtk::Box,
-    gtk::Entry,
-    Vec<(Language, gtk::ToggleButton)>,
-    gtk::Button,
-) {
+/// A button of the history left of the field, showing `icon`, with
+/// `tooltip`: it never takes the focus from the field, and it cannot be
+/// pressed until there is somewhere to go.
+fn history_button(icon: &str, tooltip: &str) -> gtk::Button {
+    gtk::Button::builder()
+        .icon_name(icon)
+        .tooltip_text(tooltip)
+        .focus_on_click(false)
+        .can_focus(false)
+        .sensitive(false)
+        .valign(gtk::Align::Center)
+        .build()
+}
+
+/// The parts of the row of the field.
+struct FieldRow {
+    row: gtk::Box,
+    field: gtk::Entry,
+    back: gtk::Button,
+    forward: gtk::Button,
+    languages: Vec<(Language, gtk::ToggleButton)>,
+    capture: gtk::Button,
+}
+
+/// The field for a word or a sentence, its paste taken over, with Back and
+/// Forward left of it and the switch of the reading language and the
+/// Capture button beside it.
+fn field_row() -> FieldRow {
     let field = gtk::Entry::builder()
         .placeholder_text(FIELD_PLACEHOLDER)
         .css_classes(["lookup"])
@@ -236,12 +259,29 @@ fn field_row() -> (
         .label(CAPTURE_LABEL)
         .css_classes(["capture"])
         .build();
+    let back = history_button("go-previous-symbolic", BACK_TOOLTIP);
+    let forward = history_button("go-next-symbolic", FORWARD_TOOLTIP);
+    let history = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .css_classes(["linked", "history"])
+        .valign(gtk::Align::Center)
+        .build();
+    history.append(&back);
+    history.append(&forward);
     let (switch, languages) = language_switch();
-    let field_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    field_row.append(&field);
-    field_row.append(&switch);
-    field_row.append(&capture);
-    (field_row, field, languages, capture)
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.append(&history);
+    row.append(&field);
+    row.append(&switch);
+    row.append(&capture);
+    FieldRow {
+        row,
+        field,
+        back,
+        forward,
+        languages,
+        capture,
+    }
 }
 
 /// What runs with the index of a sense or a gloss when its row is clicked.
@@ -676,6 +716,10 @@ pub struct View {
     /// What is said about the dictionary indexes; hidden when both are open.
     indexes: gtk::Label,
     field: gtk::Entry,
+    /// Left of the field: puts the text before into it.
+    back: gtk::Button,
+    /// Left of the field, after Back: puts the text after into it.
+    forward: gtk::Button,
     /// The handler that reports the changes of the field; blocked while a
     /// recognized text is put in.
     sentence_handler: RefCell<Option<glib::SignalHandlerId>>,
@@ -723,7 +767,14 @@ impl View {
         let indexes = banner();
         root.append(&indexes);
 
-        let (field_row, field, languages, capture) = field_row();
+        let FieldRow {
+            row: field_row,
+            field,
+            back,
+            forward,
+            languages,
+            capture,
+        } = field_row();
         let sentence = wrapping(gtk::Label::builder().use_markup(true))
             .css_classes(["sentence"])
             .visible(false)
@@ -744,6 +795,8 @@ impl View {
             retry: binding_row.retry,
             indexes,
             field,
+            back,
+            forward,
             sentence_handler: RefCell::new(None),
             languages,
             setting_language: Rc::new(Cell::new(false)),
@@ -890,6 +943,61 @@ impl View {
         if let Some(handler) = handler.as_ref() {
             self.field.unblock_signal(handler);
         }
+    }
+
+    /// Runs `back` each time Back is pressed.
+    pub fn connect_back(&self, back: impl Fn() + 'static) {
+        self.back.connect_clicked(move |_| back());
+    }
+
+    /// Runs `forward` each time Forward is pressed.
+    pub fn connect_forward(&self, forward: impl Fn() + 'static) {
+        self.forward.connect_clicked(move |_| forward());
+    }
+
+    /// Whether Back and Forward can be pressed.
+    pub fn set_history(&self, can_back: bool, can_forward: bool) {
+        self.back.set_sensitive(can_back);
+        self.forward.set_sensitive(can_forward);
+    }
+
+    /// The hotkeys of Back and Forward, Alt+Left and Alt+Right, for the
+    /// window to take in its capture phase, before a focused child: each
+    /// presses its button when that can be pressed, and is left to the
+    /// child otherwise. Ctrl+Left and Ctrl+Right stay the field's.
+    pub fn history_keys(&self) -> gtk::EventControllerKey {
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let (back, forward) = (self.back.clone(), self.forward.clone());
+        keys.connect_key_pressed(move |_, key, _, state| {
+            let held = state
+                & (gdk::ModifierType::SHIFT_MASK
+                    | gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::ALT_MASK
+                    | gdk::ModifierType::SUPER_MASK
+                    | gdk::ModifierType::HYPER_MASK);
+            if held != gdk::ModifierType::ALT_MASK {
+                return glib::Propagation::Proceed;
+            }
+            let button = match key {
+                gdk::Key::Left | gdk::Key::KP_Left => &back,
+                gdk::Key::Right | gdk::Key::KP_Right => &forward,
+                _ => return glib::Propagation::Proceed,
+            };
+            if !button.is_sensitive() {
+                return glib::Propagation::Proceed;
+            }
+            button.emit_clicked();
+            glib::Propagation::Stop
+        });
+        keys
+    }
+
+    /// Puts `text` into the field as a paste does: it replaces the text,
+    /// the handler of [`View::connect_sentence_changed`] runs, and then the
+    /// field is submitted.
+    pub fn put_into_field(&self, text: &str) {
+        put_into_field(&self.field, text);
     }
 
     /// Runs `submitted` each time the text of the field is submitted: by
@@ -1078,6 +1186,8 @@ impl View {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::Cell, rc::Rc};
+
     use addict_core::{
         dictionary::{Dictionary, Sample},
         input::WindowState,
@@ -1086,7 +1196,7 @@ mod tests {
     use gtk::{glib, prelude::*};
 
     use super::{View, fill_listed};
-    use crate::view::{COPIED_LABEL, COPY_LABEL, Listed};
+    use crate::view::{BACK_TOOLTIP, COPIED_LABEL, COPY_LABEL, FORWARD_TOOLTIP, Listed};
     use crate::{
         style,
         view::{Binding, Lookup, Online, OnlineTexts, Shown},
@@ -1201,6 +1311,32 @@ mod tests {
         fill_listed(&translations, Some(listed()), &["pill"], None);
         let pills = translations.last_child().expect("the pills");
         assert!(pills.first_child().and_downcast::<gtk::Label>().is_some());
+    }
+
+    /// Back and Forward never take the focus from the field, cannot be
+    /// pressed at first, name their hotkeys, and put a text into the field
+    /// as a paste does. Run alone: GTK starts once per process, on one
+    /// thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_history_buttons_follow_the_history() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        for (button, tooltip) in [(&view.back, BACK_TOOLTIP), (&view.forward, FORWARD_TOOLTIP)] {
+            assert!(!button.can_focus());
+            assert!(!button.gets_focus_on_click());
+            assert!(!button.is_sensitive());
+            assert_eq!(button.tooltip_text().as_deref(), Some(tooltip));
+        }
+        view.set_history(true, false);
+        assert!(view.back.is_sensitive());
+        assert!(!view.forward.is_sensitive());
+        let submitted = Rc::new(Cell::new(false));
+        let heard = submitted.clone();
+        view.connect_submitted(move || heard.set(true));
+        view.put_into_field("bank");
+        assert_eq!(view.field_text(), "bank");
+        assert!(submitted.get());
     }
 
     /// Copy shows only beside a line that names a command, says "Copied"

@@ -136,6 +136,17 @@
 //! ([`language`](crate::language)); a read that comes after the user chose
 //! changes nothing.
 //!
+//! The session keeps the history of the field for as long as the process
+//! lives, hiding the window included, and writes none of it: a submitted
+//! text, by Enter, a paste or a synonym, and a text that replaces the
+//! field, recognized or read from the bus or the clipboard, are recorded,
+//! but not a typed one nor a click on a word of the sentence. Back and
+//! Forward left of the field, and Alt+Left and Alt+Right wherever the focus
+//! is, put the text before or after into the field as a paste does, so it
+//! is looked up and submitted again; Back from a typed text records it
+//! first. Ctrl+Left and Ctrl+Right stay the field's. The history itself is
+//! [`history`](crate::history)'s.
+//!
 //! What is asked for and what is kept is [`online`](crate::online)'s. What
 //! the window says is [`view`](crate::view)'s; its widgets and the paste
 //! into its field are [`widgets`](crate::widgets)'s; what an edit or a click
@@ -174,7 +185,9 @@ use crate::{
     capture::{self, Capture, Captured, Failure, Timing},
     context::{self, Read, Reading},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
-    evidence, language,
+    evidence,
+    history::History,
+    language,
     manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
     online::{self, Kept, Subject},
     recording::Recording,
@@ -235,6 +248,10 @@ enum Event {
     Gloss(usize),
     /// The text of the field was submitted, by Enter or by a paste.
     Submitted,
+    /// Back was pressed, or Alt+Left.
+    Back,
+    /// Forward was pressed, or Alt+Right.
+    Forward,
     /// The user explicitly requested the selected dictionary definition.
     DefinitionAction,
     /// The separate definition job ended with its individual request number;
@@ -391,6 +408,9 @@ struct Session {
     /// The text of the field, a word or a sentence, and what was chosen in
     /// it.
     manual: Manual,
+    /// The texts the field held, for Back and Forward; kept for the life of
+    /// the process, hidden window included.
+    history: History,
     /// Where the lookup of the chosen word stands.
     looking_up: LookingUp,
     /// The result the window shows and the sense chosen in it.
@@ -562,6 +582,8 @@ impl Session {
             Event::Sense(index) => self.sense_chosen(index),
             Event::Gloss(index) => self.gloss_chosen(index),
             Event::Submitted => self.submitted(),
+            Event::Back => self.back(),
+            Event::Forward => self.forward(),
             Event::DefinitionAction => self.definition_action(),
             Event::DefinitionTranslated {
                 number,
@@ -776,6 +798,7 @@ impl Session {
         self.view.clear_source_failure();
         let edit = self.manual.edit(String::new());
         self.view.set_field_text("");
+        self.render_history();
         self.manual.set_reading(Some(Source::AtSpi));
         self.text_replaced(edit);
     }
@@ -1048,6 +1071,8 @@ impl Session {
         let gave_up_read = self.give_up_read();
         let edit = self.manual.edit(text);
         self.text_replaced(edit);
+        // A typed text is not recorded, but Back can go from it.
+        self.render_history();
         if gave_up_capture || gave_up_read {
             self.view.render(self.manual.state(), self.manual.source());
         }
@@ -1058,7 +1083,46 @@ impl Session {
     /// field shows it, and what follows a new text follows.
     fn replace_field(&mut self, edit: Edit) {
         self.view.set_field_text(self.manual.sentence());
+        if !matches!(edit, Edit::Same | Edit::Cleared) {
+            self.history.record(self.manual.sentence());
+        }
+        self.render_history();
         self.text_replaced(edit);
+    }
+
+    /// Back or Alt+Left: the text before in the history is put into the
+    /// field as a paste puts it, so it is looked up and submitted again. A
+    /// typed text that is not in the history is recorded first, so Forward
+    /// comes back to it.
+    fn back(&mut self) {
+        let current = self.view.field_text();
+        let text = self.history.back(&current).map(str::to_owned);
+        self.walked(text);
+    }
+
+    /// Forward or Alt+Right: the text after in the history is put into the
+    /// field as Back puts one.
+    fn forward(&mut self) {
+        let text = self.history.forward().map(str::to_owned);
+        self.walked(text);
+    }
+
+    /// Puts `text`, where Back or Forward led, into the field. Nothing is
+    /// recorded: its submit records the text at the position, which changes
+    /// nothing.
+    fn walked(&mut self, text: Option<String>) {
+        if let Some(text) = text {
+            self.view.put_into_field(&text);
+        }
+        self.render_history();
+    }
+
+    /// Whether Back and Forward can be pressed, for the field's text now.
+    fn render_history(&self) {
+        self.view.set_history(
+            self.history.can_back(&self.view.field_text()),
+            self.history.can_forward(),
+        );
     }
 
     /// What follows a new text in the field, typed, pasted or recognized:
@@ -1132,6 +1196,8 @@ impl Session {
         if self.field_is_newer() {
             return;
         }
+        self.history.record(self.manual.sentence());
+        self.render_history();
         if self.online.submit() {
             self.start_translation(Subject::Lone);
             self.render_online();
@@ -1838,8 +1904,8 @@ fn read_line(
 }
 
 /// Sends what the user does in the `view` to `sender`: Retry, an edit of the
-/// field, a submit of its text, Capture, a click on a word and a click on a
-/// sense.
+/// field, a submit of its text, Back and Forward, Capture, a click on a word
+/// and a click on a sense.
 fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     let retry = sender.clone();
     view.connect_retry(move || {
@@ -1852,6 +1918,14 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     let submitted = sender.clone();
     view.connect_submitted(move || {
         let _ = submitted.unbounded_send(Event::Submitted);
+    });
+    let back = sender.clone();
+    view.connect_back(move || {
+        let _ = back.unbounded_send(Event::Back);
+    });
+    let forward = sender.clone();
+    view.connect_forward(move || {
+        let _ = forward.unbounded_send(Event::Forward);
     });
     let chosen = sender.clone();
     view.connect_word_chosen(move |index| {
@@ -1891,6 +1965,9 @@ fn build_ui(
     let view = View::new(window_state(None, None), binding);
     connect_view(&view, sender);
     let window = build_window(application, &view);
+    // Capture phase: Alt+Left and Alt+Right are Back and Forward wherever
+    // the focus is.
+    window.add_controller(view.history_keys());
     let active = sender.clone();
     window.connect_is_active_notify(move |window| {
         if window.is_active() {
@@ -2033,6 +2110,7 @@ fn start(
         sender,
         current: Rc::downgrade(&handle),
         manual: Manual::default(),
+        history: History::default(),
         looking_up: LookingUp::default(),
         shown: Shown::default(),
         work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),

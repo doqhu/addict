@@ -168,7 +168,8 @@
 //! request to it starts is [`translate`]'s, the capture job is [`capture`]'s,
 //! the accessibility read is [`context`]'s,
 //! and its portal, accessibility and Tesseract adapters are `addict_platform`'s, the
-//! resident application is [`resident`]'s, the Settings window is
+//! resident application is [`resident`]'s, the history of its field is
+//! [`history`]'s, the Settings window is
 //! [`settings`]'s, the texts of its window are
 //! [`view`]'s and the widgets of the window are [`widgets`]'s.
 
@@ -177,6 +178,7 @@ mod context;
 mod dictionaries;
 mod entries;
 mod evidence;
+mod history;
 mod language;
 mod manual;
 mod online;

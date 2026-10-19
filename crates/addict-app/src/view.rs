@@ -208,6 +208,14 @@ pub(crate) const LANGUAGE_TOOLTIP: &str = "The language of the text you read";
 /// puts the text recognized in it into the field.
 pub(crate) const CAPTURE_LABEL: &str = "Capture";
 
+/// The tooltip of the button left of the field that puts the text before
+/// into it, naming its hotkey.
+pub(crate) const BACK_TOOLTIP: &str = "Back (Alt+Left)";
+
+/// The tooltip of the button left of the field that puts the text after
+/// into it, naming its hotkey.
+pub(crate) const FORWARD_TOOLTIP: &str = "Forward (Alt+Right)";
+
 /// The package of the Tesseract data of `language`. No wildcard arm: a new
 /// language does not compile until it is given its package.
 pub(crate) fn ocr_package(language: Language) -> &'static str {
