@@ -39,10 +39,10 @@ use gtk::{gio, glib, prelude::*};
 use crate::{
     dictionaries::Indexes,
     view::{
-        Binding, Block, CAPTURE_LABEL, ChosenGloss, DEFINITION_ACTION, Explained,
-        FIELD_PLACEHOLDER, LANGUAGE_TOOLTIP, Listed, OnlineTexts, RETRY_LABEL, ResultTexts,
-        SENSES_LABEL, SenseText, Shown, binding_texts, choice_texts, indexes_text, language_label,
-        online_markup, sentence_markup, texts,
+        Binding, Block, CAPTURE_LABEL, COPIED_LABEL, COPY_LABEL, ChosenGloss, DEFINITION_ACTION,
+        Explained, FIELD_PLACEHOLDER, LANGUAGE_TOOLTIP, Listed, OnlineTexts, RETRY_LABEL,
+        ResultTexts, SENSES_LABEL, SenseText, Shown, binding_texts, choice_texts, command_in,
+        indexes_text, language_label, online_markup, sentence_markup, texts,
     },
     wrap::Wrap,
 };
@@ -267,6 +267,53 @@ fn banner() -> gtk::Label {
         .css_classes(["banner"])
         .visible(false)
         .build()
+}
+
+/// The source line: a banner whose text wraps, with a Copy button beside
+/// it that is shown while the text names a runnable command.
+struct SourceFailure {
+    row: gtk::Box,
+    line: gtk::Label,
+    copy: gtk::Button,
+    /// The command the line names, which Copy puts on the clipboard.
+    command: Rc<RefCell<Option<String>>>,
+}
+
+/// The source line, hidden until it has something to say. Neither the line
+/// nor Copy takes the focus from the field: the line is not selectable and
+/// the button is never focused.
+fn source_failure() -> SourceFailure {
+    let line = wrapping(gtk::Label::builder()).hexpand(true).build();
+    let copy = gtk::Button::builder()
+        .label(COPY_LABEL)
+        .css_classes(["copy"])
+        .focus_on_click(false)
+        .can_focus(false)
+        .valign(gtk::Align::Start)
+        .visible(false)
+        .build();
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(10)
+        .css_classes(["banner"])
+        .visible(false)
+        .build();
+    row.append(&line);
+    row.append(&copy);
+    let command: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let held = command.clone();
+    copy.connect_clicked(move |button| {
+        if let Some(command) = held.borrow().as_deref() {
+            button.clipboard().set_text(command);
+            button.set_label(COPIED_LABEL);
+        }
+    });
+    SourceFailure {
+        row,
+        line,
+        copy,
+        command,
+    }
 }
 
 /// A dim caption above a part of the result.
@@ -584,7 +631,7 @@ pub struct View {
     /// Why the last capture or read of Android Studio gave no text, shared
     /// by both: they never run together. Hidden until one gave nothing, and
     /// again once something new happens in the window.
-    source_failure: gtk::Label,
+    source_failure: SourceFailure,
     binding: gtk::Box,
     binding_text: gtk::Label,
     binding_detail: gtk::Label,
@@ -628,8 +675,8 @@ impl View {
 
         // Wraps, so an install command fits. Not selectable, like the line
         // of the indexes: it must not take the focus from the field.
-        let source_failure = banner();
-        root.append(&source_failure);
+        let source_failure = source_failure();
+        root.append(&source_failure.row);
 
         let binding_row = binding_row();
         root.append(&binding_row.row);
@@ -722,15 +769,27 @@ impl View {
     /// Shows `line`, why a capture or a read of Android Studio gave no
     /// text, under the source and the status. [`View::render`] leaves it;
     /// [`View::clear_source_failure`] hides it.
+    /// A line that names a runnable command shows Copy beside it.
     pub fn render_source_failure(&self, line: &str) {
-        self.source_failure.set_text(line);
-        self.source_failure.set_visible(true);
+        self.set_source_failure(line);
+        self.source_failure.row.set_visible(true);
     }
 
     /// Hides the source line.
     pub fn clear_source_failure(&self) {
-        self.source_failure.set_visible(false);
-        self.source_failure.set_text("");
+        self.source_failure.row.set_visible(false);
+        self.set_source_failure("");
+    }
+
+    /// Puts `line` into the source line and gives Copy the command it
+    /// names, if any, with Copy's label back to its own.
+    fn set_source_failure(&self, line: &str) {
+        let failure = &self.source_failure;
+        failure.line.set_text(line);
+        let command = command_in(line);
+        failure.copy.set_visible(command.is_some());
+        failure.copy.set_label(COPY_LABEL);
+        failure.command.replace(command);
     }
 
     /// Runs `changed` with the text of the field each time the user changes
@@ -983,6 +1042,7 @@ mod tests {
     use gtk::{glib, prelude::*};
 
     use super::View;
+    use crate::view::{COPIED_LABEL, COPY_LABEL};
     use crate::{
         style,
         view::{Binding, Lookup, Online, OnlineTexts, Shown},
@@ -1062,5 +1122,38 @@ mod tests {
         let texture = renderer.render_texture(&node, None);
         texture.save_to_png(&path).expect("the PNG");
         window.destroy();
+    }
+
+    /// Copy shows only beside a line that names a command, says "Copied"
+    /// once pressed, and is back to "Copy" for every new line. Run alone:
+    /// GTK starts once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn copy_follows_the_source_line() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let copy = &view.source_failure.copy;
+        assert!(!copy.can_focus());
+        assert!(!copy.gets_focus_on_click());
+        let missing = "Catalan OCR data is not installed. Install it with: \
+                       sudo dnf install tesseract-langpack-cat";
+        view.render_source_failure(missing);
+        assert!(copy.is_visible());
+        assert_eq!(
+            view.source_failure.command.borrow().as_deref(),
+            Some("sudo dnf install tesseract-langpack-cat")
+        );
+        copy.emit_clicked();
+        assert_eq!(copy.label().as_deref(), Some(COPIED_LABEL));
+
+        view.render_source_failure("The capture was cancelled.");
+        assert!(!copy.is_visible());
+        assert_eq!(view.source_failure.command.borrow().as_deref(), None);
+
+        view.render_source_failure(missing);
+        assert_eq!(copy.label().as_deref(), Some(COPY_LABEL));
+        view.clear_source_failure();
+        assert!(!view.source_failure.row.is_visible());
+        assert!(!copy.is_visible());
     }
 }

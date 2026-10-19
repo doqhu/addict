@@ -98,10 +98,12 @@
 //! cancels the read. A text of either as one line, of at most
 //! [`CLIPBOARD_MAX_CHARS`] characters, replaces the field as a new text with
 //! the source clipboard, as a read context does, without a word chosen unless
-//! it is one word, and nothing is asked online; the line is not shown. When
-//! neither gives a line (empty, blank, not text, too long, unreadable or
-//! late), why is written to stderr, and the empty state stays with the line
-//! of the read; when one of them was too long, the line says that instead,
+//! it is one word, and nothing is asked online; the line is not shown. A
+//! line that is exactly a command the window offered to copy, such as the
+//! one that turns accessibility on, is the user's Copy and counts as no
+//! line. When neither gives a line (empty, blank, not text, too long, a
+//! command, unreadable or late), why is written to stderr, and the empty
+//! state stays with the line of the read; when one of them was too long, the line says that instead,
 //! the selection's before the clipboard's. The read has a number and is given
 //! up like the read it follows, by a press, an edit and a capture; what it
 //! reports later is ignored. Retry, a launch and a capture read no clipboard.
@@ -180,7 +182,7 @@ use crate::{
     style,
     translate::{self, Translated},
     view::{
-        Binding, Choice, Held, Lookup, Online, Shown, failure_text, read_failure_text,
+        Binding, Choice, Held, Lookup, Online, Shown, command_in, failure_text, read_failure_text,
         too_long_text,
     },
     widgets::View,
@@ -1778,6 +1780,12 @@ impl Missed {
     }
 }
 
+/// Whether `line` is exactly a command the window offers to copy: such a
+/// line is the user's Copy, not a text to look up.
+fn is_offered_command(line: &str) -> bool {
+    command_in(line).as_deref() == Some(line)
+}
+
 /// The source line when neither the selection nor the clipboard gave a
 /// line: that the selection was too long, when it was, else that the
 /// clipboard was, else `read`, why the read of the bus gave nothing.
@@ -1802,13 +1810,23 @@ fn read_line(
 ) {
     clipboard.read_text_async(Some(cancellable), move |read| {
         done(match read {
-            Ok(Some(text)) => manual::clipboard_line(&text).map_err(|no_line| match no_line {
-                NoLine::Blank => Missed::because("blank".to_owned()),
-                NoLine::TooLong(chars) => Missed {
-                    reason: format!("{chars} characters, over {CLIPBOARD_MAX_CHARS}"),
-                    too_long: Some((held, chars)),
-                },
-            }),
+            Ok(Some(text)) => manual::clipboard_line(&text)
+                .map_err(|no_line| match no_line {
+                    NoLine::Blank => Missed::because("blank".to_owned()),
+                    NoLine::TooLong(chars) => Missed {
+                        reason: format!("{chars} characters, over {CLIPBOARD_MAX_CHARS}"),
+                        too_long: Some((held, chars)),
+                    },
+                })
+                .and_then(|line| {
+                    if is_offered_command(&line) {
+                        Err(Missed::because(
+                            "a command the window offered to copy".to_owned(),
+                        ))
+                    } else {
+                        Ok(line)
+                    }
+                }),
             Ok(None) => Err(Missed::because("no text".to_owned())),
             Err(e) => Err(Missed::because(e.to_string())),
         });
@@ -2125,8 +2143,26 @@ pub fn run(evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
 mod tests {
     use gtk::{gio, prelude::*};
 
-    use super::{CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, Copying, missed_line};
-    use crate::view::{Held, too_long_text};
+    use super::{CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, Copying, is_offered_command, missed_line};
+    use crate::view::{
+        Held, TURN_ON_ACCESSIBILITY, install_language, install_tesseract, too_long_text,
+    };
+    use addict_core::translation::Source as Language;
+
+    #[test]
+    fn a_line_that_is_an_offered_command_is_not_a_text() {
+        assert!(is_offered_command(TURN_ON_ACCESSIBILITY));
+        for language in Language::ALL {
+            assert!(is_offered_command(&install_tesseract(language)));
+            assert!(is_offered_command(&install_language(language)));
+        }
+        assert!(!is_offered_command("bank"));
+        assert!(!is_offered_command(&format!("run {TURN_ON_ACCESSIBILITY}")));
+        assert!(!is_offered_command(
+            "Catalan OCR data is not installed. Install it with: \
+             sudo dnf install tesseract-langpack-cat"
+        ));
+    }
 
     #[test]
     fn only_the_last_clipboard_read_is_the_one_that_runs() {
