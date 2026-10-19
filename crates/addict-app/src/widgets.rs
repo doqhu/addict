@@ -102,15 +102,21 @@ fn replace_on_paste(field: &gtk::Entry) {
                 if edits.get() != requested {
                     return;
                 }
-                // Fires `changed` twice, for the removal of the old text and
-                // for the new one, also when the two are the same text.
-                entry.set_text(&line);
-                entry.set_position(-1);
-                // After the text is in the field: whoever hears of the
-                // submit has heard of the new text first.
-                entry.emit_activate();
+                put_into_field(&entry, &line);
             });
     });
+}
+
+/// Puts `text` into `field` as a paste does: it replaces the text, and the
+/// field is submitted, so a lone word is also asked for online.
+fn put_into_field(field: &gtk::Entry, text: &str) {
+    // Fires `changed` twice, for the removal of the old text and for the new
+    // one, also when the two are the same text.
+    field.set_text(text);
+    field.set_position(-1);
+    // After the text is in the field: whoever hears of the submit has heard
+    // of the new text first.
+    field.emit_activate();
 }
 
 /// Makes the label that `label` builds wrap at [`TEXT_WIDTH_CHARS`], with
@@ -327,8 +333,14 @@ fn caption(text: &str) -> gtk::Label {
 
 /// Puts `listed` into `container`: its label as a caption and its items as
 /// pills of `pill_classes`, or the line of an empty list; nothing for
-/// `None`.
-fn fill_listed(container: &gtk::Box, listed: Option<Listed<'_>>, pill_classes: &[&str]) {
+/// `None`. With a `field`, each pill is a link that puts its item into the
+/// field as a paste does, and keeps the focus in the field.
+fn fill_listed(
+    container: &gtk::Box,
+    listed: Option<Listed<'_>>,
+    pill_classes: &[&str],
+    field: Option<&gtk::Entry>,
+) {
     clear(container);
     match listed {
         None => {}
@@ -344,12 +356,28 @@ fn fill_listed(container: &gtk::Box, listed: Option<Listed<'_>>, pill_classes: &
             let pills = Wrap::new();
             pills.add_css_class("pills");
             for item in items {
-                pills.append(
-                    &gtk::Label::builder()
-                        .label(item.as_str())
-                        .css_classes(pill_classes)
-                        .build(),
-                );
+                let pill = gtk::Label::builder()
+                    .label(item.as_str())
+                    .css_classes(pill_classes)
+                    .build();
+                let Some(field) = field else {
+                    pills.append(&pill);
+                    continue;
+                };
+                let link = gtk::Button::builder()
+                    .child(&pill)
+                    .css_classes(["pill-link"])
+                    .focus_on_click(false)
+                    .build();
+                link.set_cursor_from_name(Some("pointer"));
+                let field = field.downgrade();
+                let word = item.to_string();
+                link.connect_clicked(move |_| {
+                    if let Some(field) = field.upgrade() {
+                        put_into_field(&field, &word);
+                    }
+                });
+                pills.append(&link);
             }
             container.append(&pills);
         }
@@ -444,13 +472,22 @@ fn sense_row(sense: &SenseText<'_>, chosen: &SenseChosen) -> gtk::Button {
     row
 }
 
-/// What stands under the chosen sense: its synonyms, the button that
-/// translates its definition when `action` is shown, and the online
-/// translation of the definition once asked for.
-fn explained_box(explained: &Explained<'_>, action: Option<&gtk::Button>) -> gtk::Box {
+/// What stands under the chosen sense: its synonyms, each a link that puts
+/// it into `field`, the button that translates its definition when `action`
+/// is shown, and the online translation of the definition once asked for.
+fn explained_box(
+    explained: &Explained<'_>,
+    action: Option<&gtk::Button>,
+    field: &gtk::Entry,
+) -> gtk::Box {
     let below = explained_tail(action, explained.definition.as_ref());
     let synonyms = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    fill_listed(&synonyms, Some(explained.synonyms), &["pill", "outline"]);
+    fill_listed(
+        &synonyms,
+        Some(explained.synonyms),
+        &["pill", "outline"],
+        Some(field),
+    );
     below.prepend(&synonyms);
     below
 }
@@ -945,7 +982,7 @@ impl View {
         let line = texts.line.as_deref().or(texts.elsewhere.as_deref());
         result.line.set_text(line.unwrap_or_default());
         result.line.set_visible(line.is_some());
-        fill_listed(&result.translations, texts.translations, &["pill"]);
+        fill_listed(&result.translations, texts.translations, &["pill"], None);
         result
             .translations
             .set_visible(texts.translations.is_some());
@@ -953,7 +990,12 @@ impl View {
 
         self.render_senses(&texts, visible);
         // Hidden for English, which has neither.
-        fill_listed(&result.word_synonyms, texts.word_synonyms, &["pill"]);
+        fill_listed(
+            &result.word_synonyms,
+            texts.word_synonyms,
+            &["pill"],
+            Some(&self.field),
+        );
         result
             .word_synonyms
             .set_visible(texts.word_synonyms.is_some());
@@ -978,8 +1020,8 @@ impl View {
         let result = &self.result;
         result.article.set_visible(false);
         result.senses.set_visible(false);
-        fill_listed(&result.translations, None, &[]);
-        fill_listed(&result.word_synonyms, None, &[]);
+        fill_listed(&result.translations, None, &[], None);
+        fill_listed(&result.word_synonyms, None, &[], None);
         result.word_synonyms.set_visible(false);
         clear(&result.glosses);
         result.glosses.set_visible(false);
@@ -999,7 +1041,9 @@ impl View {
             result.rows.append(&sense_row(sense, &chosen));
             if let Some(explained) = &sense.explained {
                 let action = visible.then_some(&result.definition_action);
-                result.rows.append(&explained_box(explained, action));
+                result
+                    .rows
+                    .append(&explained_box(explained, action, &self.field));
             }
         }
         result
@@ -1041,8 +1085,8 @@ mod tests {
     };
     use gtk::{glib, prelude::*};
 
-    use super::View;
-    use crate::view::{COPIED_LABEL, COPY_LABEL};
+    use super::{View, fill_listed};
+    use crate::view::{COPIED_LABEL, COPY_LABEL, Listed};
     use crate::{
         style,
         view::{Binding, Lookup, Online, OnlineTexts, Shown},
@@ -1122,6 +1166,41 @@ mod tests {
         let texture = renderer.render_texture(&node, None);
         texture.save_to_png(&path).expect("the PNG");
         window.destroy();
+    }
+
+    /// A synonym is a link: a click puts it into the field and submits the
+    /// field, as a paste does; translations stay plain pills. Run alone: GTK
+    /// starts once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_synonym_click_puts_it_into_the_field() {
+        gtk::init().expect("a display");
+        let field = gtk::Entry::new();
+        field.set_text("I sat on the bank of the river.");
+        let submitted = std::rc::Rc::new(std::cell::Cell::new(false));
+        let heard = submitted.clone();
+        field.connect_activate(move |_| heard.set(true));
+        let items = ["shore".to_owned(), "riverside".to_owned()];
+        let listed = || Listed::Items {
+            label: "SYNONYMS",
+            items: &items,
+        };
+        let synonyms = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        fill_listed(&synonyms, Some(listed()), &["pill"], Some(&field));
+        let pills = synonyms.last_child().expect("the pills");
+        let link = pills
+            .last_child()
+            .and_downcast::<gtk::Button>()
+            .expect("a link");
+        assert!(!link.gets_focus_on_click());
+        link.emit_clicked();
+        assert_eq!(field.text(), "riverside");
+        assert!(submitted.get());
+
+        let translations = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        fill_listed(&translations, Some(listed()), &["pill"], None);
+        let pills = translations.last_child().expect("the pills");
+        assert!(pills.first_child().and_downcast::<gtk::Label>().is_some());
     }
 
     /// Copy shows only beside a line that names a command, says "Copied"

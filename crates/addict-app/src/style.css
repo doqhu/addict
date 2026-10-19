@@ -237,6 +237,23 @@ window.addict label.pill.outline {
   font-size: 0.9em;
 }
 
+/* A synonym is a link: the button around its pill draws nothing of its own,
+ * and the pill takes the accent while hovered. */
+window.addict button.pill-link {
+  padding: 0;
+  min-height: 0;
+  min-width: 0;
+  border: none;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+}
+
+window.addict button.pill-link:hover label.pill {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
 /* The online texts: tinted with the accent, so they read as the other
  * source. */
 window.addict label.online,
