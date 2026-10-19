@@ -133,6 +133,37 @@ window.addict button.capture:hover {
   background: var(--chip);
 }
 
+/* Back and Forward left of the field: two linked buttons of the
+ * field's height; one that cannot be pressed is dimmed. */
+window.addict .history > button {
+  min-height: 44px;
+  min-width: 34px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: none;
+  border-radius: 0;
+}
+
+window.addict .history > button:first-child {
+  border-radius: 12px 0 0 12px;
+}
+
+window.addict .history > button:last-child {
+  border-radius: 0 12px 12px 0;
+  border-left-width: 0;
+}
+
+window.addict .history > button:hover {
+  background: var(--chip);
+}
+
+window.addict .history > button:disabled {
+  color: var(--muted);
+  opacity: 0.5;
+}
+
 /* The switch of the reading language: three linked buttons of the
  * field's height, the pressed one in the accent. */
 window.addict .language > button {
