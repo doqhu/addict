@@ -91,8 +91,10 @@ pub fn asked_forms(language: Language, word: &str) -> Vec<String> {
 
 /// The exception lemmas `indexes` give for each of the [`asked_forms`] of
 /// `word` read in `language`: their union per form, sorted, each once. An
-/// error of an index is the error of the lookup.
-fn lemmas_of<'a>(
+/// error of an index is the error of the lookup. A form with no lemma is
+/// left out, which [`headwords`] reads as no lemma. Public so that a test
+/// over real indexes asks them as [`grouped`] does.
+pub fn lemmas_of<'a>(
     indexes: impl IntoIterator<Item = &'a Index> + Clone,
     language: Language,
     word: &str,

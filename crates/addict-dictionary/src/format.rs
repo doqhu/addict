@@ -30,7 +30,7 @@
 //! decoders take bytes the reader has read. A decoder never trusts a length
 //! or a count: what does not fit the bytes it was given is a [`Damage`].
 
-use std::fmt;
+use std::{collections::BTreeMap, fmt};
 
 /// The first bytes of every index file.
 pub const MAGIC: [u8; 8] = *b"ADDICTIX";
@@ -78,6 +78,28 @@ pub struct Contents {
     pub headwords: Vec<Headword>,
     /// The exception list, sorted by the bytes of the form, each form once.
     pub forms: Vec<ExceptionForm>,
+}
+
+impl Contents {
+    /// The contents of `source` whose headwords are the words of `headwords`,
+    /// in their order, each with its sense records in order; no translations
+    /// and no forms. The builder of the readers of sources without synsets.
+    pub(crate) fn of_senses(source: &str, headwords: BTreeMap<String, Vec<SenseRecord>>) -> Self {
+        let mut contents = Contents {
+            source: source.to_owned(),
+            ..Contents::default()
+        };
+        for (word, senses) in headwords {
+            let first = contents.senses.len() as u32;
+            contents.senses.extend(senses);
+            contents.headwords.push(Headword {
+                word,
+                senses: (first..contents.senses.len() as u32).collect(),
+                translations: Vec::new(),
+            });
+        }
+        contents
+    }
 }
 
 /// One sense, shared by the headwords that have it.

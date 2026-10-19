@@ -20,7 +20,7 @@ use std::{
     io::{self, BufRead},
 };
 
-use crate::format::{Contents, Headword, SenseRecord};
+use crate::format::{Contents, SenseRecord};
 
 /// Why a thesaurus gave no contents.
 #[derive(Debug)]
@@ -96,20 +96,7 @@ pub fn parse(mut reader: impl BufRead, source: &str) -> Result<Contents, ParseEr
         return Err(ParseError::NoEntry);
     }
 
-    let mut contents = Contents {
-        source: source.to_owned(),
-        ..Contents::default()
-    };
-    for (word, senses) in headwords {
-        let first = contents.senses.len() as u32;
-        contents.senses.extend(senses);
-        contents.headwords.push(Headword {
-            word,
-            senses: (first..contents.senses.len() as u32).collect(),
-            translations: Vec::new(),
-        });
-    }
-    Ok(contents)
+    Ok(Contents::of_senses(source, headwords))
 }
 
 /// The word and the meaning count of a line `word|n`.

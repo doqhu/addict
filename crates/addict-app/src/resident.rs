@@ -385,16 +385,8 @@ struct Session {
     /// The text of the field, a word or a sentence, and what was chosen in
     /// it.
     manual: Manual,
-    /// The lookup whose outcome is awaited; dropping it cancels the lookup.
-    pending: Option<Job>,
-    /// The language that gave the result of the last started lookup, once
-    /// it ended with one; `None` before. The word's online requests are
-    /// sent from it.
-    answered: Option<Language>,
-    /// The online requests of the word, alone or in its sentence, asked
-    /// while its lookup runs: they are sent once it ends, from the language
-    /// that answered.
-    deferred: Vec<Subject>,
+    /// Where the lookup of the chosen word stands.
+    looking_up: LookingUp,
     /// The result the window shows and the sense chosen in it.
     shown: Shown,
     /// Weak: the runner must go when the resident state is dropped. Never
@@ -466,6 +458,22 @@ struct Capturing {
     /// The language the last started capture job recognizes, which its
     /// line of missing data names.
     language: Language,
+}
+
+/// Where the lookup of the word chosen in a [`Session`] stands; at first
+/// none runs.
+#[derive(Default)]
+struct LookingUp {
+    /// The lookup whose outcome is awaited; dropping it cancels the lookup.
+    job: Option<Job>,
+    /// The language that gave the result of the last started lookup, once
+    /// it ended with one; `None` before. The word's online requests are
+    /// sent from it.
+    answered: Option<Language>,
+    /// The online requests of the word, alone or in its sentence, asked
+    /// while its lookup runs: they are sent once it ends, from the language
+    /// that answered.
+    deferred: Vec<Subject>,
 }
 
 /// Where the read of the clipboard of a [`Session`] stands; at first none
@@ -1057,7 +1065,7 @@ impl Session {
         // Cancels the online requests; whatever they still report has the
         // number of an old text.
         self.translating_word = None;
-        self.deferred.clear();
+        self.looking_up.deferred.clear();
         self.translating_sentence = None;
         self.online = Kept::of(self.manual.text_number(), self.manual.kind());
         self.render_online();
@@ -1066,7 +1074,7 @@ impl Session {
             Edit::Cleared => {
                 // Cancels the lookup; whatever it still reports has an old
                 // number.
-                self.pending = None;
+                self.looking_up.job = None;
                 self.render_manual();
                 self.show_result(None);
             }
@@ -1099,7 +1107,7 @@ impl Session {
         let click = self.online.click(index, number, long);
         if click.gave_up {
             self.translating_word = None;
-            self.deferred.clear();
+            self.looking_up.deferred.clear();
         }
         if click.gave_up_sentence {
             self.translating_sentence = None;
@@ -1137,8 +1145,8 @@ impl Session {
     /// online texts are not touched.
     fn start_lookup(&mut self, run: u64) {
         // The lookup of another word, if it runs, is replaced.
-        self.pending = None;
-        self.answered = None;
+        self.looking_up.job = None;
+        self.looking_up.answered = None;
         self.render_manual();
         let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
             self.show_result(None);
@@ -1163,7 +1171,7 @@ impl Session {
         );
         match started {
             Ok(job) => {
-                self.pending = Some(job);
+                self.looking_up.job = Some(job);
                 self.show_result(Some(Lookup::Pending));
             }
             Err(lookup) => {
@@ -1201,7 +1209,7 @@ impl Session {
         if !self.manual.awaits(run) {
             return;
         }
-        self.pending = None;
+        self.looking_up.job = None;
         let Some(input) = self.manual.input() else {
             return;
         };
@@ -1210,14 +1218,14 @@ impl Session {
             self.show_answered(Some(lookup), language);
         }
         // A lookup that did not finish names no language: the chosen one.
-        self.answered = finished.then_some(language);
+        self.looking_up.answered = finished.then_some(language);
         self.send_deferred();
     }
 
     /// Sends the word's online requests held while its lookup ran, now that
     /// no lookup runs, from the language that answered or the chosen one.
     fn send_deferred(&mut self) {
-        let deferred = std::mem::take(&mut self.deferred);
+        let deferred = std::mem::take(&mut self.looking_up.deferred);
         if deferred.is_empty() {
             return;
         }
@@ -1239,13 +1247,13 @@ impl Session {
             return;
         };
         let word = matches!(subject, Subject::Word(_) | Subject::Lone);
-        if word && self.pending.is_some() {
-            if !self.deferred.contains(&subject) {
-                self.deferred.push(subject);
+        if word && self.looking_up.job.is_some() {
+            if !self.looking_up.deferred.contains(&subject) {
+                self.looking_up.deferred.push(subject);
             }
             return;
         }
-        let source = translate::source_of(subject, self.language, self.answered);
+        let source = translate::source_of(subject, self.language, self.looking_up.answered);
         let request = self
             .manual
             .input()
@@ -1510,7 +1518,7 @@ impl Session {
         // Cancels the online requests; whatever they still report has a
         // number that is no longer awaited.
         self.translating_word = None;
-        self.deferred.clear();
+        self.looking_up.deferred.clear();
         self.translating_sentence = None;
         let submitted = self.online.forget();
         if let Some(run) = self.manual.again() {
@@ -2003,9 +2011,7 @@ fn start(
         sender,
         current: Rc::downgrade(&handle),
         manual: Manual::default(),
-        pending: None,
-        answered: None,
-        deferred: Vec::new(),
+        looking_up: LookingUp::default(),
         shown: Shown::default(),
         work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),
         articles: articles.clone(),
