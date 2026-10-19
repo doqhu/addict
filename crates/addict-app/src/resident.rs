@@ -107,12 +107,20 @@
 //! reports later is ignored. Retry, a launch and a capture read no clipboard.
 //!
 //! The user reads in one language, chosen with the EN / ES / CA switch
-//! beside the field; English at first. Every online request about the
-//! field's text is sent from it. English is looked up offline in its two
+//! beside the field; English at first. The online requests about the
+//! field's text are sent from it, but for a word answered by another
+//! language (below). English is looked up offline in its two
 //! indexes. Spanish and Catalan are each looked up in their own indexes when
 //! the last known state of the indexes says one of that language is there;
 //! otherwise the result is the line that there is no offline dictionary for
-//! the language, and no lookup runs. With Spanish or Catalan chosen and its
+//! the language, and no lookup runs. A lookup that runs tries the chosen
+//! language first and, when it has no entry for the word, the other
+//! languages in the order EN, ES, CA; the first that has the word gives the
+//! article, and the window names it. The word's online requests, alone or
+//! in its sentence, wait for that lookup and are sent from the language
+//! that answered, or from the chosen one when none did; the sentence's
+//! request is sent at once, from the chosen language. Neither the switch
+//! nor the language file changes. With Spanish or Catalan chosen and its
 //! indexes not known to be there, the indexes are checked again, so that an
 //! import done while the application runs is found by the next pick. The
 //! definition of an English sense is OEWN's and is sent from English; that
@@ -236,8 +244,9 @@ enum Event {
         outcome: Outcome<Translated>,
         elapsed: Option<evidence::Elapsed>,
     },
-    /// The lookup started as number `run`, of a word read in `language`,
-    /// ended.
+    /// The lookup started as number `run` ended, answered by `language`:
+    /// the chosen one, or the one that had the word when the chosen one had
+    /// no entry for it.
     Lookup {
         run: u64,
         language: Language,
@@ -378,6 +387,14 @@ struct Session {
     manual: Manual,
     /// The lookup whose outcome is awaited; dropping it cancels the lookup.
     pending: Option<Job>,
+    /// The language that gave the result of the last started lookup, once
+    /// it ended with one; `None` before. The word's online requests are
+    /// sent from it.
+    answered: Option<Language>,
+    /// The online requests of the word, alone or in its sentence, asked
+    /// while its lookup runs: they are sent once it ends, from the language
+    /// that answered.
+    deferred: Vec<Subject>,
     /// The result the window shows and the sense chosen in it.
     shown: Shown,
     /// Weak: the runner must go when the resident state is dropped. Never
@@ -415,8 +432,8 @@ struct Session {
     reading: Reading,
     /// Where the read of the clipboard after it stands.
     copying: Copying,
-    /// The language the user reads: the requests are sent from it, and its
-    /// own indexes alone are looked up offline.
+    /// The language the user reads: the sentence requests are sent from
+    /// it, and its indexes are looked up first.
     language: Language,
     /// Where the reading language is kept across restarts; `None` when the
     /// environment names no configuration directory.
@@ -1040,6 +1057,7 @@ impl Session {
         // Cancels the online requests; whatever they still report has the
         // number of an old text.
         self.translating_word = None;
+        self.deferred.clear();
         self.translating_sentence = None;
         self.online = Kept::of(self.manual.text_number(), self.manual.kind());
         self.render_online();
@@ -1081,6 +1099,7 @@ impl Session {
         let click = self.online.click(index, number, long);
         if click.gave_up {
             self.translating_word = None;
+            self.deferred.clear();
         }
         if click.gave_up_sentence {
             self.translating_sentence = None;
@@ -1119,6 +1138,7 @@ impl Session {
     fn start_lookup(&mut self, run: u64) {
         // The lookup of another word, if it runs, is replaced.
         self.pending = None;
+        self.answered = None;
         self.render_manual();
         let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
             self.show_result(None);
@@ -1132,7 +1152,7 @@ impl Session {
             word,
             language,
             self.indexes,
-            move |outcome| {
+            move |language, outcome| {
                 // On the worker: the UI thread wakes for the event.
                 let _ = sender.unbounded_send(Event::Lookup {
                     run,
@@ -1149,6 +1169,8 @@ impl Session {
             Err(lookup) => {
                 let checks = manual::checks_again(&lookup, language);
                 self.show_result(Some(lookup));
+                // No lookup event comes: what waited for one goes now.
+                self.send_deferred();
                 if checks {
                     self.check = start_check(
                         self.work.upgrade().as_deref(),
@@ -1160,9 +1182,12 @@ impl Session {
         }
     }
 
-    /// A lookup ended. Only the last started one is shown; where it found
-    /// the indexes is shown for every one that read them, and every one
-    /// that was not given up is recorded.
+    /// A lookup ended, answered by `language`. Only the last started one is
+    /// shown, with the line that names the language when it is not the
+    /// chosen one, and the word's online requests asked while it ran are
+    /// sent then, from that language; where it found the indexes is shown
+    /// for every one that read them, and every one that was not given up is
+    /// recorded.
     fn looked_up(&mut self, run: u64, language: Language, outcome: Outcome<Looked>) {
         if let Some(recording) = &self.recording
             && let Some(answered) = evidence::answered(&outcome)
@@ -1180,20 +1205,47 @@ impl Session {
         let Some(input) = self.manual.input() else {
             return;
         };
+        let finished = matches!(outcome, Outcome::Finished(_));
         if let Some(lookup) = manual::result_in(outcome, input.word(), language) {
-            self.show_result(Some(lookup));
+            self.show_answered(Some(lookup), language);
         }
+        // A lookup that did not finish names no language: the chosen one.
+        self.answered = finished.then_some(language);
+        self.send_deferred();
+    }
+
+    /// Sends the word's online requests held while its lookup ran, now that
+    /// no lookup runs, from the language that answered or the chosen one.
+    fn send_deferred(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred);
+        if deferred.is_empty() {
+            return;
+        }
+        for subject in deferred {
+            self.start_translation(subject);
+        }
+        self.render_online();
     }
 
     /// Sends the online request about `subject` that [`Kept`] has just
     /// asked for, as a job in the slot of its subject. A request that could
-    /// not start is a refusal at once.
+    /// not start is a refusal at once. The sentence is sent from the chosen
+    /// language at once. The word, alone or in its sentence, waits while its
+    /// lookup runs, and is then sent from the language that answered, or
+    /// from the chosen one when none did.
     fn start_translation(&mut self, subject: Subject) {
         let text = self.manual.text_number();
         let Some(number) = self.online.request_number(subject) else {
             return;
         };
-        let source = self.language;
+        let word = matches!(subject, Subject::Word(_) | Subject::Lone);
+        if word && self.pending.is_some() {
+            if !self.deferred.contains(&subject) {
+                self.deferred.push(subject);
+            }
+            return;
+        }
+        let source = translate::source_of(subject, self.language, self.answered);
         let request = self
             .manual
             .input()
@@ -1326,8 +1378,14 @@ impl Session {
     /// The one place the shown result changes: the sense chosen in the one
     /// before is forgotten.
     fn show_result(&mut self, lookup: Option<Lookup>) {
+        self.show_answered(lookup, self.language);
+    }
+
+    /// As [`Session::show_result`], for a result that the language `found`
+    /// gave: when it is not the chosen one, an article says so.
+    fn show_answered(&mut self, lookup: Option<Lookup>, found: Language) {
         self.translating_definition = None;
-        self.shown.show(lookup);
+        self.shown.show_elsewhere(lookup, self.language, found);
         self.render_shown();
     }
 
@@ -1452,6 +1510,7 @@ impl Session {
         // Cancels the online requests; whatever they still report has a
         // number that is no longer awaited.
         self.translating_word = None;
+        self.deferred.clear();
         self.translating_sentence = None;
         let submitted = self.online.forget();
         if let Some(run) = self.manual.again() {
@@ -1945,6 +2004,8 @@ fn start(
         current: Rc::downgrade(&handle),
         manual: Manual::default(),
         pending: None,
+        answered: None,
+        deferred: Vec::new(),
         shown: Shown::default(),
         work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),
         articles: articles.clone(),

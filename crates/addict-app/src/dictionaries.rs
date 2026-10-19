@@ -16,8 +16,10 @@
 //! ([`Articles::look_up_in`]): an English word in the two English ones, as
 //! [`Combined`] answers, a Spanish or Catalan word in every index of that
 //! language among the sources of `import::KNOWN`, each under its kind,
-//! through `addict_dictionary::lookup::grouped`. No language falls back to
-//! another.
+//! through `addict_dictionary::lookup::grouped`. A word the chosen language
+//! has no entry for is looked up in the other languages, in the order EN,
+//! ES, CA, and the first that has it answers
+//! ([`Articles::look_up_first`]); the chosen language stays the user's.
 //!
 //! Everything here opens or reads files, so it is called on the work runner
 //! and never on the UI thread. Starting a lookup there is
@@ -161,7 +163,36 @@ pub trait Articles: Send + Sync {
             },
         }
     }
+
+    /// What the source says about `word`, read first in the `chosen`
+    /// language, with the language that answered. The chosen language
+    /// answers whenever it gives anything but [`Answer::NoEntry`]. When it
+    /// has no entry, the other languages are asked in the order of
+    /// [`FALLBACK`], and the first that gives an article answers; one with
+    /// no index, no entry or an unreadable file is passed over. When none
+    /// has the word, the chosen language's answer is given, with where the
+    /// indexes stood at the last lookup.
+    fn look_up_first(&self, chosen: Language, word: &str) -> (Language, Looked) {
+        let mut first = self.look_up_in(chosen, word);
+        if first.answer != Answer::NoEntry {
+            return (chosen, first);
+        }
+        for language in FALLBACK.into_iter().filter(|other| *other != chosen) {
+            let looked = self.look_up_in(language, word);
+            match looked.answer {
+                Answer::Article(_) | Answer::Grouped(_) => return (language, looked),
+                Answer::NoEntry | Answer::NotImported | Answer::Unreadable(_) => {
+                    first.indexes = looked.indexes;
+                }
+            }
+        }
+        (chosen, first)
+    }
 }
+
+/// The order in which the languages are asked for a word the chosen one has
+/// no entry for.
+pub const FALLBACK: [Language; 3] = [Language::En, Language::Es, Language::Ca];
 
 /// The indexes opened so far.
 #[derive(Debug, Default)]
@@ -545,6 +576,12 @@ pub mod tests {
                 ),
             };
             std::fs::write(self.index(source), encode(&contents).expect("encode"))
+                .expect("write the index");
+        }
+
+        /// Writes `contents` as the index of `source`.
+        fn write(&self, source: Source, contents: &Contents) {
+            std::fs::write(self.index(source), encode(contents).expect("encode"))
                 .expect("write the index");
         }
 
@@ -1348,6 +1385,138 @@ pub mod tests {
             panic!("bank");
         };
         assert_eq!(bank.senses, english_bank());
+    }
+
+    /// A data directory with the English indexes, a Spanish Russian index
+    /// with `cerrar` and `banco`, and, when `catalan`, a Catalan Russian
+    /// index with `banco` and `banc`.
+    fn three_languages(tag: &str, catalan: bool) -> DataDir {
+        let dir = DataDir::new(tag);
+        dir.import(Source::Oewn);
+        dir.import(Source::Freedict);
+        dir.write(
+            Source::WikdictEsRu,
+            &headwords(
+                "es-ru",
+                &[("banco", &[], &["банк"]), ("cerrar", &[], &["закрыть"])],
+            ),
+        );
+        if catalan {
+            dir.write(
+                Source::WikdictCaRu,
+                &headwords(
+                    "ca-ru",
+                    &[("banc", &[], &["скамья"]), ("banco", &[], &["лавка"])],
+                ),
+            );
+        }
+        dir
+    }
+
+    /// The Russian of a grouped answer.
+    fn russian_of(answer: &Answer) -> Option<Vec<String>> {
+        match answer {
+            Answer::Grouped(grouped) => grouped.russian.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_word_the_chosen_language_lacks_is_answered_by_the_first_that_has_it() {
+        let dir = three_languages("fallback", true);
+        let dictionaries = dir.dictionaries();
+        // `cerró` is Spanish only, through the Spanish dictionary-form rules.
+        assert_eq!(
+            dictionaries.look_up_in(Language::Ca, "cerró").answer,
+            Answer::NoEntry
+        );
+        let (language, looked) = dictionaries.look_up_first(Language::Ca, "cerró");
+        assert_eq!(language, Language::Es);
+        assert_eq!(russian_of(&looked.answer), Some(texts(&["закрыть"])));
+        assert_eq!(looked, dictionaries.look_up_in(Language::Es, "cerró"));
+        // An English word read in Spanish or Catalan: English answers first.
+        for chosen in [Language::Es, Language::Ca] {
+            let (language, looked) = dictionaries.look_up_first(chosen, "went");
+            assert_eq!(language, Language::En, "{chosen:?}");
+            assert_eq!(looked, dictionaries.look_up("went"), "{chosen:?}");
+        }
+        // A Catalan word read in English.
+        let (language, looked) = dictionaries.look_up_first(Language::En, "banc");
+        assert_eq!(language, Language::Ca);
+        assert_eq!(russian_of(&looked.answer), Some(texts(&["скамья"])));
+    }
+
+    #[test]
+    fn the_chosen_language_answers_a_word_it_has() {
+        let dir = three_languages("chosen-wins", true);
+        let dictionaries = dir.dictionaries();
+        let (language, looked) = dictionaries.look_up_first(Language::Es, "banco");
+        assert_eq!(language, Language::Es);
+        assert_eq!(russian_of(&looked.answer), Some(texts(&["банк"])));
+        let (language, looked) = dictionaries.look_up_first(Language::Ca, "banco");
+        assert_eq!(language, Language::Ca);
+        assert_eq!(russian_of(&looked.answer), Some(texts(&["лавка"])));
+        // English with the word: the same as the English lookup.
+        for word in ["bank", "went", "Bank"] {
+            assert_eq!(
+                dictionaries.look_up_first(Language::En, word),
+                (Language::En, dictionaries.look_up(word)),
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_no_language_has_is_the_chosen_language_s_miss() {
+        let dir = three_languages("nobody", true);
+        let dictionaries = dir.dictionaries();
+        for chosen in Language::ALL {
+            let (language, looked) = dictionaries.look_up_first(chosen, "zzz");
+            assert_eq!(language, chosen);
+            assert_eq!(looked.answer, Answer::NoEntry);
+            assert_eq!(looked.indexes, dictionaries.indexes());
+        }
+        // English with no Spanish or Catalan index: as before.
+        let dir = DataDir::new("english-only");
+        dir.import(Source::Oewn);
+        dir.import(Source::Freedict);
+        let dictionaries = dir.dictionaries();
+        assert_eq!(
+            dictionaries.look_up_first(Language::En, "zzz"),
+            (Language::En, dictionaries.look_up("zzz"))
+        );
+    }
+
+    #[test]
+    fn a_language_with_no_index_is_passed_over() {
+        let dir = DataDir::new("no-spanish-fallback");
+        dir.import(Source::Oewn);
+        dir.import(Source::Freedict);
+        dir.write(
+            Source::WikdictCaRu,
+            &headwords("ca-ru", &[("banc", &[], &["скамья"])]),
+        );
+        let dictionaries = dir.dictionaries();
+        let (language, looked) = dictionaries.look_up_first(Language::Ca, "cerró");
+        assert_eq!(language, Language::Ca);
+        assert_eq!(looked.answer, Answer::NoEntry);
+        assert_eq!(looked.indexes.spanish, State::Missing);
+        // A damaged file of another language is passed over too.
+        std::fs::write(dir.index(Source::WikdictEsRu), b"no index").expect("write");
+        let (language, looked) = dictionaries.look_up_first(Language::Ca, "cerró");
+        assert_eq!(language, Language::Ca);
+        assert_eq!(looked.answer, Answer::NoEntry);
+        assert_eq!(looked.indexes.spanish, State::Unreadable);
+    }
+
+    #[test]
+    fn an_unreadable_chosen_language_falls_back_to_none() {
+        let dir = three_languages("chosen-unreadable", true);
+        std::fs::write(dir.index(Source::KaikkiEs), b"no index").expect("write");
+        let dictionaries = dir.dictionaries();
+        let (language, looked) = dictionaries.look_up_first(Language::Es, "went");
+        assert_eq!(language, Language::Es);
+        assert_eq!(looked.answer, Answer::Unreadable(SPANISH));
     }
 
     #[test]
