@@ -89,6 +89,57 @@ pub fn parse(bytes: &[u8], source: &str) -> Result<Contents, ParseError> {
     })
 }
 
+/// The stress marks a Russian headword may be written with: the combining
+/// acute (U+0301) and grave (U+0300) accents.
+pub const STRESS_MARKS: [char; 2] = ['\u{0301}', '\u{0300}'];
+
+/// `word` without its [`STRESS_MARKS`]; `кни́га` is `книга`. A grave
+/// stress written precomposed, as in the NFC files, is dropped too: `ѐ`,
+/// `ѝ`, `Ѐ` and `Ѝ` (U+0450, U+045D, U+0400, U+040D) are written `е`, `и`,
+/// `Е` and `И`; `бѝотехнология` is `биотехнология`.
+pub fn unstressed_word(word: &str) -> String {
+    word.chars()
+        .filter(|letter| !STRESS_MARKS.contains(letter))
+        .map(|letter| match letter {
+            '\u{0450}' => 'е',
+            '\u{045D}' => 'и',
+            '\u{0400}' => 'Е',
+            '\u{040D}' => 'И',
+            other => other,
+        })
+        .collect()
+}
+
+/// The `contents` of a file of Russian headwords, each headword keyed
+/// without its [`STRESS_MARKS`]. Headwords that become one key are one
+/// headword: its translations are theirs, each once, in the order the
+/// headwords had (byte order of the written headword), and within each in
+/// its order. The headwords stay in byte order, each once. Nothing else of
+/// the contents changes; a file of other headwords is not given here.
+pub fn unstressed(contents: Contents) -> Contents {
+    let mut merged: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for headword in contents.headwords {
+        let translations = merged.entry(unstressed_word(&headword.word)).or_default();
+        for translation in headword.translations {
+            if !translations.contains(&translation) {
+                translations.push(translation);
+            }
+        }
+    }
+    Contents {
+        headwords: merged
+            .into_iter()
+            .filter(|(word, _)| !word.is_empty())
+            .map(|(word, translations)| Headword {
+                word,
+                senses: Vec::new(),
+                translations,
+            })
+            .collect(),
+        ..contents
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -268,5 +319,60 @@ pub(crate) mod tests {
         let number = builder.leaf(&[row(1, "spa/x", None, Value::Integer(3), "банк")]);
         let bytes = builder.finish(&[("table", TABLE, number, SQL)]);
         assert!(error(&bytes).contains("not text"));
+    }
+
+    fn headword(word: &str, translations: &[&str]) -> Headword {
+        Headword {
+            word: word.to_owned(),
+            senses: Vec::new(),
+            translations: texts(translations),
+        }
+    }
+
+    #[test]
+    fn russian_headwords_are_keyed_without_stress_marks_and_merged() {
+        let contents = Contents {
+            source: "wikdict-ru-en".to_owned(),
+            senses: Vec::new(),
+            headwords: vec![
+                headword("биотехнология", &["biotechnology"]),
+                headword("б\u{045D}отехнология", &["biotech", "biotechnology"]),
+                headword("за\u{0301}мок", &["castle", "palace"]),
+                headword("замо\u{0301}к", &["lock", "castle"]),
+                headword("замок", &["padlock"]),
+                headword("зверь", &["beast"]),
+                headword("кни\u{0301}га", &["book"]),
+                headword("что\u{0300}-то", &["something"]),
+                headword("ёж", &["hedgehog"]),
+            ],
+            forms: Vec::new(),
+        };
+        let unstressed = unstressed(contents);
+        assert_eq!(unstressed.source, "wikdict-ru-en");
+        assert_eq!(
+            translations(&unstressed),
+            [
+                ("биотехнология", texts(&["biotechnology", "biotech"])),
+                ("замок", texts(&["castle", "palace", "lock", "padlock"])),
+                ("зверь", texts(&["beast"])),
+                ("книга", texts(&["book"])),
+                ("что-то", texts(&["something"])),
+                ("ёж", texts(&["hedgehog"])),
+            ]
+        );
+        // Sorted in byte order, each once.
+        let words: Vec<&str> = unstressed
+            .headwords
+            .iter()
+            .map(|headword| headword.word.as_str())
+            .collect();
+        assert!(
+            words
+                .windows(2)
+                .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+        );
+        assert_eq!(unstressed_word("кни\u{0301}га"), "книга");
+        assert_eq!(unstressed_word("bank"), "bank");
+        assert_eq!(unstressed_word("\u{0400}\u{0450}\u{040D}\u{045D}"), "ЕеИи");
     }
 }

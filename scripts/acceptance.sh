@@ -33,7 +33,7 @@ build='cargo build --release -p addict-app -p addict-exp4'
 data=${XDG_DATA_HOME:-}
 [[ $data == /* ]] || data=$HOME/.local/share
 entry="$data/applications/dev.addict.Addict.desktop"
-# Each index with the published file it is imported from, in the order of import::KNOWN.
+# Each index with the published file it is imported from: the ten EN/ES/CA indexes, in the order of import::KNOWN.
 indexes=(oewn freedict wikdict-es-ru kaikki-es-Espanol omw-es kaikki-en-Spanish
   wikdict-ca-ru dbnary-ca sinonims-cat kaikki-en-Catalan)
 indexes=("${indexes[@]/#/"$data/addict/"}")

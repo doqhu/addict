@@ -433,6 +433,12 @@ pub enum Lookup {
         language: Language,
         grouped: Grouped,
     },
+    /// The Russian index of `language` gave these translations of a
+    /// Russian word, never empty; the article is this list alone.
+    FromRussian {
+        language: Language,
+        translations: Vec<String>,
+    },
     /// The dictionary has no entry for `word`.
     NoEntry { word: String },
     /// No offline dictionary of the reading language is installed, so
@@ -440,6 +446,9 @@ pub enum Lookup {
     NoDictionary(Language),
     /// No index is open: there is nothing to look `word` up in.
     NotImported { word: String },
+    /// No Russian index of `language` is imported, so a Russian word has
+    /// nothing to be looked up in.
+    NoRussianDictionary(Language),
     /// An open index could not be read, so the word has no answer.
     Unreadable(IndexFile),
     /// The lookup ended without an answer.
@@ -521,6 +530,28 @@ const NO_SYNONYMS: &str = "The dictionary gives no synonyms for this sense.";
 /// What stands before the translations. They belong to the word, not to a
 /// sense.
 const RUSSIAN_LABEL: &str = "Russian, for the word as a whole:";
+
+/// What stands before the translations of a Russian word into `language`,
+/// as [`RUSSIAN_LABEL`] stands before those of a word into Russian. No
+/// wildcard arm, as in [`definitions_label`].
+fn from_russian_label(language: Language) -> &'static str {
+    match language {
+        Language::En => "English, for the word as a whole:",
+        Language::Es => "Spanish, for the word as a whole:",
+        Language::Ca => "Catalan, for the word as a whole:",
+    }
+}
+
+/// The line of a Russian word read with no Russian index of `language`
+/// imported, as [`missing_russian`] is for the other way. No wildcard arm,
+/// as in [`definitions_label`].
+fn missing_from_russian(language: Language) -> &'static str {
+    match language {
+        Language::En => "No Russian-English dictionary is imported.",
+        Language::Es => "No Russian-Spanish dictionary is imported.",
+        Language::Ca => "No Russian-Catalan dictionary is imported.",
+    }
+}
 
 /// The line of an article without translations.
 const NO_TRANSLATION: &str = "The dictionary has no Russian translation of this word.";
@@ -753,10 +784,13 @@ pub fn choice_texts<'a>(
     let texts = lookup_texts(lookup, choice, definition, key_file);
     match lookup {
         Lookup::Article(_) | Lookup::Grouped { .. } => ResultTexts { elsewhere, ..texts },
-        Lookup::Pending
+        // A Russian word is answered by the chosen language only.
+        Lookup::FromRussian { .. }
+        | Lookup::Pending
         | Lookup::NoEntry { .. }
         | Lookup::NoDictionary(_)
         | Lookup::NotImported { .. }
+        | Lookup::NoRussianDictionary(_)
         | Lookup::Unreadable(_)
         | Lookup::Unfinished => texts,
     }
@@ -791,6 +825,18 @@ fn lookup_texts<'a>(
         Lookup::Grouped { language, grouped } => {
             grouped_texts(*language, grouped, choice, definition, key_file)
         }
+        // The list of translations alone: no senses, synonyms or glosses.
+        Lookup::FromRussian {
+            language,
+            translations,
+        } => ResultTexts {
+            line: None,
+            translations: Some(Listed::Items {
+                label: from_russian_label(*language),
+                items: translations,
+            }),
+            ..line(Cow::Borrowed(""))
+        },
         Lookup::NoEntry { word } => line(Cow::Owned(format!(
             "{NO_ENTRY_BEFORE}{word}{NO_ENTRY_AFTER}"
         ))),
@@ -801,6 +847,9 @@ fn lookup_texts<'a>(
         Lookup::NotImported { word } => line(Cow::Owned(format!(
             "{NOT_IMPORTED_BEFORE}{word}{NOT_IMPORTED_AFTER}{IMPORT_COMMAND}."
         ))),
+        Lookup::NoRussianDictionary(language) => {
+            line(Cow::Borrowed(missing_from_russian(*language)))
+        }
         Lookup::Unreadable(file) => line(Cow::Owned(format!(
             "{UNREADABLE_BEFORE}{}",
             unreadable_text(*file)
@@ -2055,15 +2104,18 @@ mod tests {
             },
             Lookup::Unreadable(OEWN),
             Lookup::Unfinished,
+            Lookup::NoRussianDictionary(Language::Ca),
         ];
         for lookup in &all {
             match lookup {
                 Lookup::Pending
                 | Lookup::Article(_)
                 | Lookup::Grouped { .. }
+                | Lookup::FromRussian { .. }
                 | Lookup::NoEntry { .. }
                 | Lookup::NoDictionary(_)
                 | Lookup::NotImported { .. }
+                | Lookup::NoRussianDictionary(_)
                 | Lookup::Unreadable(_)
                 | Lookup::Unfinished => {}
             }
@@ -2149,6 +2201,48 @@ mod tests {
                 assert_eq!(rows(&lookup, chosen).is_empty(), !article, "{lookup:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_russian_word_shows_its_translations_alone_under_the_language() {
+        for (language, label) in [
+            (Language::En, "English, for the word as a whole:"),
+            (Language::Es, "Spanish, for the word as a whole:"),
+            (Language::Ca, "Catalan, for the word as a whole:"),
+        ] {
+            let lookup = Lookup::FromRussian {
+                language,
+                translations: vec!["perro".to_owned(), "cachorro".to_owned()],
+            };
+            let texts = result_texts(&lookup, None, None, None);
+            assert_eq!(texts.line, None);
+            assert_eq!(texts.hint, None);
+            assert!(texts.senses.is_empty());
+            assert_eq!(texts.word_synonyms, None);
+            assert_eq!(texts.glosses, None);
+            assert_eq!(texts.gloss, None);
+            assert_eq!(
+                details(&lookup, None),
+                ["", &format!("{label} perro, cachorro")]
+            );
+            // No sense to choose, and no line about another language.
+            let mut shown = Shown::default();
+            shown.show_elsewhere(Some(lookup.clone()), language, language);
+            assert!(!shown.choose(0));
+            assert_eq!(shown_texts(&shown), texts);
+        }
+        assert_eq!(
+            details(&Lookup::NoRussianDictionary(Language::Ca), None),
+            ["No Russian-Catalan dictionary is imported."]
+        );
+        assert_eq!(
+            details(&Lookup::NoRussianDictionary(Language::Es), None),
+            ["No Russian-Spanish dictionary is imported."]
+        );
+        assert_eq!(
+            details(&Lookup::NoRussianDictionary(Language::En), None),
+            ["No Russian-English dictionary is imported."]
+        );
     }
 
     #[test]

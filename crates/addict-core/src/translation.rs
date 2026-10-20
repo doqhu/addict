@@ -44,6 +44,15 @@ impl Source {
     }
 }
 
+/// Whether `word` is Russian: it has a letter of the Cyrillic block,
+/// U+0400 to U+04FF. It is the one rule that routes a picked word to the
+/// Russian dictionaries; nothing else about the word is weighed. A word of
+/// no Cyrillic letter is read in the chosen [`Source`] as always.
+pub fn is_russian(word: &str) -> bool {
+    word.chars()
+        .any(|character| ('\u{0400}'..='\u{04FF}').contains(&character))
+}
+
 /// What is asked of a translator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
@@ -139,13 +148,39 @@ mod tests {
         task::{Context, Poll, Waker},
     };
 
-    use super::{Canned, Refusal, Request, Source, Translating, Translator};
+    use super::{Canned, Refusal, Request, Source, Translating, Translator, is_russian};
 
     fn request() -> Request {
         Request {
             text: "bank".to_owned(),
             context: Some("I sat on the bank of the river.".to_owned()),
             source: Source::En,
+        }
+    }
+
+    #[test]
+    fn a_word_with_a_cyrillic_letter_is_russian_and_no_other_is() {
+        for russian in [
+            "собака",
+            "«Дом»,",
+            "ёж",
+            "Ёж",
+            "e-мейл",
+            "\u{0400}",
+            "\u{04FF}",
+        ] {
+            assert!(is_russian(russian), "{russian:?}");
+        }
+        for other in [
+            "bank",
+            "cerró",
+            "col·lecció",
+            "",
+            "…",
+            "\u{03FF}",
+            "\u{0500}",
+        ] {
+            assert!(!is_russian(other), "{other:?}");
         }
     }
 

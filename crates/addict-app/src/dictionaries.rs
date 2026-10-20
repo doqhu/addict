@@ -21,6 +21,13 @@
 //! ES, CA, and the first that has it answers
 //! ([`Articles::look_up_first`]); the chosen language stays the user's.
 //!
+//! A Russian word is looked up in the one index of Russian headwords
+//! translated into the chosen language ([`Articles::look_up_russian`]), and
+//! in nothing else: no other language is asked for it, and no other index
+//! for a word read in a language. The Russian indexes are opened when they
+//! are first asked, and are not among [`Indexes`]: the English line and the
+//! states of Spanish and Catalan do not change with them.
+//!
 //! Everything here opens or reads files, so it is called on the work runner
 //! and never on the UI thread. Starting a lookup there is
 //! [`manual`](crate::manual)'s; the texts are [`view`](crate::view)'s.
@@ -124,6 +131,9 @@ pub enum Answer {
     /// What the open indexes of a language beside English give for the
     /// word, by kind; one of them at least has it.
     Grouped(Grouped),
+    /// The translations the Russian index of the chosen language gives for
+    /// a Russian word, each once; never empty.
+    FromRussian(Vec<String>),
     /// An index is open and none has the word or a dictionary form of it.
     NoEntry,
     /// Neither dictionary is imported: there is nothing to look the word up
@@ -164,6 +174,19 @@ pub trait Articles: Send + Sync {
         }
     }
 
+    /// What the source says about the Russian `word` translated into
+    /// `into`, from the Russian index of that language alone: no other
+    /// index and no other language is asked. [`Answer::NotImported`] when
+    /// that index is not there, [`Answer::Unreadable`] naming it when it
+    /// cannot be read. A source without Russian indexes has none imported.
+    fn look_up_russian(&self, into: Language, word: &str) -> Looked {
+        let _ = (into, word);
+        Looked {
+            answer: Answer::NotImported,
+            indexes: self.indexes(),
+        }
+    }
+
     /// What the source says about `word`, read first in the `chosen`
     /// language, with the language that answered. The chosen language
     /// answers whenever it gives anything but [`Answer::NoEntry`]. When it
@@ -180,7 +203,10 @@ pub trait Articles: Send + Sync {
         for language in FALLBACK.into_iter().filter(|other| *other != chosen) {
             let looked = self.look_up_in(language, word);
             match looked.answer {
-                Answer::Article(_) | Answer::Grouped(_) => return (language, looked),
+                // A lookup in a language never gives a Russian answer.
+                Answer::Article(_) | Answer::Grouped(_) | Answer::FromRussian(_) => {
+                    return (language, looked);
+                }
                 Answer::NoEntry | Answer::NotImported | Answer::Unreadable(_) => {
                     first.indexes = looked.indexes;
                 }
@@ -203,6 +229,9 @@ struct Opened {
     /// The sources beside English whose file is there and could not be
     /// opened by the last check, or failed a lookup since.
     unreadable: Vec<Source>,
+    /// The open indexes of Russian headwords, by source: each is opened by
+    /// the first lookup that asks it, and closed when it fails one.
+    russian: Vec<(Source, Index)>,
 }
 
 impl Opened {
@@ -212,13 +241,13 @@ impl Opened {
         if self
             .others
             .iter()
-            .any(|(source, _)| source.language() == language)
+            .any(|(source, _)| source.language() == Some(language))
         {
             State::Open
         } else if self
             .unreadable
             .iter()
-            .any(|source| source.language() == language)
+            .any(|source| source.language() == Some(language))
         {
             State::Unreadable
         } else {
@@ -238,11 +267,13 @@ impl Opened {
 }
 
 /// The known sources of the languages beside English, each once, in the
-/// order of `import::KNOWN`.
+/// order of `import::KNOWN`. A source of Russian headwords reads no
+/// language and is not one of them.
 fn other_sources() -> Vec<Source> {
     let mut sources = Vec::new();
     for known in import::KNOWN {
-        if known.source.language() != Language::En && !sources.contains(&known.source) {
+        let other = matches!(known.source.language(), Some(Language::Es | Language::Ca));
+        if other && !sources.contains(&known.source) {
             sources.push(known.source);
         }
     }
@@ -355,7 +386,7 @@ impl Dictionaries {
         if let Some(source) = opened
             .unreadable
             .iter()
-            .find(|source| source.language() == language)
+            .find(|source| source.language() == Some(language))
         {
             return Looked {
                 answer: Answer::Unreadable(IndexFile::of(*source)),
@@ -365,7 +396,7 @@ impl Dictionaries {
         // In the order of `import::KNOWN`, whatever order they were opened in.
         let asked: Vec<(Kind, &Index)> = other_sources()
             .into_iter()
-            .filter(|source| source.language() == language)
+            .filter(|source| source.language() == Some(language))
             .filter_map(|source| {
                 let (_, index) = opened.others.iter().find(|(kept, _)| *kept == source)?;
                 Some((source.kind(), index))
@@ -382,7 +413,7 @@ impl Dictionaries {
             Ok(None) => Answer::NoEntry,
             Err(error) => {
                 let failed = other_sources().into_iter().find(|source| {
-                    source.language() == language
+                    source.language() == Some(language)
                         && self.path(*source).as_deref() == Some(error_path(&error))
                 });
                 // Every index has the path of its source, so one is found.
@@ -397,6 +428,39 @@ impl Dictionaries {
             indexes: opened.languages(indexes),
         }
     }
+
+    /// What the Russian index translated into `into` says about the Russian
+    /// `word`; see [`Articles::look_up_russian`]. It is opened when it is
+    /// not open yet; one that could not be read is closed, and opened again
+    /// by the next call. Where the other indexes stand is checked as by
+    /// every call, and the Russian index changes none of it.
+    fn look_up_russian_in(&self, into: Language, word: &str) -> Looked {
+        let mut opened = self.open.lock().unwrap_or_else(PoisonError::into_inner);
+        let indexes = self.open_missing(&mut opened);
+        let source = Source::from_russian(into);
+        let looked = |answer| Looked { answer, indexes };
+        let open = opened.russian.iter().any(|(kept, _)| *kept == source);
+        let mut index = None;
+        match self.open(source, open, |opened| index = Some(opened)) {
+            State::Open => {}
+            State::Missing => return looked(Answer::NotImported),
+            State::Unreadable => return looked(Answer::Unreadable(IndexFile::of(source))),
+        }
+        if let Some(index) = index {
+            opened.russian.push((source, index));
+        }
+        let Some((_, index)) = opened.russian.iter().find(|(kept, _)| *kept == source) else {
+            return looked(Answer::NotImported);
+        };
+        looked(match lookup::russian(index, word) {
+            Ok(Some(translations)) => Answer::FromRussian(translations),
+            Ok(None) => Answer::NoEntry,
+            Err(_) => {
+                opened.russian.retain(|(kept, _)| *kept != source);
+                Answer::Unreadable(IndexFile::of(source))
+            }
+        })
+    }
 }
 
 /// The first open source of `language`, the one to name when an error
@@ -406,7 +470,7 @@ fn asked_first(opened: &Opened, language: Language) -> Source {
         .others
         .iter()
         .map(|(source, _)| *source)
-        .find(|source| source.language() == language)
+        .find(|source| source.language() == Some(language))
         .unwrap_or(Source::KaikkiEs)
 }
 
@@ -422,6 +486,10 @@ impl Articles for Dictionaries {
             Language::En => self.look_up(word),
             Language::Es | Language::Ca => self.look_up_language(language, word),
         }
+    }
+
+    fn look_up_russian(&self, into: Language, word: &str) -> Looked {
+        self.look_up_russian_in(into, word)
     }
 
     fn look_up(&self, word: &str) -> Looked {
@@ -447,7 +515,10 @@ impl Articles for Dictionaries {
                         | Source::WikdictCaRu
                         | Source::DbnaryCa
                         | Source::SinonimsCat
-                        | Source::KaikkiEnCatalan => {
+                        | Source::KaikkiEnCatalan
+                        | Source::WikdictRuEn
+                        | Source::WikdictRuEs
+                        | Source::WikdictRuCa => {
                             indexes.definitions = State::Unreadable;
                             Answer::Unreadable(definitions)
                         }
@@ -574,6 +645,24 @@ pub mod tests {
                     "ca-en",
                     &[("col·lecció", &[("collection", &[]), ("set", &[])], &[])],
                 ),
+                Source::WikdictRuEn => headwords(
+                    "ru-en",
+                    &[
+                        ("Москва", &[], &["Moscow", "Moskva"]),
+                        ("банк", &[], &["bank"]),
+                    ],
+                ),
+                Source::WikdictRuEs => headwords(
+                    "ru-es",
+                    &[
+                        ("собака", &[], &["perro", "cachorro", "arroba"]),
+                        ("дом", &[], &["casa", "hogar", "domicilio"]),
+                        // A Spanish word as a Russian headword: never read
+                        // for a word read in Spanish.
+                        ("banco", &[], &["no"]),
+                    ],
+                ),
+                Source::WikdictRuCa => headwords("ru-ca", &[("ёж", &[], &["eriçó"])]),
             };
             std::fs::write(self.index(source), encode(&contents).expect("encode"))
                 .expect("write the index");
@@ -797,7 +886,7 @@ pub mod tests {
         assert!(
             other_sources()
                 .iter()
-                .any(|source| source.language() == Language::Ca)
+                .any(|source| source.language() == Some(Language::Ca))
         );
     }
 
@@ -1325,7 +1414,7 @@ pub mod tests {
         dir.import(Source::Oewn);
         dir.import(Source::Freedict);
         for source in import::KNOWN.iter().map(|known| known.source) {
-            if source.language() != Language::En {
+            if matches!(source.language(), Some(Language::Es | Language::Ca)) {
                 dir.import(source);
             }
         }
@@ -1336,7 +1425,7 @@ pub mod tests {
         assert_eq!(indexes.files(), Indexes::OPEN.files());
         let catalan: Vec<_> = other_sources()
             .into_iter()
-            .filter(|source| source.language() == Language::Ca)
+            .filter(|source| source.language() == Some(Language::Ca))
             .map(|source| source.kind())
             .collect();
         assert_eq!(
@@ -1517,6 +1606,138 @@ pub mod tests {
         let (language, looked) = dictionaries.look_up_first(Language::Es, "went");
         assert_eq!(language, Language::Es);
         assert_eq!(looked.answer, Answer::Unreadable(SPANISH));
+    }
+
+    /// A data directory with every index of the three reading languages
+    /// and the Russian indexes of `russian`.
+    fn with_russian(tag: &str, russian: &[Source]) -> DataDir {
+        let dir = DataDir::new(tag);
+        for known in import::KNOWN {
+            if known.source.language().is_some() {
+                dir.import(known.source);
+            }
+        }
+        for source in russian {
+            dir.import(*source);
+        }
+        dir
+    }
+
+    const RUSSIAN: [Source; 3] = [
+        Source::WikdictRuEn,
+        Source::WikdictRuEs,
+        Source::WikdictRuCa,
+    ];
+
+    #[test]
+    fn a_russian_word_is_answered_by_the_russian_index_of_the_chosen_language() {
+        let without = with_russian("russian-without", &[])
+            .dictionaries()
+            .indexes();
+        let dir = with_russian("russian", &RUSSIAN);
+        let dictionaries = dir.dictionaries();
+        let indexes = dictionaries.indexes();
+        // The Russian indexes change none of the states.
+        assert_eq!(indexes, without);
+        let russian = |into, word| dictionaries.look_up_russian(into, word);
+        for (into, word, translations) in [
+            (Language::Es, "собака", &["perro", "cachorro", "arroba"][..]),
+            (Language::En, "Москва", &["Moscow", "Moskva"]),
+            (Language::Ca, "еж", &["eriçó"]),
+            (Language::Es, "«Дом»,", &["casa", "hogar", "domicilio"]),
+        ] {
+            let looked = russian(into, word);
+            assert_eq!(
+                looked.answer,
+                Answer::FromRussian(texts(translations)),
+                "{word}"
+            );
+            assert_eq!(looked.indexes, indexes, "{word}");
+        }
+        // Only the chosen language answers: no fallback to the others.
+        assert_eq!(russian(Language::En, "собака").answer, Answer::NoEntry);
+        assert_eq!(russian(Language::Ca, "Москва").answer, Answer::NoEntry);
+        assert_eq!(russian(Language::Es, "собаки").answer, Answer::NoEntry);
+        // A word read in a language never reaches a Russian index.
+        assert_eq!(
+            dictionaries.look_up_in(Language::Es, "собака").answer,
+            Answer::NoEntry
+        );
+        let Answer::Grouped(banco) = dictionaries.look_up_in(Language::Es, "banco").answer else {
+            panic!("banco");
+        };
+        assert_eq!(banco.russian, Some(texts(&["банк"])));
+        assert!(
+            !other_sources()
+                .iter()
+                .any(|source| RUSSIAN.contains(source))
+        );
+    }
+
+    #[test]
+    fn a_russian_word_without_the_index_of_the_chosen_language_has_nothing_to_be_looked_up_in() {
+        let dir = with_russian(
+            "russian-missing",
+            &[Source::WikdictRuEs, Source::WikdictRuEn],
+        );
+        let dictionaries = dir.dictionaries();
+        let looked = dictionaries.look_up_russian(Language::Ca, "собака");
+        assert_eq!(looked.answer, Answer::NotImported);
+        assert_eq!(looked.indexes, dictionaries.indexes());
+        assert_eq!(
+            Dictionaries::new(None)
+                .look_up_russian(Language::Es, "собака")
+                .answer,
+            Answer::NotImported
+        );
+        // Imported while resident: found by the next call.
+        dir.import(Source::WikdictRuCa);
+        assert_eq!(
+            dictionaries.look_up_russian(Language::Ca, "ёж").answer,
+            Answer::FromRussian(texts(&["eriçó"]))
+        );
+    }
+
+    #[test]
+    fn a_damaged_russian_index_is_named_closed_and_opened_again() {
+        let file = IndexFile {
+            index: "wikdict-ru-en.index",
+            published: "ru-en.sqlite3",
+        };
+        assert_eq!(IndexFile::of(Source::WikdictRuEn), file);
+        let dir = with_russian("russian-damaged", &[]);
+        std::fs::write(dir.index(Source::WikdictRuEn), b"not an index").expect("write");
+        let dictionaries = dir.dictionaries();
+        let states = dictionaries.indexes();
+        let looked = dictionaries.look_up_russian(Language::En, "Москва");
+        assert_eq!(looked.answer, Answer::Unreadable(file));
+        assert_eq!(looked.indexes, states);
+        dir.import(Source::WikdictRuEn);
+        assert!(matches!(
+            dictionaries.look_up_russian(Language::En, "Москва").answer,
+            Answer::FromRussian(_)
+        ));
+        // Broken while open: named, closed, and read again once imported.
+        std::fs::write(dir.index(Source::WikdictRuEn), b"").expect("truncate");
+        assert_eq!(
+            dictionaries.look_up_russian(Language::En, "Москва").answer,
+            Answer::Unreadable(file)
+        );
+        let old = dir.path().join("old.index");
+        std::fs::rename(dir.index(Source::WikdictRuEn), &old).expect("rename");
+        dir.import(Source::WikdictRuEn);
+        assert_eq!(
+            dictionaries.look_up_russian(Language::En, "Москва").answer,
+            Answer::FromRussian(texts(&["Moscow", "Moskva"]))
+        );
+        // The English line is not about it.
+        assert!(
+            looked
+                .indexes
+                .files()
+                .iter()
+                .all(|(named, _)| *named != file)
+        );
     }
 
     #[test]

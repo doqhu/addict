@@ -190,6 +190,25 @@ impl Kept {
         submitted
     }
 
+    /// The request about `subject`, just asked for, is not sent after all:
+    /// it is no longer awaited, and the word, the lone word or the sentence
+    /// has no online text, as if it had never been asked. A sentence whose
+    /// answer is already kept keeps it.
+    pub fn withdraw(&mut self, subject: Subject) {
+        match subject {
+            Subject::Word(index) => {
+                self.words.remove(&index);
+            }
+            Subject::Lone => self.lone = None,
+            Subject::Sentence(number) => {
+                if self.sentences.get(&number) == Some(&Whole::Asked(Online::Pending)) {
+                    self.sentences.remove(&number);
+                }
+            }
+        }
+        self.pending.remove(&subject);
+    }
+
     /// Assigns a fresh identity whenever a request is started or retried.
     fn begin(&mut self, subject: Subject) {
         self.next_request += 1;
@@ -292,6 +311,35 @@ mod tests {
         assert!(!lone.forget());
         assert!(lone.submit());
         assert!(lone.forget());
+        assert_eq!(lone.shown(None), OnlineTexts::default());
+        assert!(lone.submit());
+    }
+
+    #[test]
+    fn a_withdrawn_request_is_as_if_never_asked_and_an_answer_stays() {
+        let mut kept = sentence();
+        kept.click(BANK, 0, false);
+        kept.withdraw(Subject::Word(BANK));
+        kept.withdraw(Subject::Sentence(0));
+        assert_eq!(kept.request_number(Subject::Word(BANK)), None);
+        assert_eq!(kept.request_number(Subject::Sentence(0)), None);
+        assert_eq!(kept.shown(Some(BANK)), OnlineTexts::default());
+        // Asked again by the next click.
+        assert_eq!(
+            kept.click(BANK, 0, false).ask,
+            [Subject::Word(BANK), Subject::Sentence(0)]
+        );
+        // A sentence already answered keeps its answer.
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), translated("Я сидел.")));
+        kept.withdraw(Subject::Sentence(0));
+        assert_eq!(
+            kept.shown(Some(BANK)).sentence,
+            Some(&Whole::Asked(translated("Я сидел.")))
+        );
+
+        let mut lone = Kept::of(TEXT, Kind::Lone);
+        assert!(lone.submit());
+        lone.withdraw(Subject::Lone);
         assert_eq!(lone.shown(None), OnlineTexts::default());
         assert!(lone.submit());
     }
