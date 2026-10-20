@@ -146,6 +146,17 @@
 //! line saying so and Retry. Retry starts a new attempt; a bound shortcut
 //! removes the line.
 //!
+//! Before GTK starts, the resident lets the Vulkan loader list only the
+//! driver of the GPU that drives the display, so that the first window does
+//! not wake a runtime-suspended discrete GPU: when sysfs shows two cards or
+//! more and exactly one is marked `boot_vga`, an Intel or AMD one, it sets
+//! `VK_LOADER_DRIVERS_SELECT` to that vendor's drivers, and in any other
+//! case it sets nothing. A variable already in the environment is kept. One
+//! line in `vulkan-drivers` of the configuration directory, next to the
+//! DeepL key, overrides the choice: `all` sets nothing, and any other line,
+//! such as `nvidia_icd*`, is set as it is. The other commands do not touch
+//! the variable.
+//!
 //! With the hidden `--evidence <FILE> --origin <APPLICATION>` the application
 //! appends measurement evidence to the file: the start of the session and, for
 //! each press, the activation, the presentation of the frame that follows it
@@ -166,7 +177,8 @@
 //! as a source of articles are [`dictionaries`]'s, the online translator is
 //! `addict_deepl`'s, what is asked of it and kept is [`online`]'s, where every
 //! request to it starts is [`translate`]'s, the capture job is [`capture`]'s,
-//! the accessibility read is [`context`]'s,
+//! the accessibility read is [`context`]'s, the Vulkan drivers the resident
+//! lets the loader list are [`gpu`]'s,
 //! and its portal, accessibility and Tesseract adapters are `addict_platform`'s, the
 //! resident application is [`resident`]'s, the history of its field is
 //! [`history`]'s, the Settings window is
@@ -178,6 +190,7 @@ mod context;
 mod dictionaries;
 mod entries;
 mod evidence;
+mod gpu;
 mod history;
 mod language;
 mod manual;
@@ -236,10 +249,13 @@ fn main() -> ExitCode {
         Some(Command::Install) => report(entries::install_entries()),
         Some(Command::Uninstall) => report(entries::uninstall_entries()),
         Some(Command::Import { file }) => import_file(&file),
-        None => match open_evidence(cli.evidence.zip(cli.origin)) {
-            Ok(writer) => resident::run(writer),
-            Err(message) => fail(&message),
-        },
+        None => {
+            gpu::select_vulkan_drivers();
+            match open_evidence(cli.evidence.zip(cli.origin)) {
+                Ok(writer) => resident::run(writer),
+                Err(message) => fail(&message),
+            }
+        }
     }
 }
 
