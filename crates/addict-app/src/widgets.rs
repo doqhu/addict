@@ -1090,7 +1090,12 @@ impl View {
         let line = texts.line.as_deref().or(texts.elsewhere.as_deref());
         result.line.set_text(line.unwrap_or_default());
         result.line.set_visible(line.is_some());
-        fill_listed(&result.translations, texts.translations, &["pill"], None);
+        fill_listed(
+            &result.translations,
+            texts.translations,
+            &["pill"],
+            Some(&self.field),
+        );
         result
             .translations
             .set_visible(texts.translations.is_some());
@@ -1279,8 +1284,8 @@ mod tests {
     }
 
     /// A synonym is a link: a click puts it into the field and submits the
-    /// field, as a paste does; translations stay plain pills. Run alone: GTK
-    /// starts once per process, on one thread.
+    /// field, as a paste does; without a field the pills are plain. Run
+    /// alone: GTK starts once per process, on one thread.
     #[test]
     #[ignore = "needs a display; run alone"]
     fn a_synonym_click_puts_it_into_the_field() {
@@ -1307,10 +1312,43 @@ mod tests {
         assert_eq!(field.text(), "riverside");
         assert!(submitted.get());
 
-        let translations = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        fill_listed(&translations, Some(listed()), &["pill"], None);
-        let pills = translations.last_child().expect("the pills");
+        let plain = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        fill_listed(&plain, Some(listed()), &["pill"], None);
+        let pills = plain.last_child().expect("the pills");
         assert!(pills.first_child().and_downcast::<gtk::Label>().is_some());
+    }
+
+    /// A translation of an article is a link too: a click puts it into the
+    /// field and submits the field, as a paste does. Run alone: GTK starts
+    /// once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_translation_click_puts_it_into_the_field() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        view.set_field_text("bank");
+        let submitted = std::rc::Rc::new(std::cell::Cell::new(false));
+        let heard = submitted.clone();
+        view.field.connect_activate(move |_| heard.set(true));
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(
+            Sample.lookup("bank").expect("the sample article"),
+        )));
+        view.render_result(&shown, None);
+        let pills = view.result.translations.last_child().expect("the pills");
+        let link = pills
+            .first_child()
+            .and_downcast::<gtk::Button>()
+            .expect("a link");
+        assert!(!link.gets_focus_on_click());
+        let word = link
+            .child()
+            .and_downcast::<gtk::Label>()
+            .expect("the pill")
+            .label();
+        link.emit_clicked();
+        assert_eq!(view.field.text(), word);
+        assert!(submitted.get());
     }
 
     /// Back and Forward never take the focus from the field, cannot be
