@@ -1083,7 +1083,9 @@ impl Session {
     /// field shows it, and what follows a new text follows.
     fn replace_field(&mut self, edit: Edit) {
         self.view.set_field_text(self.manual.sentence());
-        if !matches!(edit, Edit::Same | Edit::Cleared) {
+        // `Cleared` is any new text with no word chosen, a sentence read
+        // without a selection too; an empty one is not recorded.
+        if edit != Edit::Same {
             self.history.record(self.manual.sentence());
         }
         self.render_history();
