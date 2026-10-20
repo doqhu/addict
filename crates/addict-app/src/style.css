@@ -256,7 +256,8 @@ window.addict label.pill {
   background: var(--chip);
 }
 
-window.addict wrap.pills > label.pill:first-child:not(.outline) {
+window.addict wrap.pills > label.pill:first-child:not(.outline),
+window.addict wrap.pills > button.pill-link:first-child > label.pill:not(.outline) {
   background: var(--accent-soft);
   font-weight: 600;
 }
@@ -268,8 +269,8 @@ window.addict label.pill.outline {
   font-size: 0.9em;
 }
 
-/* A synonym is a link: the button around its pill draws nothing of its own,
- * and the pill takes the accent while hovered. */
+/* A synonym or a translation is a link: the button around its pill draws
+ * nothing of its own, and the pill takes the accent while hovered. */
 window.addict button.pill-link {
   padding: 0;
   min-height: 0;
@@ -283,6 +284,8 @@ window.addict button.pill-link {
 window.addict button.pill-link:hover label.pill {
   background: var(--accent-soft);
   border-color: var(--accent);
+  /* The first pill has the accent already: a ring shows it is hovered. */
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 
 /* The online texts: tinted with the accent, so they read as the other
