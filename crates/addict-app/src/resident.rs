@@ -1314,12 +1314,21 @@ impl Session {
     /// not start is a refusal at once. The sentence is sent from the chosen
     /// language at once. The word, alone or in its sentence, waits while its
     /// lookup runs, and is then sent from the language that answered, or
-    /// from the chosen one when none did.
+    /// from the chosen one when none did. Nothing is sent for a Russian word,
+    /// neither the word nor its sentence ([`translate::is_sent`]).
     fn start_translation(&mut self, subject: Subject) {
         let text = self.manual.text_number();
         let Some(number) = self.online.request_number(subject) else {
             return;
         };
+        // A Russian word is read offline only: nothing is sent for it or its
+        // sentence, nothing is recorded, and its request is not awaited.
+        if let Some(input) = self.manual.input()
+            && !translate::is_sent(input, subject)
+        {
+            self.online.withdraw(subject);
+            return;
+        }
         let word = matches!(subject, Subject::Word(_) | Subject::Lone);
         if word && self.looking_up.job.is_some() {
             if !self.looking_up.deferred.contains(&subject) {

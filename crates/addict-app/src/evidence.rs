@@ -188,7 +188,7 @@ pub fn answered(outcome: &Outcome<Looked>) -> Option<Answered> {
     Some(match outcome {
         Outcome::Finished(looked) => match looked.answer {
             // The evidence names no kind: an article is an article.
-            Answer::Article(_) | Answer::Grouped(_) => Answered::Article,
+            Answer::Article(_) | Answer::Grouped(_) | Answer::FromRussian(_) => Answered::Article,
             Answer::NoEntry => Answered::NoEntry,
             Answer::NotImported => Answered::NotImported,
             Answer::Unreadable(_) => Answered::Unreadable,

@@ -25,6 +25,12 @@
 //! [`article`] answers from one index of an ES or CA source with the
 //! headwords of its language, and [`grouped`] answers from every index of
 //! one language at once, what each gives under its [`Kind`].
+//!
+//! A Russian word has a hook of its own, [`russian`], outside
+//! [`headwords`]: its spellings without stress marks, as written, in
+//! lowercase and with `ё` and `е` taken as one letter
+//! ([`russian_spellings`]). It has no dictionary
+//! forms: an inflected form finds nothing.
 
 use std::collections::BTreeMap;
 
@@ -38,6 +44,7 @@ use crate::{
     combined::{Found, merged},
     import::Kind,
     index::{Error, Index},
+    wikdict,
 };
 
 /// The exception lemmas of a form, by form: sorted, each once. A form that
@@ -219,6 +226,9 @@ pub fn grouped(
                 let glosses = senses.filter(|sense| !sense.definition.trim().is_empty());
                 push_new(english, glosses.map(|sense| sense.definition.clone()));
             }
+            // Never among the indexes of a reading language: a Russian
+            // index is asked by [`russian`] alone. Nothing of it is kept.
+            Kind::FromRussian => {}
         }
     }
     if !found_any {
@@ -228,6 +238,62 @@ pub fn grouped(
         *senses = merged(definitions).map_or_else(Vec::new, |article| article.senses);
     }
     Ok(Some(grouped))
+}
+
+/// The headwords to try for the Russian `word`, in order, each once; empty
+/// when nothing of the word is left. The word without its stress marks
+/// ([`wikdict::STRESS_MARKS`], as the headwords are keyed) and without the
+/// punctuation around it, and its lowercase; then each of them with every
+/// `ё` written `е`; then each of those with one `е` written `ё`, from the
+/// first `е` on. Nothing else is done to the word: no dictionary forms.
+pub fn russian_spellings(word: &str) -> Vec<String> {
+    let unstressed = wikdict::unstressed_word(word);
+    let written = reduction::stripped(&unstressed);
+    if written.is_empty() {
+        return Vec::new();
+    }
+    let cased = [written.to_owned(), reduction::lowercase(written)];
+    let plain: Vec<String> = cased
+        .iter()
+        .map(|spelling| spelling.replace('ё', "е").replace('Ё', "Е"))
+        .collect();
+    let mut spellings = Vec::new();
+    let mut add = |spelling: String| {
+        if !spellings.contains(&spelling) {
+            spellings.push(spelling);
+        }
+    };
+    for spelling in cased.iter().chain(&plain) {
+        add(spelling.clone());
+    }
+    for spelling in &plain {
+        for (at, letter) in spelling.char_indices() {
+            let yo = match letter {
+                'е' => "ё",
+                'Е' => "Ё",
+                _ => continue,
+            };
+            let end = at + letter.len_utf8();
+            add(format!("{}{yo}{}", &spelling[..at], &spelling[end..]));
+        }
+    }
+    spellings
+}
+
+/// The translations the Russian index `index` gives for the Russian
+/// `word`: those of the first of its [`russian_spellings`] that is a
+/// headword of the index, each once, in the order of the index. `None` when
+/// no spelling is a headword, or the headword has no translation. An error
+/// of the index is the error of the lookup.
+pub fn russian(index: &Index, word: &str) -> Result<Option<Vec<String>>, Error> {
+    for spelling in russian_spellings(word) {
+        if let Some(article) = index.find(&spelling)? {
+            let mut translations = Vec::new();
+            push_new(&mut translations, article.translations);
+            return Ok((!translations.is_empty()).then_some(translations));
+        }
+    }
+    Ok(None)
 }
 
 /// Appends each of `items` that `list` does not have yet.
@@ -254,6 +320,80 @@ mod tests {
             .iter()
             .map(|(form, lemmas)| ((*form).to_owned(), texts(lemmas)))
             .collect()
+    }
+
+    #[test]
+    fn a_russian_word_is_tried_as_written_in_lowercase_and_with_yo_as_ye() {
+        assert_eq!(russian_spellings("собака"), texts(&["собака"]));
+        assert_eq!(russian_spellings("«Дом»,"), texts(&["Дом", "дом"]));
+        assert_eq!(russian_spellings("еж"), texts(&["еж", "ёж"]));
+        assert_eq!(russian_spellings("ёж"), texts(&["ёж", "еж"]));
+        assert_eq!(
+            russian_spellings("Ёлке"),
+            texts(&["Ёлке", "ёлке", "Елке", "елке", "Елкё", "елкё"])
+        );
+        assert_eq!(russian_spellings("кни\u{0301}га"), texts(&["книга"]));
+        assert_eq!(
+            russian_spellings("б\u{045D}отехнология"),
+            texts(&["биотехнология", "биотёхнология"])
+        );
+        assert_eq!(russian_spellings("«Что\u{0300}»"), texts(&["Что", "что"]));
+        assert!(russian_spellings("…").is_empty());
+        assert!(russian_spellings("").is_empty());
+    }
+
+    /// An index of Russian headwords in the shape of `wikdict-ru-*`.
+    fn russian_index(dir: &TempDir, name: &str, entries: &[(&str, &[&str])]) -> Index {
+        let entries: Vec<Entry<'_>> = entries
+            .iter()
+            .map(|(word, translations)| (*word, &[][..], *translations))
+            .collect();
+        canned(dir, name, &entries)
+    }
+
+    #[test]
+    fn a_russian_word_gets_the_translations_of_its_first_headword() {
+        let dir = TempDir::new("lookup-ru");
+        let spanish = russian_index(
+            &dir,
+            "ru-es.index",
+            &[
+                ("собака", &["perro", "cachorro", "arroba"]),
+                ("дом", &["casa", "hogar", "domicilio"]),
+                ("Москва", &["Moscú"]),
+            ],
+        );
+        let english = russian_index(&dir, "ru-en.index", &[("Москва", &["Moscow", "Moskva"])]);
+        let catalan = russian_index(&dir, "ru-ca.index", &[("ёж", &["eriçó"])]);
+        let found = |index: &Index, word: &str| russian(index, word).expect("look up");
+        // HAPPY_ES, HAPPY_EN, YO, CASE_PUNCT.
+        assert_eq!(
+            found(&spanish, "собака"),
+            Some(texts(&["perro", "cachorro", "arroba"]))
+        );
+        assert_eq!(
+            found(&english, "Москва"),
+            Some(texts(&["Moscow", "Moskva"]))
+        );
+        assert_eq!(found(&catalan, "еж"), Some(texts(&["eriçó"])));
+        assert_eq!(found(&catalan, "Ёж"), Some(texts(&["eriçó"])));
+        assert_eq!(
+            found(&spanish, "«Дом»,"),
+            Some(texts(&["casa", "hogar", "domicilio"]))
+        );
+        // STRESS: the headword is keyed without the mark, and so is the word.
+        let english = russian_index(
+            &dir,
+            "ru-en-stress.index",
+            &[("книга", &["book"]), ("Москва", &["Moscow", "Moskva"])],
+        );
+        assert_eq!(found(&english, "книга"), Some(texts(&["book"])));
+        assert_eq!(found(&english, "кни\u{0301}га"), Some(texts(&["book"])));
+        // NO_ENTRY: an inflected form is not reduced.
+        assert_eq!(found(&spanish, "собаки"), None);
+        assert_eq!(found(&spanish, "…"), None);
+        // A lowercase word does not reach a capitalised headword.
+        assert_eq!(found(&english, "москва"), None);
     }
 
     #[test]

@@ -25,7 +25,9 @@
 //! does to it is tested without a display. [`offline`] starts a lookup on
 //! the work runner, for English, and for Spanish or Catalan only when the
 //! last known state of its indexes says there is one; it tries the chosen
-//! language first and the others after it, and tells which answered; and
+//! language first and the others after it, and tells which answered; a
+//! Russian word is looked up in the Russian index of the chosen language
+//! alone, whatever the state of the other indexes; and
 //! [`lookup_result`] and [`result_in`] say what the window shows for its
 //! outcome; [`check_indexes`] asks on the runner where the dictionary indexes
 //! stand. The online requests about the input are
@@ -37,7 +39,7 @@ use std::{ops::Range, sync::Arc, time::Duration};
 use addict_core::{
     input::{Input, Source, WindowState, window_state},
     sentence,
-    translation::Source as Language,
+    translation::{Source as Language, is_russian},
 };
 use addict_platform::{
     atspi::Context,
@@ -380,6 +382,26 @@ fn look_up_first(
     ))
 }
 
+/// Starts the lookup of the Russian `word` translated into `chosen` in
+/// `articles` on `work`, with a deadline, through
+/// [`Articles::look_up_russian`]. `on_outcome` runs once on the worker
+/// thread, always with `chosen`: no other language answers. Without a
+/// runner nothing starts and the result to show is given back.
+fn look_up_russian(
+    work: Option<&Work>,
+    articles: Arc<dyn Articles>,
+    word: String,
+    chosen: Language,
+    on_outcome: impl FnOnce(Language, Outcome<Looked>) + Send + 'static,
+) -> Result<Job, Lookup> {
+    let work = work.ok_or(Lookup::Unfinished)?;
+    Ok(work.run(
+        LOOKUP_LIMIT,
+        async move { articles.look_up_russian(chosen, &word) },
+        move |outcome| on_outcome(chosen, outcome),
+    ))
+}
+
 /// The language that answered in `outcome` and the outcome of the lookup
 /// alone; `chosen` when the lookup did not finish.
 fn answering(
@@ -403,8 +425,10 @@ fn answering(
 /// ([`Articles::look_up_first`]); `on_outcome` is given the language that
 /// answered. Otherwise nothing starts and nothing is asked of `articles`:
 /// the line that says there is no dictionary is given back, so no article
-/// of a word spelt alike in another language is shown. No wildcard arm: a
-/// new language does not compile until it is given its offline result.
+/// of a word spelt alike in another language is shown. A Russian word
+/// ([`is_russian`]) is looked up first of all, and only in the Russian index
+/// of the chosen language, whatever `known` says. No wildcard arm: a new
+/// language does not compile until it is given its offline result.
 pub fn offline(
     work: Option<&Work>,
     articles: Arc<dyn Articles>,
@@ -413,6 +437,9 @@ pub fn offline(
     known: Option<Indexes>,
     on_outcome: impl FnOnce(Language, Outcome<Looked>) + Send + 'static,
 ) -> Result<Job, Lookup> {
+    if is_russian(&word) {
+        return look_up_russian(work, articles, word, chosen, on_outcome);
+    }
     match chosen {
         Language::En => look_up_first(work, articles, word, chosen, on_outcome),
         Language::Es | Language::Ca => {
@@ -458,9 +485,21 @@ pub fn check_indexes(
 /// answered in `language`, or `None` when it shows nothing new. English is
 /// [`lookup_result`]. For another language what its indexes gave is shown
 /// by kind, in that language, and a language whose indexes were not there
-/// after all has the line that says there is no dictionary. No wildcard
-/// arm: a new language does not compile until it is given its result.
+/// after all has the line that says there is no dictionary. A Russian word
+/// has its translations into `language`, or the line that says there is no
+/// Russian dictionary of it. No wildcard arm: a new language does not
+/// compile until it is given its result.
 pub fn result_in(outcome: Outcome<Looked>, word: &str, language: Language) -> Option<Lookup> {
+    if is_russian(word) {
+        return Some(match lookup_result(outcome, word)? {
+            Lookup::FromRussian { translations, .. } => Lookup::FromRussian {
+                language,
+                translations,
+            },
+            Lookup::NotImported { .. } => Lookup::NoRussianDictionary(language),
+            other => other,
+        });
+    }
     match language {
         Language::En => lookup_result(outcome, word),
         Language::Es | Language::Ca => Some(match lookup_result(outcome, word)? {
@@ -485,6 +524,12 @@ pub fn lookup_result(outcome: Outcome<Looked>, word: &str) -> Option<Lookup> {
                 language: Language::En,
                 grouped,
             },
+            // Only a Russian word gives one, and [`result_in`] names its
+            // language.
+            Answer::FromRussian(translations) => Lookup::FromRussian {
+                language: Language::En,
+                translations,
+            },
             Answer::NoEntry => Lookup::NoEntry { word: word() },
             Answer::NotImported => Lookup::NotImported { word: word() },
             Answer::Unreadable(file) => Lookup::Unreadable(file),
@@ -496,7 +541,11 @@ pub fn lookup_result(outcome: Outcome<Looked>, word: &str) -> Option<Lookup> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::{sync::mpsc, thread, time::Duration};
+    use std::{
+        sync::{Arc, mpsc},
+        thread,
+        time::Duration,
+    };
 
     use addict_core::{
         dictionary::{Dictionary, Sample},
@@ -793,6 +842,105 @@ pub(crate) mod tests {
                 word: "sat".to_owned()
             })
         );
+    }
+
+    /// A source of articles that answers a Russian word with `answer` and
+    /// keeps the language it was asked for; any other lookup panics.
+    struct RussianOnly(Answer, std::sync::Arc<std::sync::Mutex<Vec<Language>>>);
+
+    impl Articles for RussianOnly {
+        fn indexes(&self) -> Indexes {
+            panic!("the indexes were asked")
+        }
+
+        fn look_up(&self, word: &str) -> Looked {
+            panic!("{word} was looked up in English")
+        }
+
+        fn look_up_in(&self, language: Language, word: &str) -> Looked {
+            panic!("{word} was looked up in {language:?}")
+        }
+
+        fn look_up_russian(&self, into: Language, _word: &str) -> Looked {
+            self.1.lock().expect("asked").push(into);
+            Looked {
+                answer: self.0.clone(),
+                indexes: Indexes::OPEN,
+            }
+        }
+    }
+
+    #[test]
+    fn a_russian_word_is_looked_up_in_the_russian_index_of_the_chosen_language_alone() {
+        let translations = vec!["perro".to_owned(), "cachorro".to_owned()];
+        // Whatever the indexes of the language stand at, also unknown.
+        let known = [
+            None,
+            Some(Indexes::OPEN),
+            Some(with_spanish(State::Missing)),
+            Some(with_catalan(State::Unreadable)),
+        ];
+        for chosen in Language::ALL {
+            for indexes in known {
+                for word in ["собака", "«Дом»,", "еж"] {
+                    let asked = std::sync::Arc::default();
+                    let articles = RussianOnly(
+                        Answer::FromRussian(translations.clone()),
+                        Arc::clone(&asked),
+                    );
+                    let (answered, outcome) = answered_offline(articles, chosen, indexes, word);
+                    assert_eq!(answered, chosen, "{word}");
+                    assert_eq!(*asked.lock().expect("asked"), [chosen]);
+                    assert_eq!(
+                        result_in(outcome, word, chosen),
+                        Some(Lookup::FromRussian {
+                            language: chosen,
+                            translations: translations.clone(),
+                        })
+                    );
+                }
+            }
+        }
+        let finished = |answer: Answer| {
+            Outcome::Finished(Looked {
+                answer,
+                indexes: Indexes::OPEN,
+            })
+        };
+        assert_eq!(
+            result_in(finished(Answer::NotImported), "собака", Language::Ca),
+            Some(Lookup::NoRussianDictionary(Language::Ca))
+        );
+        assert_eq!(
+            result_in(finished(Answer::NoEntry), "собаки", Language::Es),
+            Some(Lookup::NoEntry {
+                word: "собаки".to_owned()
+            })
+        );
+        let file =
+            crate::dictionaries::IndexFile::of(addict_dictionary::import::Source::WikdictRuEn);
+        assert_eq!(
+            result_in(finished(Answer::Unreadable(file)), "Москва", Language::En),
+            Some(Lookup::Unreadable(file))
+        );
+        assert_eq!(
+            result_in(Outcome::TimedOut, "собака", Language::Es),
+            Some(Lookup::Unfinished)
+        );
+        assert!(!checks_again(
+            &Lookup::NoRussianDictionary(Language::Es),
+            Language::Es
+        ));
+        // Without a runner nothing is asked.
+        let started = offline(
+            None,
+            std::sync::Arc::new(Unasked),
+            "собака".to_owned(),
+            Language::Es,
+            None,
+            |_, _| panic!("a lookup ended"),
+        );
+        assert_eq!(started.err(), Some(Lookup::Unfinished));
     }
 
     #[test]

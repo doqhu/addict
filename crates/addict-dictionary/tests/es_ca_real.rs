@@ -75,7 +75,7 @@ fn run(
     let indexes: Vec<(Kind, Index)> = KNOWN
         .iter()
         .map(|known| known.source)
-        .filter(|source| source.language() == language)
+        .filter(|source| source.language() == Some(language))
         .map(|source| {
             let path = dir.join(source.index_name());
             let index = Index::open(&path).unwrap_or_else(|error| panic!("{error}"));

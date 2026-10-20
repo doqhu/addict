@@ -12,13 +12,14 @@
 //! whether its answer is shown. Which requests are sent, and when, is
 //! [`online`](crate::online)'s; the text of the field and the chosen word are
 //! [`manual`](crate::manual)'s. Putting any of it on the screen is
-//! [`resident`](crate::resident)'s.
+//! [`resident`](crate::resident)'s. Nothing is sent for a Russian word
+//! ([`is_sent`]), neither the word nor its sentence: it is read offline only.
 
 use std::{sync::Arc, time::Duration};
 
 use addict_core::{
     input::Input,
-    translation::{Refusal, Request, Source, Translator},
+    translation::{Refusal, Request, Source, Translator, is_russian},
 };
 use addict_platform::work::{Job, Outcome, Work};
 
@@ -52,6 +53,17 @@ pub fn source_of(subject: Subject, chosen: Source, answered: Option<Source>) -> 
     match subject {
         Subject::Sentence(_) => chosen,
         Subject::Word(_) | Subject::Lone => answered.unwrap_or(chosen),
+    }
+}
+
+/// Whether the online request about `subject` for `input` is sent at all:
+/// not when the chosen word is Russian, whether the request is about the
+/// word, the lone word or its sentence. A Russian word is read offline only.
+/// No wildcard arm: a new subject does not compile until it is given its
+/// answer.
+pub fn is_sent(input: &Input, subject: Subject) -> bool {
+    match subject {
+        Subject::Sentence(_) | Subject::Word(_) | Subject::Lone => !is_russian(input.word()),
     }
 }
 
@@ -177,7 +189,7 @@ pub(crate) mod tests {
     use addict_platform::work::{Outcome, Work};
 
     use super::{
-        SENTENCE_LIMIT, TRANSLATE_LIMIT, Translated, request, source_of, translate,
+        SENTENCE_LIMIT, TRANSLATE_LIMIT, Translated, is_sent, request, source_of, translate,
         translate_within, translation_ended, translation_result, translation_unstarted,
     };
     use crate::{
@@ -717,6 +729,12 @@ pub(crate) mod tests {
         }
 
         fn send(&mut self, subject: Subject) {
+            if let Some(input) = self.manual.input()
+                && !is_sent(input, subject)
+            {
+                self.kept.withdraw(subject);
+                return;
+            }
             let (sender, receiver) = mpsc::channel();
             let asked = self
                 .manual
@@ -780,6 +798,61 @@ pub(crate) mod tests {
     /// The Spanish sentence of the matrix, and `banco` in it.
     const BANCO_SENTENCE: &str = "El banco cerró a las tres.";
     const BANCO: usize = 1;
+
+    #[test]
+    fn nothing_is_sent_for_a_russian_word_nor_for_its_sentence() {
+        for language in Language::ALL {
+            // Alone, by Enter or by a paste.
+            let mut desk = Desk::with_text(Ok("x"), "собака");
+            desk.language = language;
+            desk.submit();
+            desk.paste("«Дом»,");
+            assert!(desk.asked().is_empty(), "{language:?}");
+            assert_eq!(desk.shown().lone, None);
+            // In a sentence: neither the word nor the sentence, as if never
+            // asked.
+            let sentence = "Моя собака спит.";
+            let mut desk = Desk::with_text(Ok("x"), sentence);
+            desk.language = language;
+            desk.click(1);
+            assert!(desk.asked().is_empty(), "{language:?}");
+            assert_eq!(desk.shown().word, None);
+            assert_eq!(desk.shown().sentence, None);
+            // Clicked again, and after a switch: still nothing.
+            desk.click(1);
+            desk.switch(if language == Language::En {
+                Language::Es
+            } else {
+                Language::En
+            });
+            desk.click(0);
+            assert!(desk.asked().is_empty(), "{language:?}");
+            assert_eq!(desk.shown().sentence, None);
+        }
+        // A Latin word is sent as always, with its sentence, also in a
+        // Russian sentence; a Russian word clicked after it leaves the
+        // sentence's kept answer as it is and sends nothing more.
+        let mut desk = Desk::with_text(Ok("банк"), "Мой bank.");
+        desk.click(1);
+        assert_eq!(desk.asked().len(), 2);
+        assert_eq!(desk.asked()[0].text, "bank");
+        assert_eq!(desk.asked()[1].text, "Мой bank.");
+        desk.click(0);
+        assert_eq!(desk.asked().len(), 2);
+        assert_eq!(desk.shown().word, None);
+        assert_eq!(desk.shown().sentence, Some(&Whole::Asked(online("банк"))));
+        let input =
+            addict_core::input::Input::new("собака", None, addict_core::input::Source::Manual)
+                .expect("input");
+        assert!(!is_sent(&input, Subject::Lone));
+        assert!(!is_sent(&input, Subject::Word(0)));
+        assert!(!is_sent(&input, Subject::Sentence(0)));
+        let input =
+            addict_core::input::Input::new("bank", None, addict_core::input::Source::Manual)
+                .expect("input");
+        assert!(is_sent(&input, Subject::Lone));
+        assert!(is_sent(&input, Subject::Sentence(0)));
+    }
 
     #[test]
     fn a_spanish_word_is_sent_from_es_with_its_sentence() {
