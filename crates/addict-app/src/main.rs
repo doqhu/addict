@@ -90,7 +90,9 @@
 //! a sentence, or the paste of a sentence. The key is read at each
 //! request from `$XDG_CONFIG_HOME/addict/deepl.key`, or
 //! `$HOME/.config/addict/deepl.key`, a file only its owner may read or write:
-//! when its mode has any bit outside `0600` it is refused unread. A request
+//! when its mode has any bit outside `0600` it is refused unread. The key
+//! can be entered in the Settings window, which writes that file with mode
+//! `0600` and never shows the key it holds. A request
 //! has a deadline. Any change of the text, an edit or a paste, drops every
 //! online text and gives up every request, and a click on another word gives
 //! up the request of the word before. When a request gives no translation,

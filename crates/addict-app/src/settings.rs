@@ -1,11 +1,12 @@
 //! The Settings window, which the tray's Settings entry shows.
 //!
-//! It tells what the application is set to and changes nothing of its own:
-//! the trigger of the shortcut, which the portal owns, with a button that
-//! asks the portal for its dialog to change it, and the file of the DeepL
-//! key, with the state it is in. The key itself is never read into the
-//! window. The texts are plain functions of the state, so that they can be
-//! tested without a display.
+//! It tells what the application is set to: the trigger of the shortcut,
+//! which the portal owns, with a button that asks the portal for its dialog
+//! to change it, and the DeepL key, with a masked field to enter one, the
+//! file it is saved in and the state that file is in. The window writes the
+//! key, on the runner, and never reads it back: the field starts empty and
+//! is cleared once the key is saved. The texts are plain functions of the
+//! state, so that they can be tested without a display.
 
 use std::{path::Path, time::Duration};
 
@@ -94,6 +95,33 @@ pub fn change_text(answer: Option<&str>) -> String {
 pub const REBINDING: &str =
     "The system's dialog opens to choose the new shortcut; the old one is reset.";
 
+/// The line after a save of the key: nothing on success, else why the key
+/// was not saved. The reason never holds the key.
+pub fn save_text(result: Result<(), &str>) -> String {
+    match result {
+        Ok(()) => String::new(),
+        Err(reason) => format!("The key was not saved: {reason}."),
+    }
+}
+
+/// Why a key is not saved when the environment names no configuration
+/// directory.
+pub const NO_KEY_PLACE: &str =
+    "there is no place for the key file: set an absolute XDG_CONFIG_HOME or HOME";
+
+/// The key's line when the write of the key file did not answer in time:
+/// it may still have been written, so nothing is claimed.
+pub const SAVE_UNANSWERED: &str =
+    "The save did not answer in time; the line above shows what the key file holds.";
+
+/// The hint line that names where the key is saved.
+pub fn saved_in_text(key_file: Option<&Path>) -> String {
+    key_file.map_or_else(
+        || "There is no place to save the key.".to_owned(),
+        |path| format!("Saved in {}", path.display()),
+    )
+}
+
 /// The line for a request made while the shortcut is not bound.
 pub const CHANGE_UNBOUND: &str = "The shortcut can be changed once it is bound.";
 
@@ -102,8 +130,11 @@ pub struct Settings {
     window: gtk::Window,
     trigger: gtk::Label,
     key_state: gtk::Label,
+    key_entry: gtk::PasswordEntry,
     change: gtk::Button,
     status: gtk::Label,
+    /// The line of the key's saves, apart from the shortcut's.
+    key_status: gtk::Label,
 }
 
 fn label(text: &str, classes: &[&str]) -> gtk::Label {
@@ -117,12 +148,15 @@ fn label(text: &str, classes: &[&str]) -> gtk::Label {
 }
 
 impl Settings {
-    /// Builds the window, hidden, above `parent`. `on_change` runs when the
-    /// button is pressed.
+    /// Builds the window, hidden, above `parent`. `on_change` runs when
+    /// Change shortcut is pressed; `on_save` runs with the text of the key
+    /// field, trimmed and not empty, when Save key or Enter in the field is
+    /// pressed.
     pub fn new(
         parent: &impl IsA<gtk::Window>,
         key_file: Option<&Path>,
         on_change: impl Fn() + 'static,
+        on_save: impl Fn(String) + 'static,
     ) -> Self {
         let trigger = label("", &[]);
         let change = gtk::Button::builder()
@@ -131,12 +165,46 @@ impl Settings {
             .build();
         change.connect_clicked(move |_| on_change());
         let status = label("", &["hint"]);
-        let key_file_label = label(
-            &key_file.map_or_else(|| "—".to_owned(), |path| path.display().to_string()),
-            &[],
-        );
+        let key_entry = gtk::PasswordEntry::builder()
+            .show_peek_icon(true)
+            .placeholder_text("Paste a DeepL key")
+            .hexpand(true)
+            .build();
+        let save = gtk::Button::builder()
+            .label("Save key")
+            .sensitive(false)
+            .build();
+        let key_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        key_row.append(&key_entry);
+        key_row.append(&save);
+        let saving = save.downgrade();
+        key_entry.connect_changed(move |entry| {
+            if let Some(save) = saving.upgrade() {
+                save.set_sensitive(!entry.text().trim().is_empty());
+            }
+        });
+        let on_save = std::rc::Rc::new(move |entry: &gtk::PasswordEntry| {
+            let text = entry.text();
+            let text = text.trim();
+            if !text.is_empty() {
+                on_save(text.to_owned());
+            }
+        });
+        let pressed = on_save.clone();
+        let entry = key_entry.downgrade();
+        save.connect_clicked(move |_| {
+            if let Some(entry) = entry.upgrade() {
+                pressed(&entry);
+            }
+        });
+        key_entry.connect_activate(move |entry| on_save(entry));
+        let key_file_label = label(&saved_in_text(key_file), &["hint"]);
         key_file_label.set_selectable(true);
         let key_state = label(key_text(None), &["hint"]);
+        let key_status = label("", &["hint"]);
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -150,9 +218,11 @@ impl Settings {
         content.append(&trigger);
         content.append(&change);
         content.append(&status);
-        content.append(&label("DeepL key file", &["section-label"]));
+        content.append(&label("DeepL key", &["section-label"]));
+        content.append(&key_row);
         content.append(&key_file_label);
         content.append(&key_state);
+        content.append(&key_status);
 
         let window = gtk::Window::builder()
             .title("Addict settings")
@@ -179,8 +249,10 @@ impl Settings {
             window,
             trigger,
             key_state,
+            key_entry,
             change,
             status,
+            key_status,
         }
     }
 
@@ -199,8 +271,19 @@ impl Settings {
         self.key_state.set_label(key_text(state));
     }
 
+    /// Empties the key field, after the key in it was saved or when the
+    /// window is shown again.
+    pub fn clear_key_entry(&self) {
+        self.key_entry.set_text("");
+    }
+
     pub fn say(&self, text: &str) {
         self.status.set_label(text);
+    }
+
+    /// Sets the line of the key's saves.
+    pub fn say_key(&self, text: &str) {
+        self.key_status.set_label(text);
     }
 }
 
@@ -208,7 +291,10 @@ impl Settings {
 mod tests {
     use addict_deepl::key::KeyError;
 
-    use super::{KeyState, REBINDING, change_text, key_text, trigger_text};
+    use super::{
+        KeyState, NO_KEY_PLACE, REBINDING, change_text, key_text, save_text, saved_in_text,
+        trigger_text,
+    };
     use crate::view::Binding;
 
     #[test]
@@ -295,6 +381,42 @@ mod tests {
     fn the_rebind_line_names_the_dialog_and_the_reset() {
         assert!(REBINDING.contains("dialog"));
         assert!(REBINDING.contains("reset"));
+    }
+
+    #[test]
+    fn a_save_says_nothing_when_it_worked_and_why_when_it_did_not() {
+        assert_eq!(save_text(Ok(())), "");
+        assert_eq!(
+            save_text(Err(
+                "a DeepL key is one word of printable ASCII, at most 1023 characters"
+            )),
+            "The key was not saved: a DeepL key is one word of printable ASCII, at most 1023 \
+             characters."
+        );
+        assert_eq!(
+            save_text(Err("permission denied")),
+            "The key was not saved: permission denied."
+        );
+    }
+
+    #[test]
+    fn the_hint_names_where_the_key_is_saved() {
+        let path = std::path::Path::new("/home/u/.config/addict/deepl.key");
+        assert_eq!(
+            saved_in_text(Some(path)),
+            "Saved in /home/u/.config/addict/deepl.key"
+        );
+        assert!(!saved_in_text(None).is_empty());
+    }
+
+    #[test]
+    fn a_save_without_a_directory_says_what_to_set() {
+        let line = save_text(Err(NO_KEY_PLACE));
+        assert!(line.starts_with("The key was not saved"), "{line}");
+        assert!(
+            line.contains("XDG_CONFIG_HOME") && line.contains("HOME"),
+            "{line}"
+        );
     }
 
     #[test]
