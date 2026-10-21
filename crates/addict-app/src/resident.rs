@@ -355,15 +355,15 @@ const WINDOW_WIDTH: i32 = 800;
 /// senses with one of them chosen fits without scrolling its list.
 const WINDOW_HEIGHT: i32 = 680;
 
-/// The header bar: the name of the application beside its accent mark, and
+/// The header bar: `name` beside the accent mark of the application, and
 /// the window's buttons.
-pub(crate) fn header_bar() -> gtk::HeaderBar {
+pub(crate) fn header_bar(name: &str) -> gtk::HeaderBar {
     let mark = gtk::Box::builder()
         .valign(gtk::Align::Center)
         .css_classes(["brand-mark"])
         .build();
     let name = gtk::Label::builder()
-        .label("Addict")
+        .label(name)
         .css_classes(["brand-name"])
         .build();
     let title = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -381,7 +381,7 @@ fn build_window(application: &gtk::Application, view: &View) -> gtk::Application
         .default_height(WINDOW_HEIGHT)
         .child(view.root())
         .css_classes(["addict"])
-        .titlebar(&header_bar())
+        .titlebar(&header_bar("Addict"))
         .build();
     // Closing hides; the process and this window stay.
     window.connect_close_request(|window| {

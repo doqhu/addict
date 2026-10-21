@@ -17,6 +17,8 @@
   --on-accent: #ffffff;
   --warn-bg: #fdf1e3;
   --warn: #8a4b0c;
+  --good-bg: #e7f4ec;
+  --good: #1d6b3c;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -33,6 +35,8 @@
     --on-accent: #10131f;
     --warn-bg: #3a2c1d;
     --warn: #f3c38a;
+    --good-bg: #1f3328;
+    --good: #8fd6a8;
   }
 }
 
@@ -361,4 +365,173 @@ window.addict label:selected,
 window.addict label > selection {
   background: var(--accent-soft);
   color: var(--fg);
+}
+
+/* The Settings window: a card per section under its label; the trigger in
+ * key caps beside a badge, and the key's state as a block of its tone. */
+window.addict .settings-section {
+  margin: 0 4px;
+}
+
+window.addict .settings-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+}
+
+window.addict label.keycap {
+  min-width: 28px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: var(--chip);
+  border: 1px solid var(--line);
+  box-shadow: inset 0 -2px var(--line);
+  font-weight: 600;
+  font-size: 0.93em;
+}
+
+window.addict label.trigger.bad {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+window.addict .badge {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+window.addict .badge .dot {
+  min-width: 6px;
+  min-height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+window.addict .badge label {
+  color: inherit;
+}
+
+window.addict .badge.good,
+window.addict .key-block.good {
+  background: var(--good-bg);
+  color: var(--good);
+}
+
+window.addict .badge.pending,
+window.addict .key-block.pending {
+  background: var(--chip);
+  color: var(--muted);
+}
+
+window.addict .badge.bad,
+window.addict .key-block.bad {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+window.addict button.settings-button {
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--chip);
+  color: var(--fg);
+  box-shadow: none;
+  font-weight: 600;
+}
+
+window.addict button.settings-button:hover {
+  background: var(--line);
+}
+
+window.addict button.settings-button:disabled,
+window.addict button.save:disabled {
+  color: var(--muted);
+}
+
+window.addict .key-block {
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+
+window.addict .key-block label,
+window.addict .key-block image {
+  color: inherit;
+}
+
+/* At the window's own size, with room above and below: at 0.93em the
+ * bold line was cut at the top. */
+window.addict label.key-state {
+  font-weight: 600;
+  padding: 2px 0;
+}
+
+window.addict entry.key {
+  min-height: 44px;
+  padding: 0 4px 0 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: none;
+  outline: none;
+}
+
+window.addict entry.key:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+window.addict entry.key > text > placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+window.addict button.save {
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 12px;
+  border: none;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: none;
+  font-weight: 600;
+}
+
+window.addict button.save:disabled {
+  background: var(--chip);
+}
+
+window.addict .key-file {
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+window.addict label.path {
+  font-family: "Source Code Pro", monospace;
+  font-size: 0.85em;
+}
+
+window.addict .settings-footer {
+  margin: 0 4px;
+  font-size: 0.85em;
+}
+
+/* Its close button: a round chip, as in the mockup. */
+window.addict.settings headerbar windowcontrols button {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--chip);
+  color: var(--fg);
+  box-shadow: none;
+}
+
+window.addict.settings headerbar windowcontrols button:hover {
+  background: var(--line);
 }
