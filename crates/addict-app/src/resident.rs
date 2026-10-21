@@ -207,6 +207,9 @@ const TRIGGER: &str = "LOGO+q";
 /// How long one attempt to bind the shortcut may take.
 const BIND_LIMIT: Duration = Duration::from_secs(60);
 
+/// How long the reset of the stored binding may take.
+const FORGET_LIMIT: Duration = Duration::from_secs(2);
+
 /// How long the read of the clipboard after a press without context may
 /// take, the wait for the window to be active included.
 const CLIPBOARD_LIMIT: Duration = Duration::from_secs(1);
@@ -310,6 +313,9 @@ enum Event {
     Tray(TrayEvent),
     /// Change shortcut was pressed in the Settings window.
     ChangeShortcut,
+    /// The reset of the stored binding, which a portal without a dialog of
+    /// its own for a change needs, ended.
+    BindingForgotten(Outcome<Result<(), String>>),
     /// The state of the key file, as the runner read it for the Settings
     /// window.
     KeyFile(KeyState),
@@ -428,6 +434,11 @@ struct Session {
     trigger: Option<String>,
     /// The read of the key file's state; dropping it gives it up.
     key_job: Option<Job>,
+    /// The reset of the stored binding; dropping it gives it up.
+    forget_job: Option<Job>,
+    /// The shortcut is being changed through the system's bind dialog: the
+    /// line of Settings is the one for that until the bind ends.
+    rebinding: bool,
     /// The online request of a word, in its sentence or alone, whose outcome
     /// is awaited; dropping it cancels the request.
     translating_word: Option<Job>,
@@ -573,6 +584,8 @@ impl Session {
                     .say(&settings::change_text(message.as_deref()));
             }
             Event::Tray(event) => self.tray(event),
+            Event::Shortcut(ShortcutEvent::ConfigureUnsupported, _) => self.rebind(),
+            Event::BindingForgotten(outcome) => self.binding_forgotten(outcome),
             Event::ChangeShortcut => self.change_shortcut(),
             Event::KeyFile(state) => self.settings.render_key(Some(state)),
             Event::Launched => self.launched(),
@@ -1667,6 +1680,15 @@ impl Session {
         self.view.render_binding(&self.binding);
         self.settings
             .render_binding(&self.binding, self.trigger.as_deref());
+        self.end_rebinding();
+    }
+
+    /// The bind ended, one way or the other: the line for the change through
+    /// the system's dialog goes. A line about a failed reset stays.
+    fn end_rebinding(&mut self) {
+        if std::mem::take(&mut self.rebinding) {
+            self.settings.say("");
+        }
     }
 
     /// The shortcut was pressed: the application in front is taken first,
@@ -1733,6 +1755,7 @@ impl Session {
         self.trigger = None;
         self.view.render_binding(&self.binding);
         self.settings.render_binding(&self.binding, None);
+        self.end_rebinding();
         // No press stands behind this, so there is no token.
         self.forget_source();
         if let Some(recording) = &self.recording {
@@ -1823,6 +1846,52 @@ impl Session {
         }
     }
 
+    /// The portal has no dialog for a change: the session is closed, then
+    /// the stored binding is reset, so that the bind that follows shows the
+    /// system's dialog. The session is closed first, or the old binding is
+    /// held.
+    fn rebind(&mut self) {
+        if !matches!(self.binding, Binding::Bound) {
+            return;
+        }
+        let (Some(current), Some(work)) = (self.current.upgrade(), self.work.upgrade()) else {
+            self.settings
+                .say(&settings::change_text(Some("the runner is not available")));
+            return;
+        };
+        current.borrow_mut().take();
+        self.binding = Binding::Attempting;
+        self.trigger = None;
+        self.view.render_binding(&self.binding);
+        self.settings.render_binding(&self.binding, None);
+        self.settings.say(settings::REBINDING);
+        self.rebinding = true;
+        let sender = self.sender.clone();
+        self.forget_job = Some(work.run(
+            FORGET_LIMIT,
+            async { shortcut::forget_binding(APP_ID) },
+            move |outcome| {
+                let _ = sender.unbounded_send(Event::BindingForgotten(outcome));
+            },
+        ));
+    }
+
+    /// The reset ended: the bind starts again. When the reset failed, the
+    /// binding is still stored, so the bind gives it back without a dialog,
+    /// and the line says why nothing changed.
+    fn binding_forgotten(&mut self, outcome: Outcome<Result<(), String>>) {
+        self.forget_job = None;
+        if let Some(failure) = reset_failure(outcome) {
+            self.rebinding = false;
+            self.settings.say(&settings::change_text(Some(&failure)));
+        }
+        let Some(current) = self.current.upgrade() else {
+            return;
+        };
+        current.borrow_mut().take();
+        *current.borrow_mut() = Some(start_shortcut(&self.sender, self.timed));
+    }
+
     fn retry(&mut self) {
         // One attempt at a time: a press that was queued
         // behind another one starts nothing.
@@ -1840,6 +1909,17 @@ impl Session {
         // wait.
         current.borrow_mut().take();
         *current.borrow_mut() = Some(start_shortcut(&self.sender, self.timed));
+    }
+}
+
+/// Why the reset of the stored binding did not happen, in one line; `None`
+/// when it did.
+fn reset_failure(outcome: Outcome<Result<(), String>>) -> Option<String> {
+    match outcome {
+        Outcome::Finished(Ok(())) => None,
+        Outcome::Finished(Err(message)) => Some(message),
+        Outcome::TimedOut => Some(format!("no reset within {FORGET_LIMIT:?}")),
+        Outcome::Cancelled | Outcome::Panicked => Some("the reset did not run".to_owned()),
     }
 }
 
@@ -2131,6 +2211,8 @@ fn start(
         settings,
         trigger: None,
         key_job: None,
+        forget_job: None,
+        rebinding: false,
         translating_word: None,
         translating_sentence: None,
         translating_definition: None,
@@ -2236,11 +2318,27 @@ pub fn run(evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
 mod tests {
     use gtk::{gio, prelude::*};
 
-    use super::{CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, Copying, is_offered_command, missed_line};
+    use super::{
+        CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, Copying, is_offered_command, missed_line,
+        reset_failure,
+    };
     use crate::view::{
         Held, TURN_ON_ACCESSIBILITY, install_language, install_tesseract, too_long_text,
     };
     use addict_core::translation::Source as Language;
+
+    #[test]
+    fn a_reset_that_did_not_happen_says_so_in_a_line() {
+        use addict_platform::work::Outcome;
+        assert_eq!(reset_failure(Outcome::Finished(Ok(()))), None);
+        assert_eq!(
+            reset_failure(Outcome::Finished(Err("dconf reset: x".to_owned()))).as_deref(),
+            Some("dconf reset: x")
+        );
+        for outcome in [Outcome::TimedOut, Outcome::Cancelled, Outcome::Panicked] {
+            assert!(reset_failure(outcome).is_some());
+        }
+    }
 
     #[test]
     fn a_line_that_is_an_offered_command_is_not_a_text() {

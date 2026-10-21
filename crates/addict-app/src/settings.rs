@@ -89,6 +89,11 @@ pub fn change_text(answer: Option<&str>) -> String {
     }
 }
 
+/// The line while the stored binding is reset and the system's bind dialog
+/// is about to open, for a portal that has no dialog of its own for a change.
+pub const REBINDING: &str =
+    "The system's dialog opens to choose the new shortcut; the old one is reset.";
+
 /// The line for a request made while the shortcut is not bound.
 pub const CHANGE_UNBOUND: &str = "The shortcut can be changed once it is bound.";
 
@@ -203,7 +208,7 @@ impl Settings {
 mod tests {
     use addict_deepl::key::KeyError;
 
-    use super::{KeyState, change_text, key_text, trigger_text};
+    use super::{KeyState, REBINDING, change_text, key_text, trigger_text};
     use crate::view::Binding;
 
     #[test]
@@ -284,6 +289,12 @@ mod tests {
             "Binding the shortcut…"
         );
         assert_eq!(trigger_text(&not_bound, Some("Super+Q")), "Not bound: x");
+    }
+
+    #[test]
+    fn the_rebind_line_names_the_dialog_and_the_reset() {
+        assert!(REBINDING.contains("dialog"));
+        assert!(REBINDING.contains("reset"));
     }
 
     #[test]
