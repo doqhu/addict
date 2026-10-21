@@ -37,8 +37,8 @@ const CLOSE_LIMIT: Duration = Duration::from_secs(1);
 const CONFIGURE_LIMIT: Duration = Duration::from_secs(5);
 
 /// What the worker reports, in order: at most one `Bound` followed by any
-/// number of `Activated` and of `ConfigureEnded`; `Failed` is always the last
-/// event.
+/// number of `Activated`, of `ConfigureEnded` and of `ConfigureUnsupported`;
+/// `Failed` is always the last event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShortcutEvent {
     /// The portal bound the shortcut; `trigger` is its own description of the
@@ -54,6 +54,11 @@ pub enum ShortcutEvent {
     /// line saying why the dialog for the shortcut could not be asked for,
     /// and `None` when it was.
     ConfigureEnded { message: Option<String> },
+    /// The portal is too old for its dialog: `ConfigureShortcuts` is from
+    /// version 2 of the interface. The shortcut stays bound; the owner may
+    /// bind again through the system's bind dialog, after
+    /// [`forget_binding`].
+    ConfigureUnsupported,
     /// The shortcut is not available. `message` is one line: either the step
     /// that failed with the portal's own error text, or, when the attempt ran
     /// out of time, the limit alone with no portal text. It does not say why.
@@ -76,7 +81,9 @@ enum Command {
 
 impl ShortcutHandle {
     /// Asks the portal for its dialog to change the shortcut. The answer is
-    /// a [`ShortcutEvent::ConfigureEnded`]. A request made before the
+    /// a [`ShortcutEvent::ConfigureEnded`], or a
+    /// [`ShortcutEvent::ConfigureUnsupported`] from a portal too old for the
+    /// dialog. A request made before the
     /// shortcut is bound waits for it, and one made after the worker has
     /// failed is not answered.
     pub fn configure(&self) {
@@ -288,7 +295,7 @@ async fn serve(
                     ),
                 )
                 .await;
-                on_event(configure_ended(asked.ok()));
+                on_event(configure_event(asked.ok()));
             }
         }
     }
@@ -327,6 +334,16 @@ fn one_line(step: &str, error: &dyn std::fmt::Display) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The event for the answer to a request for the portal's dialog: the
+/// refusal for the version of the interface is [`ShortcutEvent::ConfigureUnsupported`],
+/// anything else is [`configure_ended`].
+fn configure_event(answer: Option<Result<(), ashpd::Error>>) -> ShortcutEvent {
+    match answer {
+        Some(Err(ashpd::Error::RequiresVersion(..))) => ShortcutEvent::ConfigureUnsupported,
+        other => configure_ended(other),
+    }
+}
+
 /// The answer to a request for the portal's dialog: its result, or `None`
 /// when [`CONFIGURE_LIMIT`] ran out first.
 fn configure_ended(answer: Option<Result<(), impl std::fmt::Display>>) -> ShortcutEvent {
@@ -338,6 +355,62 @@ fn configure_ended(answer: Option<Result<(), impl std::fmt::Display>>) -> Shortc
         )),
     };
     ShortcutEvent::ConfigureEnded { message }
+}
+
+/// Where GNOME keeps the binding of `app_id`.
+fn binding_path(app_id: &str) -> String {
+    format!("/org/gnome/settings-daemon/global-shortcuts/{app_id}/")
+}
+
+/// How long `dconf` may take to reset a binding.
+const RESET_LIMIT: Duration = Duration::from_secs(2);
+
+/// Resets the binding that GNOME keeps for `app_id`, so that the next bind
+/// shows the system's dialog again. Only that app id is touched. Blocks for
+/// the run of `dconf`, at most [`RESET_LIMIT`]. The session of the app must be
+/// closed first, or GNOME holds the old binding. The error is one line.
+pub fn forget_binding(app_id: &str) -> Result<(), String> {
+    reset_with("dconf", &binding_path(app_id), RESET_LIMIT)
+}
+
+fn reset_with(program: &str, path: &str, limit: Duration) -> Result<(), String> {
+    use std::{io::Read, process::Stdio, time::Instant};
+
+    let mut child = std::process::Command::new(program)
+        .args(["reset", "-f", path])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| one_line(&format!("running {program}"), &e))?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < limit => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{program} reset: no result within {limit:?}"));
+            }
+            Err(e) => return Err(one_line(&format!("waiting for {program}"), &e)),
+        }
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    let detail = if stderr.trim().is_empty() {
+        status.to_string()
+    } else {
+        stderr
+    };
+    Err(one_line(&format!("{program} reset"), &detail))
 }
 
 /// The failure of an attempt that ran out of time: it names the limit and
@@ -455,5 +528,73 @@ mod tests {
                 message: Some("changing the shortcut: no result within 5s".to_owned())
             }
         );
+    }
+
+    #[test]
+    fn the_version_refusal_is_unsupported_and_no_other_error_is() {
+        assert_eq!(
+            configure_event(Some(Err(ashpd::Error::RequiresVersion(2, 1)))),
+            ShortcutEvent::ConfigureUnsupported
+        );
+        assert_eq!(
+            configure_event(Some(Err(ashpd::Error::InvalidAppID))),
+            ShortcutEvent::ConfigureEnded {
+                message: Some(format!(
+                    "changing the shortcut: {}",
+                    ashpd::Error::InvalidAppID
+                ))
+            }
+        );
+        assert_eq!(
+            configure_event(Some(Ok(()))),
+            ShortcutEvent::ConfigureEnded { message: None }
+        );
+        assert_eq!(
+            configure_event(None),
+            ShortcutEvent::ConfigureEnded {
+                message: Some("changing the shortcut: no result within 5s".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn the_binding_path_is_that_of_the_app_id_alone() {
+        assert_eq!(
+            binding_path("dev.addict.Addict"),
+            "/org/gnome/settings-daemon/global-shortcuts/dev.addict.Addict/"
+        );
+    }
+
+    #[test]
+    fn a_reset_is_ok_only_when_the_program_succeeds() {
+        let limit = Duration::from_secs(5);
+        assert_eq!(reset_with("true", "/x/", limit), Ok(()));
+        let failed = reset_with("false", "/x/", limit).unwrap_err();
+        assert!(failed.starts_with("false reset: "), "{failed}");
+        assert!(!failed.contains('\n'));
+        let missing = reset_with("addict-no-such-program", "/x/", limit).unwrap_err();
+        assert!(
+            missing.starts_with("running addict-no-such-program: "),
+            "{missing}"
+        );
+    }
+
+    #[test]
+    fn a_reset_that_hangs_is_killed_at_the_limit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("addict-reset-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("directory");
+        let script = dir.join("hang");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").expect("script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        let started = std::time::Instant::now();
+        let result = reset_with(
+            script.to_str().expect("utf-8 path"),
+            "/x/",
+            Duration::from_millis(100),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(result.unwrap_err().contains("no result within 100ms"));
     }
 }
