@@ -125,10 +125,101 @@ pub fn saved_in_text(key_file: Option<&Path>) -> String {
 /// The line for a request made while the shortcut is not bound.
 pub const CHANGE_UNBOUND: &str = "The shortcut can be changed once it is bound.";
 
+/// The keys of a trigger the portal described, one cap each: GNOME's
+/// `Press <Super>q` as an accelerator, or a label such as `Super+Q`;
+/// nothing when the description is neither (another sentence, an empty
+/// part), which is then shown as it is. `Ctrl++` is Ctrl and `+`.
+pub fn trigger_keys(trigger: &str) -> Option<Vec<String>> {
+    let trigger = trigger.trim();
+    let trigger = trigger.strip_prefix("Press ").unwrap_or(trigger).trim();
+    if trigger.is_empty() || trigger.contains(char::is_whitespace) {
+        return None;
+    }
+    if trigger.starts_with('<') {
+        return accelerator_keys(trigger);
+    }
+    let (rest, plus) = match trigger.strip_suffix("++") {
+        Some(rest) => (rest, true),
+        None => (trigger, false),
+    };
+    let mut keys: Vec<String> = if rest.is_empty() {
+        Vec::new()
+    } else {
+        rest.split('+').map(str::to_owned).collect()
+    };
+    if plus {
+        keys.push("+".to_owned());
+    }
+    if keys.is_empty() || keys.iter().any(String::is_empty) {
+        return None;
+    }
+    Some(keys)
+}
+
+/// The caps of an accelerator in GTK's form, `<Control><Alt>t`: each
+/// modifier by the name on its key, then the key, a letter in capitals.
+fn accelerator_keys(accelerator: &str) -> Option<Vec<String>> {
+    let mut keys = Vec::new();
+    let mut rest = accelerator;
+    while let Some(after) = rest.strip_prefix('<') {
+        let (modifier, tail) = after.split_once('>')?;
+        keys.push(
+            match modifier {
+                "Control" | "Ctrl" | "Primary" => "Ctrl",
+                "" => return None,
+                other => other,
+            }
+            .to_owned(),
+        );
+        rest = tail;
+    }
+    let mut chars = rest.chars();
+    let first = chars.next()?;
+    keys.push(first.to_uppercase().chain(chars).collect());
+    Some(keys)
+}
+
+/// The badge beside the trigger, and its class.
+pub fn badge(binding: &Binding) -> (&'static str, &'static str) {
+    match binding {
+        Binding::Bound => ("Bound", "good"),
+        Binding::Attempting => ("Binding…", "pending"),
+        Binding::NotBound { .. } => ("Not bound", "bad"),
+    }
+}
+
+/// The class of the block of a key state: good when a key is set, pending
+/// while it is checked, bad otherwise. No wildcard arm, as in `key_text`.
+pub fn key_tone(state: Option<KeyState>) -> &'static str {
+    match state {
+        None => "pending",
+        Some(KeyState::Free | KeyState::Pro) => "good",
+        Some(KeyState::NoDirectory | KeyState::Refused(_) | KeyState::Unknown) => "bad",
+    }
+}
+
+/// The classes a tone replaces on a widget.
+const TONES: [&str; 3] = ["good", "pending", "bad"];
+
+fn set_tone(widget: &impl IsA<gtk::Widget>, tone: &str) {
+    for other in TONES {
+        widget.remove_css_class(other);
+    }
+    widget.add_css_class(tone);
+}
+
 /// The window and the labels that change.
 pub struct Settings {
     window: gtk::Window,
+    /// The caps of the bound trigger.
+    keys: gtk::Box,
+    /// The trigger when it is not shown as caps: where the attempt stands.
     trigger: gtk::Label,
+    badge: gtk::Box,
+    badge_text: gtk::Label,
+    /// The block of the key's state: its icon and its line.
+    key_block: gtk::Box,
+    key_icon: gtk::Image,
     key_state: gtk::Label,
     key_entry: gtk::PasswordEntry,
     change: gtk::Button,
@@ -147,6 +238,32 @@ fn label(text: &str, classes: &[&str]) -> gtk::Label {
         .build()
 }
 
+/// A section: its label above a card holding `rows`.
+fn section(name: &str, rows: &[&gtk::Widget]) -> gtk::Box {
+    let card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .css_classes(["settings-card"])
+        .build();
+    for row in rows {
+        card.append(*row);
+    }
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    // Not wrapped: the label is measured before it is set in capitals,
+    // and a wrapped one breaks where the capitals do not fit.
+    let name = label(name, &["section-label", "settings-section"]);
+    name.set_wrap(false);
+    section.append(&name);
+    section.append(&card);
+    section
+}
+
+/// A line that hides itself while it is empty.
+fn say_in(line: &gtk::Label, text: &str) {
+    line.set_label(text);
+    line.set_visible(!text.is_empty());
+}
+
 impl Settings {
     /// Builds the window, hidden, above `parent`. `on_change` runs when
     /// Change shortcut is pressed; `on_save` runs with the text of the key
@@ -158,21 +275,65 @@ impl Settings {
         on_change: impl Fn() + 'static,
         on_save: impl Fn(String) + 'static,
     ) -> Self {
-        let trigger = label("", &[]);
+        let keys = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        let trigger = label("", &["trigger"]);
+        trigger.set_hexpand(true);
+        // The badge: a dot in the text's colour, then its word.
+        let badge_text = gtk::Label::new(None);
+        let badge = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .valign(gtk::Align::Center)
+            .halign(gtk::Align::End)
+            .hexpand(true)
+            .css_classes(["badge"])
+            .build();
+        badge.append(
+            &gtk::Box::builder()
+                .valign(gtk::Align::Center)
+                .css_classes(["dot"])
+                .build(),
+        );
+        badge.append(&badge_text);
+        let trigger_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        trigger_row.append(&keys);
+        trigger_row.append(&trigger);
+        trigger_row.append(&badge);
         let change = gtk::Button::builder()
             .label("Change shortcut…")
             .halign(gtk::Align::Start)
+            .css_classes(["settings-button"])
             .build();
         change.connect_clicked(move |_| on_change());
         let status = label("", &["hint"]);
+        status.set_visible(false);
+
+        let key_icon = gtk::Image::builder().valign(gtk::Align::Center).build();
+        let key_state = label(key_text(None), &["key-state"]);
+        key_state.set_hexpand(true);
+        key_state.set_valign(gtk::Align::Center);
+        let key_block = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(10)
+            .css_classes(["key-block"])
+            .build();
+        key_block.append(&key_icon);
+        key_block.append(&key_state);
         let key_entry = gtk::PasswordEntry::builder()
             .show_peek_icon(true)
             .placeholder_text("Paste a DeepL key")
             .hexpand(true)
+            .css_classes(["key"])
             .build();
         let save = gtk::Button::builder()
             .label("Save key")
             .sensitive(false)
+            .css_classes(["save"])
             .build();
         let key_row = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
@@ -201,40 +362,70 @@ impl Settings {
             }
         });
         key_entry.connect_activate(move |entry| on_save(entry));
-        let key_file_label = label(&saved_in_text(key_file), &["hint"]);
-        key_file_label.set_selectable(true);
-        let key_state = label(key_text(None), &["hint"]);
         let key_status = label("", &["hint"]);
+        key_status.set_visible(false);
+        // The place of the file below a hairline: the path in monospace, and
+        // selectable, so that it can be copied.
+        let key_file_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .css_classes(["key-file"])
+            .build();
+        match key_file {
+            Some(path) => {
+                key_file_row.append(&label("Saved in", &["hint"]));
+                let path = label(&path.display().to_string(), &["path"]);
+                path.set_selectable(true);
+                path.set_wrap_mode(gtk::pango::WrapMode::Char);
+                path.set_hexpand(true);
+                key_file_row.append(&path);
+            }
+            None => key_file_row.append(&label(&saved_in_text(None), &["hint"])),
+        }
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
-            .spacing(8)
+            .spacing(16)
             .margin_top(16)
             .margin_bottom(16)
             .margin_start(16)
             .margin_end(16)
             .build();
-        content.append(&label("Shortcut", &["section-label"]));
-        content.append(&trigger);
-        content.append(&change);
-        content.append(&status);
-        content.append(&label("DeepL key", &["section-label"]));
-        content.append(&key_row);
-        content.append(&key_file_label);
-        content.append(&key_state);
-        content.append(&key_status);
+        content.append(&section(
+            "Shortcut",
+            &[
+                trigger_row.upcast_ref(),
+                change.upcast_ref(),
+                status.upcast_ref(),
+            ],
+        ));
+        content.append(&section(
+            "DeepL key",
+            &[
+                key_block.upcast_ref(),
+                key_row.upcast_ref(),
+                key_status.upcast_ref(),
+                key_file_row.upcast_ref(),
+            ],
+        ));
+        let footer = label(
+            "Esc closes the window. The key is never shown back here.",
+            &["hint", "settings-footer"],
+        );
+        content.append(&footer);
 
         let window = gtk::Window::builder()
             .title("Addict settings")
             .transient_for(parent)
-            .default_width(420)
+            .default_width(440)
             .hide_on_close(true)
+            .titlebar(&crate::resident::header_bar("Addict settings"))
             .child(&content)
-            .css_classes(["addict"])
+            .css_classes(["addict", "settings"])
             .build();
-        let keys = gtk::EventControllerKey::new();
+        let escape = gtk::EventControllerKey::new();
         let esc = window.downgrade();
-        keys.connect_key_pressed(move |_, key, _, _| {
+        escape.connect_key_pressed(move |_, key, _, _| {
             if key == gtk::gdk::Key::Escape {
                 if let Some(window) = esc.upgrade() {
                     window.close();
@@ -244,31 +435,69 @@ impl Settings {
                 glib::Propagation::Proceed
             }
         });
-        window.add_controller(keys);
-        Self {
+        window.add_controller(escape);
+        let settings = Self {
             window,
+            keys,
             trigger,
+            badge,
+            badge_text,
+            key_block,
+            key_icon,
             key_state,
             key_entry,
             change,
             status,
             key_status,
-        }
+        };
+        settings.render_binding(&Binding::Attempting, None);
+        settings.render_key(None);
+        settings
     }
 
     pub fn present(&self) {
         self.window.present();
     }
 
-    /// Shows where the shortcut stands; the button works only when it is
-    /// bound.
+    /// Shows where the shortcut stands: a bound trigger as key caps, else
+    /// the line of `trigger_text`; the button works only when it is bound.
     pub fn render_binding(&self, binding: &Binding, trigger: Option<&str>) {
-        self.trigger.set_label(&trigger_text(binding, trigger));
-        self.change.set_sensitive(matches!(binding, Binding::Bound));
+        while let Some(cap) = self.keys.first_child() {
+            self.keys.remove(&cap);
+        }
+        let bound = matches!(binding, Binding::Bound);
+        let caps = trigger.filter(|_| bound).and_then(trigger_keys);
+        if let Some(caps) = &caps {
+            for (index, key) in caps.iter().enumerate() {
+                if index > 0 {
+                    self.keys.append(&label("+", &["hint"]));
+                }
+                self.keys.append(&label(key, &["keycap"]));
+            }
+        }
+        self.keys.set_visible(caps.is_some());
+        // Bound with no trigger to show: the badge says it alone.
+        let line = match (bound, &caps, trigger) {
+            (true, Some(_), _) | (true, None, None) => String::new(),
+            _ => trigger_text(binding, trigger),
+        };
+        say_in(&self.trigger, &line);
+        set_tone(&self.trigger, badge(binding).1);
+        let (text, tone) = badge(binding);
+        self.badge_text.set_label(text);
+        set_tone(&self.badge, tone);
+        self.change.set_sensitive(bound);
     }
 
     pub fn render_key(&self, state: Option<KeyState>) {
         self.key_state.set_label(key_text(state));
+        let tone = key_tone(state);
+        set_tone(&self.key_block, tone);
+        self.key_icon.set_icon_name(Some(match tone {
+            "good" => "object-select-symbolic",
+            "pending" => "content-loading-symbolic",
+            _ => "dialog-warning-symbolic",
+        }));
     }
 
     /// Empties the key field, after the key in it was saved or when the
@@ -278,12 +507,12 @@ impl Settings {
     }
 
     pub fn say(&self, text: &str) {
-        self.status.set_label(text);
+        say_in(&self.status, text);
     }
 
     /// Sets the line of the key's saves.
     pub fn say_key(&self, text: &str) {
-        self.key_status.set_label(text);
+        say_in(&self.key_status, text);
     }
 }
 
@@ -292,8 +521,8 @@ mod tests {
     use addict_deepl::key::KeyError;
 
     use super::{
-        KeyState, NO_KEY_PLACE, REBINDING, change_text, key_text, save_text, saved_in_text,
-        trigger_text,
+        KeyState, NO_KEY_PLACE, REBINDING, badge, change_text, key_text, key_tone, save_text,
+        saved_in_text, trigger_keys, trigger_text,
     };
     use crate::view::Binding;
 
@@ -423,5 +652,35 @@ mod tests {
     fn a_refused_change_says_why() {
         assert!(change_text(Some("version 1")).ends_with("version 1"));
         assert!(!change_text(None).contains("cannot"));
+    }
+
+    #[test]
+    fn a_trigger_is_split_into_its_keys() {
+        let keys = |t| trigger_keys(t).map(|k| k.join(" "));
+        assert_eq!(keys("Super+Q").as_deref(), Some("Super Q"));
+        assert_eq!(keys("Ctrl+Alt+T").as_deref(), Some("Ctrl Alt T"));
+        assert_eq!(keys("Ctrl++").as_deref(), Some("Ctrl +"));
+        assert_eq!(keys("F9").as_deref(), Some("F9"));
+        assert_eq!(keys("Press <Super>q").as_deref(), Some("Super Q"));
+        assert_eq!(keys("<Control><Alt>t").as_deref(), Some("Ctrl Alt T"));
+        assert_eq!(keys("<Primary>F9").as_deref(), Some("Ctrl F9"));
+        assert_eq!(keys("<Super>"), None);
+        assert_eq!(keys("<>q"), None);
+        assert_eq!(keys("Press the key"), None);
+        assert_eq!(keys("Super+"), None);
+        assert_eq!(keys(""), None);
+    }
+
+    #[test]
+    fn the_badge_and_tones_follow_the_state() {
+        assert_eq!(badge(&Binding::Bound), ("Bound", "good"));
+        assert_eq!(badge(&Binding::Attempting).1, "pending");
+        let not_bound = Binding::NotBound {
+            detail: "x".to_owned(),
+        };
+        assert_eq!(badge(&not_bound), ("Not bound", "bad"));
+        assert_eq!(key_tone(None), "pending");
+        assert_eq!(key_tone(Some(KeyState::Pro)), "good");
+        assert_eq!(key_tone(Some(KeyState::Refused(KeyError::TooOpen))), "bad");
     }
 }

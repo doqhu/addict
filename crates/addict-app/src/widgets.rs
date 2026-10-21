@@ -1248,7 +1248,7 @@ mod tests {
             .default_height(860)
             .child(view.root())
             .css_classes(["addict"])
-            .titlebar(&crate::resident::header_bar())
+            .titlebar(&crate::resident::header_bar("Addict"))
             .build();
         window.present();
         let context = glib::MainContext::default();
