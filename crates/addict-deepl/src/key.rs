@@ -6,15 +6,17 @@
 //! is the product's one configuration directory: the other files of the
 //! product are found by the same rule. A file that anyone but its owner
 //! can use, or that its owner can execute, is refused before its content is
-//! read.
+//! read. [`write`] replaces the file with one of mode `0600` that holds a
+//! key, and nothing else of the product writes it.
 
 use std::{
     ffi::OsString,
     fmt,
-    fs::File,
-    io::{self, Read},
-    os::unix::fs::PermissionsExt,
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 /// The name of the key file inside the configuration directory.
@@ -123,14 +125,100 @@ pub fn read(path: &Path) -> Result<Key, KeyError> {
     file.take(KEY_LIMIT + 1)
         .read_to_string(&mut content)
         .map_err(|_| KeyError::Unreadable)?;
-    let key = content.trim();
-    // A key is one printable ASCII word; anything else cannot be sent in a
-    // header.
-    let fits = u64::try_from(content.len()).is_ok_and(|read| read <= KEY_LIMIT);
-    if key.is_empty() || !fits || !key.chars().all(|c| c.is_ascii_graphic()) {
-        return Err(KeyError::Empty);
-    }
+    let key = key_of(&content).ok_or(KeyError::Empty)?;
     Ok(Key(key.to_owned()))
+}
+
+/// The key that the content of a key file holds: the content without the
+/// white space around it, when the content fits in [`KEY_LIMIT`] bytes and
+/// the key is one printable ASCII word. Anything else cannot be sent in a
+/// header. [`read`] and [`write`] share this rule, so that what is written
+/// is read back.
+fn key_of(content: &str) -> Option<&str> {
+    let key = content.trim();
+    let fits = u64::try_from(content.len()).is_ok_and(|read| read <= KEY_LIMIT);
+    (!key.is_empty() && fits && key.chars().all(|c| c.is_ascii_graphic())).then_some(key)
+}
+
+/// Why a key was not written. Neither holds anything of the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteError {
+    /// What was given is not a key: blank, longer than a key file may be, or
+    /// not one printable ASCII word. Nothing was written.
+    Invalid,
+    /// The directory or the file could not be made; the file is as it was.
+    Io(io::ErrorKind),
+}
+
+impl fmt::Display for WriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid => write!(
+                f,
+                "a DeepL key is one word of printable ASCII, at most {} characters",
+                KEY_LIMIT - 1
+            ),
+            Self::Io(kind) => write!(f, "{kind}"),
+        }
+    }
+}
+
+impl std::error::Error for WriteError {}
+
+/// Tells apart the temporary files of the writes of one process.
+static NEXT_TEMP: AtomicU32 = AtomicU32::new(0);
+
+/// Writes `key`, without the white space around it, and a newline to the key
+/// file at `path`, which then has mode `0600`. Its directory is made when
+/// missing. The key goes to a new file in that directory, which is created
+/// with mode `0600`, so that no one else can read it at any moment, and is
+/// then renamed over `path`: a reader sees the old file or the new one,
+/// never a part of it, and a file that was refused for its mode is replaced.
+/// On a failure the temporary file is removed and `path` is as it was.
+pub fn write(path: &Path, key: &str) -> Result<(), WriteError> {
+    let content = format!("{}\n", key.trim());
+    if key_of(&content).is_none() {
+        return Err(WriteError::Invalid);
+    }
+    let io = |error: io::Error| WriteError::Io(error.kind());
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .ok_or(WriteError::Io(io::ErrorKind::InvalidInput))?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(io)?;
+    let mut temp_name = OsString::from(".");
+    temp_name.push(name);
+    temp_name.push(format!(
+        ".{}-{}.tmp",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let temp = dir.join(temp_name);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(ALLOWED_MODE)
+        .open(&temp)
+        .map_err(io)?;
+    let written = (|| {
+        // The umask may have taken bits away; the mode is exactly 0600.
+        file.set_permissions(fs::Permissions::from_mode(ALLOWED_MODE))?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp, path)
+    })();
+    written.map_err(|error| {
+        let _ = fs::remove_file(&temp);
+        io(error)
+    })
 }
 
 #[cfg(test)]

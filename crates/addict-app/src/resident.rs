@@ -168,7 +168,7 @@ use addict_core::{
     sentence,
     translation::{Request, Source as Language, Translator},
 };
-use addict_deepl::DeepL;
+use addict_deepl::{DeepL, key};
 use addict_platform::{
     atspi::ContextFailure,
     foreground::{self, Accessibility, Foreground, Probe, Source as Foregrounded},
@@ -319,6 +319,13 @@ enum Event {
     /// The state of the key file, as the runner read it for the Settings
     /// window.
     KeyFile(KeyState),
+    /// Save key, or Enter in the key field, was pressed in the Settings
+    /// window with this text, trimmed and not empty. `Event` has no `Debug`,
+    /// so the key is never printed.
+    SaveKey(String),
+    /// The write of the key file ended: why it failed, in one line that
+    /// does not hold the key.
+    KeySaved(Outcome<Result<(), String>>),
     /// The read of the clipboard with this number ended: the line of its
     /// text, or why there is none.
     Clipboard(u64, Result<String, Missed>),
@@ -434,6 +441,8 @@ struct Session {
     trigger: Option<String>,
     /// The read of the key file's state; dropping it gives it up.
     key_job: Option<Job>,
+    /// The write of the key file; a newer save replaces it.
+    save_job: Option<Job>,
     /// The reset of the stored binding; dropping it gives it up.
     forget_job: Option<Job>,
     /// The shortcut is being changed through the system's bind dialog: the
@@ -588,6 +597,8 @@ impl Session {
             Event::BindingForgotten(outcome) => self.binding_forgotten(outcome),
             Event::ChangeShortcut => self.change_shortcut(),
             Event::KeyFile(state) => self.settings.render_key(Some(state)),
+            Event::SaveKey(text) => self.save_key(text),
+            Event::KeySaved(outcome) => self.key_saved(outcome),
             Event::Launched => self.launched(),
             Event::Retry => self.retry(),
             Event::Sentence(text) => self.sentence_changed(text),
@@ -1808,6 +1819,15 @@ impl Session {
         self.settings
             .render_binding(&self.binding, self.trigger.as_deref());
         self.settings.say("");
+        self.settings.clear_key_entry();
+        self.settings.say_key("");
+        self.check_key();
+        self.settings.present();
+    }
+
+    /// Reads the state of the key file on the runner, for the Settings
+    /// window; a read still running is given up.
+    fn check_key(&mut self) {
         self.settings.render_key(None);
         let sender = self.sender.clone();
         let path = self.key_file.clone();
@@ -1819,7 +1839,7 @@ impl Session {
                     let state = match outcome {
                         Outcome::Finished(state) => state,
                         Outcome::TimedOut | Outcome::Panicked => KeyState::Unknown,
-                        // Replaced by the next press of Settings.
+                        // Replaced by the next press of Settings or save.
                         Outcome::Cancelled => return,
                     };
                     let _ = sender.unbounded_send(Event::KeyFile(state));
@@ -1829,7 +1849,56 @@ impl Session {
         if self.key_job.is_none() {
             self.settings.render_key(Some(KeyState::Unknown));
         }
-        self.settings.present();
+    }
+
+    /// Save key was pressed: the key file is written on the runner. A save
+    /// still running is replaced. DeepL is not asked whether the key works.
+    fn save_key(&mut self, text: String) {
+        let Some(path) = self.key_file.clone() else {
+            self.settings
+                .say_key(&settings::save_text(Err(settings::NO_KEY_PLACE)));
+            return;
+        };
+        let Some(work) = self.work.upgrade() else {
+            self.settings
+                .say_key(&settings::save_text(Err("the runner is not available")));
+            return;
+        };
+        self.settings.say_key("Saving the key…");
+        let sender = self.sender.clone();
+        self.save_job = Some(work.run(
+            settings::KEY_CHECK_LIMIT,
+            async move { key::write(&path, &text).map_err(|error| error.to_string()) },
+            move |outcome| {
+                let _ = sender.unbounded_send(Event::KeySaved(outcome));
+            },
+        ));
+    }
+
+    /// The write of the key file ended: the field is emptied when it
+    /// worked, the line says why when it did not, and the state of the file
+    /// is read again either way. The job slot is left alone: only a newer
+    /// save replaces it, and clearing it would cancel that one.
+    fn key_saved(&mut self, outcome: Outcome<Result<(), String>>) {
+        let result = match outcome {
+            Outcome::Finished(result) => result,
+            // The write cannot be stopped, so it may have happened.
+            Outcome::TimedOut => {
+                self.settings.say_key(settings::SAVE_UNANSWERED);
+                self.check_key();
+                return;
+            }
+            Outcome::Panicked => Err("the write did not run".to_owned()),
+            // Replaced by a newer save, whose end is awaited.
+            Outcome::Cancelled => return,
+        };
+        if result.is_ok() {
+            self.settings.clear_key_entry();
+        }
+        self.settings.say_key(&settings::save_text(
+            result.as_ref().map(|_| ()).map_err(String::as_str),
+        ));
+        self.check_key();
     }
 
     /// Change shortcut was pressed: the portal is asked for its dialog
@@ -2069,16 +2138,24 @@ fn build_ui(
 }
 
 /// The Settings window above `window`, hidden, naming `key_file`; Change
-/// shortcut goes to `sender` as an event.
+/// shortcut and Save key go to `sender` as events.
 fn start_settings(
     window: &gtk::ApplicationWindow,
     key_file: Option<&std::path::Path>,
     sender: &UnboundedSender<Event>,
 ) -> Settings {
     let change = sender.clone();
-    Settings::new(window, key_file, move || {
-        let _ = change.unbounded_send(Event::ChangeShortcut);
-    })
+    let save = sender.clone();
+    Settings::new(
+        window,
+        key_file,
+        move || {
+            let _ = change.unbounded_send(Event::ChangeShortcut);
+        },
+        move |text| {
+            let _ = save.unbounded_send(Event::SaveKey(text));
+        },
+    )
 }
 
 /// Starts the icon in the top bar; the choices of its menu and the tray
@@ -2211,6 +2288,7 @@ fn start(
         settings,
         trigger: None,
         key_job: None,
+        save_job: None,
         forget_job: None,
         rebinding: false,
         translating_word: None,
