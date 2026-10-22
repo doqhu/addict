@@ -1153,7 +1153,7 @@ mod tests {
             assert_eq!(article.entries[0].pronunciations.len(), 3);
             assert_eq!(
                 article.entries[0].pronunciations[0].notation.as_deref(),
-                Some("@ca-fonipa")
+                Some("IPA")
             );
             assert_eq!(
                 article.entries[0].part_of_speech.as_ref().unwrap().category,
@@ -1163,8 +1163,39 @@ mod tests {
                 article.entries[0].part_of_speech.as_ref().unwrap().label,
                 "Nom"
             );
+            assert_eq!(
+                article.senses[0].part_of_speech,
+                article.entries[0].part_of_speech
+            );
             assert_eq!(article.senses[0].entries[0].id, "cat:e");
         }
+    }
+
+    #[test]
+    fn dbnary_notation_is_named_by_the_phonetic_subtag_alone() {
+        let entry = "cat:e a ontolex:LexicalEntry;\n dcterms:language lexvo:cat;\n rdfs:label \"banc\";\n lexinfo:partOfSpeech lexinfo:noun;\n ontolex:canonicalForm cat:form .\n\n";
+        let form = "cat:form a ontolex:Form;\n ontolex:phoneticRep \"ipa\"@CA-FONIPA , \"typed\"^^xsd:string , \"tagged\"@ca , \"bare\" .\n\n";
+        let contents =
+            crate::dbnary::parse(format!("{entry}{form}").as_bytes(), "cat", "dbnary").unwrap();
+        let dir = TempDir::new("metadata-dbnary-notation");
+        let article = metadata_index(&dir, &contents)
+            .find("banc")
+            .unwrap()
+            .unwrap();
+        let notations: Vec<_> = article.entries[0]
+            .pronunciations
+            .iter()
+            .map(|sound| (sound.text.as_deref().unwrap(), sound.notation.as_deref()))
+            .collect();
+        assert_eq!(
+            notations,
+            [
+                ("ipa", Some("IPA")),
+                ("typed", None),
+                ("tagged", None),
+                ("bare", None)
+            ]
+        );
     }
 
     #[test]
@@ -1264,7 +1295,7 @@ mod tests {
         invalid.headwords[0].entries[0].entry.pronunciations[0].text = Some(" ".to_owned());
         assert!(matches!(
             encode(&invalid),
-            Err(format::WriteError::Metadata)
+            Err(format::WriteError::Metadata(_))
         ));
         let mut invalid = contents;
         invalid.headwords[0].entries[0].senses.push(u32::MAX);

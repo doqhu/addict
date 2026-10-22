@@ -32,10 +32,14 @@ pub struct Sense {
     pub synonyms: Vec<String>,
 }
 
-/// Metadata-bearing source sense before presentation projections or precedence.
+/// A sense that has grammar or entries, as its source gave it: before a
+/// lookup merges, projects or drops senses for display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourcedSense {
+    /// The id of the source the sense comes from, such as `oewn-2025`.
     pub source: String,
+    /// The headword the sense was found under, which may be a dictionary
+    /// form of the word looked up.
     pub headword: String,
     pub sense: Sense,
 }
@@ -43,7 +47,9 @@ pub struct SourcedSense {
 /// A source's POS label with a normalized category when recognized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartOfSpeech {
+    /// The shared category the label names; `None` for a label not known.
     pub category: Option<Pos>,
+    /// The label as the source wrote it, trimmed; never blank.
     pub label: String,
 }
 
@@ -83,6 +89,8 @@ pub enum Pos {
 }
 
 impl PartOfSpeech {
+    /// The part of speech of the source label `label`; `None` when it is
+    /// blank.
     pub fn from_label(label: &str) -> Option<Self> {
         if label.trim().is_empty() {
             return None;
@@ -102,9 +110,11 @@ impl PartOfSpeech {
             "s" | "adjective satellite" | "adjective_satellite" | "adj_satellite" => {
                 Some(Pos::AdjectiveSatellite)
             }
-            "r" | "adv" | "adverb" | "adverbi" => Some(Pos::Adverb),
+            "r" | "adv" | "adverb" | "adverbi" | "adverbio" => Some(Pos::Adverb),
             "pron"
             | "pronoun"
+            | "pronom"
+            | "pronombre"
             | "personalpronoun"
             | "indefinitepronoun"
             | "possessivepronoun"
@@ -113,10 +123,10 @@ impl PartOfSpeech {
             | "interrogativepronoun" => Some(Pos::Pronoun),
             "det" | "determiner" => Some(Pos::Determiner),
             "art" | "article" => Some(Pos::Article),
-            "prep" | "preposition" => Some(Pos::Preposition),
+            "prep" | "preposition" | "preposició" | "preposición" => Some(Pos::Preposition),
             "postp" | "postposition" => Some(Pos::Postposition),
-            "conj" | "conjunction" => Some(Pos::Conjunction),
-            "intj" | "interjection" => Some(Pos::Interjection),
+            "conj" | "conjunction" | "conjunció" | "conjunción" => Some(Pos::Conjunction),
+            "intj" | "interjection" | "interjecció" | "interjección" => Some(Pos::Interjection),
             "num" | "numeral" | "number" => Some(Pos::Numeral),
             "particle" => Some(Pos::Particle),
             "name" | "proper noun" | "propernoun" | "proper-noun" | "propn" => {
@@ -141,7 +151,7 @@ impl PartOfSpeech {
         };
         Some(Self {
             category,
-            label: label.to_owned(),
+            label: label.trim().to_owned(),
         })
     }
 }
@@ -149,31 +159,44 @@ impl PartOfSpeech {
 /// Stable provenance for a lexical entry, even after headword reductions.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EntryIdentity {
+    /// The id of the source the entry comes from.
     pub source: String,
+    /// The headword as the source wrote it, before any reduction.
     pub headword: String,
+    /// The id of the entry within its source.
     pub id: String,
 }
 
 /// A single source sound record. Independent records are never paired.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Pronunciation {
+    /// The transcription; `None` for a record that has audio only.
     pub text: Option<String>,
+    /// What the transcription is written in, such as `IPA` or `enPR`.
     pub notation: Option<String>,
+    /// The source's normalized tags, such as a region (`GB`, `US`).
     pub labels: Vec<String>,
+    /// The source's free-text tags, kept as written.
     pub raw_labels: Vec<String>,
+    /// The recordings of this record.
     pub audio: Vec<Audio>,
 }
 
+/// A recording of a pronunciation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Audio {
+    /// Where the recording is; never blank.
     pub url: String,
     /// The source's format name, when supplied (for example mp3 or ogg).
     pub format: Option<String>,
 }
 
+/// One entry of a source for a word: the grammar and the pronunciations of
+/// that entry, whether or not it has a definition.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LexicalEntry {
     pub identity: EntryIdentity,
+    /// The grammar of the entry as a whole, when the source gives one.
     pub part_of_speech: Option<PartOfSpeech>,
     pub pronunciations: Vec<Pronunciation>,
 }

@@ -145,8 +145,11 @@ pub enum Answer {
 }
 
 impl Answer {
-    /// Newly retained lexical data must not hide useful content in another language.
-    /// Legacy answers without metadata keep their existing fallback behavior.
+    /// Whether the answer has lexical entries or sense metadata and nothing
+    /// the window shows: no definition, synonym, translation, gloss or verb
+    /// form that is not blank. Such an answer does not stop
+    /// [`Articles::look_up_first`]; an answer with no metadata at all is
+    /// never metadata only.
     fn metadata_only(&self) -> bool {
         let text = |value: &String| !value.trim().is_empty();
         let sense = |value: &addict_core::dictionary::Sense| {
@@ -160,6 +163,7 @@ impl Answer {
             }
             Self::Grouped(grouped) => {
                 (!grouped.entries.is_empty() || !grouped.sense_metadata.is_empty())
+                    && grouped.verb.is_none()
                     && !grouped.definitions.iter().flatten().any(sense)
                     && !grouped.russian.iter().flatten().any(text)
                     && !grouped.english.iter().flatten().any(text)
@@ -219,10 +223,10 @@ pub trait Articles: Send + Sync {
 
     /// What the source says about `word`, read first in the `chosen`
     /// language, with the language that answered. The chosen language's
-    /// errors and missing indexes retain precedence. A miss or an answer
-    /// containing only new metadata searches the other languages in
-    /// [`FALLBACK`] order for visible content. If none answers, keep the
-    /// first metadata candidate (or the chosen miss) with the latest index states.
+    /// errors and missing indexes come first. A miss or an answer that is
+    /// [`Answer::metadata_only`] asks the other languages in [`FALLBACK`]
+    /// order for one with content; when none has it, the first metadata-only
+    /// answer is given, or the chosen miss, with the latest index states.
     fn look_up_first(&self, chosen: Language, word: &str) -> (Language, Looked) {
         let mut first = self.look_up_in(chosen, word);
         let mut answered = chosen;
@@ -1824,6 +1828,18 @@ pub mod tests {
             }
             assert!(!Answer::Grouped(useful).metadata_only(), "{kind:?}");
         }
+        // The line of a verb form is shown, so it is content too.
+        let verb_form = Grouped {
+            verb: Some(Box::new(addict_dictionary::lookup::VerbForm {
+                analyses: vec![addict_dictionary::analysis::Analyses {
+                    lemma: "beure".to_owned(),
+                    shapes: Vec::new(),
+                }],
+                periphrastic: None,
+            })),
+            ..grouped
+        };
+        assert!(!Answer::Grouped(verb_form).metadata_only());
         assert!(!Answer::Article(Article::default()).metadata_only());
         assert!(!Answer::Grouped(Grouped::default()).metadata_only());
     }

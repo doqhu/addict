@@ -121,8 +121,10 @@ pub struct Contents {
 
 impl Contents {
     /// The contents of `source` whose headwords are the words of `headwords`,
-    /// in their order, each with its sense records in order; no translations
-    /// and no forms. The builder of the readers of sources without synsets.
+    /// in their order, each with its sense records in order; no lexical
+    /// entries, no translations and no forms. The builder of the readers of
+    /// sources without synsets; [`attach_entries`] adds the entries a source
+    /// has.
     pub(crate) fn of_senses(source: &str, headwords: BTreeMap<String, Vec<SenseRecord>>) -> Self {
         let mut contents = Contents {
             source: source.to_owned(),
@@ -130,27 +132,9 @@ impl Contents {
         };
         for (word, senses) in headwords {
             let first = contents.senses.len() as u32;
-            let entries = senses
-                .iter()
-                .enumerate()
-                .filter_map(|(at, sense)| {
-                    Some(EntryRecord {
-                        entry: LexicalEntry {
-                            identity: EntryIdentity {
-                                source: source.to_owned(),
-                                headword: word.clone(),
-                                id: format!("sense-{at}"),
-                            },
-                            part_of_speech: Some(sense.part_of_speech.clone()?),
-                            pronunciations: Vec::new(),
-                        },
-                        senses: vec![first + at as u32],
-                    })
-                })
-                .collect();
             contents.senses.extend(senses);
             contents.headwords.push(Headword {
-                entries,
+                entries: Vec::new(),
                 word,
                 senses: (first..contents.senses.len() as u32).collect(),
                 translations: Vec::new(),
@@ -257,10 +241,14 @@ pub struct Headword {
     pub translations: Vec<String>,
 }
 
-/// A lexical entry and the source sense positions explicitly associated with it.
+/// A lexical entry and the senses explicitly associated with it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EntryRecord {
     pub entry: LexicalEntry,
+    /// The senses of the entry. In [`Contents`] given to [`encode`], they
+    /// are positions in [`Contents::senses`], as [`Headword::senses`] are;
+    /// a parser gives [`attach_entries`] positions in the headword's own
+    /// sense list instead, and [`decode_word`] gives those too.
     pub senses: Vec<u32>,
 }
 
@@ -293,14 +281,17 @@ pub enum WriteError {
     /// A key or a record is longer than [`MAX_RECORD`]; this is its key or
     /// the start of its definition.
     TooLarge(String),
-    /// A new metadata record contains a blank required field or no sound.
-    Metadata,
+    /// A grammar or pronunciation record has a blank label, entry id,
+    /// headword, text, notation, audio URL or format, or a pronunciation
+    /// has neither text nor audio; this is its headword, or the start of
+    /// the definition of its sense.
+    Metadata(String),
 }
 
 impl fmt::Display for WriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Metadata => write!(f, "invalid lexical metadata"),
+            Self::Metadata(what) => write!(f, "the grammar or pronunciation of {what:?} is blank"),
             Self::Source => write!(f, "the source id is empty or too long"),
             Self::EmptyKey => write!(f, "an empty headword or form"),
             Self::Unsorted(key) => write!(f, "{key:?} is out of order or repeated"),
@@ -336,7 +327,7 @@ pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
         }
         if let Some(pos) = &sense.part_of_speech {
             body.extend_from_slice(b"POS2");
-            put_pos_value(&mut body, pos)?;
+            put_pos_value(&mut body, pos, &sense.definition)?;
         }
         let len = bounded(body.len(), &sense.definition)?;
         sense_offsets.push(senses.len() as u64);
@@ -366,13 +357,13 @@ pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
                 if entry.entry.identity.id.trim().is_empty()
                     || entry.entry.identity.headword.trim().is_empty()
                 {
-                    return Err(WriteError::Metadata);
+                    return Err(blank(&headword.word));
                 }
                 put_text(&mut record, &entry.entry.identity.id)?;
                 put_text(&mut record, &entry.entry.identity.headword)?;
                 record.push(u8::from(entry.entry.part_of_speech.is_some()));
                 if let Some(pos) = &entry.entry.part_of_speech {
-                    put_pos_value(&mut record, pos)?;
+                    put_pos_value(&mut record, pos, &headword.word)?;
                 }
                 put_count(&mut record, entry.senses.len(), &headword.word)?;
                 for sense in &entry.senses {
@@ -399,19 +390,19 @@ pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
                 )?;
                 for sound in &entry.entry.pronunciations {
                     if sound.text.is_none() && sound.audio.is_empty() {
-                        return Err(WriteError::Metadata);
+                        return Err(blank(&headword.word));
                     }
-                    put_optional(&mut record, sound.text.as_deref())?;
-                    put_optional(&mut record, sound.notation.as_deref())?;
+                    put_optional(&mut record, sound.text.as_deref(), &headword.word)?;
+                    put_optional(&mut record, sound.notation.as_deref(), &headword.word)?;
                     put_texts(&mut record, &sound.labels)?;
                     put_texts(&mut record, &sound.raw_labels)?;
                     put_count(&mut record, sound.audio.len(), &headword.word)?;
                     for audio in &sound.audio {
                         if audio.url.trim().is_empty() {
-                            return Err(WriteError::Metadata);
+                            return Err(blank(&headword.word));
                         }
                         put_text(&mut record, &audio.url)?;
-                        put_optional(&mut record, audio.format.as_deref())?;
+                        put_optional(&mut record, audio.format.as_deref(), &headword.word)?;
                     }
                 }
             }
@@ -567,19 +558,24 @@ fn pos_tag(category: Option<Pos>) -> u8 {
     }
 }
 
-fn put_pos_value(out: &mut Vec<u8>, pos: &PartOfSpeech) -> Result<(), WriteError> {
+/// The error of a blank metadata field of the record of `what`.
+fn blank(what: &str) -> WriteError {
+    WriteError::Metadata(what.chars().take(40).collect())
+}
+
+fn put_pos_value(out: &mut Vec<u8>, pos: &PartOfSpeech, what: &str) -> Result<(), WriteError> {
     if pos.label.trim().is_empty() {
-        return Err(WriteError::Metadata);
+        return Err(blank(what));
     }
     out.push(pos_tag(pos.category));
     put_text(out, &pos.label)
 }
 
-fn put_optional(out: &mut Vec<u8>, text: Option<&str>) -> Result<(), WriteError> {
+fn put_optional(out: &mut Vec<u8>, text: Option<&str>, what: &str) -> Result<(), WriteError> {
     out.push(u8::from(text.is_some()));
     if let Some(text) = text {
         if text.trim().is_empty() {
-            return Err(WriteError::Metadata);
+            return Err(blank(what));
         }
         put_text(out, text)?;
     }
@@ -1570,11 +1566,97 @@ pub(crate) mod tests {
         put_text(&mut body, "(v; description)").unwrap();
         body.extend_from_slice(b"POS2");
         let category_at = body.len();
-        put_pos_value(&mut body, &PartOfSpeech::from_label("verb").unwrap()).unwrap();
+        put_pos_value(
+            &mut body,
+            &PartOfSpeech::from_label("verb").unwrap(),
+            "definition",
+        )
+        .unwrap();
         let sense = decode_sense(&body).unwrap();
         assert_eq!(sense.metadata.unwrap().label(), "(v; description)");
         assert_eq!(sense.part_of_speech.unwrap().category, Some(Pos::Verb));
         body[category_at] = 255;
         assert!(decode_sense(&body).is_err());
+    }
+
+    #[test]
+    fn every_grammar_category_is_read_back_as_written() {
+        // No wildcard arm: a new category does not compile until it is here.
+        let listed = |pos: Pos| match pos {
+            Pos::Noun
+            | Pos::Verb
+            | Pos::Adjective
+            | Pos::Adverb
+            | Pos::Pronoun
+            | Pos::Determiner
+            | Pos::Article
+            | Pos::Preposition
+            | Pos::Postposition
+            | Pos::Conjunction
+            | Pos::Interjection
+            | Pos::Numeral
+            | Pos::Particle
+            | Pos::ProperNoun
+            | Pos::Auxiliary
+            | Pos::AdjectiveSatellite
+            | Pos::Affix
+            | Pos::Prefix
+            | Pos::Suffix
+            | Pos::Infix
+            | Pos::Circumfix
+            | Pos::Contraction
+            | Pos::Abbreviation
+            | Pos::Acronym
+            | Pos::Symbol
+            | Pos::Letter
+            | Pos::Phrase
+            | Pos::Proverb
+            | Pos::Idiom
+            | Pos::Punctuation => pos,
+        };
+        let categories = [
+            Pos::Noun,
+            Pos::Verb,
+            Pos::Adjective,
+            Pos::Adverb,
+            Pos::Pronoun,
+            Pos::Determiner,
+            Pos::Article,
+            Pos::Preposition,
+            Pos::Postposition,
+            Pos::Conjunction,
+            Pos::Interjection,
+            Pos::Numeral,
+            Pos::Particle,
+            Pos::ProperNoun,
+            Pos::Auxiliary,
+            Pos::AdjectiveSatellite,
+            Pos::Affix,
+            Pos::Prefix,
+            Pos::Suffix,
+            Pos::Infix,
+            Pos::Circumfix,
+            Pos::Contraction,
+            Pos::Abbreviation,
+            Pos::Acronym,
+            Pos::Symbol,
+            Pos::Letter,
+            Pos::Phrase,
+            Pos::Proverb,
+            Pos::Idiom,
+            Pos::Punctuation,
+        ];
+        let mut tags = Vec::new();
+        for category in categories.into_iter().map(listed).map(Some).chain([None]) {
+            let written = PartOfSpeech {
+                category,
+                label: "label".to_owned(),
+            };
+            let mut bytes = Vec::new();
+            put_pos_value(&mut bytes, &written, "word").unwrap();
+            assert!(!tags.contains(&bytes[0]), "{category:?} shares its tag");
+            tags.push(bytes[0]);
+            assert_eq!(Cursor(&bytes).pos_value().unwrap(), written);
+        }
     }
 }

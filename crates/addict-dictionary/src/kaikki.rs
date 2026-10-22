@@ -251,7 +251,7 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
         if entry.lang_code.as_deref() != Some(language) {
             continue;
         }
-        let Some(word) = entry.word.filter(|word| !word.is_empty()) else {
+        let Some(word) = entry.word.filter(|word| !word.trim().is_empty()) else {
             continue;
         };
         entries += 1;
