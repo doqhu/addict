@@ -44,10 +44,10 @@ use crate::{
     view::{
         ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL,
         COPIED_LABEL, COPY_LABEL, ChosenGloss, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER,
-        FORWARD_TOOLTIP, LANGUAGE_TOOLTIP, Listed, OnlineTexts, RETRY_LABEL, ResultTexts,
-        SENSES_LABEL, SHOW_LESS, SHOW_MORE, SYNONYM_PREVIEW, SenseText, Shown, SynonymTexts,
-        binding_texts, choice_texts, command_in, indexes_text, language_label, online_markup,
-        sentence_markup, synonym_heading, texts,
+        FORWARD_TOOLTIP, LANGUAGE_TOOLTIP, Listed, ONLINE_SOURCE, OnlineRow, OnlineState,
+        OnlineTexts, RETRY_LABEL, ResultTexts, SENSES_LABEL, SHOW_LESS, SHOW_MORE, SYNONYM_PREVIEW,
+        SenseText, Shown, SynonymTexts, binding_texts, choice_texts, command_in, indexes_text,
+        language_label, online_rows, sentence_markup, synonym_heading, texts,
     },
     wrap::Wrap,
 };
@@ -702,11 +702,14 @@ fn definition_block(block: &Block<'_>) -> gtk::Box {
     translated
 }
 
-/// The result area, which scrolls: the card of the word, the online texts,
-/// the list of senses and, for a language beside English, the synonyms of
+/// The result area, which scrolls: the card of the word with the online
+/// texts at its foot, the list of senses and, for a language beside English, the synonyms of
 /// the word and its English glosses.
 struct ResultArea {
     area: gtk::ScrolledWindow,
+    /// The raised surface: the article above, the online texts below it;
+    /// shown while either is.
+    card: gtk::Box,
     article: gtk::Box,
     headword: gtk::Label,
     line: gtk::Label,
@@ -714,7 +717,10 @@ struct ResultArea {
     /// the card.
     analysis: gtk::Box,
     translations: gtk::Box,
-    online: gtk::Label,
+    /// The online texts: their rows and, under them, the line that names
+    /// DeepL.
+    online: gtk::Box,
+    online_rows: gtk::Grid,
     senses: gtk::Box,
     /// What stands above the list: the kind and the language of the senses,
     /// set for each result.
@@ -754,18 +760,32 @@ fn result_area() -> ResultArea {
     let article = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(14)
-        .css_classes(["article-card"])
         .visible(false)
         .build();
     article.append(&headword);
     article.append(&line);
     article.append(&analysis);
     article.append(&translations);
-    let online = wrapping(gtk::Label::builder().use_markup(true))
-        .selectable(true)
+    let online_rows = gtk::Grid::builder()
+        .row_spacing(8)
+        .column_spacing(12)
+        .build();
+    let online = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
         .css_classes(["online"])
         .visible(false)
         .build();
+    online.append(&online_rows);
+    online.append(&online_source());
+    let card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(14)
+        .css_classes(["article-card"])
+        .visible(false)
+        .build();
+    card.append(&article);
+    card.append(&online);
     let hint = wrapping(gtk::Label::builder())
         .css_classes(["hint"])
         .visible(false)
@@ -794,8 +814,7 @@ fn result_area() -> ResultArea {
         .spacing(6)
         .visible(false)
         .build();
-    content.append(&article);
-    content.append(&online);
+    content.append(&card);
     content.append(&senses);
     content.append(&word_synonyms);
     content.append(&glosses);
@@ -824,12 +843,14 @@ fn result_area() -> ResultArea {
         .build();
     ResultArea {
         area,
+        card,
         article,
         headword,
         line,
         analysis,
         translations,
         online,
+        online_rows,
         senses,
         senses_caption,
         hint,
@@ -837,6 +858,60 @@ fn result_area() -> ResultArea {
         word_synonyms,
         glosses,
         definition_action,
+    }
+}
+
+/// The dim line under the online rows: a globe and where they came from.
+fn online_source() -> gtk::Box {
+    let source = gtk::Box::builder()
+        .spacing(6)
+        .css_classes(["online-source"])
+        .build();
+    source.append(&gtk::Image::from_icon_name("web-browser-symbolic"));
+    source.append(&gtk::Label::new(Some(ONLINE_SOURCE)));
+    source
+}
+
+/// Puts `rows` into `grid`, a row each: the label on the left, dim, and
+/// the line on the right, which wraps; the word's line in bold, a pending
+/// one dim behind a spinner, a failed one in the warning's colour.
+fn fill_online(grid: &gtk::Grid, rows: &[OnlineRow<'_>]) {
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+    for (row, online) in (0..).zip(rows) {
+        let label = gtk::Label::builder()
+            .label(online.label)
+            .xalign(0.0)
+            .yalign(0.0)
+            .valign(gtk::Align::Start)
+            .css_classes(["online-label"])
+            .build();
+        let line = wrapping(gtk::Label::builder())
+            .label(&*online.line)
+            .selectable(online.state != OnlineState::Pending)
+            .hexpand(true)
+            .build();
+        match online.state {
+            OnlineState::Translated if online.word => line.add_css_class("online-word"),
+            OnlineState::Translated => {}
+            OnlineState::Pending => line.add_css_class("online-pending"),
+            OnlineState::Failed => line.add_css_class("online-failed"),
+        }
+        grid.attach(&label, 0, row, 1, 1);
+        if online.state == OnlineState::Pending {
+            let pending = gtk::Box::builder().spacing(8).build();
+            pending.append(
+                &gtk::Spinner::builder()
+                    .spinning(true)
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
+            pending.append(&line);
+            grid.attach(&pending, 1, row, 1, 1);
+        } else {
+            grid.attach(&line, 1, row, 1, 1);
+        }
     }
 }
 
@@ -1308,22 +1383,28 @@ impl View {
             .set_visible(!texts.senses.is_empty() || texts.hint.is_some());
     }
 
-    /// Shows the blocks of `online`, or hides them when there is none.
+    /// Shows the rows of `online`, or hides them when there is none.
     pub fn render_online(&self, online: &OnlineTexts<'_>, key_file: Option<&std::path::Path>) {
-        let markup = online_markup(online, key_file);
-        self.result.online.set_markup(&markup);
-        self.result.online.set_visible(!markup.is_empty());
+        let rows = online_rows(online, key_file);
+        fill_online(&self.result.online_rows, &rows);
+        self.result.online.set_visible(!rows.is_empty());
         self.show_area();
     }
 
-    /// Shows the result area while it has something in it.
+    /// Shows the card and the result area while they have something in
+    /// them; the online texts are set off from an article above them.
     fn show_area(&self) {
         let result = &self.result;
-        result
-            .area
-            // The flags of their own: `is_visible` would also ask the
-            // hidden area itself.
-            .set_visible(result.article.get_visible() || result.online.get_visible());
+        // The flags of their own: `is_visible` would also ask the hidden
+        // area itself.
+        let (article, online) = (result.article.get_visible(), result.online.get_visible());
+        if article {
+            result.online.add_css_class("under-article");
+        } else {
+            result.online.remove_css_class("under-article");
+        }
+        result.card.set_visible(article || online);
+        result.area.set_visible(article || online);
     }
 
     /// Puts the keyboard focus into the field, so a paste lands there. The
@@ -1355,12 +1436,24 @@ mod tests {
     /// its first sense chosen, into the PNG file `ADDICT_SHOT` names. Run
     /// by hand, and alone, to see the look: it opens a window on the
     /// display, and GTK starts once per process, on one thread.
+    /// `ADDICT_SHOT_SCHEME=dark` or `light` draws it in that scheme instead
+    /// of the desktop's.
     #[test]
     #[ignore = "opens a window; run alone with ADDICT_SHOT=<file.png>"]
     fn draws_the_window_into_a_png() {
         let path = std::env::var("ADDICT_SHOT").expect("ADDICT_SHOT");
         gtk::init().expect("a display");
         style::install();
+        let scheme = match std::env::var("ADDICT_SHOT_SCHEME").as_deref() {
+            Ok("dark") => Some(gtk::InterfaceColorScheme::Dark),
+            Ok("light") => Some(gtk::InterfaceColorScheme::Light),
+            _ => None,
+        };
+        if let Some(scheme) = scheme {
+            gtk::Settings::default()
+                .expect("settings")
+                .set_gtk_interface_color_scheme(scheme);
+        }
         let view = View::new(WindowState::Empty, &Binding::Bound);
         let sentence = "I sat on the bank of the river.";
         let words = words(sentence);
