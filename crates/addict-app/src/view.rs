@@ -9,15 +9,15 @@
 //! with what is said about the sense that was clicked under it and its
 //! definition translated online once that is asked for, and, for a language
 //! beside English, its English glosses, one of which can be chosen and
-//! translated instead. Below the result, apart from
-//! it, stand the online texts, each under a label that says what it is: the
+//! translated instead. In the card of the word, under its translations,
+//! stand the online texts, each beside a label that says what it is: the
 //! chosen word translated in its sentence, the sentence itself, or a word
-//! translated without a sentence.
+//! translated without a sentence; a dim line under them names DeepL.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
 //! [`binding_texts`], [`indexes_text`], [`failure_text`], [`read_failure_text`], [`too_long_text`],
 //! [`sentence_markup`],
-//! [`choice_texts`] and [`online_markup`] are pure, and
+//! [`choice_texts`] and [`online_rows`] are pure, and
 //! so is [`Shown`], the result with the sense chosen in it; they are tested
 //! without a display. This module owns no
 //! widget: [`View`](crate::widgets::View) puts the results into its own.
@@ -1055,7 +1055,7 @@ pub fn result_texts<'a>(
 /// have is no choice. The online translation of the definition,
 /// `definition`, stands under the chosen sense or gloss when its text is not
 /// blank. A refusal about the key names `key_file`, as in
-/// [`online_markup`]. An article that the language `elsewhere.1` gave for a
+/// [`online_rows`]. An article that the language `elsewhere.1` gave for a
 /// word the chosen language `elsewhere.0` had no entry for has the line
 /// that names both. No wildcard arm: a new variant does not compile until
 /// it is given its text.
@@ -1308,15 +1308,18 @@ pub struct OnlineTexts<'a> {
     pub lone: Option<&'a Online>,
 }
 
-/// What stands above the online translation of the chosen word in its
+/// What stands beside the online translation of the chosen word in its
 /// sentence.
-const ONLINE_WORD_LABEL: &str = "Online, this word in the sentence:";
+const ONLINE_WORD_LABEL: &str = "In this sentence";
 
-/// What stands above the online translation of a word that has no sentence.
-const ONLINE_LONE_LABEL: &str = "Online, this word without a sentence:";
+/// What stands beside the online translation of a word that has no sentence.
+const ONLINE_LONE_LABEL: &str = "Without a sentence";
 
-/// What stands above the online translation of the sentence itself.
-const ONLINE_SENTENCE_LABEL: &str = "Online, the whole sentence:";
+/// What stands beside the online translation of the sentence itself.
+const ONLINE_SENTENCE_LABEL: &str = "Whole sentence";
+
+/// The dim line under the online rows: where they came from.
+pub(crate) const ONLINE_SOURCE: &str = "Online · DeepL";
 
 /// The line of an online request that still runs.
 const ONLINE_PENDING: &str = "Translating online…";
@@ -1327,49 +1330,73 @@ const ONLINE_UNAVAILABLE: &str = "Online translation is not available.";
 /// The line of a text that is not sent as a sentence because of its length.
 const ONLINE_TOO_LONG: &str = "The sentence is too long to translate.";
 
-/// The online texts as Pango markup: a block for the word in its sentence,
-/// one for the word without a sentence and one for the sentence, in this
-/// order, with an empty line between two of them. A block is its label and,
-/// under it, the pending line, the translation as it came, escaped, the line
-/// of a refusal or the line of a text that is too long. Empty when there is
-/// no block. A refusal about the key names `key_file`, or says how to make
-/// it known when there is none.
-pub fn online_markup(texts: &OnlineTexts<'_>, key_file: Option<&Path>) -> String {
-    let mut markup = String::new();
-    if let Some(online) = texts.word {
-        push_online_block(
-            &mut markup,
-            ONLINE_WORD_LABEL,
-            &online_line(online, key_file),
-        );
-    }
-    if let Some(online) = texts.lone {
-        push_online_block(
-            &mut markup,
-            ONLINE_LONE_LABEL,
-            &online_line(online, key_file),
-        );
-    }
-    if let Some(whole) = texts.sentence {
-        let line = match whole {
-            Whole::Asked(online) => online_line(online, key_file),
-            Whole::TooLong => Cow::Borrowed(ONLINE_TOO_LONG),
-        };
-        push_online_block(&mut markup, ONLINE_SENTENCE_LABEL, &line);
-    }
-    markup
+/// How the line of an online row reads, so the window styles it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnlineState {
+    /// The translation as it came.
+    Translated,
+    /// The request still runs.
+    Pending,
+    /// No translation: a refusal, or a text too long to send.
+    Failed,
 }
 
-/// Appends a block: the `label` and the `line` under it, both escaped, after
-/// an empty line when a block stands before it.
-fn push_online_block(markup: &mut String, label: &str, line: &str) {
-    if !markup.is_empty() {
-        markup.push_str("\n\n");
+/// One online text in a row of its own: what it is, its line and how the
+/// line reads. The line is text, never markup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnlineRow<'a> {
+    pub label: &'static str,
+    pub line: Cow<'a, str>,
+    pub state: OnlineState,
+    /// The translation of the word, which stands out from the sentence.
+    pub word: bool,
+}
+
+/// The online texts as rows: the word in its sentence, the word without a
+/// sentence and the sentence, in this order; empty when there is none. A
+/// row's line is the pending line, the translation as it came, the line of
+/// a refusal or the line of a text that is too long. A refusal about the
+/// key names `key_file`, or says how to make it known when there is none.
+pub fn online_rows<'a>(texts: &OnlineTexts<'a>, key_file: Option<&Path>) -> Vec<OnlineRow<'a>> {
+    let mut rows = Vec::new();
+    if let Some(online) = texts.word {
+        rows.push(online_row(ONLINE_WORD_LABEL, online, key_file, true));
     }
-    markup.push_str("<i>");
-    push_escaped(markup, label);
-    markup.push_str("</i>\n");
-    push_escaped(markup, line);
+    if let Some(online) = texts.lone {
+        rows.push(online_row(ONLINE_LONE_LABEL, online, key_file, true));
+    }
+    if let Some(whole) = texts.sentence {
+        rows.push(match whole {
+            Whole::Asked(online) => online_row(ONLINE_SENTENCE_LABEL, online, key_file, false),
+            Whole::TooLong => OnlineRow {
+                label: ONLINE_SENTENCE_LABEL,
+                line: Cow::Borrowed(ONLINE_TOO_LONG),
+                state: OnlineState::Failed,
+                word: false,
+            },
+        });
+    }
+    rows
+}
+
+/// The row of `online` beside `label`.
+fn online_row<'a>(
+    label: &'static str,
+    online: &'a Online,
+    key_file: Option<&Path>,
+    word: bool,
+) -> OnlineRow<'a> {
+    let state = match online {
+        Online::Pending => OnlineState::Pending,
+        Online::Translated(_) => OnlineState::Translated,
+        Online::Refused(_) => OnlineState::Failed,
+    };
+    OnlineRow {
+        label,
+        line: online_line(online, key_file),
+        state,
+        word,
+    }
 }
 
 /// The line of one online request: the pending line, the translation as it
@@ -1607,9 +1634,10 @@ mod tests {
         AnalysisGroup, AnalysisLine, Binding, CAPTURE_LABEL, CHOOSE_SENSE, ENGLISH_LABEL,
         EXPLANATION_MARK, FIELD_PLACEHOLDER, Listed, Lookup, NO_DEFINITIONS, NO_GLOSS, NO_SYNONYMS,
         NO_TRANSLATION, NO_WORD_SYNONYMS, ONLINE_LONE_LABEL, ONLINE_PENDING, ONLINE_SENTENCE_LABEL,
-        ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online, OnlineTexts, PENDING,
-        RUSSIAN_LABEL, ResultTexts, SYNONYMS_LABEL, Shown, SynonymTexts, UNFINISHED, Whole,
-        binding_texts, indexes_text, online_markup, result_texts, sentence_markup, texts,
+        ONLINE_SOURCE, ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online, OnlineState,
+        OnlineTexts, PENDING, RUSSIAN_LABEL, ResultTexts, SYNONYMS_LABEL, Shown, SynonymTexts,
+        UNFINISHED, Whole, binding_texts, indexes_text, online_rows, result_texts, sentence_markup,
+        texts,
     };
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
@@ -1760,72 +1788,88 @@ mod tests {
         Online::Translated(text.to_owned())
     }
 
-    /// The block of `label` with `line` under it.
-    fn block(label: &str, line: &str) -> String {
-        format!("<i>{label}</i>\n{line}")
+    /// The labels and lines of the rows of `texts`, with no key file.
+    fn online(texts: &OnlineTexts<'_>) -> Vec<(&'static str, String, OnlineState, bool)> {
+        online_rows(texts, None)
+            .into_iter()
+            .map(|row| (row.label, row.line.into_owned(), row.state, row.word))
+            .collect()
     }
 
     #[test]
-    fn without_an_online_text_there_is_no_block() {
-        assert_eq!(online_markup(&OnlineTexts::default(), None), "");
+    fn without_an_online_text_there_is_no_row() {
+        assert!(online_rows(&OnlineTexts::default(), None).is_empty());
     }
 
     #[test]
-    fn the_word_and_its_sentence_stand_under_their_own_labels() {
+    fn the_word_and_its_sentence_stand_beside_their_own_labels() {
         let word = translated("берег");
         let sentence = Whole::Asked(translated("Я сидел на берегу реки."));
-        let markup = online_markup(
-            &OnlineTexts {
+        assert_eq!(
+            online(&OnlineTexts {
                 word: Some(&word),
                 sentence: Some(&sentence),
                 lone: None,
-            },
-            None,
+            }),
+            [
+                (
+                    ONLINE_WORD_LABEL,
+                    "берег".to_owned(),
+                    OnlineState::Translated,
+                    true
+                ),
+                (
+                    ONLINE_SENTENCE_LABEL,
+                    "Я сидел на берегу реки.".to_owned(),
+                    OnlineState::Translated,
+                    false
+                ),
+            ]
         );
-        assert_eq!(
-            markup,
-            format!(
-                "{}\n\n{}",
-                block(ONLINE_WORD_LABEL, "берег"),
-                block(ONLINE_SENTENCE_LABEL, "Я сидел на берегу реки.")
-            )
-        );
-        assert!(!markup.contains(ONLINE_LONE_LABEL), "{markup}");
     }
 
     #[test]
-    fn a_word_without_a_sentence_has_its_own_label_and_no_sentence_block() {
+    fn a_word_without_a_sentence_has_its_own_label_and_no_sentence_row() {
         let lone = translated("банк");
-        let markup = online_markup(
-            &OnlineTexts {
+        assert_eq!(
+            online(&OnlineTexts {
                 word: None,
                 sentence: None,
                 lone: Some(&lone),
-            },
-            None,
+            }),
+            [(
+                ONLINE_LONE_LABEL,
+                "банк".to_owned(),
+                OnlineState::Translated,
+                true
+            )]
         );
-        assert_eq!(markup, block(ONLINE_LONE_LABEL, "банк"));
     }
 
     #[test]
     fn the_sentence_stays_alone_when_the_word_has_no_online_text() {
         let sentence = Whole::Asked(translated("Я сидел."));
-        let markup = online_markup(
-            &OnlineTexts {
+        assert_eq!(
+            online(&OnlineTexts {
                 word: None,
                 sentence: Some(&sentence),
                 lone: None,
-            },
-            None,
+            }),
+            [(
+                ONLINE_SENTENCE_LABEL,
+                "Я сидел.".to_owned(),
+                OnlineState::Translated,
+                false
+            )]
         );
-        assert_eq!(markup, block(ONLINE_SENTENCE_LABEL, "Я сидел."));
     }
 
     #[test]
     fn the_online_labels_say_what_each_text_is() {
-        assert_eq!(ONLINE_WORD_LABEL, "Online, this word in the sentence:");
-        assert_eq!(ONLINE_LONE_LABEL, "Online, this word without a sentence:");
-        assert_eq!(ONLINE_SENTENCE_LABEL, "Online, the whole sentence:");
+        assert_eq!(ONLINE_WORD_LABEL, "In this sentence");
+        assert_eq!(ONLINE_LONE_LABEL, "Without a sentence");
+        assert_eq!(ONLINE_SENTENCE_LABEL, "Whole sentence");
+        assert_eq!(ONLINE_SOURCE, "Online · DeepL");
         // Told apart from the dictionary texts too.
         for label in [ONLINE_WORD_LABEL, ONLINE_LONE_LABEL, ONLINE_SENTENCE_LABEL] {
             assert_ne!(label, RUSSIAN_LABEL);
@@ -1835,73 +1879,65 @@ mod tests {
     }
 
     #[test]
-    fn an_online_translation_is_text_and_never_markup() {
+    fn an_online_translation_is_kept_as_it_came() {
+        // The window shows it as text: nothing is escaped or parsed.
         let hostile = translated("<b>берег</b> & банк");
-        let escaped = "&lt;b&gt;берег&lt;/b&gt; &amp; банк";
         let whole = Whole::Asked(hostile.clone());
-        assert_eq!(
-            online_markup(
-                &OnlineTexts {
-                    word: Some(&hostile),
-                    sentence: Some(&whole),
-                    lone: None,
-                },
-                None
-            ),
-            format!(
-                "{}\n\n{}",
-                block(ONLINE_WORD_LABEL, escaped),
-                block(ONLINE_SENTENCE_LABEL, escaped)
-            )
-        );
-        assert_eq!(
-            online_markup(
-                &OnlineTexts {
-                    word: None,
-                    sentence: None,
-                    lone: Some(&hostile),
-                },
-                None
-            ),
-            block(ONLINE_LONE_LABEL, escaped)
-        );
+        for row in online_rows(
+            &OnlineTexts {
+                word: Some(&hostile),
+                sentence: Some(&whole),
+                lone: None,
+            },
+            None,
+        ) {
+            assert_eq!(row.line, "<b>берег</b> & банк");
+        }
     }
 
     #[test]
-    fn a_pending_online_request_has_its_own_line_under_its_label() {
+    fn a_pending_online_request_has_its_own_line_beside_its_label() {
         let pending = Whole::Asked(Online::Pending);
         assert_eq!(
-            online_markup(
-                &OnlineTexts {
-                    word: Some(&Online::Pending),
-                    sentence: Some(&pending),
-                    lone: None,
-                },
-                None
-            ),
-            format!(
-                "{}\n\n{}",
-                block(ONLINE_WORD_LABEL, ONLINE_PENDING),
-                block(ONLINE_SENTENCE_LABEL, ONLINE_PENDING)
-            )
+            online(&OnlineTexts {
+                word: Some(&Online::Pending),
+                sentence: Some(&pending),
+                lone: None,
+            }),
+            [
+                (
+                    ONLINE_WORD_LABEL,
+                    ONLINE_PENDING.to_owned(),
+                    OnlineState::Pending,
+                    true
+                ),
+                (
+                    ONLINE_SENTENCE_LABEL,
+                    ONLINE_PENDING.to_owned(),
+                    OnlineState::Pending,
+                    false
+                ),
+            ]
         );
         assert_eq!(
-            online_markup(
-                &OnlineTexts {
-                    word: None,
-                    sentence: None,
-                    lone: Some(&Online::Pending),
-                },
-                None
-            ),
-            block(ONLINE_LONE_LABEL, ONLINE_PENDING)
+            online(&OnlineTexts {
+                word: None,
+                sentence: None,
+                lone: Some(&Online::Pending),
+            }),
+            [(
+                ONLINE_LONE_LABEL,
+                ONLINE_PENDING.to_owned(),
+                OnlineState::Pending,
+                true
+            )]
         );
         assert_ne!(ONLINE_PENDING, PENDING);
         assert_ne!(ONLINE_PENDING, ONLINE_UNAVAILABLE);
     }
 
     #[test]
-    fn every_refusal_has_its_line_under_its_label() {
+    fn every_refusal_has_its_line_beside_its_label() {
         assert_eq!(ONLINE_UNAVAILABLE, "Online translation is not available.");
         for refusal in [
             Refusal::Key,
@@ -1918,55 +1954,59 @@ mod tests {
             let refused = Online::Refused(refusal);
             let whole = Whole::Asked(refused.clone());
             assert_eq!(
-                online_markup(
-                    &OnlineTexts {
-                        word: Some(&refused),
-                        sentence: Some(&whole),
-                        lone: None,
-                    },
-                    None
-                ),
-                format!(
-                    "{}\n\n{}",
-                    block(ONLINE_WORD_LABEL, &line),
-                    block(ONLINE_SENTENCE_LABEL, &line)
-                ),
+                online(&OnlineTexts {
+                    word: Some(&refused),
+                    sentence: Some(&whole),
+                    lone: None,
+                }),
+                [
+                    (ONLINE_WORD_LABEL, line.clone(), OnlineState::Failed, true),
+                    (
+                        ONLINE_SENTENCE_LABEL,
+                        line.clone(),
+                        OnlineState::Failed,
+                        false
+                    ),
+                ],
                 "{refusal:?}"
             );
             assert_eq!(
-                online_markup(
-                    &OnlineTexts {
-                        word: None,
-                        sentence: None,
-                        lone: Some(&refused),
-                    },
-                    None
-                ),
-                block(ONLINE_LONE_LABEL, &line),
+                online(&OnlineTexts {
+                    word: None,
+                    sentence: None,
+                    lone: Some(&refused),
+                }),
+                [(ONLINE_LONE_LABEL, line.clone(), OnlineState::Failed, true)],
                 "{refusal:?}"
             );
         }
     }
 
     #[test]
-    fn a_text_that_is_too_long_says_so_under_the_label_of_the_sentence() {
+    fn a_text_that_is_too_long_says_so_beside_the_label_of_the_sentence() {
         assert_eq!(ONLINE_TOO_LONG, "The sentence is too long to translate.");
         assert_ne!(ONLINE_TOO_LONG, ONLINE_UNAVAILABLE);
         let word = translated("берег");
         assert_eq!(
-            online_markup(
-                &OnlineTexts {
-                    word: Some(&word),
-                    sentence: Some(&Whole::TooLong),
-                    lone: None,
-                },
-                None
-            ),
-            format!(
-                "{}\n\n{}",
-                block(ONLINE_WORD_LABEL, "берег"),
-                block(ONLINE_SENTENCE_LABEL, ONLINE_TOO_LONG)
-            )
+            online(&OnlineTexts {
+                word: Some(&word),
+                sentence: Some(&Whole::TooLong),
+                lone: None,
+            }),
+            [
+                (
+                    ONLINE_WORD_LABEL,
+                    "берег".to_owned(),
+                    OnlineState::Translated,
+                    true
+                ),
+                (
+                    ONLINE_SENTENCE_LABEL,
+                    ONLINE_TOO_LONG.to_owned(),
+                    OnlineState::Failed,
+                    false
+                ),
+            ]
         );
     }
 
@@ -1978,16 +2018,14 @@ mod tests {
             assert!(!line.contains("deepl"), "{line}");
         }
         let refused = Online::Refused(Refusal::Other);
-        let markup = online_markup(
-            &OnlineTexts {
-                word: Some(&refused),
-                sentence: None,
-                lone: None,
-            },
-            None,
-        );
-        assert_eq!(markup.lines().count(), 2, "{markup}");
-        assert!(!markup.contains("deepl"), "{markup}");
+        let shown = online(&OnlineTexts {
+            word: Some(&refused),
+            sentence: None,
+            lone: None,
+        });
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].1.lines().count(), 1, "{shown:?}");
+        assert!(!shown[0].1.contains("deepl"), "{shown:?}");
     }
 
     #[test]
@@ -4102,7 +4140,7 @@ mod tests {
         );
     }
     #[test]
-    fn refusal_lines_are_distinct_and_key_paths_are_escaped() {
+    fn refusal_lines_are_distinct_and_name_the_key_file() {
         let refusals = [
             Refusal::Key,
             Refusal::UnreadableKey,
@@ -4119,27 +4157,29 @@ mod tests {
             let line = super::refusal_text(refusal, None);
             assert!(lines.insert(line.clone()), "{line}");
             let online = Online::Refused(refusal);
-            let markup = super::online_markup(
+            let line_shown = super::online_rows(
                 &OnlineTexts {
                     lone: Some(&online),
                     ..OnlineTexts::default()
                 },
                 Some(std::path::Path::new("/config/<key>&/deepl.key")),
-            );
+            )
+            .remove(0)
+            .line;
             if matches!(
                 refusal,
                 Refusal::Key | Refusal::UnreadableKey | Refusal::UnsafeKey | Refusal::RejectedKey
             ) {
                 assert!(
-                    markup.contains("/config/&lt;key&gt;&amp;/deepl.key"),
-                    "{markup}"
+                    line_shown.contains("/config/<key>&/deepl.key"),
+                    "{line_shown}"
                 );
                 assert!(
                     line.contains("XDG_CONFIG_HOME") && line.contains("HOME"),
                     "{line}"
                 );
             } else {
-                assert!(!markup.contains("deepl.key"), "{markup}");
+                assert!(!line_shown.contains("deepl.key"), "{line_shown}");
             }
         }
     }

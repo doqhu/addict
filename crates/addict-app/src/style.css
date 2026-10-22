@@ -337,14 +337,58 @@ window.addict button.pill-link:hover label.pill {
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
-/* The online texts: tinted with the accent, so they read as the other
- * source. */
-window.addict label.online,
+/* The online translation of a definition: tinted with the accent, so it
+ * reads as the other source. */
 window.addict .online-definition {
   background: var(--accent-soft);
   border-radius: 14px;
   padding: 12px 16px;
   line-height: 1.5;
+}
+
+/* The online texts at the foot of the card: a label column, dim, beside
+ * the lines; a hairline sets them off from an article above them, and a
+ * dim line under them names DeepL. */
+window.addict .online.under-article {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+window.addict label.online-label {
+  min-width: 120px;
+  color: var(--muted);
+  font-size: 0.87em;
+  /* The label is smaller than the line beside it: down to its baseline. */
+  margin-top: 2px;
+}
+
+window.addict label.online-word {
+  font-weight: 600;
+}
+
+window.addict label.online-pending {
+  color: var(--muted);
+  font-size: 0.93em;
+}
+
+window.addict .online spinner {
+  color: var(--accent);
+  min-width: 14px;
+  min-height: 14px;
+}
+
+window.addict label.online-failed {
+  color: var(--warn);
+  font-size: 0.93em;
+}
+
+window.addict .online-source {
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+window.addict .online-source image {
+  -gtk-icon-size: 13px;
 }
 
 /* The senses: a quiet row each, a number in a circle, the chosen one
