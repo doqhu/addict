@@ -127,8 +127,8 @@ pub fn lemmas_of<'a>(
 
 /// The article of `word` read in `language` from `index` alone: the senses
 /// and translations of every headword [`headwords`] gives that the index
-/// has, merged in that order, a sense whose definition is already there
-/// skipped; the exception lemmas are those of this index's form table.
+/// has, merged in that order, a sense whose definition and grammar are
+/// already there skipped; the exception lemmas are those of this index's form table.
 /// `None` when the index has none of them. An error of the index is the
 /// error of the lookup.
 pub fn article(index: &Index, language: Language, word: &str) -> Result<Option<Article>, Error> {
@@ -163,7 +163,8 @@ pub struct Grouped {
     /// Source sense grammar and lexical associations, including projected glosses.
     pub sense_metadata: Vec<SourcedSense>,
     /// [`Kind::Definitions`]: the senses, with their own synonyms, merged in
-    /// the order of the indexes, a definition already there skipped.
+    /// the order of the indexes, a sense whose definition and grammar are
+    /// already there skipped.
     pub definitions: Option<Vec<Sense>>,
     /// [`Kind::Russian`]: the translations of the word, each once.
     pub russian: Option<Vec<String>>,
@@ -286,8 +287,9 @@ fn union<'a>(
 /// grouped by kind in the order of the list. Every index is asked for the
 /// same headwords: those [`headwords`] gives with the exception lemmas of
 /// all the indexes together, read once. Every sense of every headword found
-/// is kept; only the definitions are merged, a definition already there
-/// skipped.
+/// is kept; only the definitions are merged, a sense whose definition and
+/// grammar are already there skipped. The entries and sense metadata of
+/// every index but a Russian one are kept, each once.
 /// `None` when no index has a headword for the word. An error of an index
 /// is the error of the lookup; it carries the path of that index.
 pub fn grouped(
@@ -313,18 +315,20 @@ pub fn grouped(
     let found_in = |index: &Index| found(index, language, word, &lemmas);
     for (kind, index) in indexes {
         let found = found_in(index)?;
-        crate::combined::append_unique(
-            &mut grouped.entries,
-            found
-                .iter()
-                .flat_map(|found| found.article.entries.iter().cloned()),
-        );
-        crate::combined::append_unique(
-            &mut grouped.sense_metadata,
-            found
-                .iter()
-                .flat_map(|found| found.article.sense_metadata.iter().cloned()),
-        );
+        if !matches!(kind, Kind::FromRussian) {
+            crate::combined::append_unique(
+                &mut grouped.entries,
+                found
+                    .iter()
+                    .flat_map(|found| found.article.entries.iter().cloned()),
+            );
+            crate::combined::append_unique(
+                &mut grouped.sense_metadata,
+                found
+                    .iter()
+                    .flat_map(|found| found.article.sense_metadata.iter().cloned()),
+            );
+        }
         match kind {
             Kind::Definitions => {
                 found_any |= !found.is_empty();

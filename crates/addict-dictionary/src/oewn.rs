@@ -283,7 +283,8 @@ pub fn parse(input: impl BufRead, source: &str) -> Result<Contents, ParseError> 
                     b"Pronunciation" if open.entry.is_some() && open.form_depth.is_none() => {
                         open.pronunciation = Some(Pronunciation {
                             text: Some(String::new()),
-                            notation: attribute(&element, "notation")?,
+                            notation: attribute(&element, "notation")?
+                                .filter(|notation| !notation.trim().is_empty()),
                             labels: attribute(&element, "variety")?.into_iter().collect(),
                             ..Default::default()
                         });

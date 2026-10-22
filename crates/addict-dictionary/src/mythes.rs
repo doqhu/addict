@@ -230,6 +230,35 @@ col·lecció|1
                 .class(),
             None
         );
+        // The grammar is read from the class tag; the label stays whole.
+        use addict_core::dictionary::Pos;
+        let grammar: Vec<_> = contents
+            .senses
+            .iter()
+            .map(|sense| {
+                sense
+                    .part_of_speech
+                    .as_ref()
+                    .map(|pos| (pos.category, pos.label.as_str()))
+            })
+            .collect();
+        assert_eq!(
+            grammar,
+            [
+                Some((Some(Pos::Adjective), "(adj)")),
+                Some((Some(Pos::Verb), "(v)")),
+                Some((Some(Pos::Verb), "(v; beure)")),
+                Some((None, "(mystery)")),
+                None
+            ]
+        );
+        // A thesaurus has no lexical entries of its own.
+        assert!(
+            contents
+                .headwords
+                .iter()
+                .all(|headword| headword.entries.is_empty())
+        );
     }
 
     #[test]

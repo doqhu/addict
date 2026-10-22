@@ -324,7 +324,13 @@ impl Open {
                     _ => None,
                 };
                 let depth = self.depth;
-                let notation = xml::attribute(element, "notation", malformed)?;
+                // Only a pronunciation's notation is read: the attributes of
+                // the other elements stay unchecked, as before.
+                let notation = match field {
+                    Some(Field::Pronunciation) => xml::attribute(element, "notation", malformed)?
+                        .filter(|notation| !notation.trim().is_empty()),
+                    _ => None,
+                };
                 self.capture = field.map(|field| Capture {
                     scope: self.scopes.last().map(|(_, index)| *index),
                     form: self.forms.last().map(|(_, index)| *index),

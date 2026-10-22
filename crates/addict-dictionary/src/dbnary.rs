@@ -124,9 +124,16 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
     let mut headwords: BTreeMap<String, Vec<SenseRecord>> = BTreeMap::new();
     let mut metadata: BTreeMap<String, Vec<EntryRecord>> = BTreeMap::new();
     for entry in entries {
-        let pos = entry
-            .part_of_speech
-            .or_else(|| entry.raw_pos.as_deref().and_then(PartOfSpeech::from_label));
+        // The category of the lexinfo URI, with the source's own label
+        // (`Nom`) when there is one: the entry and its senses carry the same.
+        let raw = entry.raw_pos.as_deref().and_then(PartOfSpeech::from_label);
+        let pos = match (entry.part_of_speech, raw) {
+            (Some(uri), Some(raw)) if uri.category.is_some() => Some(PartOfSpeech {
+                category: uri.category,
+                label: raw.label,
+            }),
+            (uri, raw) => raw.or(uri),
+        };
         let senses: Vec<SenseRecord> = entry
             .senses
             .iter()
@@ -139,7 +146,7 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
                 metadata: None,
             })
             .collect();
-        if !entry.label.is_empty() {
+        if !entry.label.trim().is_empty() {
             let mut pronunciations = Vec::new();
             for form in entry.forms {
                 if let Some(sounds) = phonetics.get(&form) {
@@ -152,7 +159,7 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
             let records = headwords.entry(entry.label.clone()).or_default();
             let first = records.len() as u32;
             records.extend(senses);
-            let mut lexical = LexicalEntry {
+            let lexical = LexicalEntry {
                 identity: EntryIdentity {
                     source: source.to_owned(),
                     headword: entry.label.clone(),
@@ -161,18 +168,6 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
                 part_of_speech: pos,
                 pronunciations,
             };
-            // Keep the human source label as well as the normalized URI label.
-            if let Some(raw) = entry.raw_pos.as_deref().and_then(PartOfSpeech::from_label) {
-                if lexical
-                    .part_of_speech
-                    .as_ref()
-                    .is_some_and(|pos| pos.category.is_some())
-                {
-                    lexical.part_of_speech.as_mut().unwrap().label = raw.label;
-                } else {
-                    lexical.part_of_speech = Some(raw);
-                }
-            }
             metadata.entry(entry.label).or_default().push(EntryRecord {
                 entry: lexical,
                 senses: (first..records.len() as u32).collect(),
@@ -203,10 +198,7 @@ fn phonetics_of(block: &str) -> Vec<Pronunciation> {
             }
             (character == '"').then_some(at + 1)
         });
-        let notation = end
-            .map(|end| object[end..].trim())
-            .filter(|tail| !tail.is_empty())
-            .map(str::to_owned);
+        let notation = end.and_then(|end| notation_of(object[end..].trim()));
         let sound = Pronunciation {
             text: Some(text),
             notation,
@@ -217,6 +209,16 @@ fn phonetics_of(block: &str) -> Vec<Pronunciation> {
         }
     }
     sounds
+}
+
+/// The notation a literal's `tail` (what follows its closing quote) names:
+/// `IPA` for a language tag with the `fonipa` subtag (`@ca-fonipa`); `None`
+/// for any other tag, a datatype (`^^xsd:string`) or nothing.
+fn notation_of(tail: &str) -> Option<String> {
+    let tag = tail.strip_prefix('@')?;
+    tag.split('-')
+        .any(|subtag| subtag.eq_ignore_ascii_case("fonipa"))
+        .then(|| "IPA".to_owned())
 }
 
 /// The lines of `reader` without their line ends; bytes that are not UTF-8

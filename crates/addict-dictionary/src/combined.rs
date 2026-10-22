@@ -151,8 +151,10 @@ impl Combined {
 }
 
 /// One article of what the reduced lookup found: the senses in the order
-/// found, a sense whose definition is already there skipped, and the translations joined in the same
-/// order, each once. `None` when nothing was found.
+/// found, a sense whose definition and grammar are already there skipped
+/// (its entries joined to the kept one), and the translations joined in the
+/// same order, each once; the entries and the sense metadata of every
+/// headword, each once. `None` when nothing was found.
 pub(crate) fn merged(found: Vec<Found>) -> Option<Article> {
     if found.is_empty() {
         return None;
@@ -167,8 +169,10 @@ pub(crate) fn merged(found: Vec<Found>) -> Option<Article> {
         append_unique(&mut article.entries, next.entries);
         append_unique(&mut article.sense_metadata, next.sense_metadata);
         for sense in next.senses {
-            // By the definition: the synonyms of one sense differ with the
-            // headword it was reached through, and the first found stays.
+            // By the definition and the grammar, not the synonyms: those of
+            // one sense differ with the headword it was reached through, and
+            // the first found stays. The same text under another part of
+            // speech is another sense.
             if let Some(kept) = article.senses.iter_mut().find(|kept| {
                 kept.definition == sense.definition && kept.part_of_speech == sense.part_of_speech
             }) {
