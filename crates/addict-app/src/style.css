@@ -240,9 +240,49 @@ window.addict label.headword {
   font-weight: 600;
 }
 
-/* The analyses of a verb form, a line per lemma. */
-window.addict label.analysis {
-  font-size: 0.95em;
+/* The analyses of a verb form, a line per lemma: the lemma a serif link in
+ * the accent, the persons a tag, the mood dimmer than the tense, and the
+ * dash and dots between them fainter still. */
+window.addict .analysis {
+  margin-top: -4px;
+}
+
+window.addict button.lemma-link {
+  padding: 0;
+  min-height: 0;
+  min-width: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+}
+
+window.addict label.lemma {
+  font-family: "Newsreader", "Source Serif 4", "Noto Serif", Georgia, serif;
+  font-size: 1.1em;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+window.addict button.lemma-link:hover label.lemma {
+  text-decoration: underline;
+}
+
+window.addict label.persons {
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--chip);
+  font-size: 0.9em;
+  font-weight: 600;
+  font-feature-settings: "tnum";
+}
+
+window.addict label.mood {
+  color: var(--muted);
+}
+
+window.addict label.analysis-mark {
+  color: var(--muted);
+  opacity: 0.7;
 }
 
 window.addict .section-label {
