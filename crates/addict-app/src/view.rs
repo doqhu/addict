@@ -637,36 +637,96 @@ const ENGLISH_LABEL: &str = "English glosses";
 /// The line of a word the English glosses index has no gloss for.
 const NO_GLOSS: &str = "The dictionary has no English gloss of this word.";
 
+/// Between the lemma of an analysis line and its groups.
+pub const ANALYSIS_DASH: &str = "—";
+
 /// Between the groups of one analysis line.
-const ANALYSIS_SEPARATOR: &str = " · ";
+pub const ANALYSIS_SEPARATOR: &str = "·";
 
 /// The line under the analysis of a Catalan form of `anar` that is also the
 /// auxiliary of the periphrastic past, around the word as picked.
 const PERIPHRASTIC_BEFORE: &str = "Also the auxiliary of the periphrastic past: ";
 const PERIPHRASTIC_AFTER: &str = " + infinitive = past.";
 
-/// The lines that open the article of a verb form: one per lemma of its
-/// analyses, then, for a Catalan auxiliary of the periphrastic past, the
-/// line that says so. Empty without analyses.
-fn analysis_lines(language: Language, grouped: &Grouped) -> Vec<String> {
-    let Some(verb) = &grouped.verb else {
-        return Vec::new();
-    };
-    let mut lines: Vec<String> = verb
-        .analyses
-        .iter()
-        .map(|analyses| analysis_line(language, analyses))
-        .collect();
-    if let Some(word) = &verb.periphrastic {
-        lines.push(format!("{PERIPHRASTIC_BEFORE}{word}{PERIPHRASTIC_AFTER}"));
-    }
-    lines
+/// What opens the article of a verb form: a line per lemma of its analyses,
+/// then, for a Catalan auxiliary of the periphrastic past, the note that
+/// says so. Empty without analyses.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Analysis {
+    pub lines: Vec<AnalysisLine>,
+    pub note: Option<String>,
 }
 
-/// `<lemma>: <group> · <group>`, a group per tense and mood, or a past
-/// participle or a gerund, in the order of the shapes, which are sorted:
-/// `hablar: 1st/3rd sg present subjunctive · usted/3rd sg imperative`.
-fn analysis_line(language: Language, analyses: &Analyses) -> String {
+impl Analysis {
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty() && self.note.is_none()
+    }
+}
+
+/// One lemma and what the form is of it: the lemma, which the window shows
+/// as a link to its own article, then a group per tense and mood.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisLine {
+    pub lemma: String,
+    pub groups: Vec<AnalysisGroup>,
+}
+
+/// One group of an analysis line, in the parts the window styles apart:
+/// the persons and numbers as a tag, the tense, then the mood, dimmer.
+/// A past participle or a gerund has no persons and no mood, and an
+/// imperative or a conditional has only the one word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnalysisGroup {
+    pub persons: Option<String>,
+    pub tense: Option<&'static str>,
+    pub mood: Option<&'static str>,
+}
+
+impl AnalysisLine {
+    /// The line as plain text, as it reads on screen:
+    /// `hablar — 1st/3rd sg present subjunctive · usted/3rd sg imperative`.
+    pub fn text(&self) -> String {
+        let groups: Vec<String> = self.groups.iter().map(AnalysisGroup::text).collect();
+        format!(
+            "{} {ANALYSIS_DASH} {}",
+            self.lemma,
+            groups.join(&format!(" {ANALYSIS_SEPARATOR} "))
+        )
+    }
+}
+
+impl AnalysisGroup {
+    /// The group as plain text: its parts joined by spaces.
+    pub fn text(&self) -> String {
+        [self.persons.as_deref(), self.tense, self.mood]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// The analysis that opens the article of a verb form; empty without one.
+fn analysis(language: Language, grouped: &Grouped) -> Analysis {
+    let Some(verb) = &grouped.verb else {
+        return Analysis::default();
+    };
+    Analysis {
+        lines: verb
+            .analyses
+            .iter()
+            .map(|analyses| analysis_line(language, analyses))
+            .collect(),
+        note: verb
+            .periphrastic
+            .as_ref()
+            .map(|word| format!("{PERIPHRASTIC_BEFORE}{word}{PERIPHRASTIC_AFTER}")),
+    }
+}
+
+/// The lemma and a group per tense and mood, or a past participle or a
+/// gerund, in the order of the shapes, which are sorted.
+fn analysis_line(language: Language, analyses: &Analyses) -> AnalysisLine {
     let mut groups = Vec::new();
     let mut shapes = analyses.shapes.iter().copied().peekable();
     while let Some(shape) = shapes.next() {
@@ -676,7 +736,11 @@ fn analysis_line(language: Language, analyses: &Analyses) -> String {
             person,
         } = shape
         else {
-            groups.push(nonfinite_text(shape).to_owned());
+            groups.push(AnalysisGroup {
+                persons: None,
+                tense: Some(nonfinite_text(shape)),
+                mood: None,
+            });
             continue;
         };
         let mut persons = vec![(number, person)];
@@ -692,13 +756,17 @@ fn analysis_line(language: Language, analyses: &Analyses) -> String {
             persons.push((number, person));
             shapes.next();
         }
-        groups.push(format!(
-            "{} {}",
-            persons_text(language, &persons),
-            tense_mood_text(tense_mood)
-        ));
+        let (tense, mood) = tense_mood_text(tense_mood);
+        groups.push(AnalysisGroup {
+            persons: Some(persons_text(language, &persons)),
+            tense,
+            mood,
+        });
     }
-    format!("{}: {}", analyses.lemma, groups.join(ANALYSIS_SEPARATOR))
+    AnalysisLine {
+        lemma: analyses.lemma.clone(),
+        groups,
+    }
 }
 
 /// The persons of one tense and mood, sorted: those of the singular, then
@@ -757,18 +825,21 @@ fn person_text(language: Language, person: Person, number: Number) -> &'static s
     }
 }
 
-/// A tense and mood as the analysis line names it.
-fn tense_mood_text(tense_mood: TenseMood) -> &'static str {
+/// A tense and mood as the analysis line names them: the tense, then the
+/// mood, each when it has a word of its own.
+fn tense_mood_text(tense_mood: TenseMood) -> (Option<&'static str>, Option<&'static str>) {
+    const INDICATIVE: Option<&str> = Some("indicative");
+    const SUBJUNCTIVE: Option<&str> = Some("subjunctive");
     match tense_mood {
-        TenseMood::PresentIndicative => "present indicative",
-        TenseMood::PreteriteIndicative => "preterite indicative",
-        TenseMood::ImperfectIndicative => "imperfect indicative",
-        TenseMood::FutureIndicative => "future indicative",
-        TenseMood::Conditional => "conditional",
-        TenseMood::PresentSubjunctive => "present subjunctive",
-        TenseMood::ImperfectSubjunctive => "imperfect subjunctive",
-        TenseMood::FutureSubjunctive => "future subjunctive",
-        TenseMood::Imperative => "imperative",
+        TenseMood::PresentIndicative => (Some("present"), INDICATIVE),
+        TenseMood::PreteriteIndicative => (Some("preterite"), INDICATIVE),
+        TenseMood::ImperfectIndicative => (Some("imperfect"), INDICATIVE),
+        TenseMood::FutureIndicative => (Some("future"), INDICATIVE),
+        TenseMood::Conditional => (Some("conditional"), None),
+        TenseMood::PresentSubjunctive => (Some("present"), SUBJUNCTIVE),
+        TenseMood::ImperfectSubjunctive => (Some("imperfect"), SUBJUNCTIVE),
+        TenseMood::FutureSubjunctive => (Some("future"), SUBJUNCTIVE),
+        TenseMood::Imperative => (None, Some("imperative")),
     }
 }
 
@@ -849,9 +920,9 @@ pub struct SenseText<'a> {
 pub struct ResultTexts<'a> {
     /// The one line of a result that is not an article.
     pub line: Option<Cow<'a, str>>,
-    /// For an article of a verb form, the lines that open it: one per lemma
-    /// with the analyses of the form, then any note under them.
-    pub analysis: Vec<String>,
+    /// For an article of a verb form, what opens it: a line per lemma with
+    /// the analyses of the form, then any note under them.
+    pub analysis: Analysis,
     /// For an article of another language than the chosen one, which had no
     /// entry for the word, the line that names both.
     pub elsewhere: Option<String>,
@@ -961,7 +1032,7 @@ fn lookup_texts<'a>(
     };
     let line = |text: Cow<'a, str>| ResultTexts {
         line: Some(text),
-        analysis: Vec::new(),
+        analysis: Analysis::default(),
         elsewhere: None,
         senses_label: SENSES_LABEL,
         hint: None,
@@ -1020,7 +1091,7 @@ fn article_texts<'a>(
     let (hint, senses) = sense_texts(&article.senses, chosen, definition, key_file);
     ResultTexts {
         line: None,
-        analysis: Vec::new(),
+        analysis: Analysis::default(),
         elsewhere: None,
         senses_label: SENSES_LABEL,
         hint: hint.or(article.senses.is_empty().then_some(NO_DEFINITIONS)),
@@ -1096,7 +1167,7 @@ fn grouped_texts<'a>(
     };
     ResultTexts {
         line: None,
-        analysis: analysis_lines(language, grouped),
+        analysis: analysis(language, grouped),
         elsewhere: None,
         senses_label: definitions_label(language),
         hint,
@@ -1467,12 +1538,12 @@ mod tests {
     };
 
     use super::{
-        Binding, CAPTURE_LABEL, CHOOSE_SENSE, ENGLISH_LABEL, EXPLANATION_MARK, FIELD_PLACEHOLDER,
-        Listed, Lookup, NO_DEFINITIONS, NO_GLOSS, NO_SYNONYMS, NO_TRANSLATION, NO_WORD_SYNONYMS,
-        ONLINE_LONE_LABEL, ONLINE_PENDING, ONLINE_SENTENCE_LABEL, ONLINE_TOO_LONG,
-        ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online, OnlineTexts, PENDING, RUSSIAN_LABEL,
-        ResultTexts, SYNONYMS_LABEL, Shown, UNFINISHED, Whole, binding_texts, indexes_text,
-        online_markup, result_texts, sentence_markup, texts,
+        AnalysisGroup, AnalysisLine, Binding, CAPTURE_LABEL, CHOOSE_SENSE, ENGLISH_LABEL,
+        EXPLANATION_MARK, FIELD_PLACEHOLDER, Listed, Lookup, NO_DEFINITIONS, NO_GLOSS, NO_SYNONYMS,
+        NO_TRANSLATION, NO_WORD_SYNONYMS, ONLINE_LONE_LABEL, ONLINE_PENDING, ONLINE_SENTENCE_LABEL,
+        ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online, OnlineTexts, PENDING,
+        RUSSIAN_LABEL, ResultTexts, SYNONYMS_LABEL, Shown, UNFINISHED, Whole, binding_texts,
+        indexes_text, online_markup, result_texts, sentence_markup, texts,
     };
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
@@ -2967,7 +3038,13 @@ mod tests {
                 ..Grouped::default()
             },
         };
-        result_texts(&lookup, None, None, None).analysis
+        let analysis = result_texts(&lookup, None, None, None).analysis;
+        analysis
+            .lines
+            .iter()
+            .map(AnalysisLine::text)
+            .chain(analysis.note)
+            .collect()
     }
 
     #[test]
@@ -2997,7 +3074,7 @@ mod tests {
                 )],
                 None
             ),
-            ["hablar: 1st/3rd sg present subjunctive · usted/3rd sg imperative"]
+            ["hablar — 1st/3rd sg present subjunctive · usted/3rd sg imperative"]
         );
         let preterite = [at(PreteriteIndicative, Third, Singular)];
         assert_eq!(
@@ -3007,13 +3084,13 @@ mod tests {
                 None
             ),
             [
-                "ir: 3rd sg preterite indicative",
-                "ser: 3rd sg preterite indicative"
+                "ir — 3rd sg preterite indicative",
+                "ser — 3rd sg preterite indicative"
             ]
         );
         assert_eq!(
             analysed(Language::Es, &[("decir", &[PastParticiple])], None),
-            ["decir: past participle"]
+            ["decir — past participle"]
         );
         assert_eq!(
             analysed(
@@ -3021,7 +3098,7 @@ mod tests {
                 &[("decir", &[at(Imperative, Second, Singular)])],
                 None
             ),
-            ["decir: 2nd sg imperative"]
+            ["decir — 2nd sg imperative"]
         );
         // A person a pronoun names has no number after it.
         assert_eq!(
@@ -3038,7 +3115,7 @@ mod tests {
                 )],
                 None
             ),
-            ["hablar: vos present indicative · ustedes/3rd pl imperative · gerund"]
+            ["hablar — vos present indicative · ustedes/3rd pl imperative · gerund"]
         );
         // Two numbers in one tense and mood; the Catalan formal person.
         assert_eq!(
@@ -3055,8 +3132,70 @@ mod tests {
                 )],
                 None
             ),
-            ["parlar: 1st sg/2nd pl present subjunctive · vostè/vostès imperative"]
+            ["parlar — 1st sg/2nd pl present subjunctive · vostè/vostès imperative"]
         );
+    }
+
+    #[test]
+    fn an_analysis_group_has_its_persons_tense_and_mood_apart() {
+        use addict_dictionary::analysis::{
+            Analyses,
+            Number::Singular,
+            Person::{Second, Third},
+            Shape::{self, Gerund},
+            TenseMood::{Imperative, PreteriteIndicative},
+        };
+        let lookup = Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                definitions: Some(spanish_senses()),
+                verb: Some(Box::new(VerbForm {
+                    analyses: vec![Analyses {
+                        lemma: "decir".to_owned(),
+                        shapes: vec![
+                            Shape::Finite {
+                                tense_mood: PreteriteIndicative,
+                                number: Singular,
+                                person: Third,
+                            },
+                            Shape::Finite {
+                                tense_mood: Imperative,
+                                number: Singular,
+                                person: Second,
+                            },
+                            Gerund,
+                        ],
+                    }],
+                    periphrastic: None,
+                })),
+                ..Grouped::default()
+            },
+        };
+        let analysis = result_texts(&lookup, None, None, None).analysis;
+        assert_eq!(
+            analysis.lines,
+            [AnalysisLine {
+                lemma: "decir".to_owned(),
+                groups: vec![
+                    AnalysisGroup {
+                        persons: Some("3rd sg".to_owned()),
+                        tense: Some("preterite"),
+                        mood: Some("indicative"),
+                    },
+                    AnalysisGroup {
+                        persons: Some("2nd sg".to_owned()),
+                        tense: None,
+                        mood: Some("imperative"),
+                    },
+                    AnalysisGroup {
+                        persons: None,
+                        tense: Some("gerund"),
+                        mood: None,
+                    },
+                ],
+            }]
+        );
+        assert_eq!(analysis.note, None);
     }
 
     #[test]
@@ -3070,7 +3209,7 @@ mod tests {
         assert_eq!(
             analysed(Language::Ca, &[("anar", &va)], Some("va")),
             [
-                "anar: 3rd sg present indicative",
+                "anar — 3rd sg present indicative",
                 "Also the auxiliary of the periphrastic past: va + infinitive = past."
             ]
         );

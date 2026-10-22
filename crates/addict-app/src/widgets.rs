@@ -42,11 +42,11 @@ use gtk::{gdk, gio, glib, prelude::*};
 use crate::{
     dictionaries::Indexes,
     view::{
-        BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COPIED_LABEL, COPY_LABEL, ChosenGloss,
-        DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, FORWARD_TOOLTIP, LANGUAGE_TOOLTIP, Listed,
-        OnlineTexts, RETRY_LABEL, ResultTexts, SENSES_LABEL, SenseText, Shown, binding_texts,
-        choice_texts, command_in, indexes_text, language_label, online_markup, sentence_markup,
-        texts,
+        ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL,
+        COPIED_LABEL, COPY_LABEL, ChosenGloss, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER,
+        FORWARD_TOOLTIP, LANGUAGE_TOOLTIP, Listed, OnlineTexts, RETRY_LABEL, ResultTexts,
+        SENSES_LABEL, SenseText, Shown, binding_texts, choice_texts, command_in, indexes_text,
+        language_label, online_markup, sentence_markup, texts,
     },
     wrap::Wrap,
 };
@@ -424,6 +424,68 @@ fn fill_listed(
     }
 }
 
+/// Puts `analysis` into `container`: a line per lemma, which wraps between
+/// its groups, never inside one; the lemma a link that puts it into `field`
+/// as a paste does, then a dash and the groups, each its persons as a tag,
+/// its tense and its mood, dimmer, with a dot between two; then the note,
+/// dim, on a line of its own.
+fn fill_analysis(container: &gtk::Box, analysis: &Analysis, field: &gtk::Entry) {
+    clear(container);
+    let part = |text: &str, class: &str| {
+        gtk::Label::builder()
+            .label(text)
+            .css_classes([class])
+            .build()
+    };
+    for line in &analysis.lines {
+        let row = Wrap::new();
+        row.add_css_class("analysis-line");
+        row.update_property(&[gtk::accessible::Property::Label(&line.text())]);
+        let lemma = gtk::Button::builder()
+            .child(&part(&line.lemma, "lemma"))
+            .css_classes(["lemma-link"])
+            .focus_on_click(false)
+            .build();
+        lemma.set_cursor_from_name(Some("pointer"));
+        let held = field.downgrade();
+        let word = line.lemma.clone();
+        lemma.connect_clicked(move |_| {
+            if let Some(field) = held.upgrade() {
+                put_into_field(&field, &word);
+            }
+        });
+        row.append(&lemma);
+        row.append(&part(ANALYSIS_DASH, "analysis-mark"));
+        for (index, group) in line.groups.iter().enumerate() {
+            if index > 0 {
+                row.append(&part(ANALYSIS_SEPARATOR, "analysis-mark"));
+            }
+            let parts = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+            if let Some(persons) = &group.persons {
+                let tag = part(persons, "persons");
+                tag.set_valign(gtk::Align::Center);
+                parts.append(&tag);
+            }
+            if let Some(tense) = group.tense {
+                parts.append(&part(tense, "tense"));
+            }
+            if let Some(mood) = group.mood {
+                parts.append(&part(mood, "mood"));
+            }
+            row.append(&parts);
+        }
+        container.append(&row);
+    }
+    if let Some(note) = &analysis.note {
+        container.append(
+            &wrapping(gtk::Label::builder().label(note.as_str()))
+                .selectable(true)
+                .css_classes(["hint"])
+                .build(),
+        );
+    }
+}
+
 /// Puts the English glosses `listed` into `container`: its label as a
 /// caption and each gloss as a row of its own, which a click chooses, with
 /// the button that translates it, when `action` is given, and its online
@@ -577,7 +639,7 @@ struct ResultArea {
     line: gtk::Label,
     /// For a verb form, its analyses, a line per lemma, above the rest of
     /// the card.
-    analysis: gtk::Label,
+    analysis: gtk::Box,
     translations: gtk::Box,
     online: gtk::Label,
     senses: gtk::Box,
@@ -609,8 +671,9 @@ fn result_area() -> ResultArea {
         .css_classes(["result-line"])
         .visible(false)
         .build();
-    let analysis = wrapping(gtk::Label::builder())
-        .selectable(true)
+    let analysis = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
         .css_classes(["analysis"])
         .visible(false)
         .build();
@@ -1100,7 +1163,7 @@ impl View {
         let line = texts.line.as_deref().or(texts.elsewhere.as_deref());
         result.line.set_text(line.unwrap_or_default());
         result.line.set_visible(line.is_some());
-        result.analysis.set_text(&texts.analysis.join("\n"));
+        fill_analysis(&result.analysis, &texts.analysis, &self.field);
         result.analysis.set_visible(!texts.analysis.is_empty());
         fill_listed(
             &result.translations,
