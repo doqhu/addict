@@ -443,12 +443,18 @@ fn fill_synonym_groups(container: &gtk::Box, texts: Option<SynonymTexts<'_>>, fi
         Some(SynonymTexts::Groups { label, groups }) => {
             container.append(&caption(label));
             for (index, group) in groups.iter().enumerate() {
+                // Numbered among the meanings of its own headword: a form
+                // can list the meanings of several headwords.
+                let number = 1 + groups[..index]
+                    .iter()
+                    .filter(|earlier| earlier.headword == group.headword)
+                    .count();
+                let title = synonym_heading(group, number);
                 let meaning = gtk::Box::new(gtk::Orientation::Vertical, 6);
                 meaning.add_css_class("synonym-meaning");
-                let heading =
-                    wrapping(gtk::Label::builder().label(synonym_heading(group, index + 1)))
-                        .css_classes(["synonym-heading"])
-                        .build();
+                let heading = wrapping(gtk::Label::builder().label(title.as_str()))
+                    .css_classes(["synonym-heading"])
+                    .build();
                 if let Some(metadata) = &group.metadata {
                     heading.set_tooltip_text(Some(&metadata.label));
                 }
@@ -472,7 +478,7 @@ fn fill_synonym_groups(container: &gtk::Box, texts: Option<SynonymTexts<'_>>, fi
                         .css_classes(["synonym-toggle"])
                         .build();
                     toggle.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
-                    toggle.set_tooltip_text(Some(&synonym_heading(group, index + 1)));
+                    toggle.set_tooltip_text(Some(&title));
                     toggle.connect_toggled(move |toggle| {
                         let expanded = toggle.is_active();
                         for pill in &extra {

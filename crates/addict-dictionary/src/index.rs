@@ -99,6 +99,17 @@ pub struct Index {
     source: String,
 }
 
+/// The `members` of a sense other than `word`, each once, in their order.
+fn others(members: Vec<String>, word: &str) -> Vec<String> {
+    let mut others: Vec<String> = Vec::new();
+    for member in members {
+        if member != word && !others.contains(&member) {
+            others.push(member);
+        }
+    }
+    others
+}
+
 /// One independent meaning from a synonym source, with its headword provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SynonymGroup {
@@ -179,15 +190,9 @@ impl Index {
         let mut senses = Vec::new();
         for offset in offsets {
             let record = self.sense(offset)?;
-            let mut synonyms: Vec<String> = Vec::new();
-            for member in record.members {
-                if member != word && !synonyms.contains(&member) {
-                    synonyms.push(member);
-                }
-            }
             senses.push(Sense {
+                synonyms: others(record.members, word),
                 definition: record.definition,
-                synonyms,
             });
         }
         Ok(Some(Article {
@@ -206,17 +211,11 @@ impl Index {
         let mut groups = Vec::new();
         for offset in offsets {
             let sense = self.sense(offset)?;
-            let mut synonyms = Vec::new();
-            for member in sense.members {
-                if member != word && !synonyms.contains(&member) {
-                    synonyms.push(member);
-                }
-            }
             groups.push(SynonymGroup {
                 headword: word.to_owned(),
+                synonyms: others(sense.members, word),
                 definition: sense.definition,
                 metadata: sense.metadata,
-                synonyms,
             });
         }
         Ok(Some(groups))
