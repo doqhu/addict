@@ -1406,6 +1406,7 @@ impl View {
     /// without a word hides the line, and so does a lone word: the headword
     /// says it.
     pub fn render_sentence(&self, sentence: &str, words: &[Range<usize>], selected: Option<usize>) {
+        self.release_focus();
         let headword = selected
             .and_then(|index| words.get(index))
             .and_then(|word| sentence.get(word.clone()))
@@ -1430,6 +1431,7 @@ impl View {
     /// when there is none. With no sense chosen the area is put at its top:
     /// that is how a result arrives. A choice leaves it where it is.
     pub fn render_result(&self, shown: &Shown, key_file: Option<&std::path::Path>) {
+        self.release_focus();
         let result = &self.result;
         let (visible, sensitive) = shown.definition_action();
         result.definition_action.set_sensitive(sensitive);
@@ -1546,6 +1548,7 @@ impl View {
 
     /// Shows the rows of `online`, or hides them when there is none.
     pub fn render_online(&self, online: &OnlineTexts<'_>, key_file: Option<&std::path::Path>) {
+        self.release_focus();
         let rows = online_rows(online, key_file);
         fill_online(&self.result.online_rows, &rows);
         self.result.online.set_visible(!rows.is_empty());
@@ -1566,6 +1569,18 @@ impl View {
         }
         result.card.set_visible(article || online);
         result.area.set_visible(article || online);
+    }
+
+    /// Puts the focus back into the field when it is in the result area,
+    /// before the area's widgets are removed or hidden. Otherwise GTK moves
+    /// it on its own after the next frame, onto a selectable label, and
+    /// warns that the widget that had it is gone (a `gtk_widget_is_ancestor`
+    /// critical).
+    fn release_focus(&self) {
+        let focus = self.root.root().and_then(|root| root.focus());
+        if focus.is_some_and(|focus| focus.is_ancestor(&self.result.area)) {
+            self.focus_field();
+        }
     }
 
     /// Puts the keyboard focus into the field, so a paste lands there. The
@@ -1982,6 +1997,37 @@ mod tests {
         view.put_into_field("bank");
         assert_eq!(view.field_text(), "bank");
         assert!(submitted.get());
+    }
+
+    /// A result that replaces the one holding the focus puts the focus
+    /// back into the field, so GTK never has to move it off a removed
+    /// widget. Run alone: GTK starts once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_new_result_gives_the_focus_back_to_the_field() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let window = gtk::Window::builder().child(view.root()).build();
+        window.present();
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(pronounced_bank())));
+        view.render_result(&shown, None);
+        let play = buttons(&view.result.pronunciations.clone().upcast(), "play").remove(0);
+        assert!(play.grab_focus());
+        assert_eq!(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            Some(play.upcast_ref::<gtk::Widget>())
+        );
+        shown.show(Some(Lookup::Article(
+            Sample.lookup("bank").expect("the sample article"),
+        )));
+        view.render_result(&shown, None);
+        assert!(play.parent().is_none());
+        let focus = gtk::prelude::GtkWindowExt::focus(&window).expect("a focus");
+        assert!(
+            focus == view.field.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&view.field)
+        );
+        window.destroy();
     }
 
     /// Copy shows only beside a line that names a command, says "Copied"
