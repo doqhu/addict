@@ -47,7 +47,7 @@ use crate::{
     analysis::{Analyses, Shape},
     combined::{Found, merged},
     import::Kind,
-    index::{Error, Index},
+    index::{Error, Index, SynonymGroup},
     wikdict,
 };
 
@@ -163,9 +163,9 @@ pub struct Grouped {
     pub definitions: Option<Vec<Sense>>,
     /// [`Kind::Russian`]: the translations of the word, each once.
     pub russian: Option<Vec<String>>,
-    /// [`Kind::Synonyms`]: the members of the senses as one list for the
-    /// word, each once, without the word itself.
-    pub synonyms: Option<Vec<String>>,
+    /// [`Kind::Synonyms`]: independent source meanings in source order,
+    /// with headword provenance and metadata; duplicates across meanings stay.
+    pub synonyms: Option<Vec<SynonymGroup>>,
     /// [`Kind::English`]: the definitions of the senses as English glosses,
     /// each once, none blank.
     pub english: Option<Vec<String>>,
@@ -293,12 +293,45 @@ pub fn grouped(
     let mut found_any = false;
     let mut definitions = Vec::new();
     let lemmas = lemmas_of(indexes.iter().map(|(_, index)| *index), language, word)?;
+    let analyses = analyses_of(indexes.iter().map(|(_, index)| *index), language, word)?;
     // The word as it may stand among the members of a sense: as written and
     // in lowercase, never its forms, so the members of a form found keep
     // the synonyms of the word.
     let written = reduction::stripped(word);
     let itself = [written.to_owned(), reduction::lowercase(written)];
     for (kind, index) in indexes {
+        if *kind == Kind::Synonyms {
+            let groups = grouped.synonyms.get_or_insert_with(Vec::new);
+            for headword in headwords(language, word, &lemmas) {
+                let Some(meanings) = index.synonym_groups(&headword)? else {
+                    continue;
+                };
+                found_any = true;
+                // Only this candidate's positive verb analysis constrains its
+                // meanings; other headwords can supply independent readings.
+                // Exact spellings still keep their independent readings.
+                let derived_verb = !itself.contains(&headword)
+                    && analyses
+                        .iter()
+                        .any(|analysis| analysis.lemma == headword && !analysis.shapes.is_empty());
+                for mut meaning in meanings {
+                    if derived_verb
+                        && meaning
+                            .metadata
+                            .as_ref()
+                            .and_then(|metadata| metadata.class)
+                            .is_some_and(|class| class != crate::format::GrammaticalClass::Verb)
+                    {
+                        continue;
+                    }
+                    meaning.synonyms.retain(|member| !itself.contains(member));
+                    if !meaning.synonyms.is_empty() {
+                        groups.push(meaning);
+                    }
+                }
+            }
+            continue;
+        }
         let found = found(index, language, word, &lemmas)?;
         found_any |= !found.is_empty();
         // Every sense of every headword: the senses of a synonyms index may
@@ -320,16 +353,7 @@ pub fn grouped(
                 let translations = found.iter().flat_map(|found| &found.article.translations);
                 push_new(russian, translations.cloned());
             }
-            Kind::Synonyms => {
-                let synonyms = grouped.synonyms.get_or_insert_with(Vec::new);
-                // `Index::find` already leaves each headword out of its own
-                // members, so a lemma reached through a form is not listed.
-                let members = senses.flat_map(|sense| &sense.synonyms);
-                push_new(
-                    synonyms,
-                    members.filter(|member| !itself.contains(member)).cloned(),
-                );
-            }
+            Kind::Synonyms => unreachable!("synonym meanings handled above"),
             Kind::English => {
                 let english = grouped.english.get_or_insert_with(Vec::new);
                 let glosses = senses.filter(|sense| !sense.definition.trim().is_empty());
@@ -346,7 +370,6 @@ pub fn grouped(
     if let Some(senses) = &mut grouped.definitions {
         *senses = merged(definitions).map_or_else(Vec::new, |article| article.senses);
     }
-    let analyses = analyses_of(indexes.iter().map(|(_, index)| *index), language, word)?;
     if !analyses.is_empty() {
         let periphrastic = language == Language::Ca && PERIPHRASTIC.contains(&itself[1].as_str());
         grouped.verb = Some(Box::new(VerbForm {
@@ -582,14 +605,17 @@ mod tests {
                 SenseRecord {
                     definition: "Empresa que ofrece servicios monetarios.".to_owned(),
                     members: Vec::new(),
+                    metadata: None,
                 },
                 SenseRecord {
                     definition: "Mueble alargado para sentarse.".to_owned(),
                     members: texts(&["banca"]),
+                    metadata: None,
                 },
                 SenseRecord {
                     definition: "Plural de banco.".to_owned(),
                     members: Vec::new(),
+                    metadata: None,
                 },
             ],
             headwords: vec![
@@ -699,6 +725,7 @@ mod tests {
                 contents.senses.push(SenseRecord {
                     definition: (*definition).to_owned(),
                     members: texts(members),
+                    metadata: None,
                 });
             }
             contents.headwords.push(Headword {
@@ -708,6 +735,15 @@ mod tests {
             });
         }
         contents
+    }
+
+    fn group(headword: &str, members: &[&str]) -> SynonymGroup {
+        SynonymGroup {
+            headword: headword.to_owned(),
+            definition: String::new(),
+            metadata: None,
+            synonyms: texts(members),
+        }
     }
 
     /// The four kinds of Spanish indexes, each having `banco`.
@@ -772,6 +808,113 @@ mod tests {
     }
 
     #[test]
+    fn derived_verb_meanings_filter_only_explicit_incompatible_classes() {
+        use crate::format::{AnalysedForm, ExceptionForm, GrammaticalClass};
+        let dir = TempDir::new("synonym-grammar");
+        let mut contents = crate::mythes::parse(&b"UTF-8\nfer|5\n(adj)|ferotge\n(v)|prendre\n(v; beure)|prendre|trincar\n(mystery)|unknown\n|legacy\nfeu|1\n(n)|exact reading\nfar|1\n(n)|farola\n"[..], "labels").expect("parse");
+        contents.forms.push(ExceptionForm {
+            form: "feu".to_owned(),
+            lemmas: texts(&["far", "fer"]),
+        });
+        contents.analyses.push(AnalysedForm {
+            form: "feu".to_owned(),
+            lemmas: vec![Analyses {
+                lemma: "fer".to_owned(),
+                shapes: vec![Shape::Gerund],
+            }],
+        });
+        let index = written(&dir, "labels.index", &contents);
+        let get = |index: &Index, word| {
+            grouped(&[(Kind::Synonyms, index)], Language::Ca, word)
+                .expect("lookup")
+                .expect("found")
+                .synonyms
+                .expect("groups")
+        };
+        let all = get(&index, "feu");
+        assert_eq!(all.len(), 6);
+        assert!(
+            all.iter()
+                .any(|group| group.headword == "far" && group.synonyms == texts(&["farola"]))
+        );
+        let derived: Vec<_> = all
+            .into_iter()
+            .filter(|group| group.headword != "far")
+            .collect();
+        assert_eq!(derived.len(), 5);
+        assert_eq!(derived[0].headword, "feu");
+        assert_eq!(derived[0].synonyms, texts(&["exact reading"]));
+        assert_eq!(
+            derived[0].metadata.as_ref().expect("noun").class,
+            Some(GrammaticalClass::Noun)
+        );
+        assert!(
+            derived
+                .iter()
+                .all(|group| !group.synonyms.contains(&"ferotge".to_owned()))
+        );
+        assert_eq!(derived[1].synonyms, texts(&["prendre"]));
+        assert_eq!(derived[2].synonyms, texts(&["prendre", "trincar"]));
+        assert_eq!(derived[3].metadata.as_ref().expect("unknown").class, None);
+        assert_eq!(derived[4].metadata, None);
+        assert_eq!(get(&index, "fer").len(), 5);
+        contents.analyses.clear();
+        let no_analysis = written(&dir, "no-analysis.index", &contents);
+        assert_eq!(get(&no_analysis, "feu").len(), 7);
+        // Legacy indexes stay readable but cannot recover discarded labels.
+        for sense in &mut contents.senses {
+            sense.metadata = None;
+        }
+        contents.analyses.push(AnalysedForm {
+            form: "feu".to_owned(),
+            lemmas: vec![Analyses {
+                lemma: "fer".to_owned(),
+                shapes: vec![Shape::Gerund],
+            }],
+        });
+        let legacy = written(&dir, "legacy.index", &contents);
+        assert_eq!(get(&legacy, "feu").len(), 7);
+    }
+
+    #[test]
+    fn causes_keeps_causa_nouns_alongside_analysed_causar_verbs() {
+        use crate::format::{AnalysedForm, ExceptionForm, GrammaticalClass};
+        let dir = TempDir::new("synonym-independent-readings");
+        let mut contents = crate::mythes::parse(&b"UTF-8\ncausa|3\n(n)|motiu\n(n)|proces\n(n)|ideal\ncausar|4\n(v)|provocar\n(v)|originar\n(v)|produir\n(v)|ocasionar\n"[..], "causes").expect("parse");
+        contents.forms.push(ExceptionForm {
+            form: "causes".to_owned(),
+            lemmas: texts(&["causa", "causar"]),
+        });
+        contents.analyses.push(AnalysedForm {
+            form: "causes".to_owned(),
+            lemmas: vec![Analyses {
+                lemma: "causar".to_owned(),
+                shapes: vec![Shape::Gerund],
+            }],
+        });
+        let index = written(&dir, "causes.index", &contents);
+        let groups = grouped(&[(Kind::Synonyms, &index)], Language::Ca, "causes")
+            .expect("lookup")
+            .expect("found")
+            .synonyms
+            .expect("groups");
+        let readings = |headword: &str, class| {
+            groups
+                .iter()
+                .filter(|group| {
+                    group.headword == headword
+                        && group
+                            .metadata
+                            .as_ref()
+                            .is_some_and(|metadata| metadata.class == Some(class))
+                })
+                .count()
+        };
+        assert_eq!(readings("causa", GrammaticalClass::Noun), 3);
+        assert_eq!(readings("causar", GrammaticalClass::Verb), 4);
+    }
+
+    #[test]
     fn every_kind_gives_its_part_of_the_article() {
         let dir = TempDir::new("grouped-all");
         let set = spanish_set(&dir);
@@ -798,10 +941,13 @@ mod tests {
                 },
             ])
         );
-        // One list for the word, each once and without the word.
+        // Independent meanings retain duplicates across groups and omit the headword.
         assert_eq!(
             banco.synonyms,
-            Some(texts(&["entidad", "banca", "asiento"]))
+            Some(vec![
+                group("banco", &["entidad", "banca"]),
+                group("banco", &["asiento", "banca"])
+            ])
         );
         assert_eq!(
             banco.english,
@@ -887,7 +1033,10 @@ mod tests {
         let banca = grouped(&[(Kind::Synonyms, &synonyms)], Language::Es, "Banca")
             .expect("look up")
             .expect("banca");
-        assert_eq!(banca.synonyms, Some(texts(&["banco", "asiento"])));
+        assert_eq!(
+            banca.synonyms,
+            Some(vec![group("banca", &["banco", "asiento"])])
+        );
     }
 
     #[test]
@@ -902,8 +1051,12 @@ mod tests {
             .expect("look up")
             .expect("bancos");
         let list = bancos.synonyms.expect("synonyms");
-        assert!(!list.contains(&"banco".to_owned()), "{list:?}");
-        assert_eq!(list, texts(&["entidad", "asiento"]));
+        assert!(
+            list.iter()
+                .all(|group| !group.synonyms.contains(&"banco".to_owned())),
+            "{list:?}"
+        );
+        assert_eq!(list, vec![group("banco", &["entidad", "asiento"])]);
     }
 
     #[test]

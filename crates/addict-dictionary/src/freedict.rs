@@ -108,6 +108,7 @@ impl Parsed {
                 senses.push(SenseRecord {
                     definition,
                     members: Vec::new(),
+                    metadata: None,
                 });
             }
             headwords.push(Headword {

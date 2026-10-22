@@ -8,6 +8,7 @@
 //! sections source        UTF-8 id of the imported source
 //!          senses        sense records, each: length u32 | definition text
 //!                        | member count u32 | member texts
+//!                        | optional "META" tag | source label text
 //!          word table    one entry per headword, sorted by the bytes of it
 //!          word keys     the headwords, back to back
 //!          word records  sense count u32 | sense offsets u64 (into senses)
@@ -133,6 +134,61 @@ pub struct SenseRecord {
     pub definition: String,
     /// The words of the sense, the headword itself included.
     pub members: Vec<String>,
+    /// Source label, parsed conservatively; absent in legacy records.
+    pub metadata: Option<SenseMetadata>,
+}
+
+/// A grammatical class explicitly supplied by a source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrammaticalClass {
+    Verb,
+    Adjective,
+    Noun,
+    Adverb,
+}
+
+/// The complete source label and its understood parts. Unknown labels retain
+/// their text without claiming a grammatical class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SenseMetadata {
+    pub label: String,
+    pub class: Option<GrammaticalClass>,
+    pub description: Option<String>,
+}
+
+impl SenseMetadata {
+    pub fn from_label(label: &str) -> Option<Self> {
+        if label.trim().is_empty() {
+            return None;
+        }
+        let inner = label
+            .trim()
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'));
+        let (class, description) = inner.map_or((None, None), |inner| {
+            let (tag, description) = inner.split_once(';').map_or((inner, None), |(tag, text)| {
+                (
+                    tag,
+                    Some(text.trim())
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned),
+                )
+            });
+            let class = match tag.trim() {
+                "v" => Some(GrammaticalClass::Verb),
+                "adj" => Some(GrammaticalClass::Adjective),
+                "n" => Some(GrammaticalClass::Noun),
+                "adv" => Some(GrammaticalClass::Adverb),
+                _ => None,
+            };
+            (class, description)
+        });
+        Some(Self {
+            label: label.to_owned(),
+            class,
+            description,
+        })
+    }
 }
 
 /// One headword as written in the source.
@@ -165,6 +221,8 @@ pub struct AnalysedForm {
 pub enum WriteError {
     /// The source id is empty or longer than [`MAX_SOURCE`].
     Source,
+    /// A supplied label is empty or its parsed fields do not match it.
+    InvalidMetadata,
     /// A headword or a form is empty.
     EmptyKey,
     /// The keys of a table are not strictly ascending; this is the later one.
@@ -180,6 +238,7 @@ impl fmt::Display for WriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Source => write!(f, "the source id is empty or too long"),
+            Self::InvalidMetadata => write!(f, "sense metadata does not match its source label"),
             Self::EmptyKey => write!(f, "an empty headword or form"),
             Self::Unsorted(key) => write!(f, "{key:?} is out of order or repeated"),
             Self::UnknownSense { word, sense } => {
@@ -206,6 +265,15 @@ pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
         let mut body = Vec::new();
         put_text(&mut body, &sense.definition)?;
         put_texts(&mut body, &sense.members)?;
+        // A trailing tagged extension keeps metadata-free version-1 bytes
+        // unchanged and legacy records readable without extra index reads.
+        if let Some(metadata) = &sense.metadata {
+            if SenseMetadata::from_label(&metadata.label).as_ref() != Some(metadata) {
+                return Err(WriteError::InvalidMetadata);
+            }
+            body.extend_from_slice(b"META");
+            put_text(&mut body, &metadata.label)?;
+        }
         let len = bounded(body.len(), &sense.definition)?;
         sense_offsets.push(senses.len() as u64);
         senses.extend_from_slice(&len.to_le_bytes());
@@ -474,10 +542,20 @@ pub fn decode_sense(body: &[u8]) -> Result<SenseRecord, Damage> {
     let mut cursor = Cursor(body);
     let definition = cursor.text()?;
     let members = cursor.texts()?;
+    let metadata = if cursor.0.is_empty() {
+        None
+    } else {
+        if cursor.take(4)? != b"META" {
+            return Err(Damage("a sense has an unknown metadata extension"));
+        }
+        let label = cursor.text()?;
+        Some(SenseMetadata::from_label(&label).ok_or(Damage("a sense metadata label is empty"))?)
+    };
     cursor.end()?;
     Ok(SenseRecord {
         definition,
         members,
+        metadata,
     })
 }
 
@@ -566,6 +644,67 @@ const SHORT: Damage = Damage("a record ends too early");
 pub(crate) mod tests {
     use super::*;
 
+    #[test]
+    fn metadata_roundtrips_without_changing_metadata_free_bytes() {
+        let legacy = sample();
+        let plain = encode(&legacy).expect("legacy");
+        let mut labelled = legacy.clone();
+        for label in [
+            "(adj)",
+            "(v; beure)",
+            "(unknown; source description)",
+            "arbitrary source text",
+        ] {
+            let metadata = SenseMetadata::from_label(label).expect("label");
+            labelled.senses[0].metadata = Some(metadata.clone());
+            let bytes = encode(&labelled).expect("metadata");
+            let header = Header::parse(&bytes, bytes.len() as u64).expect("header");
+            let senses = header.section(SectionId::Senses);
+            let at = senses.offset as usize;
+            let len = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("length")) as usize;
+            assert_eq!(
+                decode_sense(&bytes[at + 4..at + 4 + len])
+                    .expect("sense")
+                    .metadata,
+                Some(metadata)
+            );
+        }
+        labelled.senses[0].metadata = None;
+        assert_eq!(encode(&labelled).expect("plain again"), plain);
+        assert_eq!(sense_at(&plain, 0).metadata, None);
+    }
+
+    #[test]
+    fn metadata_decoding_rejects_truncation_invalid_text_and_unknown_extensions() {
+        let mut legacy = Vec::new();
+        put_text(&mut legacy, "").expect("definition");
+        put_texts(&mut legacy, &[]).expect("members");
+        for extension in [
+            b"M".to_vec(),
+            b"OTHER".to_vec(),
+            b"META".to_vec(),
+            [b"META".as_slice(), &u32::MAX.to_le_bytes()].concat(),
+            [b"META".as_slice(), &1_u32.to_le_bytes(), &[255]].concat(),
+            [b"META".as_slice(), &0_u32.to_le_bytes()].concat(),
+        ] {
+            assert!(decode_sense(&[legacy.as_slice(), &extension].concat()).is_err());
+        }
+        let mut valid = legacy;
+        valid.extend_from_slice(b"META");
+        put_text(&mut valid, "(v; beure)").expect("metadata");
+        assert_eq!(
+            decode_sense(&valid)
+                .expect("decode")
+                .metadata
+                .expect("metadata")
+                .description
+                .as_deref(),
+            Some("beure")
+        );
+        valid.push(0);
+        assert!(decode_sense(&valid).is_err());
+    }
+
     pub(crate) fn texts(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
     }
@@ -579,14 +718,17 @@ pub(crate) mod tests {
                 SenseRecord {
                     definition: "sloping land beside water".to_owned(),
                     members: texts(&["bank", "shore"]),
+                    metadata: None,
                 },
                 SenseRecord {
                     definition: "a financial institution".to_owned(),
                     members: texts(&["bank", "depository", "bank"]),
+                    metadata: None,
                 },
                 SenseRecord {
                     definition: "a proposal for a course of action".to_owned(),
                     members: texts(&["advice"]),
+                    metadata: None,
                 },
             ],
             headwords: vec![

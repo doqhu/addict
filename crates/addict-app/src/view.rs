@@ -885,6 +885,52 @@ impl<'a> Listed<'a> {
     }
 }
 
+/// Separate synonym meanings, or the existing missing-source/result line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SynonymTexts<'a> {
+    Groups {
+        label: &'static str,
+        groups: &'a [addict_dictionary::index::SynonymGroup],
+    },
+    Missing(&'static str),
+}
+
+pub(crate) const SYNONYM_PREVIEW: usize = 6;
+pub(crate) const SHOW_MORE: &str = "Show more";
+pub(crate) const SHOW_LESS: &str = "Show less";
+
+/// Uses only explicit source information, with an ordinal for unlabeled
+/// meanings. The complete original grammatical label remains available.
+pub(crate) fn synonym_heading(
+    group: &addict_dictionary::index::SynonymGroup,
+    number: usize,
+) -> String {
+    use addict_dictionary::format::GrammaticalClass;
+    let mut text = group.headword.clone();
+    if let Some(metadata) = &group.metadata {
+        let class = match metadata.class {
+            Some(GrammaticalClass::Verb) => "Verb",
+            Some(GrammaticalClass::Adjective) => "Adjective",
+            Some(GrammaticalClass::Noun) => "Noun",
+            Some(GrammaticalClass::Adverb) => "Adverb",
+            None => "",
+        };
+        if !class.is_empty() {
+            write!(text, " · {class}").expect("write string");
+        }
+    }
+    write!(text, " · Meaning {number}").expect("write string");
+    let description = group
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.description.as_deref())
+        .or_else(|| (!group.definition.trim().is_empty()).then_some(group.definition.as_str()));
+    if let Some(description) = description {
+        write!(text, " — {description}").expect("write string");
+    }
+    text
+}
+
 /// An online text in a block of its own: what it is and its line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block<'a> {
@@ -938,7 +984,7 @@ pub struct ResultTexts<'a> {
     /// For an article of a language beside English, the synonyms of the
     /// word as a whole, shown under its definitions; `None` when there is
     /// nothing to say.
-    pub word_synonyms: Option<Listed<'a>>,
+    pub word_synonyms: Option<SynonymTexts<'a>>,
     /// For an article of a language beside English, its English glosses:
     /// rows to choose, one at a time with the senses.
     pub glosses: Option<Listed<'a>>,
@@ -1137,13 +1183,13 @@ fn grouped_texts<'a>(
     let word_synonyms = match &grouped.synonyms {
         // The senses have their own: nothing to say about the word.
         None if in_senses => None,
-        None => Some(Listed::Missing(missing_synonyms(language))),
+        None => Some(SynonymTexts::Missing(missing_synonyms(language))),
         Some(synonyms) if synonyms.is_empty() && in_senses => None,
-        Some(synonyms) => Some(Listed::of(
-            word_synonyms_label(language),
-            synonyms,
-            NO_WORD_SYNONYMS,
-        )),
+        Some(synonyms) if synonyms.is_empty() => Some(SynonymTexts::Missing(NO_WORD_SYNONYMS)),
+        Some(groups) => Some(SynonymTexts::Groups {
+            label: word_synonyms_label(language),
+            groups,
+        }),
     };
     let glosses = match &grouped.english {
         None => Listed::Missing(missing_english(language)),
@@ -1542,8 +1588,8 @@ mod tests {
         EXPLANATION_MARK, FIELD_PLACEHOLDER, Listed, Lookup, NO_DEFINITIONS, NO_GLOSS, NO_SYNONYMS,
         NO_TRANSLATION, NO_WORD_SYNONYMS, ONLINE_LONE_LABEL, ONLINE_PENDING, ONLINE_SENTENCE_LABEL,
         ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online, OnlineTexts, PENDING,
-        RUSSIAN_LABEL, ResultTexts, SYNONYMS_LABEL, Shown, UNFINISHED, Whole, binding_texts,
-        indexes_text, online_markup, result_texts, sentence_markup, texts,
+        RUSSIAN_LABEL, ResultTexts, SYNONYMS_LABEL, Shown, SynonymTexts, UNFINISHED, Whole,
+        binding_texts, indexes_text, online_markup, result_texts, sentence_markup, texts,
     };
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
@@ -3002,7 +3048,12 @@ mod tests {
             grouped: Grouped {
                 definitions: Some(spanish_senses()),
                 russian: Some(vec!["банк".to_owned(), "скамейка".to_owned()]),
-                synonyms: Some(vec!["entidad".to_owned(), "asiento".to_owned()]),
+                synonyms: Some(vec![addict_dictionary::index::SynonymGroup {
+                    headword: "banco".to_owned(),
+                    definition: String::new(),
+                    metadata: None,
+                    synonyms: vec!["entidad".to_owned(), "asiento".to_owned()],
+                }]),
                 verb: None,
                 english: Some(vec![
                     "bank (financial institution)".to_owned(),
@@ -3232,7 +3283,18 @@ mod tests {
     fn sections(texts: &ResultTexts<'_>) -> [Option<String>; 3] {
         [
             texts.translations.map(listed_line),
-            texts.word_synonyms.map(listed_line),
+            texts.word_synonyms.map(|synonyms| match synonyms {
+                SynonymTexts::Missing(line) => line.to_owned(),
+                SynonymTexts::Groups { label, groups } => format!(
+                    "{label} {}",
+                    groups
+                        .iter()
+                        .flat_map(|group| &group.synonyms)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }),
             texts.glosses.map(listed_line),
         ]
     }
@@ -3434,6 +3496,42 @@ mod tests {
     }
 
     #[test]
+    fn synonym_groups_have_source_headwords_classes_and_descriptions_without_invented_definitions()
+    {
+        use addict_dictionary::{format::SenseMetadata, index::SynonymGroup};
+        let mut group = SynonymGroup {
+            headword: "fer".to_owned(),
+            definition: String::new(),
+            metadata: SenseMetadata::from_label("(v; beure)"),
+            synonyms: vec!["prendre".to_owned(); 9],
+        };
+        assert_eq!(
+            super::synonym_heading(&group, 3),
+            "fer · Verb · Meaning 3 — beure"
+        );
+        group.metadata = SenseMetadata::from_label("(v)");
+        assert_eq!(super::synonym_heading(&group, 2), "fer · Verb · Meaning 2");
+        group.metadata = None;
+        assert_eq!(super::synonym_heading(&group, 1), "fer · Meaning 1");
+        group.metadata = SenseMetadata::from_label("(unknown)");
+        assert_eq!(super::synonym_heading(&group, 4), "fer · Meaning 4");
+        let groups = vec![group.clone(), group];
+        let lookup = Lookup::Grouped {
+            language: Language::Ca,
+            grouped: Grouped {
+                synonyms: Some(groups.clone()),
+                ..Grouped::default()
+            },
+        };
+        let texts = result_texts(&lookup, None, None, None);
+        let Some(SynonymTexts::Groups { groups: shown, .. }) = texts.word_synonyms else {
+            panic!("groups");
+        };
+        assert_eq!(shown, groups);
+        assert_eq!(shown[0].synonyms.len(), 9);
+    }
+
+    #[test]
     fn a_word_with_no_synonyms_anywhere_says_so_for_the_word() {
         let lookup = Lookup::Grouped {
             language: Language::Es,
@@ -3447,7 +3545,10 @@ mod tests {
             },
         };
         let texts = result_texts(&lookup, None, None, None);
-        assert_eq!(texts.word_synonyms, Some(Listed::Missing(NO_WORD_SYNONYMS)));
+        assert_eq!(
+            texts.word_synonyms,
+            Some(SynonymTexts::Missing(NO_WORD_SYNONYMS))
+        );
         assert_eq!(
             NO_WORD_SYNONYMS,
             "The dictionaries give no synonyms for this word."

@@ -99,6 +99,15 @@ pub struct Index {
     source: String,
 }
 
+/// One independent meaning from a synonym source, with its headword provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynonymGroup {
+    pub headword: String,
+    pub definition: String,
+    pub metadata: Option<format::SenseMetadata>,
+    pub synonyms: Vec<String>,
+}
+
 impl Index {
     /// Opens the index at `path` and checks its header. A missing file is
     /// [`Error::NotImported`].
@@ -185,6 +194,32 @@ impl Index {
             senses,
             translations,
         }))
+    }
+
+    /// Reads independent synonym meanings without changing the core Article
+    /// contract. Uses the same bounded, positioned reads as `find`.
+    pub fn synonym_groups(&self, word: &str) -> Result<Option<Vec<SynonymGroup>>, Error> {
+        let Some(record) = self.search(WORDS, word)? else {
+            return Ok(None);
+        };
+        let (offsets, _) = format::decode_word(&record).map_err(|damage| self.damaged(damage))?;
+        let mut groups = Vec::new();
+        for offset in offsets {
+            let sense = self.sense(offset)?;
+            let mut synonyms = Vec::new();
+            for member in sense.members {
+                if member != word && !synonyms.contains(&member) {
+                    synonyms.push(member);
+                }
+            }
+            groups.push(SynonymGroup {
+                headword: word.to_owned(),
+                definition: sense.definition,
+                metadata: sense.metadata,
+                synonyms,
+            });
+        }
+        Ok(Some(groups))
     }
 
     /// The lemmas the exception list gives for `form`, in its order; empty

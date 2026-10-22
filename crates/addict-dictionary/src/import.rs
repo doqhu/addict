@@ -1494,6 +1494,17 @@ mod tests {
         assert!(definitions.iter().all(String::is_empty));
         assert_eq!(synonyms[1], strings(&["sèrie", "lot (m)", "joc de peces"]));
         assert!(translations.is_empty());
+        let groups = thesaurus
+            .synonym_groups("col·lecció")
+            .expect("rich read")
+            .expect("headword");
+        assert_eq!(groups.len(), 3);
+        assert!(groups.iter().all(|group| {
+            group
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.label == "(n)")
+        }));
         // Definitions: the Catalan senses.
         let dbnary = open(Source::DbnaryCa);
         let (definitions, synonyms, _) = article(&dbnary, "col·lecció");

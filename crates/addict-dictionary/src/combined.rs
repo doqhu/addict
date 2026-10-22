@@ -229,6 +229,7 @@ mod tests {
             contents.senses.push(SenseRecord {
                 definition: definition.to_owned(),
                 members: texts(&[word]),
+                metadata: None,
             });
         }
         // One sense the word and its dictionary form share.
@@ -236,10 +237,12 @@ mod tests {
         contents.senses.push(SenseRecord {
             definition: "the trees in a large wooded area".to_owned(),
             members: texts(&["forest", "wood", "woods"]),
+            metadata: None,
         });
         contents.senses.push(SenseRecord {
             definition: "the hard fibrous substance under the bark of trees".to_owned(),
             members: texts(&["wood"]),
+            metadata: None,
         });
         for (word, senses) in [("wood", vec![shared + 1, shared]), ("woods", vec![shared])] {
             contents.headwords.push(Headword {
@@ -270,6 +273,7 @@ mod tests {
         let definition = |text: &str| SenseRecord {
             definition: text.to_owned(),
             members: Vec::new(),
+            metadata: None,
         };
         Contents {
             source: "russian-1".to_owned(),
