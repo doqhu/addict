@@ -1658,16 +1658,24 @@ mod tests {
     fn definition_shown() -> Shown {
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(Article {
+            sense_metadata: Vec::new(),
+            entries: Vec::new(),
             senses: vec![
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "  land <near> & water  ".to_owned(),
                     synonyms: vec!["shore".to_owned()],
                 },
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "financial institution".to_owned(),
                     synonyms: vec![],
                 },
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: " \n\t ".to_owned(),
                     synonyms: vec![],
                 },
@@ -2404,12 +2412,18 @@ mod tests {
 
     fn article() -> Article {
         Article {
+            sense_metadata: Vec::new(),
+            entries: Vec::new(),
             senses: vec![
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "first".to_owned(),
                     synonyms: vec!["one".to_owned(), "uno".to_owned()],
                 },
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "second".to_owned(),
                     synonyms: Vec::new(),
                 },
@@ -2718,6 +2732,8 @@ mod tests {
     #[test]
     fn an_article_with_nothing_has_a_line_for_each_absence() {
         let lookup = Lookup::Article(Article {
+            sense_metadata: Vec::new(),
+            entries: Vec::new(),
             senses: Vec::new(),
             translations: Vec::new(),
         });
@@ -2742,7 +2758,11 @@ mod tests {
     fn the_texts_of_the_dictionary_are_shown_as_written() {
         let written = "a < b & c";
         let lookup = Lookup::Article(Article {
+            sense_metadata: Vec::new(),
+            entries: Vec::new(),
             senses: vec![Sense {
+                part_of_speech: None,
+                entries: Vec::new(),
                 definition: written.to_owned(),
                 synonyms: vec!["<i>x</i>".to_owned(), "y & z".to_owned()],
             }],
@@ -3077,10 +3097,14 @@ mod tests {
     fn spanish_senses() -> Vec<Sense> {
         vec![
             Sense {
+                part_of_speech: None,
+                entries: Vec::new(),
                 definition: "Empresa que ofrece servicios monetarios.".to_owned(),
                 synonyms: Vec::new(),
             },
             Sense {
+                part_of_speech: None,
+                entries: Vec::new(),
                 definition: "Mueble alargado para sentarse.".to_owned(),
                 synonyms: vec!["banca".to_owned()],
             },
@@ -3104,6 +3128,8 @@ mod tests {
         Lookup::Grouped {
             language: Language::Es,
             grouped: Grouped {
+                entries: Vec::new(),
+                sense_metadata: Vec::new(),
                 definitions: Some(spanish_senses()),
                 russian: Some(vec!["банк".to_owned(), "скамейка".to_owned()]),
                 synonyms: Some(vec![addict_dictionary::index::SynonymGroup {
@@ -3467,6 +3493,8 @@ mod tests {
             language: Language::Ca,
             grouped: Grouped {
                 definitions: Some(vec![Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "Conjunt de coses.".to_owned(),
                     // No synonym on the sense: the missing index is named.
                     synonyms: Vec::new(),
@@ -3492,6 +3520,8 @@ mod tests {
         let lookup = Lookup::Grouped {
             language: Language::Es,
             grouped: Grouped {
+                entries: Vec::new(),
+                sense_metadata: Vec::new(),
                 definitions: Some(spanish_senses()),
                 russian: Some(Vec::new()),
                 synonyms: Some(Vec::new()),
@@ -3584,6 +3614,8 @@ mod tests {
             language: Language::Es,
             grouped: Grouped {
                 definitions: Some(vec![Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "Lo que existe.".to_owned(),
                     synonyms: Vec::new(),
                 }]),
@@ -3768,6 +3800,8 @@ mod tests {
             language: Language::Es,
             grouped: Grouped {
                 definitions: Some(vec![Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: " \n ".to_owned(),
                     synonyms: Vec::new(),
                 }]),

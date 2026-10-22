@@ -732,7 +732,7 @@ mod tests {
 
         let imported = import_known(&archive.file, &data, &known).expect("import");
         assert_eq!(imported.path, data.join("kaikki-es-Espanol.index"));
-        assert_eq!(imported.headwords, 3);
+        assert_eq!(imported.headwords, 4);
         assert_eq!(imported.exception_forms, 3);
         assert_eq!(fs::read(&oewn.path).expect("index"), oewn_bytes);
         let bytes = fs::read(&imported.path).expect("index");

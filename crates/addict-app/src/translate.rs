@@ -499,6 +499,8 @@ pub(crate) mod tests {
         let work = Work::start().expect("runner");
         let grouped = Grouped {
             definitions: Some(vec![Sense {
+                part_of_speech: None,
+                entries: Vec::new(),
                 definition: "Asiento largo.".to_owned(),
                 synonyms: Vec::new(),
             }]),

@@ -12,11 +12,13 @@
 //! translation belongs to is not kept. Texts are stored as written, stress
 //! marks included.
 //!
-//! The pronunciation, the part of speech and everything outside the entries
-//! are skipped. The file is read as a stream; the headwords are held until
+//! Form pronunciation and scoped grammar are retained before definitions
+//! are flattened. The file is read as a stream; the headwords are held until
 //! its end, because the entries are not in the order of the index.
 
 use std::{collections::BTreeMap, io::BufRead};
+
+use addict_core::dictionary::{EntryIdentity, LexicalEntry, PartOfSpeech, Pronunciation};
 
 use quick_xml::{
     Reader,
@@ -25,7 +27,7 @@ use quick_xml::{
 
 pub use crate::xml::ParseError;
 use crate::{
-    format::{Contents, Headword, SenseRecord},
+    format::{Contents, EntryRecord, Headword, SenseRecord},
     xml,
 };
 
@@ -36,8 +38,27 @@ const UNKNOWN_ENTITY: &str = "an unknown entity in an entry";
 #[derive(Default)]
 struct Entry {
     orths: Vec<String>,
-    definitions: Vec<String>,
+    definitions: Vec<(String, Option<usize>)>,
+    part_of_speech: Option<PartOfSpeech>,
+    scopes: Vec<(Option<usize>, Option<PartOfSpeech>)>,
+    orth_forms: Vec<Option<usize>>,
+    form_grammar: Vec<Option<PartOfSpeech>>,
+    pronunciations: Vec<(Option<usize>, Pronunciation)>,
     translations: Vec<String>,
+}
+
+impl Entry {
+    /// The nearest explicit grammar in a definition's enclosing sense chain.
+    fn sense_grammar(&self, mut scope: Option<usize>) -> Option<(usize, &PartOfSpeech)> {
+        while let Some(at) = scope {
+            let (parent, grammar) = &self.scopes[at];
+            if let Some(grammar) = grammar {
+                return Some((at, grammar));
+            }
+            scope = *parent;
+        }
+        None
+    }
 }
 
 /// The element whose text is being collected.
@@ -46,9 +67,14 @@ enum Field {
     Orth,
     Definition,
     Translation,
+    Pos,
+    Pronunciation,
 }
 
 struct Capture {
+    scope: Option<usize>,
+    form: Option<usize>,
+    notation: Option<String>,
     field: Field,
     /// The depth of the element: it ends where the depth is this again.
     depth: u32,
@@ -58,7 +84,8 @@ struct Capture {
 /// The definitions and the translations of one headword, in file order.
 #[derive(Default)]
 struct Collected {
-    definitions: Vec<String>,
+    definitions: Vec<SenseRecord>,
+    entries: Vec<EntryRecord>,
     translations: Vec<String>,
 }
 
@@ -79,9 +106,120 @@ impl Parsed {
                 continue;
             }
             let collected = self.headwords.entry(orth.clone()).or_default();
-            collected
-                .definitions
-                .extend(entry.definitions.iter().cloned());
+            // Collect every form of this spelling before merging identical grammar.
+            // Different grammar keeps a distinct lexical identity and sense association.
+            let mut forms: Vec<(Option<usize>, Option<PartOfSpeech>, Vec<Pronunciation>)> =
+                Vec::new();
+            for (orth_at, candidate) in entry.orths.iter().enumerate() {
+                if candidate != orth {
+                    continue;
+                }
+                let form = entry.orth_forms[orth_at];
+                let grammar = form
+                    .and_then(|form| entry.form_grammar[form].clone())
+                    .or_else(|| entry.part_of_speech.clone());
+                let group =
+                    if let Some(group) = forms.iter().position(|(_, pos, _)| *pos == grammar) {
+                        &mut forms[group]
+                    } else {
+                        forms.push((form, grammar, Vec::new()));
+                        forms.last_mut().expect("just added a form")
+                    };
+                for (_, sound) in entry.pronunciations.iter().filter(|(at, _)| *at == form) {
+                    if !group.2.contains(sound) {
+                        group.2.push(sound.clone());
+                    }
+                }
+            }
+            // Keep a definition once per effective POS, even when several forms
+            // share it. Definition positions distinguish repeated source definitions.
+            let mut associations: Vec<(usize, u32)> = Vec::new();
+            let mut scoped_pronunciations = Vec::new();
+            for (group_at, (form, grammar, pronunciations)) in forms.into_iter().enumerate() {
+                // Grammar-only scopes have no sense record linking them to these
+                // forms. Retain only this source entry's matching spelling's sounds.
+                for sound in &pronunciations {
+                    if !scoped_pronunciations.contains(sound) {
+                        scoped_pronunciations.push(sound.clone());
+                    }
+                }
+                let mut senses = Vec::with_capacity(entry.definitions.len());
+                for (definition_at, (definition, scope)) in entry.definitions.iter().enumerate() {
+                    let pos = entry
+                        .sense_grammar(*scope)
+                        .map(|(_, pos)| pos.clone())
+                        .or_else(|| grammar.clone());
+                    let existing = associations.iter().find_map(|(at, sense)| {
+                        (*at == definition_at
+                            && collected.definitions[*sense as usize].part_of_speech == pos)
+                            .then_some(*sense)
+                    });
+                    let sense = if let Some(sense) = existing {
+                        sense
+                    } else {
+                        let sense = u32::try_from(collected.definitions.len())
+                            .map_err(|_| malformed("too many definitions".to_owned()))?;
+                        collected.definitions.push(SenseRecord {
+                            definition: definition.clone(),
+                            part_of_speech: pos,
+                            ..Default::default()
+                        });
+                        associations.push((definition_at, sense));
+                        sense
+                    };
+                    senses.push(sense);
+                }
+                collected.entries.push(EntryRecord {
+                    entry: LexicalEntry {
+                        identity: EntryIdentity {
+                            source: String::new(),
+                            headword: orth.clone(),
+                            id: if group_at == 0 {
+                                format!("entry-{}", self.entries)
+                            } else {
+                                let form =
+                                    form.map_or_else(|| "unscoped".to_owned(), |at| at.to_string());
+                                format!("entry-{}-form-{form}", self.entries)
+                            },
+                        },
+                        part_of_speech: grammar,
+                        pronunciations,
+                    },
+                    senses,
+                });
+            }
+            // A sense-level grammar group can exist without any definition.
+            for (scope_at, (_, grammar)) in entry.scopes.iter().enumerate() {
+                let Some(grammar) = grammar else {
+                    continue;
+                };
+                let associated: Vec<u32> = associations
+                    .iter()
+                    .filter_map(|(definition_at, sense)| {
+                        let scope = entry.definitions[*definition_at].1;
+                        entry
+                            .sense_grammar(scope)
+                            .is_some_and(|(index, _)| index == scope_at)
+                            .then_some(*sense)
+                    })
+                    .collect();
+                collected.entries.push(EntryRecord {
+                    entry: LexicalEntry {
+                        identity: EntryIdentity {
+                            source: String::new(),
+                            headword: orth.clone(),
+                            id: format!("entry-{}-scope-{scope_at}", self.entries),
+                        },
+                        part_of_speech: Some(grammar.clone()),
+                        pronunciations: if associated.is_empty() {
+                            scoped_pronunciations.clone()
+                        } else {
+                            Vec::new()
+                        },
+                    },
+                    senses: associated,
+                });
+            }
             for translation in &entry.translations {
                 if !collected.translations.contains(translation) {
                     collected.translations.push(translation.clone());
@@ -105,13 +243,20 @@ impl Parsed {
                     u32::try_from(senses.len())
                         .map_err(|_| malformed("too many definitions".to_owned()))?,
                 );
-                senses.push(SenseRecord {
-                    definition,
-                    members: Vec::new(),
-                    metadata: None,
-                });
+                senses.push(definition);
             }
             headwords.push(Headword {
+                entries: collected
+                    .entries
+                    .into_iter()
+                    .map(|mut entry| {
+                        entry.entry.identity.source = source.to_owned();
+                        for sense in &mut entry.senses {
+                            *sense = places[*sense as usize];
+                        }
+                        entry
+                    })
+                    .collect(),
                 word,
                 senses: places,
                 translations: collected.translations,
@@ -138,6 +283,8 @@ struct Open {
     /// How many elements are open: a file cut between two entries is still
     /// cut.
     depth: u32,
+    scopes: Vec<(u32, usize)>,
+    forms: Vec<(u32, usize)>,
 }
 
 impl Open {
@@ -147,13 +294,28 @@ impl Open {
             root(element)?;
         }
         self.depth += 1;
-        match (element.local_name().as_ref(), self.entry.is_some()) {
+        let name = element.local_name();
+        if let Some((_, entry)) = self.entry.as_mut() {
+            if name.as_ref() == b"sense" {
+                let index = entry.scopes.len();
+                entry
+                    .scopes
+                    .push((self.scopes.last().map(|(_, index)| *index), None));
+                self.scopes.push((self.depth, index));
+            } else if name.as_ref() == b"form" {
+                self.forms.push((self.depth, entry.form_grammar.len()));
+                entry.form_grammar.push(None);
+            }
+        }
+        match (name.as_ref(), self.entry.is_some()) {
             (b"entry", false) => self.entry = Some((self.depth, Entry::default())),
             (b"entry", true) => return Err(nested()),
             (name, true) if self.capture.is_none() => {
                 let field = match name {
                     b"orth" => Some(Field::Orth),
                     b"def" => Some(Field::Definition),
+                    b"pos" => Some(Field::Pos),
+                    b"pron" if !self.forms.is_empty() => Some(Field::Pronunciation),
                     b"quote" if self.russian.is_some() => Some(Field::Translation),
                     b"cit" if self.russian.is_none() && is_russian(element)? => {
                         self.russian = Some(self.depth);
@@ -162,7 +324,11 @@ impl Open {
                     _ => None,
                 };
                 let depth = self.depth;
+                let notation = xml::attribute(element, "notation", malformed)?;
                 self.capture = field.map(|field| Capture {
+                    scope: self.scopes.last().map(|(_, index)| *index),
+                    form: self.forms.last().map(|(_, index)| *index),
+                    notation,
                     field,
                     depth,
                     text: String::new(),
@@ -183,11 +349,40 @@ impl Open {
             let text = done.text.trim();
             if !text.is_empty() {
                 match done.field {
-                    Field::Orth => entry.orths.push(text.to_owned()),
-                    Field::Definition => entry.definitions.push(text.to_owned()),
+                    Field::Orth => {
+                        entry.orths.push(text.to_owned());
+                        entry.orth_forms.push(done.form);
+                    }
+                    Field::Definition => entry.definitions.push((text.to_owned(), done.scope)),
+                    Field::Pos => {
+                        let pos = PartOfSpeech::from_label(text);
+                        let form_is_nearer = self.forms.last().map(|(at, _)| at)
+                            > self.scopes.last().map(|(at, _)| at);
+                        if let Some(form) = done.form.filter(|_| form_is_nearer) {
+                            entry.form_grammar[form] = pos;
+                        } else if let Some(scope) = done.scope {
+                            entry.scopes[scope].1 = pos;
+                        } else {
+                            entry.part_of_speech = pos;
+                        }
+                    }
+                    Field::Pronunciation => entry.pronunciations.push((
+                        done.form,
+                        Pronunciation {
+                            text: Some(text.to_owned()),
+                            notation: done.notation,
+                            ..Default::default()
+                        },
+                    )),
                     Field::Translation => entry.translations.push(text.to_owned()),
                 }
             }
+        }
+        if self.scopes.last().is_some_and(|(at, _)| *at == depth) {
+            self.scopes.pop();
+        }
+        if self.forms.last().is_some_and(|(at, _)| *at == depth) {
+            self.forms.pop();
         }
         if self.russian == Some(depth) {
             self.russian = None;

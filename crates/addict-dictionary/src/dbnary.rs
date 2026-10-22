@@ -29,7 +29,8 @@ use std::{
     io::{self, BufRead},
 };
 
-use crate::format::{Contents, SenseRecord};
+use crate::format::{self, Contents, EntryRecord, SenseRecord};
+use addict_core::dictionary::{EntryIdentity, LexicalEntry, PartOfSpeech, Pronunciation};
 
 /// Why a DBnary file gave no contents.
 #[derive(Debug)]
@@ -53,6 +54,10 @@ impl std::error::Error for ParseError {}
 
 /// One entry block: its label and the ids of its senses.
 struct Entry {
+    id: String,
+    part_of_speech: Option<PartOfSpeech>,
+    raw_pos: Option<String>,
+    forms: Vec<String>,
     label: String,
     senses: Vec<String>,
 }
@@ -64,11 +69,25 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
     let code = format!("lexvo:{language}");
     let mut entries: Vec<Entry> = Vec::new();
     let mut definitions: HashMap<String, Vec<String>> = HashMap::new();
+    let mut phonetics: HashMap<String, Vec<Pronunciation>> = HashMap::new();
     let mut block = String::new();
     let mut take = |block: &str| {
+        let sounds = phonetics_of(block);
+        if !sounds.is_empty() {
+            phonetics
+                .entry(subject(block).to_owned())
+                .or_default()
+                .extend(sounds);
+        }
         if block.contains("ontolex:LexicalEntry") && has_token(block, &code) {
             if let Some(label) = literal_after(block, "rdfs:label") {
                 entries.push(Entry {
+                    id: subject(block).to_owned(),
+                    part_of_speech: objects(block, "lexinfo:partOfSpeech").first().and_then(
+                        |label| PartOfSpeech::from_label(label.rsplit(':').next().unwrap_or(label)),
+                    ),
+                    raw_pos: literal_after(block, "dbnary:partOfSpeech"),
+                    forms: objects(block, "ontolex:canonicalForm"),
                     label,
                     senses: objects(block, "ontolex:sense"),
                 });
@@ -103,23 +122,101 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
     }
 
     let mut headwords: BTreeMap<String, Vec<SenseRecord>> = BTreeMap::new();
+    let mut metadata: BTreeMap<String, Vec<EntryRecord>> = BTreeMap::new();
     for entry in entries {
+        let pos = entry
+            .part_of_speech
+            .or_else(|| entry.raw_pos.as_deref().and_then(PartOfSpeech::from_label));
         let senses: Vec<SenseRecord> = entry
             .senses
             .iter()
             .filter_map(|sense| definitions.get(sense))
             .flatten()
             .map(|definition| SenseRecord {
+                part_of_speech: pos.clone(),
                 definition: definition.clone(),
                 members: Vec::new(),
                 metadata: None,
             })
             .collect();
-        if !senses.is_empty() && !entry.label.is_empty() {
-            headwords.entry(entry.label).or_default().extend(senses);
+        if !entry.label.is_empty() {
+            let mut pronunciations = Vec::new();
+            for form in entry.forms {
+                if let Some(sounds) = phonetics.get(&form) {
+                    crate::combined::append_unique(&mut pronunciations, sounds.iter().cloned());
+                }
+            }
+            if senses.is_empty() && pos.is_none() && pronunciations.is_empty() {
+                continue;
+            }
+            let records = headwords.entry(entry.label.clone()).or_default();
+            let first = records.len() as u32;
+            records.extend(senses);
+            let mut lexical = LexicalEntry {
+                identity: EntryIdentity {
+                    source: source.to_owned(),
+                    headword: entry.label.clone(),
+                    id: entry.id,
+                },
+                part_of_speech: pos,
+                pronunciations,
+            };
+            // Keep the human source label as well as the normalized URI label.
+            if let Some(raw) = entry.raw_pos.as_deref().and_then(PartOfSpeech::from_label) {
+                if lexical
+                    .part_of_speech
+                    .as_ref()
+                    .is_some_and(|pos| pos.category.is_some())
+                {
+                    lexical.part_of_speech.as_mut().unwrap().label = raw.label;
+                } else {
+                    lexical.part_of_speech = Some(raw);
+                }
+            }
+            metadata.entry(entry.label).or_default().push(EntryRecord {
+                entry: lexical,
+                senses: (first..records.len() as u32).collect(),
+            });
         }
     }
-    Ok(Contents::of_senses(source, headwords))
+    let mut contents = Contents::of_senses(source, headwords);
+    format::attach_entries(&mut contents, metadata);
+    Ok(contents)
+}
+
+fn phonetics_of(block: &str) -> Vec<Pronunciation> {
+    let mut sounds = Vec::new();
+    for object in objects(block, "ontolex:phoneticRep") {
+        let Some(text) = literal(&object).filter(|text| !text.trim().is_empty()) else {
+            continue;
+        };
+        // Locate the closing quote without treating an escaped quote as the end.
+        let mut escaped = false;
+        let end = object.char_indices().skip(1).find_map(|(at, character)| {
+            if escaped {
+                escaped = false;
+                return None;
+            }
+            if character == '\\' {
+                escaped = true;
+                return None;
+            }
+            (character == '"').then_some(at + 1)
+        });
+        let notation = end
+            .map(|end| object[end..].trim())
+            .filter(|tail| !tail.is_empty())
+            .map(str::to_owned);
+        let sound = Pronunciation {
+            text: Some(text),
+            notation,
+            ..Default::default()
+        };
+        if !sounds.contains(&sound) {
+            sounds.push(sound);
+        }
+    }
+    sounds
 }
 
 /// The lines of `reader` without their line ends; bytes that are not UTF-8

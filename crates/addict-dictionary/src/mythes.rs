@@ -86,7 +86,16 @@ pub fn parse(mut reader: impl BufRead, source: &str) -> Result<Contents, ParseEr
                 }
             }
             if !members.is_empty() {
+                let part_of_speech = metadata.as_ref().and_then(|metadata| {
+                    let tag = metadata
+                        .parts()
+                        .map_or(metadata.label(), |(tag, _)| tag.trim());
+                    let mut pos = addict_core::dictionary::PartOfSpeech::from_label(tag)?;
+                    pos.label = metadata.label().to_owned();
+                    Some(pos)
+                });
                 senses.push(SenseRecord {
+                    part_of_speech,
                     definition: String::new(),
                     members,
                     metadata,

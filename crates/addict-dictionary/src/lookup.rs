@@ -158,6 +158,10 @@ fn found(
 /// indexes of its kind have nothing for the word.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Grouped {
+    /// Metadata from every source, independent of displayed definition precedence.
+    pub entries: Vec<addict_core::dictionary::LexicalEntry>,
+    /// Source sense grammar and lexical associations, including projected glosses.
+    pub sense_metadata: Vec<SourcedSense>,
     /// [`Kind::Definitions`]: the senses, with their own synonyms, merged in
     /// the order of the indexes, a definition already there skipped.
     pub definitions: Option<Vec<Sense>>,
@@ -174,6 +178,8 @@ pub struct Grouped {
     /// words are no verb form.
     pub verb: Option<Box<VerbForm>>,
 }
+
+pub use addict_core::dictionary::SourcedSense;
 
 /// What [`grouped`] says of a word as a verb form.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,9 +312,21 @@ pub fn grouped(
     let itself = [written.to_owned(), reduction::lowercase(written)];
     let found_in = |index: &Index| found(index, language, word, &lemmas);
     for (kind, index) in indexes {
+        let found = found_in(index)?;
+        crate::combined::append_unique(
+            &mut grouped.entries,
+            found
+                .iter()
+                .flat_map(|found| found.article.entries.iter().cloned()),
+        );
+        crate::combined::append_unique(
+            &mut grouped.sense_metadata,
+            found
+                .iter()
+                .flat_map(|found| found.article.sense_metadata.iter().cloned()),
+        );
         match kind {
             Kind::Definitions => {
-                let found = found_in(index)?;
                 found_any |= !found.is_empty();
                 grouped.definitions.get_or_insert_with(Vec::new);
                 definitions.extend(found.into_iter().map(|found| Found {
@@ -320,7 +338,6 @@ pub fn grouped(
                 }));
             }
             Kind::Russian => {
-                let found = found_in(index)?;
                 found_any |= !found.is_empty();
                 let russian = grouped.russian.get_or_insert_with(Vec::new);
                 let translations = found.iter().flat_map(|found| &found.article.translations);
@@ -362,7 +379,6 @@ pub fn grouped(
                 }
             }
             Kind::English => {
-                let found = found_in(index)?;
                 found_any |= !found.is_empty();
                 let english = grouped.english.get_or_insert_with(Vec::new);
                 let glosses = found
@@ -373,7 +389,7 @@ pub fn grouped(
             }
             // Never among the indexes of a reading language: a Russian
             // index is asked by [`russian`] alone. Nothing of it is kept.
-            Kind::FromRussian => found_any |= !found_in(index)?.is_empty(),
+            Kind::FromRussian => found_any |= !found.is_empty(),
         }
     }
     if !found_any {
@@ -619,16 +635,19 @@ mod tests {
             source: "spanish-1".to_owned(),
             senses: vec![
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "Empresa que ofrece servicios monetarios.".to_owned(),
                     members: Vec::new(),
                     metadata: None,
                 },
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "Mueble alargado para sentarse.".to_owned(),
                     members: texts(&["banca"]),
                     metadata: None,
                 },
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "Plural de banco.".to_owned(),
                     members: Vec::new(),
                     metadata: None,
@@ -636,11 +655,13 @@ mod tests {
             ],
             headwords: vec![
                 Headword {
+                    entries: Vec::new(),
                     word: "banco".to_owned(),
                     senses: vec![0, 1],
                     translations: Vec::new(),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "bancos".to_owned(),
                     senses: vec![2],
                     translations: Vec::new(),
@@ -662,10 +683,14 @@ mod tests {
         let index = Index::open(&path).expect("open");
         let banco_senses = vec![
             Sense {
+                part_of_speech: None,
+                entries: Vec::new(),
                 definition: "Empresa que ofrece servicios monetarios.".to_owned(),
                 synonyms: Vec::new(),
             },
             Sense {
+                part_of_speech: None,
+                entries: Vec::new(),
                 definition: "Mueble alargado para sentarse.".to_owned(),
                 synonyms: texts(&["banca"]),
             },
@@ -674,6 +699,8 @@ mod tests {
         assert_eq!(
             banco,
             Some(Article {
+                sense_metadata: Vec::new(),
+                entries: Vec::new(),
                 senses: banco_senses.clone(),
                 translations: Vec::new(),
             })
@@ -739,12 +766,14 @@ mod tests {
             for (definition, members) in senses {
                 numbers.push(contents.senses.len() as u32);
                 contents.senses.push(SenseRecord {
+                    part_of_speech: None,
                     definition: (*definition).to_owned(),
                     members: texts(members),
                     metadata: None,
                 });
             }
             contents.headwords.push(Headword {
+                entries: Vec::new(),
                 word: word.to_owned(),
                 senses: numbers,
                 translations: texts(translations),
@@ -948,10 +977,14 @@ mod tests {
             banco.definitions,
             Some(vec![
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "Empresa que ofrece servicios monetarios.".to_owned(),
                     synonyms: Vec::new(),
                 },
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "Mueble alargado para sentarse.".to_owned(),
                     synonyms: texts(&["banca"]),
                 },
@@ -1093,7 +1126,11 @@ mod tests {
         assert_eq!(
             found,
             Grouped {
+                entries: Vec::new(),
+                sense_metadata: Vec::new(),
                 definitions: Some(vec![Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "Conjunt de coses.".to_owned(),
                     synonyms: Vec::new(),
                 }]),

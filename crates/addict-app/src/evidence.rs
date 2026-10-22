@@ -870,6 +870,8 @@ mod tests {
         let file = TempFile::new("lookup");
         let mut writer = start(&file.0, Origin::Foliate);
         let article = Article {
+            sense_metadata: Vec::new(),
+            entries: Vec::new(),
             senses: Vec::new(),
             translations: vec!["банк".to_owned()],
         };

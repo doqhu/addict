@@ -98,10 +98,15 @@ impl Combined {
         Ok(match (defined, translated) {
             (None, None) => None,
             (None, Some(translated)) => Some(translated),
-            (Some(defined), translated) => Some(Article {
-                senses: defined.senses,
-                translations: translated.map_or_else(Vec::new, |article| article.translations),
-            }),
+            (Some(mut defined), translated) => {
+                defined.translations.clear();
+                if let Some(translated) = translated {
+                    append_unique(&mut defined.entries, translated.entries);
+                    append_unique(&mut defined.sense_metadata, translated.sense_metadata);
+                    defined.translations = translated.translations;
+                }
+                Some(defined)
+            }
         })
     }
 
@@ -153,18 +158,22 @@ pub(crate) fn merged(found: Vec<Found>) -> Option<Article> {
         return None;
     }
     let mut article = Article {
+        sense_metadata: Vec::new(),
+        entries: Vec::new(),
         senses: Vec::new(),
         translations: Vec::new(),
     };
     for Found { article: next, .. } in found {
+        append_unique(&mut article.entries, next.entries);
+        append_unique(&mut article.sense_metadata, next.sense_metadata);
         for sense in next.senses {
             // By the definition: the synonyms of one sense differ with the
             // headword it was reached through, and the first found stays.
-            if !article
-                .senses
-                .iter()
-                .any(|kept| kept.definition == sense.definition)
-            {
+            if let Some(kept) = article.senses.iter_mut().find(|kept| {
+                kept.definition == sense.definition && kept.part_of_speech == sense.part_of_speech
+            }) {
+                append_unique(&mut kept.entries, sense.entries);
+            } else {
                 article.senses.push(sense);
             }
         }
@@ -175,6 +184,14 @@ pub(crate) fn merged(found: Vec<Found>) -> Option<Article> {
         }
     }
     Some(article)
+}
+
+pub(crate) fn append_unique<T: PartialEq>(out: &mut Vec<T>, items: impl IntoIterator<Item = T>) {
+    for item in items {
+        if !out.contains(&item) {
+            out.push(item);
+        }
+    }
 }
 
 impl Dictionary for Combined {
@@ -200,6 +217,115 @@ mod tests {
         testdir::TempDir,
     };
 
+    #[test]
+    fn source_senses_survive_definition_precedence_and_reductions() {
+        use crate::{freedict, import::Kind, oewn};
+        use addict_core::dictionary::Pos;
+
+        let xml = r#"<TEI><entry><form><orth>bank</orth><pron notation="IPA">bæŋk</pron></form>
+            <sense><gramGrp><pos>n</pos></gramGrp>
+              <sense><def>FreeDict noun</def></sense>
+              <sense><gramGrp><pos>v</pos></gramGrp><def>FreeDict verb</def></sense>
+              <cit type="trans" xml:lang="ru"><quote>банк</quote></cit>
+            </sense></entry></TEI>"#;
+        let freedict = freedict::parse(xml.as_bytes(), "freedict-source").unwrap();
+        let wordnet = oewn::parse(
+            br#"<LexicalResource><Lexicon>
+            <LexicalEntry id="wordnet-bank-n"><Lemma writtenForm="bank" partOfSpeech="n"/>
+            <Sense id="bank-sense" synset="bank-synset"/></LexicalEntry>
+            <Synset id="bank-synset" members="wordnet-bank-n" partOfSpeech="n">
+            <Definition>WordNet noun</Definition></Synset>
+            </Lexicon></LexicalResource>"#
+                .as_slice(),
+            "wordnet-source",
+        )
+        .unwrap();
+        let dir = TempDir::new("source-senses");
+        let translations_path = dir.path().join("freedict.index");
+        std::fs::write(&translations_path, encode(&freedict).unwrap()).unwrap();
+        let direct = Index::open(&translations_path)
+            .unwrap()
+            .find("bank")
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct.sense_metadata.len(), 2);
+        assert_eq!(direct.entries[0].identity.id, "entry-1");
+        assert_eq!(direct.entries[0].identity.source, "freedict-source");
+        assert_eq!(direct.entries[0].identity.headword, "bank");
+        assert_eq!(
+            direct.entries[0].pronunciations[0].text.as_deref(),
+            Some("bæŋk")
+        );
+        for (record, category) in direct.sense_metadata.iter().zip([Pos::Noun, Pos::Verb]) {
+            assert_eq!(record.source, "freedict-source");
+            assert_eq!(record.headword, "bank");
+            assert_eq!(
+                record.sense.part_of_speech.as_ref().unwrap().category,
+                Some(category)
+            );
+            assert!(record.sense.entries.contains(&direct.entries[0].identity));
+            assert!(record.sense.entries.iter().all(|identity| {
+                direct
+                    .entries
+                    .iter()
+                    .any(|entry| &entry.identity == identity)
+            }));
+        }
+        // A legacy definition source has no metadata; v2 retains WordNet's own channel too.
+        for legacy in [false, true] {
+            let mut wordnet_contents = wordnet.clone();
+            if legacy {
+                wordnet_contents
+                    .headwords
+                    .iter_mut()
+                    .for_each(|word| word.entries.clear());
+                wordnet_contents
+                    .senses
+                    .iter_mut()
+                    .for_each(|sense| sense.part_of_speech = None);
+            }
+            let mut bytes = encode(&wordnet_contents).unwrap();
+            if legacy {
+                bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+            }
+            let definitions_path = dir.path().join("wordnet.index");
+            std::fs::write(&definitions_path, bytes).unwrap();
+            let combined = Combined::new(
+                Index::open(&definitions_path).unwrap(),
+                Index::open(&translations_path).unwrap(),
+            );
+            let exact = combined.find("bank").unwrap().unwrap();
+            assert_eq!(definitions(&exact), ["WordNet noun"]);
+            assert_eq!(exact.translations, ["банк"]);
+            assert_eq!(exact.sense_metadata.len(), if legacy { 2 } else { 3 });
+            assert_eq!(
+                exact
+                    .sense_metadata
+                    .iter()
+                    .filter(|sense| sense.source == "freedict-source")
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                direct.sense_metadata
+            );
+            assert!(exact.entries.ends_with(&direct.entries));
+            assert_eq!(combined.article("Banks").unwrap().unwrap(), exact);
+            assert_eq!(combined.find_reduced("Banks").unwrap()[0].headword, "bank");
+            // Repeated collection must reuse the shared records without duplicating metadata.
+            let index = combined.translations().unwrap();
+            let grouped = lookup::grouped(
+                &[(Kind::Russian, index), (Kind::English, index)],
+                Language::En,
+                "Banks",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(grouped.sense_metadata, direct.sense_metadata);
+        }
+        let mut only_freedict = Combined::default();
+        only_freedict.set_translations(Index::open(&translations_path).unwrap());
+        assert_eq!(only_freedict.article("banks").unwrap().unwrap(), direct);
+    }
+
     /// The sample index with what an Open English WordNet import adds for
     /// the reduced lookup: words alone in their senses, a capitalised
     /// headword and exception forms, one with its lemmas out of order.
@@ -222,11 +348,13 @@ mod tests {
             ("well", "in a good or proper manner"),
         ] {
             contents.headwords.push(Headword {
+                entries: Vec::new(),
                 word: word.to_owned(),
                 senses: vec![contents.senses.len() as u32],
                 translations: Vec::new(),
             });
             contents.senses.push(SenseRecord {
+                part_of_speech: None,
                 definition: definition.to_owned(),
                 members: texts(&[word]),
                 metadata: None,
@@ -235,17 +363,20 @@ mod tests {
         // One sense the word and its dictionary form share.
         let shared = contents.senses.len() as u32;
         contents.senses.push(SenseRecord {
+            part_of_speech: None,
             definition: "the trees in a large wooded area".to_owned(),
             members: texts(&["forest", "wood", "woods"]),
             metadata: None,
         });
         contents.senses.push(SenseRecord {
+            part_of_speech: None,
             definition: "the hard fibrous substance under the bark of trees".to_owned(),
             members: texts(&["wood"]),
             metadata: None,
         });
         for (word, senses) in [("wood", vec![shared + 1, shared]), ("woods", vec![shared])] {
             contents.headwords.push(Headword {
+                entries: Vec::new(),
                 word: word.to_owned(),
                 senses,
                 translations: Vec::new(),
@@ -271,6 +402,7 @@ mod tests {
     /// What a FreeDict import writes: definitions without members.
     fn russian() -> Contents {
         let definition = |text: &str| SenseRecord {
+            part_of_speech: None,
             definition: text.to_owned(),
             members: Vec::new(),
             metadata: None,
@@ -284,56 +416,67 @@ mod tests {
             ],
             headwords: vec![
                 Headword {
+                    entries: Vec::new(),
                     word: "bank".to_owned(),
                     senses: vec![0],
                     translations: texts(&["бе́рег", "брег", "банк"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "despite".to_owned(),
                     senses: vec![],
                     translations: texts(&["несмотря на"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "go".to_owned(),
                     senses: vec![],
                     translations: texts(&["идти́"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "leave".to_owned(),
                     senses: vec![],
                     translations: texts(&["оставля́ть", "оста́вил"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "left".to_owned(),
                     senses: vec![],
                     translations: texts(&["ле́вый", "оста́вил"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "saw".to_owned(),
                     senses: vec![],
                     translations: texts(&["пила́"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "see".to_owned(),
                     senses: vec![],
                     translations: texts(&["ви́деть"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "the".to_owned(),
                     senses: vec![],
                     translations: texts(&["э́тот"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "webhook".to_owned(),
                     senses: vec![1, 2],
                     translations: texts(&["вебхук"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "webhooks".to_owned(),
                     senses: vec![2],
                     translations: texts(&["вебхуки", "вебхук"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "well-known".to_owned(),
                     senses: vec![],
                     translations: texts(&["изве́стный"]),
@@ -428,10 +571,14 @@ mod tests {
             article.senses,
             vec![
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "A unit of work for a web server.".to_owned(),
                     synonyms: Vec::new(),
                 },
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "A web hook.".to_owned(),
                     synonyms: Vec::new(),
                 },
@@ -680,10 +827,14 @@ mod tests {
             combined.lookup("woods").expect("woods").senses,
             vec![
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "the trees in a large wooded area".to_owned(),
                     synonyms: texts(&["forest", "wood"]),
                 },
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "the hard fibrous substance under the bark of trees".to_owned(),
                     synonyms: Vec::new(),
                 },
@@ -821,6 +972,8 @@ mod tests {
         assert_eq!(
             bank.senses,
             vec![Sense {
+                part_of_speech: None,
+                entries: Vec::new(),
                 definition: "An edge of river, lake, or other watercourse.".to_owned(),
                 synonyms: Vec::new(),
             }]
