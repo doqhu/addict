@@ -210,15 +210,15 @@ pub const KNOWN: &[KnownFile<'static>] = &[
         size: 5_963_776,
         sha256: "4c941b5df1809575e47d5e0524a683eb03a3a1941b731b7434be10a74b6e78f6",
     },
-    // `kaikki-es-Espanol` of EXP-9: the eswiktionary dump of 2026-10-01,
-    // extracted on 2026-10-16. Kaikki replaces the file about weekly under
-    // the same URL; only this copy is known.
+    // `kaikki-es-Espanol` of EXP-9: the eswiktionary extract of 2026-10-20.
+    // Kaikki replaces the file about weekly under the same URL; only this
+    // copy is known (the extract of 2026-10-16, of the same size, is not).
     KnownFile {
         name: "kaikki.org-dictionary-Español.jsonl.gz",
-        edition: "kaikki-es-Espanol-2026-10-16",
+        edition: "kaikki-es-Espanol-2026-10-20",
         source: Source::KaikkiEs,
         size: 108_490_455,
-        sha256: "fee9c37580717d7faa69e951515a94fa0aaa77b816d2f9f96a0fb8d44b87b9bc",
+        sha256: "1c542c10b3a8d39d9948e53584c08442e5f0cd455d5aa98e15318ec325fd467b",
     },
     // `omw-es-2.0` of EXP-9: Open Multilingual Wordnet 2.0.
     KnownFile {
@@ -690,7 +690,7 @@ mod tests {
         assert_eq!(known.size, 108490455);
         assert_eq!(
             known.sha256,
-            "fee9c37580717d7faa69e951515a94fa0aaa77b816d2f9f96a0fb8d44b87b9bc"
+            "1c542c10b3a8d39d9948e53584c08442e5f0cd455d5aa98e15318ec325fd467b"
         );
         assert_eq!(
             index_path(Path::new("/d"), Source::KaikkiEs),
@@ -1309,7 +1309,7 @@ mod tests {
             pins,
             [
                 (5963776, "4c941b5d", "wikdict-es-ru-2026-06"),
-                (108490455, "fee9c375", "kaikki-es-Espanol-2026-10-16"),
+                (108490455, "1c542c10", "kaikki-es-Espanol-2026-10-20"),
                 (3232924, "d8450d42", "omw-es-2.0"),
                 (95164223, "c805cfb9", "kaikki-en-Spanish-2026-10-03"),
                 (3076096, "01cf2923", "wikdict-ca-ru-2026-06"),
