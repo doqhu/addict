@@ -15,7 +15,17 @@
 //!          form table    one entry per exception form, sorted
 //!          form keys     the forms, back to back
 //!          form records  lemma count u32 | lemma texts
+//!          analysis table    one entry per analysed verb form, sorted
+//!          analysis keys     the forms, back to back
+//!          analysis records  lemma count u32 | per lemma: lemma text
+//!                            | shape count u32 | shapes, 3 bytes each
 //! ```
+//!
+//! The three analysis sections are there only in a file whose contents
+//! have analyses: its header names 11 sections, any other 8. A file of 8
+//! sections has no analyses, so a source without tags gives the same bytes
+//! as before they existed. A shape is stored as [`analysis::encode`] gives
+//! it.
 //!
 //! A table entry is `key offset u64 | key length u32 | record offset u64 |
 //! record length u32`, the offsets into the keys and the records section of
@@ -32,17 +42,26 @@
 
 use std::{collections::BTreeMap, fmt};
 
+use crate::analysis::{self, Analyses};
+
 /// The first bytes of every index file.
 pub const MAGIC: [u8; 8] = *b"ADDICTIX";
 
 /// The version of the layout this module writes and reads.
 pub const VERSION: u32 = 1;
 
-/// The sections of a file, in the order of the header.
+/// The sections of a file without analyses, in the order of the header.
 pub const SECTIONS: usize = 8;
 
-/// The length of the header: magic, version, section count, section table.
+/// The sections of a file with analyses.
+pub const ANALYSED_SECTIONS: usize = 11;
+
+/// The length of the header of a file without analyses: magic, version,
+/// section count, section table.
 pub const HEADER_LEN: usize = 16 + SECTIONS * 16;
+
+/// The length of the header of a file with analyses, the longest header.
+pub const ANALYSED_HEADER_LEN: usize = 16 + ANALYSED_SECTIONS * 16;
 
 /// The length of one table entry.
 pub const ENTRY_LEN: u64 = 24;
@@ -65,6 +84,9 @@ pub enum SectionId {
     FormTable = 5,
     FormKeys = 6,
     FormRecords = 7,
+    AnalysisTable = 8,
+    AnalysisKeys = 9,
+    AnalysisRecords = 10,
 }
 
 /// Everything an index file holds: the input of [`encode`].
@@ -78,6 +100,9 @@ pub struct Contents {
     pub headwords: Vec<Headword>,
     /// The exception list, sorted by the bytes of the form, each form once.
     pub forms: Vec<ExceptionForm>,
+    /// The analysed verb forms, sorted by the bytes of the form, each form
+    /// once; empty for a source without tags.
+    pub analyses: Vec<AnalysedForm>,
 }
 
 impl Contents {
@@ -125,6 +150,14 @@ pub struct Headword {
 pub struct ExceptionForm {
     pub form: String,
     pub lemmas: Vec<String>,
+}
+
+/// A verb form and its analyses, one [`Analyses`] per lemma, the lemmas
+/// sorted, each once.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AnalysedForm {
+    pub form: String,
+    pub lemmas: Vec<Analyses>,
 }
 
 /// Why [`encode`] refused its input.
@@ -204,7 +237,21 @@ pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
         forms.push(&form.form, &record)?;
     }
 
-    let sections: [&[u8]; SECTIONS] = [
+    let mut analyses = Table::default();
+    for analysed in &contents.analyses {
+        let mut record = Vec::new();
+        put_count(&mut record, analysed.lemmas.len(), &analysed.form)?;
+        for lemma in &analysed.lemmas {
+            put_text(&mut record, &lemma.lemma)?;
+            put_count(&mut record, lemma.shapes.len(), &analysed.form)?;
+            for shape in &lemma.shapes {
+                record.extend_from_slice(&analysis::encode(*shape));
+            }
+        }
+        analyses.push(&analysed.form, &record)?;
+    }
+
+    let mut sections: Vec<&[u8]> = vec![
         source,
         &senses,
         &words.entries,
@@ -214,13 +261,21 @@ pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
         &forms.keys,
         &forms.records,
     ];
-    let total = HEADER_LEN + sections.iter().map(|section| section.len()).sum::<usize>();
+    if !contents.analyses.is_empty() {
+        sections.extend([
+            &analyses.entries[..],
+            &analyses.keys[..],
+            &analyses.records[..],
+        ]);
+    }
+    let header_len = 16 + sections.len() * 16;
+    let total = header_len + sections.iter().map(|section| section.len()).sum::<usize>();
     let mut file = Vec::with_capacity(total);
     file.extend_from_slice(&MAGIC);
     file.extend_from_slice(&VERSION.to_le_bytes());
-    file.extend_from_slice(&(SECTIONS as u32).to_le_bytes());
-    let mut offset = HEADER_LEN as u64;
-    for section in sections {
+    file.extend_from_slice(&(sections.len() as u32).to_le_bytes());
+    let mut offset = header_len as u64;
+    for section in &sections {
         file.extend_from_slice(&offset.to_le_bytes());
         file.extend_from_slice(&(section.len() as u64).to_le_bytes());
         offset += section.len() as u64;
@@ -303,15 +358,18 @@ pub struct Section {
     pub len: u64,
 }
 
-/// The header of a file: where its sections are.
+/// The header of a file: where its sections are. The analysis sections of
+/// a file without them are empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
-    sections: [Section; SECTIONS],
+    sections: [Section; ANALYSED_SECTIONS],
 }
 
 impl Header {
-    /// Reads the header from the first [`HEADER_LEN`] bytes of a file that
-    /// is `file_len` bytes long. Every section lies inside the file.
+    /// Reads the header from the first bytes of a file that is `file_len`
+    /// bytes long: [`HEADER_LEN`] of them, or [`ANALYSED_HEADER_LEN`] for a
+    /// file with analyses; more are ignored. Every section lies inside the
+    /// file.
     pub fn parse(bytes: &[u8], file_len: u64) -> Result<Self, Damage> {
         let mut cursor = Cursor(bytes);
         if cursor.take(MAGIC.len())? != MAGIC {
@@ -320,15 +378,21 @@ impl Header {
         if cursor.u32()? != VERSION {
             return Err(Damage("its format version is unknown"));
         }
-        if cursor.u32()? as usize != SECTIONS {
+        let count = cursor.u32()? as usize;
+        if count != SECTIONS && count != ANALYSED_SECTIONS {
             return Err(Damage("its section count is wrong"));
         }
-        let mut sections = [Section { offset: 0, len: 0 }; SECTIONS];
-        for section in &mut sections {
+        let mut sections = [Section {
+            offset: HEADER_LEN as u64,
+            len: 0,
+        }; ANALYSED_SECTIONS];
+        // No section starts inside the header of its own file.
+        let header_len = (16 + count * 16) as u64;
+        for section in &mut sections[..count] {
             let offset = cursor.u64()?;
             let len = cursor.u64()?;
-            let inside = offset >= HEADER_LEN as u64
-                && offset.checked_add(len).is_some_and(|end| end <= file_len);
+            let inside =
+                offset >= header_len && offset.checked_add(len).is_some_and(|end| end <= file_len);
             if !inside {
                 return Err(Damage("a section lies outside the file"));
             }
@@ -338,7 +402,11 @@ impl Header {
         if header.section(SectionId::Source).len > MAX_SOURCE {
             return Err(Damage("its source id is too long"));
         }
-        for table in [SectionId::WordTable, SectionId::FormTable] {
+        for table in [
+            SectionId::WordTable,
+            SectionId::FormTable,
+            SectionId::AnalysisTable,
+        ] {
             if !header.section(table).len.is_multiple_of(ENTRY_LEN) {
                 return Err(Damage("a table is not a whole number of entries"));
             }
@@ -417,6 +485,27 @@ pub fn decode_sense(body: &[u8]) -> Result<SenseRecord, Damage> {
 pub fn decode_form(record: &[u8]) -> Result<Vec<String>, Damage> {
     let mut cursor = Cursor(record);
     let lemmas = cursor.texts()?;
+    cursor.end()?;
+    Ok(lemmas)
+}
+
+/// The analyses of an analysis record, a shape [`analysis::decode`] does
+/// not know being damage.
+pub fn decode_analyses(record: &[u8]) -> Result<Vec<Analyses>, Damage> {
+    let mut cursor = Cursor(record);
+    let mut lemmas = Vec::new();
+    for _ in 0..cursor.u32()? {
+        let lemma = cursor.text()?;
+        let mut shapes = Vec::new();
+        for _ in 0..cursor.u32()? {
+            let bytes = cursor.take(analysis::SHAPE_LEN)?;
+            let bytes = bytes.try_into().map_err(|_| SHORT)?;
+            shapes.push(
+                analysis::decode(bytes).ok_or(Damage("a verb form has an unknown analysis"))?,
+            );
+        }
+        lemmas.push(Analyses { lemma, shapes });
+    }
     cursor.end()?;
     Ok(lemmas)
 }
@@ -522,6 +611,7 @@ pub(crate) mod tests {
                     translations: vec![],
                 },
             ],
+            analyses: Vec::new(),
             forms: vec![
                 ExceptionForm {
                     form: "geese".to_owned(),
@@ -535,8 +625,48 @@ pub(crate) mod tests {
         }
     }
 
+    /// [`sample`] with two analysed verb forms, one of two lemmas.
+    pub(crate) fn analysed() -> Contents {
+        use crate::analysis::{Number, Person, Shape, TenseMood};
+        let third = |tense_mood| Shape::Finite {
+            tense_mood,
+            number: Number::Singular,
+            person: Person::Third,
+        };
+        Contents {
+            analyses: vec![
+                AnalysedForm {
+                    form: "fue".to_owned(),
+                    lemmas: vec![
+                        Analyses {
+                            lemma: "ir".to_owned(),
+                            shapes: vec![third(TenseMood::PreteriteIndicative)],
+                        },
+                        Analyses {
+                            lemma: "ser".to_owned(),
+                            shapes: vec![third(TenseMood::PreteriteIndicative)],
+                        },
+                    ],
+                },
+                AnalysedForm {
+                    form: "hable".to_owned(),
+                    lemmas: vec![Analyses {
+                        lemma: "hablar".to_owned(),
+                        shapes: vec![
+                            third(TenseMood::PresentSubjunctive),
+                            third(TenseMood::Imperative),
+                            Shape::Gerund,
+                        ],
+                    }],
+                },
+            ],
+            ..sample()
+        }
+    }
+
     pub(crate) fn header(file: &[u8]) -> Header {
-        Header::parse(&file[..HEADER_LEN], file.len() as u64).expect("header")
+        let len = file.len().min(ANALYSED_HEADER_LEN);
+        Header::parse(&file[..len], file.len() as u64).expect("header")
     }
 
     fn slice(file: &[u8], section: Section) -> &[u8] {
@@ -615,6 +745,93 @@ pub(crate) mod tests {
             assert_eq!(key, &form.form);
             assert_eq!(decode_form(record).expect("form record"), form.lemmas);
         }
+    }
+
+    #[test]
+    fn the_analyses_are_read_back_from_a_file_of_eleven_sections() {
+        let contents = analysed();
+        let file = encode(&contents).expect("encode");
+        assert_eq!(
+            u32::from_le_bytes(file[12..16].try_into().expect("count")) as usize,
+            ANALYSED_SECTIONS
+        );
+        let rows = table(
+            &file,
+            SectionId::AnalysisTable,
+            SectionId::AnalysisKeys,
+            SectionId::AnalysisRecords,
+        );
+        assert_eq!(rows.len(), contents.analyses.len());
+        for ((key, record), analysed) in rows.iter().zip(&contents.analyses) {
+            assert_eq!(key, &analysed.form);
+            assert_eq!(decode_analyses(record).expect("record"), analysed.lemmas);
+        }
+        // The other sections are those of the same contents without them.
+        let plain = encode(&sample()).expect("encode");
+        let words = |file: &[u8]| {
+            table(
+                file,
+                SectionId::WordTable,
+                SectionId::WordKeys,
+                SectionId::WordRecords,
+            )
+        };
+        assert_eq!(words(&file), words(&plain));
+        let mut expected = ANALYSED_HEADER_LEN as u64;
+        let header = header(&file);
+        for id in 0..ANALYSED_SECTIONS {
+            assert_eq!(header.sections[id].offset, expected, "section {id}");
+            expected += header.sections[id].len;
+        }
+        assert_eq!(expected, file.len() as u64);
+    }
+
+    #[test]
+    fn contents_without_analyses_give_eight_sections() {
+        let file = encode(&sample()).expect("encode");
+        assert_eq!(
+            u32::from_le_bytes(file[12..16].try_into().expect("count")) as usize,
+            SECTIONS
+        );
+        assert_eq!(header(&file).section(SectionId::AnalysisTable).len, 0);
+        assert_eq!(header(&file).section(SectionId::AnalysisRecords).len, 0);
+    }
+
+    #[test]
+    fn an_analysis_record_that_lies_is_damage() {
+        let file = encode(&analysed()).expect("encode");
+        let rows = table(
+            &file,
+            SectionId::AnalysisTable,
+            SectionId::AnalysisKeys,
+            SectionId::AnalysisRecords,
+        );
+        let record = rows[1].1.clone();
+        for len in 0..record.len() {
+            assert!(decode_analyses(&record[..len]).is_err(), "length {len}");
+        }
+        let mut longer = record.clone();
+        longer.push(0);
+        assert!(decode_analyses(&longer).is_err());
+        // The last shape, a gerund, made a kind no shape has.
+        let mut unknown = record.clone();
+        let at = unknown.len() - crate::analysis::SHAPE_LEN;
+        unknown[at] = 200;
+        assert_eq!(
+            decode_analyses(&unknown),
+            Err(Damage("a verb form has an unknown analysis"))
+        );
+        assert!(decode_analyses(&u32::MAX.to_le_bytes()).is_err());
+    }
+
+    #[test]
+    fn unsorted_analysed_forms_are_refused() {
+        let mut unsorted = analysed();
+        unsorted.analyses.swap(0, 1);
+        assert_eq!(
+            encode(&unsorted),
+            Err(WriteError::Unsorted("fue".to_owned()))
+        );
     }
 
     #[test]
@@ -708,8 +925,13 @@ pub(crate) mod tests {
     #[test]
     fn a_wrong_section_count_is_damage() {
         let mut file = encode(&sample()).expect("encode");
-        file[12..16].copy_from_slice(&9u32.to_le_bytes());
-        assert!(Header::parse(&file[..HEADER_LEN], file.len() as u64).is_err());
+        for count in [0u32, 7, 9, 10, 12, u32::MAX] {
+            file[12..16].copy_from_slice(&count.to_le_bytes());
+            assert!(
+                Header::parse(&file[..HEADER_LEN], file.len() as u64).is_err(),
+                "{count}"
+            );
+        }
     }
 
     #[test]
@@ -720,6 +942,30 @@ pub(crate) mod tests {
             assert!(Header::parse(head, len as u64).is_err(), "length {len}");
         }
         assert!(Header::parse(&file[..HEADER_LEN], file.len() as u64).is_ok());
+    }
+
+    #[test]
+    fn a_truncated_header_of_eleven_sections_is_damage() {
+        let file = encode(&analysed()).expect("encode");
+        for len in HEADER_LEN..ANALYSED_HEADER_LEN {
+            assert!(
+                Header::parse(&file[..len], file.len() as u64).is_err(),
+                "length {len}"
+            );
+        }
+        assert!(Header::parse(&file[..ANALYSED_HEADER_LEN], file.len() as u64).is_ok());
+    }
+
+    #[test]
+    fn a_section_inside_the_longer_header_is_damage() {
+        let mut file = encode(&analysed()).expect("encode");
+        // The offset of the last section, moved into the header.
+        let at = 16 + (ANALYSED_SECTIONS - 1) * 16;
+        file[at..at + 8].copy_from_slice(&(HEADER_LEN as u64).to_le_bytes());
+        assert_eq!(
+            Header::parse(&file[..ANALYSED_HEADER_LEN], file.len() as u64),
+            Err(Damage("a section lies outside the file"))
+        );
     }
 
     #[test]

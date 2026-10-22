@@ -351,12 +351,11 @@ fn ca_bases(word: &str) -> Vec<String> {
     bases
 }
 
-/// Spanish: the verb under one, two or three enclitic pronouns (dá-me-lo).
-/// A base is kept when, without accents, it ends in `r` or `ndo`, or when it
-/// carries an acute accent; it is given without accents, then as written if
-/// that differs (`oírlo` gives `oir`, `oír`).
-fn es_bases(word: &str) -> Vec<String> {
-    let mut bases = Vec::new();
+/// Spanish: the stems left under one, two and three enclitic pronouns
+/// (dá-me-lo), one list per number of pronouns, each in the order tried; a
+/// stem may repeat.
+fn es_clitic_levels(word: &str) -> Vec<Vec<String>> {
+    let mut levels = Vec::new();
     let mut stems = vec![word.to_owned()];
     for _ in 0..ES_MAX_CLITICS {
         stems = stems
@@ -369,19 +368,46 @@ fn es_bases(word: &str) -> Vec<String> {
                 })
             })
             .collect();
-        for stem in &stems {
-            let plain = strip_accents(stem);
-            let kept = plain.ends_with('r')
-                || plain.ends_with("ndo")
-                || stem.chars().any(|character| ES_ACUTE.contains(character));
-            if !kept {
-                continue;
-            }
-            add(&mut bases, word, plain);
-            add(&mut bases, word, stem.clone());
+        levels.push(stems.clone());
+    }
+    levels
+}
+
+/// Spanish: the verb under one, two or three enclitic pronouns (dá-me-lo).
+/// A base is kept when, without accents, it ends in `r` or `ndo`, or when it
+/// carries an acute accent; it is given without accents, then as written if
+/// that differs (`oírlo` gives `oir`, `oír`).
+fn es_bases(word: &str) -> Vec<String> {
+    let mut bases = Vec::new();
+    for stem in es_clitic_levels(word).into_iter().flatten() {
+        let plain = strip_accents(&stem);
+        let kept = plain.ends_with('r')
+            || plain.ends_with("ndo")
+            || stem.chars().any(|character| ES_ACUTE.contains(character));
+        if !kept {
+            continue;
         }
+        add(&mut bases, word, plain);
+        add(&mut bases, word, stem);
     }
     bases
+}
+
+/// Every Spanish stem of `word` under one, two or three enclitic pronouns,
+/// the most pronouns removed first, each without accents and then as
+/// written, each once: the stems [`bases`] gives and those it does not keep
+/// for lack of an `r`, an `ndo` or an accent (`dale` gives `da`). For the
+/// caller that checks a stem otherwise, such as by the analyses of a verb
+/// form: the stem under the most pronouns is the likelier verb, since a
+/// written accent such as that of `dímelo` comes with two or more
+/// (`dí-me-lo`, not the rare `dime` of `dimir` + `lo`).
+pub fn enclitic_stems(word: &str) -> Vec<String> {
+    let mut stems = Vec::new();
+    for stem in es_clitic_levels(word).into_iter().rev().flatten() {
+        add(&mut stems, word, strip_accents(&stem));
+        add(&mut stems, word, stem);
+    }
+    stems
 }
 
 /// The bases of `word`: Catalan elision, or the Spanish verb under its
@@ -425,6 +451,30 @@ mod tests {
 
     fn texts(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_enclitic_stems_are_every_stem_under_the_pronouns() {
+        // The most pronouns removed first: `dí-me-lo` before `díme-lo`.
+        assert_eq!(
+            enclitic_stems("dímelo"),
+            texts(&["di", "dí", "dime", "díme"])
+        );
+        assert_eq!(
+            bases("dímelo", Language::Es),
+            texts(&["dime", "díme", "di", "dí"])
+        );
+        assert_eq!(enclitic_stems("dale"), texts(&["da"]));
+        assert!(bases("dale", Language::Es).is_empty());
+        assert_eq!(enclitic_stems("vete"), texts(&["ve"]));
+        // Every base is a stem.
+        for word in ["dámelo", "oírlo", "diciéndomelo", "comerlos", "mesa"] {
+            let stems = enclitic_stems(word);
+            for base in bases(word, Language::Es) {
+                assert!(stems.contains(&base), "{word}: {base}");
+            }
+        }
+        assert!(enclitic_stems("casa").is_empty());
     }
 
     #[test]

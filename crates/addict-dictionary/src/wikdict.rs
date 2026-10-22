@@ -85,6 +85,7 @@ pub fn parse(bytes: &[u8], source: &str) -> Result<Contents, ParseError> {
         source: source.to_owned(),
         senses: Vec::new(),
         headwords,
+        analyses: Vec::new(),
         forms: Vec::new(),
     })
 }
@@ -345,6 +346,7 @@ pub(crate) mod tests {
                 headword("что\u{0300}-то", &["something"]),
                 headword("ёж", &["hedgehog"]),
             ],
+            analyses: Vec::new(),
             forms: Vec::new(),
         };
         let unstressed = unstressed(contents);

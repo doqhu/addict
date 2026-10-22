@@ -335,6 +335,7 @@ mod tests {
                     translations: texts(&["изве́стный"]),
                 },
             ],
+            analyses: Vec::new(),
             forms: Vec::new(),
         }
     }

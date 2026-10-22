@@ -154,6 +154,7 @@ impl Parsed {
                     translations: Vec::new(),
                 })
                 .collect(),
+            analyses: Vec::new(),
             forms: self
                 .forms
                 .into_iter()
