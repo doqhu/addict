@@ -240,6 +240,53 @@ window.addict label.headword {
   font-weight: 600;
 }
 
+/* The pronunciations under the headword: the transcription in the
+ * text's colour, the headword of another entry and the labels dim, and a
+ * small round play button; one whose playback failed is in the warning's
+ * colour. */
+window.addict .pronunciations {
+  margin-top: -6px;
+}
+
+window.addict label.transcription {
+  font-size: 1.05em;
+}
+
+window.addict label.pronunciation-headword {
+  font-family: "Newsreader", "Source Serif 4", "Noto Serif", Georgia, serif;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+window.addict label.pronunciation-labels {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+window.addict button.play {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  border-radius: 999px;
+  border: none;
+  background: var(--chip);
+  color: var(--accent);
+  box-shadow: none;
+}
+
+window.addict button.play:hover {
+  background: var(--accent-soft);
+}
+
+window.addict button.play.failed {
+  background: var(--warn-bg);
+  color: var(--warn);
+}
+
+window.addict button.play image {
+  -gtk-icon-size: 14px;
+}
+
 /* The analyses of a verb form, a line per lemma: the lemma a serif link in
  * the accent, the persons a tag, the mood dimmer than the tense, and the
  * dash and dots between them fainter still. */
@@ -424,6 +471,17 @@ window.addict label.number {
 window.addict button.sense.chosen label.number {
   background: var(--accent);
   color: var(--on-accent);
+}
+
+/* The part of speech of a sense: a small dim tag before its definition. */
+window.addict label.pos {
+  padding: 0 6px;
+  margin-top: 1px;
+  border-radius: 5px;
+  background: var(--chip);
+  color: var(--muted);
+  font-size: 0.8em;
+  font-style: italic;
 }
 
 window.addict label.mark {
