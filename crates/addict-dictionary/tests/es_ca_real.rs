@@ -361,7 +361,7 @@ fn catalan_feu_keeps_fourteen_verb_meanings_and_direct_fer_keeps_fifteen() {
     for group in &groups {
         assert_eq!(group.headword, "fer");
         assert_eq!(
-            group.metadata.as_ref().expect("metadata").class,
+            group.metadata.as_ref().expect("metadata").class(),
             Some(GrammaticalClass::Verb)
         );
         assert!(
@@ -385,7 +385,7 @@ fn catalan_feu_keeps_fourteen_verb_meanings_and_direct_fer_keeps_fifteen() {
     );
     assert_eq!(direct.len(), 15);
     assert_eq!(
-        direct[0].metadata.as_ref().expect("adjective").class,
+        direct[0].metadata.as_ref().expect("adjective").class(),
         Some(GrammaticalClass::Adjective)
     );
     for (group, position) in direct.iter().zip(&fer.senses) {
@@ -438,7 +438,7 @@ fn catalan_causes_keeps_causa_nouns_alongside_causar_verbs() {
                     && group
                         .metadata
                         .as_ref()
-                        .is_some_and(|metadata| metadata.class == Some(class))
+                        .is_some_and(|metadata| metadata.class() == Some(class))
             })
             .count()
     };

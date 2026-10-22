@@ -147,47 +147,54 @@ pub enum GrammaticalClass {
     Adverb,
 }
 
-/// The complete source label and its understood parts. Unknown labels retain
-/// their text without claiming a grammatical class.
+/// A source label, never blank. Its grammatical class and description are
+/// read from it when asked, so they never disagree with it; an unknown
+/// label claims no class.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SenseMetadata {
-    pub label: String,
-    pub class: Option<GrammaticalClass>,
-    pub description: Option<String>,
+    label: String,
 }
 
 impl SenseMetadata {
+    /// The metadata of `label`; `None` when it is blank.
     pub fn from_label(label: &str) -> Option<Self> {
-        if label.trim().is_empty() {
-            return None;
-        }
-        let inner = label
+        (!label.trim().is_empty()).then(|| Self {
+            label: label.to_owned(),
+        })
+    }
+
+    /// The label as the source wrote it.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The class tag and the description of a label `(tag; description)`
+    /// or `(tag)`; `None` for a label of another shape.
+    fn parts(&self) -> Option<(&str, Option<&str>)> {
+        let inner = self
+            .label
             .trim()
             .strip_prefix('(')
-            .and_then(|s| s.strip_suffix(')'));
-        let (class, description) = inner.map_or((None, None), |inner| {
-            let (tag, description) = inner.split_once(';').map_or((inner, None), |(tag, text)| {
-                (
-                    tag,
-                    Some(text.trim())
-                        .filter(|text| !text.is_empty())
-                        .map(str::to_owned),
-                )
-            });
-            let class = match tag.trim() {
-                "v" => Some(GrammaticalClass::Verb),
-                "adj" => Some(GrammaticalClass::Adjective),
-                "n" => Some(GrammaticalClass::Noun),
-                "adv" => Some(GrammaticalClass::Adverb),
-                _ => None,
-            };
-            (class, description)
-        });
-        Some(Self {
-            label: label.to_owned(),
-            class,
-            description,
-        })
+            .and_then(|s| s.strip_suffix(')'))?;
+        Some(inner.split_once(';').map_or((inner, None), |(tag, text)| {
+            (tag, Some(text.trim()).filter(|text| !text.is_empty()))
+        }))
+    }
+
+    /// The grammatical class the label names, if it names a known one.
+    pub fn class(&self) -> Option<GrammaticalClass> {
+        match self.parts()?.0.trim() {
+            "v" => Some(GrammaticalClass::Verb),
+            "adj" => Some(GrammaticalClass::Adjective),
+            "n" => Some(GrammaticalClass::Noun),
+            "adv" => Some(GrammaticalClass::Adverb),
+            _ => None,
+        }
+    }
+
+    /// The text after the class tag, if any.
+    pub fn description(&self) -> Option<&str> {
+        self.parts()?.1
     }
 }
 
@@ -221,8 +228,6 @@ pub struct AnalysedForm {
 pub enum WriteError {
     /// The source id is empty or longer than [`MAX_SOURCE`].
     Source,
-    /// A supplied label is empty or its parsed fields do not match it.
-    InvalidMetadata,
     /// A headword or a form is empty.
     EmptyKey,
     /// The keys of a table are not strictly ascending; this is the later one.
@@ -238,7 +243,6 @@ impl fmt::Display for WriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Source => write!(f, "the source id is empty or too long"),
-            Self::InvalidMetadata => write!(f, "sense metadata does not match its source label"),
             Self::EmptyKey => write!(f, "an empty headword or form"),
             Self::Unsorted(key) => write!(f, "{key:?} is out of order or repeated"),
             Self::UnknownSense { word, sense } => {
@@ -268,11 +272,8 @@ pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
         // A trailing tagged extension keeps metadata-free version-1 bytes
         // unchanged and legacy records readable without extra index reads.
         if let Some(metadata) = &sense.metadata {
-            if SenseMetadata::from_label(&metadata.label).as_ref() != Some(metadata) {
-                return Err(WriteError::InvalidMetadata);
-            }
             body.extend_from_slice(b"META");
-            put_text(&mut body, &metadata.label)?;
+            put_text(&mut body, metadata.label())?;
         }
         let len = bounded(body.len(), &sense.definition)?;
         sense_offsets.push(senses.len() as u64);
@@ -697,8 +698,7 @@ pub(crate) mod tests {
                 .expect("decode")
                 .metadata
                 .expect("metadata")
-                .description
-                .as_deref(),
+                .description(),
             Some("beure")
         );
         valid.push(0);

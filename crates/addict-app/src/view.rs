@@ -895,6 +895,26 @@ pub enum SynonymTexts<'a> {
     Missing(&'static str),
 }
 
+impl SynonymTexts<'_> {
+    /// The section as one line: the label and the synonyms of every
+    /// meaning, joined, or the missing line.
+    #[cfg(test)]
+    pub fn line(&self) -> String {
+        match self {
+            Self::Groups { label, groups } => format!(
+                "{label} {}",
+                groups
+                    .iter()
+                    .flat_map(|group| &group.synonyms)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Missing(line) => (*line).to_owned(),
+        }
+    }
+}
+
 pub(crate) const SYNONYM_PREVIEW: usize = 6;
 pub(crate) const SHOW_MORE: &str = "Show more";
 pub(crate) const SHOW_LESS: &str = "Show less";
@@ -908,7 +928,7 @@ pub(crate) fn synonym_heading(
     use addict_dictionary::format::GrammaticalClass;
     let mut text = group.headword.clone();
     if let Some(metadata) = &group.metadata {
-        let class = match metadata.class {
+        let class = match metadata.class() {
             Some(GrammaticalClass::Verb) => "Verb",
             Some(GrammaticalClass::Adjective) => "Adjective",
             Some(GrammaticalClass::Noun) => "Noun",
@@ -923,7 +943,7 @@ pub(crate) fn synonym_heading(
     let description = group
         .metadata
         .as_ref()
-        .and_then(|metadata| metadata.description.as_deref())
+        .and_then(|metadata| metadata.description())
         .or_else(|| (!group.definition.trim().is_empty()).then_some(group.definition.as_str()));
     if let Some(description) = description {
         write!(text, " — {description}").expect("write string");
@@ -3283,18 +3303,7 @@ mod tests {
     fn sections(texts: &ResultTexts<'_>) -> [Option<String>; 3] {
         [
             texts.translations.map(listed_line),
-            texts.word_synonyms.map(|synonyms| match synonyms {
-                SynonymTexts::Missing(line) => line.to_owned(),
-                SynonymTexts::Groups { label, groups } => format!(
-                    "{label} {}",
-                    groups
-                        .iter()
-                        .flat_map(|group| &group.synonyms)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            }),
+            texts.word_synonyms.map(|synonyms| synonyms.line()),
             texts.glosses.map(listed_line),
         ]
     }

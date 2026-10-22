@@ -456,7 +456,7 @@ fn fill_synonym_groups(container: &gtk::Box, texts: Option<SynonymTexts<'_>>, fi
                     .css_classes(["synonym-heading"])
                     .build();
                 if let Some(metadata) = &group.metadata {
-                    heading.set_tooltip_text(Some(&metadata.label));
+                    heading.set_tooltip_text(Some(metadata.label()));
                 }
                 meaning.append(&heading);
                 let pills = Wrap::new();

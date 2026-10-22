@@ -1503,7 +1503,7 @@ mod tests {
             group
                 .metadata
                 .as_ref()
-                .is_some_and(|metadata| metadata.label == "(n)")
+                .is_some_and(|metadata| metadata.label() == "(n)")
         }));
         // Definitions: the Catalan senses.
         let dbnary = open(Source::DbnaryCa);
