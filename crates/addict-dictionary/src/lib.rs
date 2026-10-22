@@ -12,10 +12,13 @@
 //! Wordnet), a FreeDict TEI file, a Kaikki JSON Lines file, a WikDict SQLite
 //! database, a DBnary Turtle file and a MyThes thesaurus into the writer's
 //! input, with what the first two do the same way in `xml` and the SQLite
-//! file read by [`sqlite`], and [`import`] is the logic of `addict import`.
+//! file read by [`sqlite`], [`analysis`] is what a Spanish or Catalan verb
+//! form is, from the tags of a Kaikki conjugation table, and [`import`] is
+//! the logic of `addict import`.
 
 #![forbid(unsafe_code)]
 
+pub mod analysis;
 pub mod combined;
 pub mod dbnary;
 pub mod format;

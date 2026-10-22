@@ -715,6 +715,7 @@ pub mod tests {
                     translations: Vec::new(),
                 },
             ],
+            analyses: Vec::new(),
             forms: vec![ExceptionForm {
                 form: "went".to_owned(),
                 lemmas: texts(&["go"]),
@@ -742,6 +743,7 @@ pub mod tests {
                     translations: texts(&["идти"]),
                 },
             ],
+            analyses: Vec::new(),
             forms: Vec::new(),
         }
     }
@@ -777,6 +779,7 @@ pub mod tests {
                     translations: Vec::new(),
                 },
             ],
+            analyses: Vec::new(),
             forms: vec![ExceptionForm {
                 form: "bancos".to_owned(),
                 lemmas: texts(&["banco"]),
@@ -800,6 +803,7 @@ pub mod tests {
             ]),
             russian: None,
             synonyms: None,
+            verb: None,
             english: None,
         })
     }
@@ -1251,6 +1255,7 @@ pub mod tests {
             source: source.to_owned(),
             senses: Vec::new(),
             headwords: Vec::new(),
+            analyses: Vec::new(),
             forms: Vec::new(),
         };
         let mut sorted = headwords.to_vec();
@@ -1281,6 +1286,7 @@ pub mod tests {
             source: name.to_owned(),
             senses: Vec::new(),
             headwords: Vec::new(),
+            analyses: Vec::new(),
             forms: Vec::new(),
         };
         for (word, senses, translations) in headwords {
@@ -1448,6 +1454,7 @@ pub mod tests {
                 }]),
                 russian: Some(texts(&["коллекция"])),
                 synonyms: Some(texts(&["recull", "aplec", "sèrie"])),
+                verb: None,
                 english: Some(texts(&["collection", "set"])),
             })
         );

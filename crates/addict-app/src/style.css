@@ -240,6 +240,11 @@ window.addict label.headword {
   font-weight: 600;
 }
 
+/* The analyses of a verb form, a line per lemma. */
+window.addict label.analysis {
+  font-size: 0.95em;
+}
+
 window.addict .section-label {
   color: var(--muted);
   font-size: 0.75em;

@@ -19,27 +19,40 @@
 //! - the form→lemma pairs: the word an entry with a `form_of` or `alt_of`
 //!   sense points at, and the `forms` list of an entry without the forms
 //!   that are table tags, inflection templates, classes, romanizations or
-//!   canonical spellings. Both sides of a pair are one word ([`is_word`]).
+//!   canonical spellings. Both sides of a pair are one word ([`is_word`]);
+//! - of an entry whose `pos` is `verb`, its `forms` again with their
+//!   `tags`: the conjugation table, each form with what
+//!   [`analysis::from_tags`] makes of its tags, the word as its lemma. A
+//!   form that is the word itself, or not one word, or whose tags give no
+//!   shape, has no analysis.
 //!
 //! The entries of one word, one per part of speech, are joined in file order
 //! into one headword. A headword gets one sense record per sense, with its
 //! synonyms as members: the format's way for a source without synsets. A
 //! word whose entries give no sense is no headword. The headwords have no
 //! translations. The pairs go into the form table, a form with its lemmas in
-//! the order first seen; the lookups do not read them yet.
+//! the order first seen; the lookups do not read them yet. The analyses go
+//! into the analysis table: per form its lemmas sorted, per lemma its
+//! shapes sorted, each once, so two rows of one analysis are one.
 //!
 //! The file is read as a stream; the headwords are held until its end,
 //! because the entries are not in the order of the index.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     io::{self, BufRead},
 };
 
 use serde::Deserialize;
 
-use crate::format::{Contents, ExceptionForm, SenseRecord};
+use crate::{
+    analysis::{self, Analyses, Shape},
+    format::{AnalysedForm, Contents, ExceptionForm, SenseRecord},
+};
+
+/// The analyses being gathered: per form, per lemma, the shapes.
+type Gathered = BTreeMap<String, BTreeMap<String, BTreeSet<Shape>>>;
 
 /// The tags of a `forms` item that is no inflected form of the word.
 const FORMS_SKIPPED: [&str; 5] = [
@@ -81,6 +94,8 @@ struct Entry {
     word: Option<String>,
     #[serde(default)]
     lang_code: Option<String>,
+    #[serde(default)]
+    pos: Option<String>,
     #[serde(default)]
     senses: Vec<Sense>,
     #[serde(default)]
@@ -153,6 +168,7 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
     let mut entries = 0;
     let mut headwords: BTreeMap<String, Vec<SenseRecord>> = BTreeMap::new();
     let mut forms: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut analyses = Gathered::new();
     for (at, line) in reader.lines().enumerate() {
         let line = line.map_err(ParseError::Io)?;
         if line.trim().is_empty() {
@@ -171,6 +187,9 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
         entries += 1;
 
         add_pairs(&mut forms, &word, &entry.senses, &entry.forms);
+        if entry.pos.as_deref() == Some("verb") {
+            add_analyses(&mut analyses, &word, &entry.forms);
+        }
         let senses = sense_records(&word, &entry.senses, &entry.synonyms);
         if !senses.is_empty() {
             headwords.entry(word).or_default().extend(senses);
@@ -184,6 +203,19 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
     contents.forms = forms
         .into_iter()
         .map(|(form, lemmas)| ExceptionForm { form, lemmas })
+        .collect();
+    contents.analyses = analyses
+        .into_iter()
+        .map(|(form, lemmas)| AnalysedForm {
+            form,
+            lemmas: lemmas
+                .into_iter()
+                .map(|(lemma, shapes)| Analyses {
+                    lemma,
+                    shapes: shapes.into_iter().collect(),
+                })
+                .collect(),
+        })
         .collect();
     Ok(contents)
 }
@@ -211,6 +243,30 @@ fn add_pairs(
             .any(|tag| FORMS_SKIPPED.contains(&tag.as_str()));
         if let (Some(text), false) = (&form.form, skipped) {
             pair(forms, text, word);
+        }
+    }
+}
+
+/// Adds to `analyses` the shapes of the conjugation table `forms_of_entry`
+/// of the verb `lemma`.
+fn add_analyses(analyses: &mut Gathered, lemma: &str, forms_of_entry: &[Form]) {
+    if !is_word(lemma) {
+        return;
+    }
+    for form in forms_of_entry {
+        let Some(text) = form.form.as_deref() else {
+            continue;
+        };
+        if text == lemma || !is_word(text) {
+            continue;
+        }
+        if let Some(shape) = analysis::from_tags(&form.tags) {
+            analyses
+                .entry(text.to_owned())
+                .or_default()
+                .entry(lemma.to_owned())
+                .or_default()
+                .insert(shape);
         }
     }
 }
@@ -309,6 +365,22 @@ pub(crate) mod tests {
         "\n",
     );
 
+    /// Verb lines in the shape of `kaikki-en-Spanish`: the table of
+    /// `hablar` with a head-line row, a repeated row, a formal and a
+    /// negative imperative, a combined form, one of two words, a vos form
+    /// and a row without a tense; `ir` and
+    /// `ser`, which share `fue`; a noun whose forms are no verb forms.
+    const VERBS: &str = concat!(
+        r#"{"word": "hablar", "pos": "verb", "lang_code": "es", "senses": [{"glosses": ["to speak"]}], "forms": [{"form": "hablar", "tags": ["infinitive"]}, {"form": "hablo", "tags": ["first-person", "present", "singular"]}, {"form": "hablo", "tags": ["first-person", "indicative", "present", "singular"]}, {"form": "hable", "tags": ["first-person", "present", "singular", "subjunctive"]}, {"form": "hable", "tags": ["present", "singular", "subjunctive", "third-person"]}, {"form": "hable", "tags": ["present", "singular", "subjunctive", "third-person"]}, {"form": "hable", "tags": ["formal", "imperative", "second-person-semantically", "singular", "third-person"]}, {"form": "hable", "tags": ["imperative", "negative", "singular", "third-person"]}, {"form": "háblame", "tags": ["combined-form", "imperative", "informal", "second-person", "singular"]}, {"form": "habla usted", "tags": ["imperative", "formal", "singular"]}, {"form": "hablado", "tags": ["participle", "past"]}, {"form": "hablás", "tags": ["indicative", "informal", "present", "vos-form", "second-person", "singular"]}, {"form": "hablasteis", "tags": ["second-person", "indicative", "plural"]}, {"form": "es-conj", "tags": ["inflection-template"]}]}"#,
+        "\n",
+        r#"{"word": "ser", "pos": "verb", "lang_code": "es", "senses": [{"glosses": ["to be"]}], "forms": [{"form": "fue", "tags": ["indicative", "preterite", "singular", "third-person"]}]}"#,
+        "\n",
+        r#"{"word": "ir", "pos": "verb", "lang_code": "es", "senses": [{"glosses": ["to go"]}], "forms": [{"form": "fue", "tags": ["third-person", "singular", "indicative", "present", "perfect"]}]}"#,
+        "\n",
+        r#"{"word": "casa", "pos": "noun", "lang_code": "es", "senses": [{"glosses": ["house"]}], "forms": [{"form": "casas", "tags": ["plural", "indicative", "present", "third-person", "singular"]}]}"#,
+        "\n",
+    );
+
     fn parsed() -> Contents {
         parse(FIXTURE.as_bytes(), "es", "fixture-es").expect("parse")
     }
@@ -390,6 +462,87 @@ pub(crate) mod tests {
                 ("bancos", texts(&["banco"])),
                 ("cerró", texts(&["cerrar"])),
                 ("cierro", texts(&["cerrar"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_verb_tables_give_the_analyses_of_their_forms() {
+        use crate::analysis::{Number, Person, TenseMood};
+        let finite = |tense_mood, person| Shape::Finite {
+            tense_mood,
+            number: Number::Singular,
+            person,
+        };
+        let contents = parse(VERBS.as_bytes(), "es", "verbs").expect("parse");
+        let analysed: Vec<_> = contents
+            .analyses
+            .iter()
+            .map(|analysed| (analysed.form.as_str(), analysed.lemmas.clone()))
+            .collect();
+        let of = |lemma: &str, shapes: Vec<Shape>| Analyses {
+            lemma: lemma.to_owned(),
+            shapes,
+        };
+        let preterite = finite(TenseMood::PreteriteIndicative, Person::Third);
+        // No `hablar`, `háblame`, `habla usted`, `hablasteis` (no tense) or
+        // `casas`; `hablo` once.
+        assert_eq!(
+            analysed,
+            [
+                (
+                    "fue",
+                    vec![of("ir", vec![preterite]), of("ser", vec![preterite])]
+                ),
+                ("hablado", vec![of("hablar", vec![Shape::PastParticiple])]),
+                (
+                    "hable",
+                    vec![of(
+                        "hablar",
+                        vec![
+                            finite(TenseMood::PresentSubjunctive, Person::First),
+                            finite(TenseMood::PresentSubjunctive, Person::Third),
+                            finite(TenseMood::Imperative, Person::Formal),
+                        ]
+                    )]
+                ),
+                (
+                    "hablo",
+                    vec![of(
+                        "hablar",
+                        vec![finite(TenseMood::PresentIndicative, Person::First)]
+                    )]
+                ),
+                (
+                    "hablás",
+                    vec![of(
+                        "hablar",
+                        vec![finite(TenseMood::PresentIndicative, Person::Vos)]
+                    )]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_analyses_leave_the_headwords_and_the_form_table_alone() {
+        let contents = parsed();
+        assert!(contents.analyses.is_empty());
+        let verbs = parse(VERBS.as_bytes(), "es", "verbs").expect("parse");
+        let words: Vec<_> = verbs.headwords.iter().map(|h| h.word.as_str()).collect();
+        assert_eq!(words, ["casa", "hablar", "ir", "ser"]);
+        let forms: Vec<_> = verbs.forms.iter().map(|form| form.form.as_str()).collect();
+        assert_eq!(
+            forms,
+            [
+                "casas",
+                "fue",
+                "hablado",
+                "hablasteis",
+                "hable",
+                "hablo",
+                "hablás",
+                "háblame"
             ]
         );
     }

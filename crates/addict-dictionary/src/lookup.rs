@@ -26,13 +26,16 @@
 //! headwords of its language, and [`grouped`] answers from every index of
 //! one language at once, what each gives under its [`Kind`].
 //!
+//! [`grouped`] also gives the analyses of the word as a verb form, from the
+//! analysis tables of the indexes it asks ([`analyses_of`]).
+//!
 //! A Russian word has a hook of its own, [`russian`], outside
 //! [`headwords`]: its spellings without stress marks, as written, in
 //! lowercase and with `ё` and `е` taken as one letter
 //! ([`russian_spellings`]). It has no dictionary
 //! forms: an inflected form finds nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use addict_core::{
     dictionary::{Article, Sense},
@@ -41,6 +44,7 @@ use addict_core::{
 };
 
 use crate::{
+    analysis::{Analyses, Shape},
     combined::{Found, merged},
     import::Kind,
     index::{Error, Index},
@@ -165,6 +169,111 @@ pub struct Grouped {
     /// [`Kind::English`]: the definitions of the senses as English glosses,
     /// each once, none blank.
     pub english: Option<Vec<String>>,
+    /// The word as a verb form; `None` when no index has an analysis of
+    /// it. Boxed: a result moves through channels and `Result`s, and most
+    /// words are no verb form.
+    pub verb: Option<Box<VerbForm>>,
+}
+
+/// What [`grouped`] says of a word as a verb form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerbForm {
+    /// Its analyses, one per lemma, the lemmas sorted, none empty
+    /// ([`analyses_of`]).
+    pub analyses: Vec<Analyses>,
+    /// The word as picked, when it is a Catalan form of `anar` that is also
+    /// the auxiliary of the periphrastic past ([`PERIPHRASTIC`]).
+    pub periphrastic: Option<String>,
+}
+
+/// The Catalan forms of `anar` that are also the auxiliary of the
+/// periphrastic past, `va` + infinitive.
+pub const PERIPHRASTIC: [&str; 6] = ["va", "vaig", "vas", "vam", "vau", "van"];
+
+/// The analyses `indexes` give for `word` read in `language` as a verb
+/// form, their union per lemma, the lemmas sorted, the shapes sorted and
+/// each once: those of the word as written and in lowercase. When there are
+/// none and the language is Spanish, those of the first of its
+/// [`enclitic_stems`](reduction_es_ca::enclitic_stems), the most pronouns
+/// removed first, that has any kept to the shapes enclitic pronouns follow
+/// ([`Shape::takes_enclitics`]): `dímelo` has those of `di` as an
+/// imperative of `decir`, not as a preterite of `dar`, nor those of `dime`
+/// as an imperative of `dimir`. A word without a written accent is tried
+/// only through stems of one syllable: a pronoun on a longer verb form
+/// takes an accent (`tómate`), so `tomate` and `filete` are no `toma` and
+/// `file` with `te`, while `dale` and `ponte` are `da` and `pon`. Nothing here depends on the sentence. An error of an
+/// index is the error of the lookup.
+pub fn analyses_of<'a>(
+    indexes: impl IntoIterator<Item = &'a Index> + Clone,
+    language: Language,
+    word: &str,
+) -> Result<Vec<Analyses>, Error> {
+    let written = reduction::stripped(word);
+    if written.is_empty() {
+        return Ok(Vec::new());
+    }
+    let lowercase = reduction::lowercase(written);
+    let mut forms = vec![written.to_owned()];
+    if lowercase != written {
+        forms.push(lowercase.clone());
+    }
+    let found = union(indexes.clone(), &forms, |_| true)?;
+    if !found.is_empty() || language != Language::Es {
+        return Ok(found);
+    }
+    let accented = lowercase
+        .chars()
+        .any(|character| "áéíóú".contains(character));
+    for stem in reduction_es_ca::enclitic_stems(&lowercase) {
+        if !accented && syllables(&stem) > 1 {
+            continue;
+        }
+        let found = union(indexes.clone(), &[stem], Shape::takes_enclitics)?;
+        if !found.is_empty() {
+            return Ok(found);
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// How many syllables `word` has, counted as its runs of vowels: enough to
+/// tell `da` from `toma`.
+fn syllables(word: &str) -> usize {
+    let vowel = |character: char| "aeiouáéíóúü".contains(character);
+    let mut count = 0;
+    let mut previous = false;
+    for character in word.chars() {
+        let now = vowel(character);
+        count += usize::from(now && !previous);
+        previous = now;
+    }
+    count
+}
+
+/// The analyses of `forms` in `indexes`, the shapes `kept` keeps, as one
+/// list per lemma; a lemma with no shape kept is left out.
+fn union<'a>(
+    indexes: impl IntoIterator<Item = &'a Index>,
+    forms: &[String],
+    kept: impl Fn(Shape) -> bool,
+) -> Result<Vec<Analyses>, Error> {
+    let mut union: BTreeMap<String, BTreeSet<Shape>> = BTreeMap::new();
+    for index in indexes {
+        for form in forms {
+            for analyses in index.analyses(form)? {
+                let shapes = analyses.shapes.into_iter().filter(|shape| kept(*shape));
+                union.entry(analyses.lemma).or_default().extend(shapes);
+            }
+        }
+    }
+    Ok(union
+        .into_iter()
+        .filter(|(_, shapes)| !shapes.is_empty())
+        .map(|(lemma, shapes)| Analyses {
+            lemma,
+            shapes: shapes.into_iter().collect(),
+        })
+        .collect())
 }
 
 /// What `indexes`, each with its kind, give for `word` read in `language`,
@@ -236,6 +345,14 @@ pub fn grouped(
     }
     if let Some(senses) = &mut grouped.definitions {
         *senses = merged(definitions).map_or_else(Vec::new, |article| article.senses);
+    }
+    let analyses = analyses_of(indexes.iter().map(|(_, index)| *index), language, word)?;
+    if !analyses.is_empty() {
+        let periphrastic = language == Language::Ca && PERIPHRASTIC.contains(&itself[1].as_str());
+        grouped.verb = Some(Box::new(VerbForm {
+            analyses,
+            periphrastic: periphrastic.then(|| written.to_owned()),
+        }));
     }
     Ok(Some(grouped))
 }
@@ -487,6 +604,7 @@ mod tests {
                     translations: Vec::new(),
                 },
             ],
+            analyses: Vec::new(),
             forms: vec![ExceptionForm {
                 form: "bancos".to_owned(),
                 lemmas: texts(&["banco"]),
@@ -544,6 +662,18 @@ mod tests {
         entries: &[Entry<'_>],
         forms: &[(&str, &[&str])],
     ) -> Index {
+        written(dir, name, &canned_contents(name, entries, forms))
+    }
+
+    /// `contents` written to `name` in `dir` and opened.
+    fn written(dir: &TempDir, name: &str, contents: &Contents) -> Index {
+        let path = dir.path().join(name);
+        std::fs::write(&path, encode(contents).expect("encode")).expect("write");
+        Index::open(&path).expect("open")
+    }
+
+    /// The contents of [`canned_with_forms`].
+    fn canned_contents(name: &str, entries: &[Entry<'_>], forms: &[(&str, &[&str])]) -> Contents {
         let mut forms = forms.to_vec();
         forms.sort_by_key(|(form, _)| *form);
         let forms = forms
@@ -559,6 +689,7 @@ mod tests {
             source: name.to_owned(),
             senses: Vec::new(),
             headwords: Vec::new(),
+            analyses: Vec::new(),
             forms,
         };
         for (word, senses, translations) in entries {
@@ -576,9 +707,7 @@ mod tests {
                 translations: texts(translations),
             });
         }
-        let path = dir.path().join(name);
-        std::fs::write(&path, encode(&contents).expect("encode")).expect("write");
-        Index::open(&path).expect("open")
+        contents
     }
 
     /// The four kinds of Spanish indexes, each having `banco`.
@@ -802,8 +931,216 @@ mod tests {
                 russian: None,
                 synonyms: None,
                 english: None,
+                verb: None,
             }
         );
+    }
+
+    /// [`canned`] with an analysis table of `analyses`, each a form, a
+    /// lemma and a shape of it.
+    fn canned_with_analyses(
+        dir: &TempDir,
+        name: &str,
+        entries: &[Entry<'_>],
+        analyses: &[(&str, &str, Shape)],
+    ) -> Index {
+        let mut contents = canned_contents(name, entries, &[]);
+        let mut gathered: BTreeMap<String, BTreeMap<String, BTreeSet<Shape>>> = BTreeMap::new();
+        for (form, lemma, shape) in analyses {
+            gathered
+                .entry((*form).to_owned())
+                .or_default()
+                .entry((*lemma).to_owned())
+                .or_default()
+                .insert(*shape);
+        }
+        contents.analyses = gathered
+            .into_iter()
+            .map(|(form, lemmas)| crate::format::AnalysedForm {
+                form,
+                lemmas: lemmas
+                    .into_iter()
+                    .map(|(lemma, shapes)| Analyses {
+                        lemma,
+                        shapes: shapes.into_iter().collect(),
+                    })
+                    .collect(),
+            })
+            .collect();
+        written(dir, name, &contents)
+    }
+
+    mod shapes {
+        use crate::analysis::{Number, Person, Shape, TenseMood};
+
+        pub fn sg(tense_mood: TenseMood, person: Person) -> Shape {
+            Shape::Finite {
+                tense_mood,
+                number: Number::Singular,
+                person,
+            }
+        }
+    }
+
+    fn of(lemma: &str, shapes: &[Shape]) -> Analyses {
+        Analyses {
+            lemma: lemma.to_owned(),
+            shapes: shapes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn the_analyses_of_a_form_are_the_union_of_the_indexes_per_lemma() {
+        use crate::analysis::{Person::*, TenseMood::*};
+        use shapes::sg;
+        let dir = TempDir::new("analyses-union");
+        let preterite = sg(PreteriteIndicative, Third);
+        let entries: &[Entry<'_>] = &[("fue", &[("Forma de ser.", &[])], &[])];
+        let one = canned_with_analyses(
+            &dir,
+            "one.index",
+            entries,
+            &[
+                ("fue", "ser", preterite),
+                ("fue", "ir", preterite),
+                ("hable", "hablar", sg(PresentSubjunctive, First)),
+                ("hable", "hablar", sg(Imperative, Third)),
+            ],
+        );
+        let two = canned_with_analyses(
+            &dir,
+            "two.index",
+            &[("hable", &[("Forma de hablar.", &[])], &[])],
+            &[
+                ("fue", "ir", preterite),
+                ("hable", "hablar", sg(PresentSubjunctive, Third)),
+                ("hable", "hablar", sg(PresentSubjunctive, First)),
+                ("hable", "hablar", sg(Imperative, Formal)),
+            ],
+        );
+        let indexes = [(Kind::Definitions, &one), (Kind::English, &two)];
+        let fue = grouped(&indexes, Language::Es, "Fue,")
+            .expect("look up")
+            .expect("fue");
+        let fue = fue.verb.expect("a verb form");
+        assert_eq!(
+            fue.analyses,
+            [of("ir", &[preterite]), of("ser", &[preterite])]
+        );
+        assert_eq!(fue.periphrastic, None);
+        let hable = grouped(&indexes, Language::Es, "hable")
+            .expect("look up")
+            .expect("hable");
+        assert_eq!(
+            hable.verb.expect("a verb form").analyses,
+            [of(
+                "hablar",
+                &[
+                    sg(PresentSubjunctive, First),
+                    sg(PresentSubjunctive, Third),
+                    sg(Imperative, Formal),
+                    sg(Imperative, Third),
+                ]
+            )]
+        );
+        // The rest of the article is what it was without analyses.
+        let plain_dir = TempDir::new("analyses-union-plain");
+        let plain = canned(&plain_dir, "one.index", entries);
+        let without = grouped(&[(Kind::Definitions, &plain)], Language::Es, "fue")
+            .expect("look up")
+            .expect("fue");
+        assert_eq!(without.verb, None);
+        let with = grouped(&[(Kind::Definitions, &one)], Language::Es, "fue")
+            .expect("look up")
+            .expect("fue");
+        assert_eq!(Grouped { verb: None, ..with }, without);
+    }
+
+    #[test]
+    fn a_word_with_enclitics_has_the_imperative_of_its_stem() {
+        use crate::analysis::{Person::*, TenseMood::*};
+        use shapes::sg;
+        let dir = TempDir::new("analyses-enclitics");
+        let index = canned_with_analyses(
+            &dir,
+            "es.index",
+            &[
+                ("decir", &[("Hablar.", &[])], &[]),
+                ("dímelo", &[("Forma de decir.", &[])], &[]),
+                ("dale", &[("Forma de dar.", &[])], &[]),
+                ("este", &[("Demostrativo.", &[])], &[]),
+                ("tomate", &[("Fruto.", &[])], &[]),
+                ("hablar", &[("Emitir palabras.", &[])], &[]),
+            ],
+            &[
+                ("di", "dar", sg(PreteriteIndicative, First)),
+                ("di", "decir", sg(Imperative, Second)),
+                ("dime", "dimir", sg(Imperative, Second)),
+                ("da", "dar", sg(Imperative, Second)),
+                ("toma", "tomar", sg(Imperative, Second)),
+                ("es", "ser", sg(PresentIndicative, Third)),
+                ("hablo", "hablar", sg(PresentIndicative, First)),
+            ],
+        );
+        let analyses = |language, word| {
+            grouped(&[(Kind::Definitions, &index)], language, word)
+                .expect("look up")
+                .map(|found| found.verb.map_or_else(Vec::new, |verb| verb.analyses))
+        };
+        assert_eq!(
+            analyses(Language::Es, "dímelo"),
+            Some(vec![of("decir", &[sg(Imperative, Second)])])
+        );
+        // A stem with no imperative gives nothing: `este` is no `es`.
+        assert_eq!(analyses(Language::Es, "este"), Some(Vec::new()));
+        // Without an accent only a stem of one syllable: `dale` is `da`,
+        // `tomate` is no `toma` + `te`.
+        assert_eq!(
+            analyses(Language::Es, "dale"),
+            Some(vec![of("dar", &[sg(Imperative, Second)])])
+        );
+        assert_eq!(analyses(Language::Es, "tomate"), Some(Vec::new()));
+        // A lemma has no analysis line.
+        assert_eq!(analyses(Language::Es, "hablar"), Some(Vec::new()));
+        // Catalan has no stems.
+        assert_eq!(analyses(Language::Ca, "dímelo"), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_catalan_periphrastic_auxiliary_is_named_only_with_its_analyses() {
+        use crate::analysis::{Person::*, TenseMood::*};
+        use shapes::sg;
+        let dir = TempDir::new("analyses-periphrastic");
+        let entries: &[Entry<'_>] = &[
+            ("va", &[("Forma d'anar.", &[])], &[]),
+            ("parla", &[("Forma de parlar.", &[])], &[]),
+        ];
+        let tagged = canned_with_analyses(
+            &dir,
+            "ca.index",
+            entries,
+            &[
+                ("va", "anar", sg(PresentIndicative, Third)),
+                ("parla", "parlar", sg(PresentIndicative, Third)),
+            ],
+        );
+        let found = |index: &Index, language, word| {
+            grouped(&[(Kind::English, index)], language, word)
+                .expect("look up")
+                .expect("found")
+        };
+        let verb = |index: &Index, language, word| found(index, language, word).verb;
+        let va = verb(&tagged, Language::Ca, "Va").expect("a verb form");
+        assert_eq!(va.analyses, [of("anar", &[sg(PresentIndicative, Third)])]);
+        assert_eq!(va.periphrastic.as_deref(), Some("Va"));
+        let parla = verb(&tagged, Language::Ca, "parla").expect("a verb form");
+        assert_eq!(parla.periphrastic, None);
+        let spanish = verb(&tagged, Language::Es, "va").expect("a verb form");
+        assert_eq!(spanish.periphrastic, None);
+        // No tags: no analyses and no note.
+        let plain_dir = TempDir::new("analyses-periphrastic-plain");
+        let plain = canned(&plain_dir, "ca.index", entries);
+        assert_eq!(verb(&plain, Language::Ca, "va"), None);
     }
 
     #[test]

@@ -575,6 +575,9 @@ struct ResultArea {
     article: gtk::Box,
     headword: gtk::Label,
     line: gtk::Label,
+    /// For a verb form, its analyses, a line per lemma, above the rest of
+    /// the card.
+    analysis: gtk::Label,
     translations: gtk::Box,
     online: gtk::Label,
     senses: gtk::Box,
@@ -606,6 +609,11 @@ fn result_area() -> ResultArea {
         .css_classes(["result-line"])
         .visible(false)
         .build();
+    let analysis = wrapping(gtk::Label::builder())
+        .selectable(true)
+        .css_classes(["analysis"])
+        .visible(false)
+        .build();
     let translations = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let article = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -615,6 +623,7 @@ fn result_area() -> ResultArea {
         .build();
     article.append(&headword);
     article.append(&line);
+    article.append(&analysis);
     article.append(&translations);
     let online = wrapping(gtk::Label::builder().use_markup(true))
         .selectable(true)
@@ -682,6 +691,7 @@ fn result_area() -> ResultArea {
         article,
         headword,
         line,
+        analysis,
         translations,
         online,
         senses,
@@ -1090,6 +1100,8 @@ impl View {
         let line = texts.line.as_deref().or(texts.elsewhere.as_deref());
         result.line.set_text(line.unwrap_or_default());
         result.line.set_visible(line.is_some());
+        result.analysis.set_text(&texts.analysis.join("\n"));
+        result.analysis.set_visible(!texts.analysis.is_empty());
         fill_listed(
             &result.translations,
             texts.translations,
@@ -1132,6 +1144,7 @@ impl View {
     fn hide_result(&self) {
         let result = &self.result;
         result.article.set_visible(false);
+        result.analysis.set_visible(false);
         result.senses.set_visible(false);
         fill_listed(&result.translations, None, &[], None);
         fill_listed(&result.word_synonyms, None, &[], None);

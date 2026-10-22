@@ -8,12 +8,16 @@
 //! them into; `ADDICT_TARGET_WORDS_ES` and `ADDICT_TARGET_WORDS_CA` are the
 //! lists, one word per line, `#` for comments, a `# [section]` line starting
 //! a section.
+//!
+//! The analyses of verb forms are checked against the indexes alone: the
+//! three Kaikki files imported with their tables.
 
 mod common;
 
 use addict_core::translation::Source as Language;
 use addict_dictionary::{
     Index,
+    analysis::{Number, Person, Shape, TenseMood},
     import::{KNOWN, Kind},
     lookup,
 };
@@ -64,13 +68,8 @@ struct Counts {
     english: usize,
 }
 
-fn run(
-    language: Language,
-    list_variable: &str,
-    form_sections: &[&str],
-    expected: [usize; 4],
-    checks: &[(&str, &str)],
-) {
+/// The four indexes of `language` in `ADDICT_INDEX_DIR`, in `KNOWN` order.
+fn open_indexes(language: Language) -> Vec<(Kind, Index)> {
     let dir = path_from("ADDICT_INDEX_DIR");
     let indexes: Vec<(Kind, Index)> = KNOWN
         .iter()
@@ -83,6 +82,17 @@ fn run(
         })
         .collect();
     assert_eq!(indexes.len(), 4, "four indexes of {language:?}");
+    indexes
+}
+
+fn run(
+    language: Language,
+    list_variable: &str,
+    form_sections: &[&str],
+    expected: [usize; 4],
+    checks: &[(&str, &str)],
+) {
+    let indexes = open_indexes(language);
     let asked: Vec<(Kind, &Index)> = indexes.iter().map(|(kind, index)| (*kind, index)).collect();
 
     let list = std::fs::read_to_string(path_from(list_variable)).expect("target list");
@@ -168,4 +178,129 @@ fn the_catalan_indexes_cover_the_target_list_as_exp9_measured() {
         [496, 506, 501, 506],
         &[("col·leccions", "col·lecció"), ("d'art", "art")],
     );
+}
+
+/// What the indexes of `language` say of `word` as a verb form: each lemma
+/// with its shapes, and the word the periphrastic note names.
+fn verb_form(
+    indexes: &[(Kind, Index)],
+    language: Language,
+    word: &str,
+) -> (Vec<(String, Vec<Shape>)>, Option<String>) {
+    let asked: Vec<(Kind, &Index)> = indexes.iter().map(|(kind, index)| (*kind, index)).collect();
+    let grouped = lookup::grouped(&asked, language, word)
+        .expect("lookup")
+        .unwrap_or_else(|| panic!("{word} is no headword"));
+    let Some(verb) = grouped.verb else {
+        return (Vec::new(), None);
+    };
+    let analyses = verb
+        .analyses
+        .into_iter()
+        .map(|analyses| (analyses.lemma, analyses.shapes))
+        .collect();
+    println!("{word}: {analyses:?} {:?}", verb.periphrastic);
+    (analyses, verb.periphrastic)
+}
+
+fn sg(tense_mood: TenseMood, person: Person) -> Shape {
+    Shape::Finite {
+        tense_mood,
+        number: Number::Singular,
+        person,
+    }
+}
+
+#[test]
+#[ignore = "needs the imported indexes: set ADDICT_INDEX_DIR"]
+fn the_verb_forms_of_the_story_have_their_analyses() {
+    use Person::{First, Formal, Second, Third};
+    use TenseMood::*;
+    let spanish = open_indexes(Language::Es);
+    let lemma = |analyses: &[(String, Vec<Shape>)], name: &str| -> Vec<Shape> {
+        analyses
+            .iter()
+            .find(|(lemma, _)| lemma == name)
+            .unwrap_or_else(|| panic!("{name}: {analyses:?}"))
+            .1
+            .clone()
+    };
+
+    let (hable, _) = verb_form(&spanish, Language::Es, "hable");
+    assert_eq!(hable.len(), 1, "{hable:?}");
+    assert_eq!(
+        lemma(&hable, "hablar"),
+        [
+            sg(PresentSubjunctive, First),
+            sg(PresentSubjunctive, Third),
+            sg(Imperative, Formal),
+            sg(Imperative, Third),
+        ]
+    );
+
+    let (fue, _) = verb_form(&spanish, Language::Es, "fue");
+    let preterite = vec![sg(PreteriteIndicative, Third)];
+    assert_eq!(
+        fue,
+        [
+            ("ir".to_owned(), preterite.clone()),
+            ("ser".to_owned(), preterite)
+        ]
+    );
+
+    let (dicho, _) = verb_form(&spanish, Language::Es, "dicho");
+    assert_eq!(
+        dicho,
+        [
+            ("decir".to_owned(), vec![Shape::PastParticiple]),
+            ("dezir".to_owned(), vec![Shape::PastParticiple]),
+        ]
+    );
+
+    // Nouns: none of their own, and `filete` is no `file` + `te`, which
+    // would carry an accent. (`tomate` is the vos imperative of `tomarse`.)
+    for word in ["hablar", "ciudades", "árboles", "filete"] {
+        assert_eq!(
+            verb_form(&spanish, Language::Es, word),
+            (Vec::new(), None),
+            "{word}"
+        );
+    }
+
+    let catalan = open_indexes(Language::Ca);
+    let (va, note) = verb_form(&catalan, Language::Ca, "va");
+    assert_eq!(
+        va,
+        [("anar".to_owned(), vec![sg(PresentIndicative, Third)])]
+    );
+    assert_eq!(note.as_deref(), Some("va"));
+    let (parli, note) = verb_form(&catalan, Language::Ca, "parli");
+    assert_eq!(
+        parli,
+        [(
+            "parlar".to_owned(),
+            vec![
+                sg(PresentSubjunctive, First),
+                sg(PresentSubjunctive, Third),
+                sg(Imperative, Formal),
+            ]
+        )]
+    );
+    assert_eq!(note, None);
+    assert_eq!(
+        verb_form(&catalan, Language::Ca, "anar"),
+        (Vec::new(), None)
+    );
+
+    let (dale, _) = verb_form(&spanish, Language::Es, "dale");
+    // `da` is the imperative of tú and of vos.
+    assert_eq!(
+        dale,
+        [(
+            "dar".to_owned(),
+            vec![sg(Imperative, Second), sg(Imperative, Person::Vos)]
+        )]
+    );
+    let (dímelo, _) = verb_form(&spanish, Language::Es, "dímelo");
+    assert_eq!(dímelo, [("decir".to_owned(), vec![sg(Imperative, Second)])]);
 }

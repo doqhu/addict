@@ -734,6 +734,7 @@ pub(crate) mod tests {
             }]),
             russian: Some(Vec::new()),
             synonyms: None,
+            verb: None,
             english: None,
         }
     }

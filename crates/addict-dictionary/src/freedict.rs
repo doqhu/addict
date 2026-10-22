@@ -120,6 +120,7 @@ impl Parsed {
             source: source.to_owned(),
             senses,
             headwords,
+            analyses: Vec::new(),
             forms: Vec::new(),
         })
     }

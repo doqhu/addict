@@ -21,7 +21,10 @@ use std::{
 
 use addict_core::dictionary::{Article, Dictionary, Sense};
 
-use crate::format::{self, Damage, Entry, Header, Section, SectionId};
+use crate::{
+    analysis::Analyses,
+    format::{self, Damage, Entry, Header, Section, SectionId},
+};
 
 /// Why an index could not be opened or read.
 #[derive(Debug)]
@@ -81,6 +84,12 @@ const FORMS: Table = Table {
     records: SectionId::FormRecords,
 };
 
+const ANALYSES: Table = Table {
+    entries: SectionId::AnalysisTable,
+    keys: SectionId::AnalysisKeys,
+    records: SectionId::AnalysisRecords,
+};
+
 /// An open index file.
 #[derive(Debug)]
 pub struct Index {
@@ -110,7 +119,8 @@ impl Index {
             path: path.to_owned(),
             reason: damage.0,
         };
-        let mut bytes = [0; format::HEADER_LEN];
+        // The longer header; a file without analyses reads less of it.
+        let mut bytes = [0; format::ANALYSED_HEADER_LEN];
         let read = read_some(&file, path, &mut bytes, 0)?;
         let header = Header::parse(&bytes[..read], metadata.len()).map_err(damaged)?;
         // The header bounds the length of the source id.
@@ -182,6 +192,16 @@ impl Index {
     pub fn exception_lemmas(&self, form: &str) -> Result<Vec<String>, Error> {
         match self.search(FORMS, form)? {
             Some(record) => format::decode_form(&record).map_err(|damage| self.damaged(damage)),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The analyses of the verb form `form`, which must equal a stored form
+    /// byte for byte, one per lemma in the order stored; empty when the
+    /// form has none or the file has no analyses.
+    pub fn analyses(&self, form: &str) -> Result<Vec<Analyses>, Error> {
+        match self.search(ANALYSES, form)? {
+            Some(record) => format::decode_analyses(&record).map_err(|damage| self.damaged(damage)),
             None => Ok(Vec::new()),
         }
     }
@@ -404,6 +424,48 @@ mod tests {
         for form in ["goose", "Geese", "bank", ""] {
             assert!(index.exception_lemmas(form).expect("form").is_empty());
         }
+    }
+
+    #[test]
+    fn a_verb_form_has_its_analyses_and_a_file_without_them_has_none() {
+        let dir = TempDir::new("analyses");
+        let contents = format::tests::analysed();
+        let index = Index::open(&written(&dir, &encode(&contents).expect("encode"))).expect("open");
+        assert_eq!(
+            index.analyses("fue").expect("fue"),
+            contents.analyses[0].lemmas
+        );
+        assert_eq!(
+            index.analyses("hable").expect("hable"),
+            contents.analyses[1].lemmas
+        );
+        for form in ["Fue", "fu", "fues", "hablar", ""] {
+            assert!(index.analyses(form).expect("form").is_empty(), "{form:?}");
+        }
+        // The rest of the file reads as without them.
+        let old_dir = TempDir::new("analyses-old");
+        let old = opened(&old_dir);
+        assert_eq!(
+            index.find("bank").expect("find"),
+            old.find("bank").expect("find")
+        );
+        assert_eq!(index.exception_lemmas("lay").expect("form"), ["lay", "lie"]);
+        assert!(old.analyses("fue").expect("old file").is_empty());
+    }
+
+    #[test]
+    fn a_damaged_analysis_is_an_error_of_the_index() {
+        let dir = TempDir::new("analyses-damaged");
+        let mut file = encode(&format::tests::analysed()).expect("encode");
+        // The last byte of the file is in the last shape of `hable`.
+        let last = file.len() - crate::analysis::SHAPE_LEN;
+        file[last] = 200;
+        let index = Index::open(&written(&dir, &file)).expect("open");
+        assert!(index.analyses("fue").is_ok());
+        assert!(matches!(
+            index.analyses("hable"),
+            Err(Error::Damaged { .. })
+        ));
     }
 
     #[test]

@@ -35,7 +35,10 @@ use addict_platform::{
     screenshot::CaptureFailure,
 };
 
-use addict_dictionary::lookup::Grouped;
+use addict_dictionary::{
+    analysis::{Analyses, Number, Person, Shape, TenseMood},
+    lookup::Grouped,
+};
 
 use crate::{
     capture::Failure,
@@ -634,6 +637,151 @@ const ENGLISH_LABEL: &str = "English glosses";
 /// The line of a word the English glosses index has no gloss for.
 const NO_GLOSS: &str = "The dictionary has no English gloss of this word.";
 
+/// Between the groups of one analysis line.
+const ANALYSIS_SEPARATOR: &str = " · ";
+
+/// The line under the analysis of a Catalan form of `anar` that is also the
+/// auxiliary of the periphrastic past, around the word as picked.
+const PERIPHRASTIC_BEFORE: &str = "Also the auxiliary of the periphrastic past: ";
+const PERIPHRASTIC_AFTER: &str = " + infinitive = past.";
+
+/// The lines that open the article of a verb form: one per lemma of its
+/// analyses, then, for a Catalan auxiliary of the periphrastic past, the
+/// line that says so. Empty without analyses.
+fn analysis_lines(language: Language, grouped: &Grouped) -> Vec<String> {
+    let Some(verb) = &grouped.verb else {
+        return Vec::new();
+    };
+    let mut lines: Vec<String> = verb
+        .analyses
+        .iter()
+        .map(|analyses| analysis_line(language, analyses))
+        .collect();
+    if let Some(word) = &verb.periphrastic {
+        lines.push(format!("{PERIPHRASTIC_BEFORE}{word}{PERIPHRASTIC_AFTER}"));
+    }
+    lines
+}
+
+/// `<lemma>: <group> · <group>`, a group per tense and mood, or a past
+/// participle or a gerund, in the order of the shapes, which are sorted:
+/// `hablar: 1st/3rd sg present subjunctive · usted/3rd sg imperative`.
+fn analysis_line(language: Language, analyses: &Analyses) -> String {
+    let mut groups = Vec::new();
+    let mut shapes = analyses.shapes.iter().copied().peekable();
+    while let Some(shape) = shapes.next() {
+        let Shape::Finite {
+            tense_mood,
+            number,
+            person,
+        } = shape
+        else {
+            groups.push(nonfinite_text(shape).to_owned());
+            continue;
+        };
+        let mut persons = vec![(number, person)];
+        while let Some(Shape::Finite {
+            tense_mood: next,
+            number,
+            person,
+        }) = shapes.peek().copied()
+        {
+            if next != tense_mood {
+                break;
+            }
+            persons.push((number, person));
+            shapes.next();
+        }
+        groups.push(format!(
+            "{} {}",
+            persons_text(language, &persons),
+            tense_mood_text(tense_mood)
+        ));
+    }
+    format!("{}: {}", analyses.lemma, groups.join(ANALYSIS_SEPARATOR))
+}
+
+/// The persons of one tense and mood, sorted: those of the singular, then
+/// those of the plural, joined by `/`; in each the persons joined by `/`
+/// and the number after them, unless every one of them is named by a
+/// pronoun that says it (`usted/3rd sg`, `vos`, `1st sg/2nd pl`).
+fn persons_text(language: Language, persons: &[(Number, Person)]) -> String {
+    let mut chunks = Vec::new();
+    for number in [Number::Singular, Number::Plural] {
+        let of: Vec<Person> = persons
+            .iter()
+            .filter(|(own, _)| *own == number)
+            .map(|(_, person)| *person)
+            .collect();
+        if of.is_empty() {
+            continue;
+        }
+        let names: Vec<&str> = of
+            .iter()
+            .map(|person| person_text(language, *person, number))
+            .collect();
+        let mut chunk = names.join("/");
+        if !of
+            .iter()
+            .all(|person| matches!(person, Person::Vos | Person::Formal))
+        {
+            chunk.push(' ');
+            chunk.push_str(match number {
+                Number::Singular => "sg",
+                Number::Plural => "pl",
+            });
+        }
+        chunks.push(chunk);
+    }
+    chunks.join("/")
+}
+
+/// A person as the analysis line names it; the formal second person by the
+/// pronoun of `language`. No wildcard arm: a new language does not compile
+/// until it is given its pronouns.
+fn person_text(language: Language, person: Person, number: Number) -> &'static str {
+    match person {
+        Person::First => "1st",
+        Person::Second => "2nd",
+        Person::Third => "3rd",
+        Person::Vos => "vos",
+        Person::Formal => match (language, number) {
+            (Language::Es, Number::Singular) => "usted",
+            (Language::Es, Number::Plural) => "ustedes",
+            (Language::Ca, Number::Singular) => "vostè",
+            (Language::Ca, Number::Plural) => "vostès",
+            // English has no analyses: the words of the tags.
+            (Language::En, Number::Singular) => "formal sg",
+            (Language::En, Number::Plural) => "formal pl",
+        },
+    }
+}
+
+/// A tense and mood as the analysis line names it.
+fn tense_mood_text(tense_mood: TenseMood) -> &'static str {
+    match tense_mood {
+        TenseMood::PresentIndicative => "present indicative",
+        TenseMood::PreteriteIndicative => "preterite indicative",
+        TenseMood::ImperfectIndicative => "imperfect indicative",
+        TenseMood::FutureIndicative => "future indicative",
+        TenseMood::Conditional => "conditional",
+        TenseMood::PresentSubjunctive => "present subjunctive",
+        TenseMood::ImperfectSubjunctive => "imperfect subjunctive",
+        TenseMood::FutureSubjunctive => "future subjunctive",
+        TenseMood::Imperative => "imperative",
+    }
+}
+
+/// A shape without a person as the analysis line names it; a finite one
+/// has its group instead.
+fn nonfinite_text(shape: Shape) -> &'static str {
+    match shape {
+        Shape::PastParticiple => "past participle",
+        Shape::Gerund => "gerund",
+        Shape::Finite { .. } => "",
+    }
+}
+
 /// The line of a language beside English with no English glosses index
 /// imported. No wildcard arm, as in [`definitions_label`].
 fn missing_english(language: Language) -> &'static str {
@@ -701,6 +849,9 @@ pub struct SenseText<'a> {
 pub struct ResultTexts<'a> {
     /// The one line of a result that is not an article.
     pub line: Option<Cow<'a, str>>,
+    /// For an article of a verb form, the lines that open it: one per lemma
+    /// with the analyses of the form, then any note under them.
+    pub analysis: Vec<String>,
     /// For an article of another language than the chosen one, which had no
     /// entry for the word, the line that names both.
     pub elsewhere: Option<String>,
@@ -810,6 +961,7 @@ fn lookup_texts<'a>(
     };
     let line = |text: Cow<'a, str>| ResultTexts {
         line: Some(text),
+        analysis: Vec::new(),
         elsewhere: None,
         senses_label: SENSES_LABEL,
         hint: None,
@@ -868,6 +1020,7 @@ fn article_texts<'a>(
     let (hint, senses) = sense_texts(&article.senses, chosen, definition, key_file);
     ResultTexts {
         line: None,
+        analysis: Vec::new(),
         elsewhere: None,
         senses_label: SENSES_LABEL,
         hint: hint.or(article.senses.is_empty().then_some(NO_DEFINITIONS)),
@@ -943,6 +1096,7 @@ fn grouped_texts<'a>(
     };
     ResultTexts {
         line: None,
+        analysis: analysis_lines(language, grouped),
         elsewhere: None,
         senses_label: definitions_label(language),
         hint,
@@ -1333,7 +1487,7 @@ mod tests {
             tests::{FREEDICT, OEWN},
         },
     };
-    use addict_dictionary::lookup::Grouped;
+    use addict_dictionary::lookup::{Grouped, VerbForm};
     use addict_platform::{atspi::ContextFailure, foreground::Source as Foregrounded};
 
     fn definition_shown() -> Shown {
@@ -2778,12 +2932,159 @@ mod tests {
                 definitions: Some(spanish_senses()),
                 russian: Some(vec!["банк".to_owned(), "скамейка".to_owned()]),
                 synonyms: Some(vec!["entidad".to_owned(), "asiento".to_owned()]),
+                verb: None,
                 english: Some(vec![
                     "bank (financial institution)".to_owned(),
                     "bench".to_owned(),
                 ]),
             },
         }
+    }
+
+    /// A grouped article read in `language` with `analyses`, each a lemma
+    /// and its shapes, and the word `periphrastic` names.
+    fn analysed(
+        language: Language,
+        analyses: &[(&str, &[addict_dictionary::analysis::Shape])],
+        periphrastic: Option<&str>,
+    ) -> Vec<String> {
+        let lookup = Lookup::Grouped {
+            language,
+            grouped: Grouped {
+                definitions: Some(spanish_senses()),
+                verb: (!analyses.is_empty()).then(|| {
+                    Box::new(VerbForm {
+                        analyses: analyses
+                            .iter()
+                            .map(|(lemma, shapes)| addict_dictionary::analysis::Analyses {
+                                lemma: (*lemma).to_owned(),
+                                shapes: shapes.to_vec(),
+                            })
+                            .collect(),
+                        periphrastic: periphrastic.map(str::to_owned),
+                    })
+                }),
+                ..Grouped::default()
+            },
+        };
+        result_texts(&lookup, None, None, None).analysis
+    }
+
+    #[test]
+    fn a_verb_form_opens_its_article_with_a_line_per_lemma() {
+        use addict_dictionary::analysis::{
+            Number::{Plural, Singular},
+            Person::{self, First, Formal, Second, Third, Vos},
+            Shape::{self, Gerund, PastParticiple},
+            TenseMood::{self, *},
+        };
+        let at = |tense_mood: TenseMood, person: Person, number| Shape::Finite {
+            tense_mood,
+            number,
+            person,
+        };
+        assert_eq!(
+            analysed(
+                Language::Es,
+                &[(
+                    "hablar",
+                    &[
+                        at(PresentSubjunctive, First, Singular),
+                        at(PresentSubjunctive, Third, Singular),
+                        at(Imperative, Formal, Singular),
+                        at(Imperative, Third, Singular),
+                    ]
+                )],
+                None
+            ),
+            ["hablar: 1st/3rd sg present subjunctive · usted/3rd sg imperative"]
+        );
+        let preterite = [at(PreteriteIndicative, Third, Singular)];
+        assert_eq!(
+            analysed(
+                Language::Es,
+                &[("ir", &preterite), ("ser", &preterite)],
+                None
+            ),
+            [
+                "ir: 3rd sg preterite indicative",
+                "ser: 3rd sg preterite indicative"
+            ]
+        );
+        assert_eq!(
+            analysed(Language::Es, &[("decir", &[PastParticiple])], None),
+            ["decir: past participle"]
+        );
+        assert_eq!(
+            analysed(
+                Language::Es,
+                &[("decir", &[at(Imperative, Second, Singular)])],
+                None
+            ),
+            ["decir: 2nd sg imperative"]
+        );
+        // A person a pronoun names has no number after it.
+        assert_eq!(
+            analysed(
+                Language::Es,
+                &[(
+                    "hablar",
+                    &[
+                        at(PresentIndicative, Vos, Singular),
+                        at(Imperative, Formal, Plural),
+                        at(Imperative, Third, Plural),
+                        Gerund,
+                    ]
+                )],
+                None
+            ),
+            ["hablar: vos present indicative · ustedes/3rd pl imperative · gerund"]
+        );
+        // Two numbers in one tense and mood; the Catalan formal person.
+        assert_eq!(
+            analysed(
+                Language::Ca,
+                &[(
+                    "parlar",
+                    &[
+                        at(PresentSubjunctive, First, Singular),
+                        at(PresentSubjunctive, Second, Plural),
+                        at(Imperative, Formal, Singular),
+                        at(Imperative, Formal, Plural),
+                    ]
+                )],
+                None
+            ),
+            ["parlar: 1st sg/2nd pl present subjunctive · vostè/vostès imperative"]
+        );
+    }
+
+    #[test]
+    fn a_catalan_auxiliary_has_its_note_under_its_analysis() {
+        use addict_dictionary::analysis::{Number::Singular, Person::Third, Shape, TenseMood};
+        let va = [Shape::Finite {
+            tense_mood: TenseMood::PresentIndicative,
+            number: Singular,
+            person: Third,
+        }];
+        assert_eq!(
+            analysed(Language::Ca, &[("anar", &va)], Some("va")),
+            [
+                "anar: 3rd sg present indicative",
+                "Also the auxiliary of the periphrastic past: va + infinitive = past."
+            ]
+        );
+    }
+
+    #[test]
+    fn an_article_without_analyses_has_no_analysis_line() {
+        assert!(analysed(Language::Es, &[], None).is_empty());
+        let english = Lookup::Article(Sample.lookup("bank").expect("bank"));
+        assert!(result_texts(&english, None, None, None).analysis.is_empty());
+        let none = Lookup::NoEntry {
+            word: "xyz".to_owned(),
+        };
+        assert!(result_texts(&none, None, None, None).analysis.is_empty());
     }
 
     /// The sections of a result beside its senses, top to bottom: the
@@ -2946,6 +3247,7 @@ mod tests {
                 definitions: Some(spanish_senses()),
                 russian: Some(Vec::new()),
                 synonyms: Some(Vec::new()),
+                verb: None,
                 english: Some(Vec::new()),
             },
         };
