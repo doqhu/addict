@@ -293,7 +293,12 @@ pub fn grouped(
     let mut found_any = false;
     let mut definitions = Vec::new();
     let lemmas = lemmas_of(indexes.iter().map(|(_, index)| *index), language, word)?;
-    let analyses = analyses_of(indexes.iter().map(|(_, index)| *index), language, word)?;
+    // Read once, and only when needed: by a synonyms index, or once the
+    // word is found.
+    let mut analyses: Option<Vec<Analyses>> = None;
+    let analyses_once = || -> Result<Vec<Analyses>, Error> {
+        analyses_of(indexes.iter().map(|(_, index)| *index), language, word)
+    };
     // The word as it may stand among the members of a sense: as written and
     // in lowercase, never its forms, so the members of a form found keep
     // the synonyms of the word.
@@ -301,6 +306,10 @@ pub fn grouped(
     let itself = [written.to_owned(), reduction::lowercase(written)];
     for (kind, index) in indexes {
         if *kind == Kind::Synonyms {
+            if analyses.is_none() {
+                analyses = Some(analyses_once()?);
+            }
+            let analyses = analyses.as_deref().unwrap_or_default();
             let groups = grouped.synonyms.get_or_insert_with(Vec::new);
             for headword in headwords(language, word, &lemmas) {
                 let Some(meanings) = index.synonym_groups(&headword)? else {
@@ -370,6 +379,10 @@ pub fn grouped(
     if let Some(senses) = &mut grouped.definitions {
         *senses = merged(definitions).map_or_else(Vec::new, |article| article.senses);
     }
+    let analyses = match analyses {
+        Some(analyses) => analyses,
+        None => analyses_once()?,
+    };
     if !analyses.is_empty() {
         let periphrastic = language == Language::Ca && PERIPHRASTIC.contains(&itself[1].as_str());
         grouped.verb = Some(Box::new(VerbForm {
