@@ -140,6 +140,7 @@ impl Parsed {
                 SenseRecord {
                     definition,
                     members,
+                    metadata: None,
                 }
             })
             .collect();

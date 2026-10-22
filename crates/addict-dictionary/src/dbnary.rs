@@ -112,6 +112,7 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
             .map(|definition| SenseRecord {
                 definition: definition.clone(),
                 members: Vec::new(),
+                metadata: None,
             })
             .collect();
         if !senses.is_empty() && !entry.label.is_empty() {

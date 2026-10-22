@@ -301,6 +301,7 @@ fn sense_records(word: &str, senses: &[Sense], synonyms: &[Synonym]) -> Vec<Sens
                 SenseRecord {
                     definition,
                     members: Vec::new(),
+                    metadata: None,
                 },
             )
         })

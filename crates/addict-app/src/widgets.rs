@@ -45,8 +45,9 @@ use crate::{
         ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL,
         COPIED_LABEL, COPY_LABEL, ChosenGloss, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER,
         FORWARD_TOOLTIP, LANGUAGE_TOOLTIP, Listed, OnlineTexts, RETRY_LABEL, ResultTexts,
-        SENSES_LABEL, SenseText, Shown, binding_texts, choice_texts, command_in, indexes_text,
-        language_label, online_markup, sentence_markup, texts,
+        SENSES_LABEL, SHOW_LESS, SHOW_MORE, SYNONYM_PREVIEW, SenseText, Shown, SynonymTexts,
+        binding_texts, choice_texts, command_in, indexes_text, language_label, online_markup,
+        sentence_markup, synonym_heading, texts,
     },
     wrap::Wrap,
 };
@@ -396,30 +397,96 @@ fn fill_listed(
             let pills = Wrap::new();
             pills.add_css_class("pills");
             for item in items {
-                let pill = gtk::Label::builder()
-                    .label(item.as_str())
-                    .css_classes(pill_classes)
-                    .build();
-                let Some(field) = field else {
-                    pills.append(&pill);
-                    continue;
-                };
-                let link = gtk::Button::builder()
-                    .child(&pill)
-                    .css_classes(["pill-link"])
-                    .focus_on_click(false)
-                    .build();
-                link.set_cursor_from_name(Some("pointer"));
-                let field = field.downgrade();
-                let word = item.to_string();
-                link.connect_clicked(move |_| {
-                    if let Some(field) = field.upgrade() {
-                        put_into_field(&field, &word);
-                    }
-                });
-                pills.append(&link);
+                pills.append(&synonym_pill(item, pill_classes, field));
             }
             container.append(&pills);
+        }
+    }
+}
+
+/// Shared pill behavior for flat translations and independent synonym meanings.
+fn synonym_pill(item: &str, classes: &[&str], field: Option<&gtk::Entry>) -> gtk::Widget {
+    let pill = gtk::Label::builder()
+        .label(item)
+        .css_classes(classes)
+        .build();
+    let Some(field) = field else {
+        return pill.upcast();
+    };
+    let link = gtk::Button::builder()
+        .child(&pill)
+        .css_classes(["pill-link"])
+        .focus_on_click(false)
+        .build();
+    link.set_cursor_from_name(Some("pointer"));
+    let field = field.downgrade();
+    let word = item.to_owned();
+    link.connect_clicked(move |_| {
+        if let Some(field) = field.upgrade() {
+            put_into_field(&field, &word);
+        }
+    });
+    link.upcast()
+}
+
+fn fill_synonym_groups(container: &gtk::Box, texts: Option<SynonymTexts<'_>>, field: &gtk::Entry) {
+    clear(container);
+    match texts {
+        None => {}
+        Some(SynonymTexts::Missing(line)) => {
+            container.append(
+                &wrapping(gtk::Label::builder().label(line))
+                    .css_classes(["hint"])
+                    .build(),
+            );
+        }
+        Some(SynonymTexts::Groups { label, groups }) => {
+            container.append(&caption(label));
+            for (index, group) in groups.iter().enumerate() {
+                let meaning = gtk::Box::new(gtk::Orientation::Vertical, 6);
+                meaning.add_css_class("synonym-meaning");
+                let heading =
+                    wrapping(gtk::Label::builder().label(synonym_heading(group, index + 1)))
+                        .css_classes(["synonym-heading"])
+                        .build();
+                if let Some(metadata) = &group.metadata {
+                    heading.set_tooltip_text(Some(&metadata.label));
+                }
+                meaning.append(&heading);
+                let pills = Wrap::new();
+                pills.add_css_class("pills");
+                let mut extra = Vec::new();
+                for (number, item) in group.synonyms.iter().enumerate() {
+                    let pill = synonym_pill(item, &["pill", "outline"], Some(field));
+                    if number >= SYNONYM_PREVIEW {
+                        pill.set_visible(false);
+                        extra.push(pill.downgrade());
+                    }
+                    pills.append(&pill);
+                }
+                meaning.append(&pills);
+                if !extra.is_empty() {
+                    let toggle = gtk::ToggleButton::builder()
+                        .label(SHOW_MORE)
+                        .halign(gtk::Align::Start)
+                        .css_classes(["synonym-toggle"])
+                        .build();
+                    toggle.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
+                    toggle.set_tooltip_text(Some(&synonym_heading(group, index + 1)));
+                    toggle.connect_toggled(move |toggle| {
+                        let expanded = toggle.is_active();
+                        for pill in &extra {
+                            if let Some(pill) = pill.upgrade() {
+                                pill.set_visible(expanded);
+                            }
+                        }
+                        toggle.set_label(if expanded { SHOW_LESS } else { SHOW_MORE });
+                        toggle.update_state(&[gtk::accessible::State::Expanded(Some(expanded))]);
+                    });
+                    meaning.append(&toggle);
+                }
+                container.append(&meaning);
+            }
         }
     }
 }
@@ -1178,12 +1245,7 @@ impl View {
 
         self.render_senses(&texts, visible);
         // Hidden for English, which has neither.
-        fill_listed(
-            &result.word_synonyms,
-            texts.word_synonyms,
-            &["pill"],
-            Some(&self.field),
-        );
+        fill_synonym_groups(&result.word_synonyms, texts.word_synonyms, &self.field);
         result
             .word_synonyms
             .set_visible(texts.word_synonyms.is_some());
@@ -1357,6 +1419,73 @@ mod tests {
         let texture = renderer.render_texture(&node, None);
         texture.save_to_png(&path).expect("the PNG");
         window.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn synonym_meanings_expand_wrap_collapse_and_submit_revealed_members() {
+        use crate::view::{SHOW_LESS, SHOW_MORE, SynonymTexts};
+        use addict_dictionary::{format::SenseMetadata, index::SynonymGroup};
+        gtk::init().expect("a display");
+        let field = gtk::Entry::new();
+        let submitted = Rc::new(Cell::new(false));
+        let heard = submitted.clone();
+        field.connect_activate(move |_| heard.set(true));
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let groups = [SynonymGroup {
+            headword: "fer".to_owned(),
+            definition: String::new(),
+            metadata: SenseMetadata::from_label("(v; beure)"),
+            synonyms: (1..=9).map(|n| format!("synonym {n}")).collect(),
+        }];
+        super::fill_synonym_groups(
+            &container,
+            Some(SynonymTexts::Groups {
+                label: "Catalan synonyms",
+                groups: &groups,
+            }),
+            &field,
+        );
+        let meaning = container.last_child().expect("meaning");
+        let heading = meaning
+            .first_child()
+            .and_downcast::<gtk::Label>()
+            .expect("heading");
+        assert_eq!(heading.label(), "fer · Verb · Meaning 1 — beure");
+        let pills = heading.next_sibling().expect("pills");
+        let toggle = meaning
+            .last_child()
+            .and_downcast::<gtk::ToggleButton>()
+            .expect("toggle");
+        assert!(toggle.is_focusable());
+        assert_eq!(toggle.label().as_deref(), Some(SHOW_MORE));
+        let mut members = Vec::new();
+        let mut next = pills.first_child();
+        while let Some(child) = next {
+            next = child.next_sibling();
+            members.push(child);
+        }
+        assert_eq!(members.len(), 9);
+        assert_eq!(members.iter().filter(|child| child.is_visible()).count(), 6);
+        let preview_height = pills.measure(gtk::Orientation::Vertical, 140).1;
+        toggle.set_active(true);
+        assert_eq!(toggle.label().as_deref(), Some(SHOW_LESS));
+        assert!(members.iter().all(|child| child.is_visible()));
+        assert!(pills.measure(gtk::Orientation::Vertical, 140).1 > preview_height);
+        let last = members[8].clone().downcast::<gtk::Button>().expect("link");
+        assert!(!last.gets_focus_on_click());
+        last.emit_clicked();
+        assert_eq!(field.text(), "synonym 9");
+        assert!(submitted.get());
+        toggle.set_active(false);
+        assert_eq!(toggle.label().as_deref(), Some(SHOW_MORE));
+        assert_eq!(members.iter().filter(|child| child.is_visible()).count(), 6);
+        assert_eq!(
+            pills.measure(gtk::Orientation::Vertical, 140).1,
+            preview_height
+        );
+        toggle.set_active(true);
+        assert!(members[8].is_visible());
     }
 
     /// A synonym is a link: a click puts it into the field and submits the

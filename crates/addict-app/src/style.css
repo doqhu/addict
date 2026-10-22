@@ -580,3 +580,19 @@ window.addict.settings headerbar windowcontrols button {
 window.addict.settings headerbar windowcontrols button:hover {
   background: var(--line);
 }
+
+/* Independent meanings keep their source ordering and expandable pills. */
+window.addict .synonym-meaning {
+  padding: 8px 0;
+}
+window.addict label.synonym-heading {
+  font-weight: 600;
+}
+window.addict button.synonym-toggle {
+  padding: 3px 8px;
+  min-height: 24px;
+  border: none;
+  background: var(--chip);
+  color: var(--accent);
+  box-shadow: none;
+}

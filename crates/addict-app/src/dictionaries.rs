@@ -697,10 +697,12 @@ pub mod tests {
                 SenseRecord {
                     definition: "sloping land beside a body of water".to_owned(),
                     members: texts(&["bank", "shore"]),
+                    metadata: None,
                 },
                 SenseRecord {
                     definition: "change location".to_owned(),
                     members: texts(&["go"]),
+                    metadata: None,
                 },
             ],
             headwords: vec![
@@ -730,6 +732,7 @@ pub mod tests {
             senses: vec![SenseRecord {
                 definition: "An edge of river, lake, or other watercourse.".to_owned(),
                 members: Vec::new(),
+                metadata: None,
             }],
             headwords: vec![
                 Headword {
@@ -757,14 +760,17 @@ pub mod tests {
                 SenseRecord {
                     definition: "Empresa que ofrece servicios monetarios.".to_owned(),
                     members: Vec::new(),
+                    metadata: None,
                 },
                 SenseRecord {
                     definition: "Mueble alargado para sentarse.".to_owned(),
                     members: texts(&["banca"]),
+                    metadata: None,
                 },
                 SenseRecord {
                     definition: "Una palabra inventada.".to_owned(),
                     members: Vec::new(),
+                    metadata: None,
                 },
             ],
             headwords: vec![
@@ -1267,6 +1273,7 @@ pub mod tests {
                 contents.senses.push(SenseRecord {
                     definition: (*definition).to_owned(),
                     members: texts(members),
+                    metadata: None,
                 });
             }
             contents.headwords.push(Headword {
@@ -1296,6 +1303,7 @@ pub mod tests {
                 contents.senses.push(SenseRecord {
                     definition: (*definition).to_owned(),
                     members: texts(members),
+                    metadata: None,
                 });
             }
             contents.headwords.push(Headword {
@@ -1326,7 +1334,19 @@ pub mod tests {
             vec![
                 line(texts.translations),
                 format!("{} senses", texts.senses.len()),
-                line(texts.word_synonyms),
+                match texts.word_synonyms {
+                    Some(crate::view::SynonymTexts::Groups { label, groups }) => format!(
+                        "{label} {}",
+                        groups
+                            .iter()
+                            .flat_map(|group| &group.synonyms)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    Some(crate::view::SynonymTexts::Missing(line)) => line.to_owned(),
+                    None => String::new(),
+                },
                 line(texts.glosses),
             ],
         )
@@ -1453,7 +1473,20 @@ pub mod tests {
                     synonyms: Vec::new(),
                 }]),
                 russian: Some(texts(&["коллекция"])),
-                synonyms: Some(texts(&["recull", "aplec", "sèrie"])),
+                synonyms: Some(vec![
+                    addict_dictionary::index::SynonymGroup {
+                        headword: "col·lecció".to_owned(),
+                        definition: String::new(),
+                        metadata: None,
+                        synonyms: texts(&["recull", "aplec"])
+                    },
+                    addict_dictionary::index::SynonymGroup {
+                        headword: "col·lecció".to_owned(),
+                        definition: String::new(),
+                        metadata: None,
+                        synonyms: texts(&["sèrie", "recull"])
+                    },
+                ]),
                 verb: None,
                 english: Some(texts(&["collection", "set"])),
             })
@@ -1471,7 +1504,10 @@ pub mod tests {
             panic!("banco");
         };
         assert_eq!(banco.russian, Some(texts(&["банк"])));
-        assert_eq!(banco.synonyms, Some(texts(&["banca"])));
+        assert_eq!(
+            banco.synonyms.expect("groups")[0].synonyms,
+            texts(&["banca"])
+        );
         assert_eq!(banco.english, Some(texts(&["bank"])));
         assert_eq!(
             dictionaries.look_up_in(Language::Ca, "banco").answer,

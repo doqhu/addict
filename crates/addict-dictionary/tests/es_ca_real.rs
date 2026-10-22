@@ -114,7 +114,15 @@ fn run(
         let kinds = [
             ("RU", has(&grouped.russian), &mut counts.russian),
             ("Def", !senses.is_empty(), &mut counts.definitions),
-            ("Syn", has(&grouped.synonyms) || own, &mut counts.synonyms),
+            (
+                "Syn",
+                grouped
+                    .synonyms
+                    .as_ref()
+                    .is_some_and(|groups| !groups.is_empty())
+                    || own,
+                &mut counts.synonyms,
+            ),
             ("EN", has(&grouped.english), &mut counts.english),
         ];
         for (name, present, count) in kinds {
@@ -303,4 +311,137 @@ fn the_verb_forms_of_the_story_have_their_analyses() {
     );
     let (dímelo, _) = verb_form(&spanish, Language::Es, "dímelo");
     assert_eq!(dímelo, [("decir".to_owned(), vec![sg(Imperative, Second)])]);
+}
+
+#[test]
+#[ignore = "needs reimported Catalan thesaurus and existing indexes: set ADDICT_INDEX_DIR and ADDICT_CATALAN_THESAURUS"]
+fn catalan_feu_keeps_fourteen_verb_meanings_and_direct_fer_keeps_fifteen() {
+    use addict_dictionary::{format::GrammaticalClass, mythes};
+    let source = std::fs::File::open(path_from("ADDICT_CATALAN_THESAURUS"))
+        .expect("approved local thesaurus");
+    let source =
+        mythes::parse(std::io::BufReader::new(source), "source-check").expect("parse source");
+    assert!(
+        source
+            .headwords
+            .iter()
+            .all(|headword| headword.word != "feu")
+    );
+    let fer = source
+        .headwords
+        .iter()
+        .find(|headword| headword.word == "fer")
+        .expect("fer");
+    assert_eq!(fer.senses.len(), 15);
+    let indexes = open_indexes(Language::Ca);
+    let asked: Vec<_> = indexes.iter().map(|(kind, index)| (*kind, index)).collect();
+    let get = |word| {
+        lookup::grouped(&asked, Language::Ca, word)
+            .expect("lookup")
+            .expect("found")
+    };
+    let feu = get("feu");
+    assert!(
+        feu.verb
+            .as_ref()
+            .expect("positive analyses")
+            .analyses
+            .iter()
+            .any(|analysis| analysis.lemma == "fer")
+    );
+    let all_groups = feu.synonyms.expect("groups");
+    // Other headwords retain their accessible independent readings.
+    assert!(all_groups.iter().any(|group| group.headword == "far"));
+    assert!(all_groups.iter().any(|group| group.headword == "fre"));
+    let groups: Vec<_> = all_groups
+        .into_iter()
+        .filter(|group| group.headword == "fer")
+        .collect();
+    assert_eq!(groups.len(), 14, "fer groups: {groups:?}");
+    for group in &groups {
+        assert_eq!(group.headword, "fer");
+        assert_eq!(
+            group.metadata.as_ref().expect("metadata").class,
+            Some(GrammaticalClass::Verb)
+        );
+        assert!(
+            group
+                .synonyms
+                .iter()
+                .all(|word| !["ferotge", "feroç", "salvatge"].contains(&word.as_str()))
+        );
+    }
+    let direct_all = get("fer").synonyms.expect("direct groups");
+    let direct: Vec<_> = direct_all
+        .iter()
+        .filter(|group| group.headword == "fer")
+        .cloned()
+        .collect();
+    println!(
+        "feu: {} verb groups; direct fer: {} source meanings ({} groups including existing heuristic headwords)",
+        groups.len(),
+        direct.len(),
+        direct_all.len()
+    );
+    assert_eq!(direct.len(), 15);
+    assert_eq!(
+        direct[0].metadata.as_ref().expect("adjective").class,
+        Some(GrammaticalClass::Adjective)
+    );
+    for (group, position) in direct.iter().zip(&fer.senses) {
+        let source = &source.senses[*position as usize];
+        assert_eq!(group.metadata, source.metadata);
+        assert_eq!(group.synonyms, source.members);
+    }
+    assert_eq!(groups, direct[1..]);
+    let thesaurus = asked
+        .iter()
+        .find(|(kind, _)| *kind == Kind::Synonyms)
+        .expect("thesaurus");
+    assert_eq!(
+        lookup::grouped(&[*thesaurus], Language::Ca, "feu")
+            .expect("alone")
+            .expect("found by rules")
+            .synonyms
+            .expect("unfiltered")
+            .iter()
+            .filter(|group| group.headword == "fer")
+            .count(),
+        15
+    );
+}
+
+#[test]
+#[ignore = "needs reimported Catalan thesaurus and existing indexes: set ADDICT_INDEX_DIR"]
+fn catalan_causes_keeps_causa_nouns_alongside_causar_verbs() {
+    use addict_dictionary::format::GrammaticalClass;
+    let indexes = open_indexes(Language::Ca);
+    let asked: Vec<_> = indexes.iter().map(|(kind, index)| (*kind, index)).collect();
+    let causes = lookup::grouped(&asked, Language::Ca, "causes")
+        .expect("lookup")
+        .expect("found");
+    assert!(
+        causes
+            .verb
+            .as_ref()
+            .expect("positive analyses")
+            .analyses
+            .iter()
+            .any(|analysis| analysis.lemma == "causar")
+    );
+    let groups = causes.synonyms.expect("groups");
+    let readings = |headword: &str, class| {
+        groups
+            .iter()
+            .filter(|group| {
+                group.headword == headword
+                    && group
+                        .metadata
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.class == Some(class))
+            })
+            .count()
+    };
+    assert_eq!(readings("causa", GrammaticalClass::Noun), 3);
+    assert_eq!(readings("causar", GrammaticalClass::Verb), 4);
 }

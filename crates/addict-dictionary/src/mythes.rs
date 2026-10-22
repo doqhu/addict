@@ -7,7 +7,9 @@
 //! experiment read it (`experiments/exp9/sources.py`, `mythes`): a line that
 //! is not `word|n` where an entry should start is skipped.
 //!
-//! Each meaning line is one sense record with an empty definition; its
+//! Each meaning line retains its full label as optional sense metadata,
+//! with explicit grammatical class and description where understood. Its
+//! definition stays empty; its
 //! members are its items, trimmed, each once, without the word itself, kept
 //! as written: annotations such as `lot (m)` and items of several words
 //! stay. A meaning line with no item left gives no record, and a word with
@@ -20,7 +22,7 @@ use std::{
     io::{self, BufRead},
 };
 
-use crate::format::{Contents, SenseRecord};
+use crate::format::{Contents, SenseMetadata, SenseRecord};
 
 /// Why a thesaurus gave no contents.
 #[derive(Debug)]
@@ -75,8 +77,10 @@ pub fn parse(mut reader: impl BufRead, source: &str) -> Result<Contents, ParseEr
         };
         let mut senses = Vec::new();
         for meaning in lines.by_ref().take(count) {
+            let mut fields = meaning.split('|');
+            let metadata = SenseMetadata::from_label(fields.next().unwrap_or_default());
             let mut members: Vec<String> = Vec::new();
-            for item in meaning.split('|').skip(1).map(str::trim) {
+            for item in fields.map(str::trim) {
                 if !item.is_empty() && item != word && !members.iter().any(|known| known == item) {
                     members.push(item.to_owned());
                 }
@@ -85,6 +89,7 @@ pub fn parse(mut reader: impl BufRead, source: &str) -> Result<Contents, ParseEr
                 senses.push(SenseRecord {
                     definition: String::new(),
                     members,
+                    metadata,
                 });
             }
         }
@@ -176,6 +181,47 @@ col·lecció|1
         assert!(contents.forms.is_empty());
         let first = format::encode(&contents).expect("encode");
         assert_eq!(format::encode(&parsed()).expect("encode"), first);
+    }
+
+    #[test]
+    fn labels_descriptions_annotations_and_duplicate_meanings_are_preserved() {
+        use crate::format::GrammaticalClass;
+        let contents = parse(&b"UTF-8\nfer|5\n(adj)|ferotge\n(v)|prendre\n(v; beure)|prendre|trincar (colloquial)\n(mystery)|other\n|unlabelled\n"[..], "labels").expect("parse");
+        let labels: Vec<_> = contents
+            .senses
+            .iter()
+            .map(|sense| {
+                sense
+                    .metadata
+                    .as_ref()
+                    .map(|metadata| metadata.label.as_str())
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                Some("(adj)"),
+                Some("(v)"),
+                Some("(v; beure)"),
+                Some("(mystery)"),
+                None
+            ]
+        );
+        assert_eq!(
+            contents.senses[0].metadata.as_ref().expect("label").class,
+            Some(GrammaticalClass::Adjective)
+        );
+        let beure = contents.senses[2].metadata.as_ref().expect("label");
+        assert_eq!(beure.class, Some(GrammaticalClass::Verb));
+        assert_eq!(beure.description.as_deref(), Some("beure"));
+        assert_eq!(
+            contents.senses[2].members,
+            texts(&["prendre", "trincar (colloquial)"])
+        );
+        assert_eq!(
+            contents.senses[3].metadata.as_ref().expect("unknown").class,
+            None
+        );
     }
 
     #[test]
