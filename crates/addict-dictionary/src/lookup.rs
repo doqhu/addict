@@ -304,50 +304,12 @@ pub fn grouped(
     // the synonyms of the word.
     let written = reduction::stripped(word);
     let itself = [written.to_owned(), reduction::lowercase(written)];
+    let found_in = |index: &Index| found(index, language, word, &lemmas);
     for (kind, index) in indexes {
-        if *kind == Kind::Synonyms {
-            if analyses.is_none() {
-                analyses = Some(analyses_once()?);
-            }
-            let analyses = analyses.as_deref().unwrap_or_default();
-            let groups = grouped.synonyms.get_or_insert_with(Vec::new);
-            for headword in headwords(language, word, &lemmas) {
-                let Some(meanings) = index.synonym_groups(&headword)? else {
-                    continue;
-                };
-                found_any = true;
-                // Only this candidate's positive verb analysis constrains its
-                // meanings; other headwords can supply independent readings.
-                // Exact spellings still keep their independent readings.
-                let derived_verb = !itself.contains(&headword)
-                    && analyses
-                        .iter()
-                        .any(|analysis| analysis.lemma == headword && !analysis.shapes.is_empty());
-                for mut meaning in meanings {
-                    if derived_verb
-                        && meaning
-                            .metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.class)
-                            .is_some_and(|class| class != crate::format::GrammaticalClass::Verb)
-                    {
-                        continue;
-                    }
-                    meaning.synonyms.retain(|member| !itself.contains(member));
-                    if !meaning.synonyms.is_empty() {
-                        groups.push(meaning);
-                    }
-                }
-            }
-            continue;
-        }
-        let found = found(index, language, word, &lemmas)?;
-        found_any |= !found.is_empty();
-        // Every sense of every headword: the senses of a synonyms index may
-        // all have the same definition, or none.
-        let senses = found.iter().flat_map(|found| &found.article.senses);
         match kind {
             Kind::Definitions => {
+                let found = found_in(index)?;
+                found_any |= !found.is_empty();
                 grouped.definitions.get_or_insert_with(Vec::new);
                 definitions.extend(found.into_iter().map(|found| Found {
                     article: Article {
@@ -358,19 +320,60 @@ pub fn grouped(
                 }));
             }
             Kind::Russian => {
+                let found = found_in(index)?;
+                found_any |= !found.is_empty();
                 let russian = grouped.russian.get_or_insert_with(Vec::new);
                 let translations = found.iter().flat_map(|found| &found.article.translations);
                 push_new(russian, translations.cloned());
             }
-            Kind::Synonyms => unreachable!("synonym meanings handled above"),
+            Kind::Synonyms => {
+                if analyses.is_none() {
+                    analyses = Some(analyses_once()?);
+                }
+                let analyses = analyses.as_deref().unwrap_or_default();
+                let groups = grouped.synonyms.get_or_insert_with(Vec::new);
+                for headword in headwords(language, word, &lemmas) {
+                    let Some(meanings) = index.synonym_groups(&headword)? else {
+                        continue;
+                    };
+                    found_any = true;
+                    // Only this candidate's positive verb analysis constrains its
+                    // meanings; other headwords can supply independent readings.
+                    // Exact spellings still keep their independent readings.
+                    let derived_verb = !itself.contains(&headword)
+                        && analyses.iter().any(|analysis| {
+                            analysis.lemma == headword && !analysis.shapes.is_empty()
+                        });
+                    for mut meaning in meanings {
+                        if derived_verb
+                            && meaning
+                                .metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.class())
+                                .is_some_and(|class| class != crate::format::GrammaticalClass::Verb)
+                        {
+                            continue;
+                        }
+                        meaning.synonyms.retain(|member| !itself.contains(member));
+                        if !meaning.synonyms.is_empty() {
+                            groups.push(meaning);
+                        }
+                    }
+                }
+            }
             Kind::English => {
+                let found = found_in(index)?;
+                found_any |= !found.is_empty();
                 let english = grouped.english.get_or_insert_with(Vec::new);
-                let glosses = senses.filter(|sense| !sense.definition.trim().is_empty());
+                let glosses = found
+                    .iter()
+                    .flat_map(|found| &found.article.senses)
+                    .filter(|sense| !sense.definition.trim().is_empty());
                 push_new(english, glosses.map(|sense| sense.definition.clone()));
             }
             // Never among the indexes of a reading language: a Russian
             // index is asked by [`russian`] alone. Nothing of it is kept.
-            Kind::FromRussian => {}
+            Kind::FromRussian => found_any |= !found_in(index)?.is_empty(),
         }
     }
     if !found_any {
@@ -858,7 +861,7 @@ mod tests {
         assert_eq!(derived[0].headword, "feu");
         assert_eq!(derived[0].synonyms, texts(&["exact reading"]));
         assert_eq!(
-            derived[0].metadata.as_ref().expect("noun").class,
+            derived[0].metadata.as_ref().expect("noun").class(),
             Some(GrammaticalClass::Noun)
         );
         assert!(
@@ -868,7 +871,7 @@ mod tests {
         );
         assert_eq!(derived[1].synonyms, texts(&["prendre"]));
         assert_eq!(derived[2].synonyms, texts(&["prendre", "trincar"]));
-        assert_eq!(derived[3].metadata.as_ref().expect("unknown").class, None);
+        assert_eq!(derived[3].metadata.as_ref().expect("unknown").class(), None);
         assert_eq!(derived[4].metadata, None);
         assert_eq!(get(&index, "fer").len(), 5);
         contents.analyses.clear();
@@ -919,7 +922,7 @@ mod tests {
                         && group
                             .metadata
                             .as_ref()
-                            .is_some_and(|metadata| metadata.class == Some(class))
+                            .is_some_and(|metadata| metadata.class() == Some(class))
                 })
                 .count()
         };

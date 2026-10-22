@@ -190,12 +190,7 @@ col·lecció|1
         let labels: Vec<_> = contents
             .senses
             .iter()
-            .map(|sense| {
-                sense
-                    .metadata
-                    .as_ref()
-                    .map(|metadata| metadata.label.as_str())
-            })
+            .map(|sense| sense.metadata.as_ref().map(|metadata| metadata.label()))
             .collect();
         assert_eq!(
             labels,
@@ -208,18 +203,22 @@ col·lecció|1
             ]
         );
         assert_eq!(
-            contents.senses[0].metadata.as_ref().expect("label").class,
+            contents.senses[0].metadata.as_ref().expect("label").class(),
             Some(GrammaticalClass::Adjective)
         );
         let beure = contents.senses[2].metadata.as_ref().expect("label");
-        assert_eq!(beure.class, Some(GrammaticalClass::Verb));
-        assert_eq!(beure.description.as_deref(), Some("beure"));
+        assert_eq!(beure.class(), Some(GrammaticalClass::Verb));
+        assert_eq!(beure.description(), Some("beure"));
         assert_eq!(
             contents.senses[2].members,
             texts(&["prendre", "trincar (colloquial)"])
         );
         assert_eq!(
-            contents.senses[3].metadata.as_ref().expect("unknown").class,
+            contents.senses[3]
+                .metadata
+                .as_ref()
+                .expect("unknown")
+                .class(),
             None
         );
     }

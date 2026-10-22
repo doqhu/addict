@@ -1334,19 +1334,9 @@ pub mod tests {
             vec![
                 line(texts.translations),
                 format!("{} senses", texts.senses.len()),
-                match texts.word_synonyms {
-                    Some(crate::view::SynonymTexts::Groups { label, groups }) => format!(
-                        "{label} {}",
-                        groups
-                            .iter()
-                            .flat_map(|group| &group.synonyms)
-                            .cloned()
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    Some(crate::view::SynonymTexts::Missing(line)) => line.to_owned(),
-                    None => String::new(),
-                },
+                texts
+                    .word_synonyms
+                    .map_or_else(String::new, |synonyms| synonyms.line()),
                 line(texts.glosses),
             ],
         )
