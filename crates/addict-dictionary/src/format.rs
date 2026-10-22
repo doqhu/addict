@@ -9,10 +9,12 @@
 //!          senses        sense records, each: length u32 | definition text
 //!                        | member count u32 | member texts
 //!                        | optional "META" tag | source label text
+//!                        | optional "POS2" tag | POS category u8 | raw label text
 //!          word table    one entry per headword, sorted by the bytes of it
 //!          word keys     the headwords, back to back
 //!          word records  sense count u32 | sense offsets u64 (into senses)
 //!                        | translation count u32 | translation texts
+//!                        | optional "ENT2" tag | lexical entry records
 //!          form table    one entry per exception form, sorted
 //!          form keys     the forms, back to back
 //!          form records  lemma count u32 | lemma texts
@@ -25,7 +27,7 @@
 //! The three analysis sections are there only in a file whose contents
 //! have analyses: its header names 11 sections, any other 8. A file of 8
 //! sections has no analyses, so a source without tags gives the same bytes
-//! as before they existed. A shape is stored as [`analysis::encode`] gives
+//! apart from the v2 header. A shape is stored as [`analysis::encode`] gives
 //! it.
 //!
 //! A table entry is `key offset u64 | key length u32 | record offset u64 |
@@ -37,6 +39,14 @@
 //! drops the looked-up word from them to get the synonyms. A source without
 //! synsets writes one record per sense, with the synonyms as members.
 //!
+//! Version 2 keeps the same eight/eleven sections as version 1. An ENT2
+//! record stores entry id and original headword, optional normalized/raw
+//! POS, local sense positions, and independent pronunciation records with
+//! optional text/notation, labels/raw labels and audio URL/format pairs.
+//! The source identity comes from the enclosing index. Optional values use
+//! a strict 0/1 byte tag; lists use u32 counts and texts use u32 byte lengths.
+//! Version 1 records (including MyThes META labels) remain readable.
+//!
 //! This module does no I/O: [`encode`] gives the bytes of a file and the
 //! decoders take bytes the reader has read. A decoder never trusts a length
 //! or a count: what does not fit the bytes it was given is a [`Damage`].
@@ -44,12 +54,15 @@
 use std::{collections::BTreeMap, fmt};
 
 use crate::analysis::{self, Analyses};
+use addict_core::dictionary::{
+    Audio, EntryIdentity, LexicalEntry, PartOfSpeech, Pos, Pronunciation,
+};
 
 /// The first bytes of every index file.
 pub const MAGIC: [u8; 8] = *b"ADDICTIX";
 
-/// The version of the layout this module writes and reads.
-pub const VERSION: u32 = 1;
+/// The writer version. Readers accept both v1 and v2.
+pub const VERSION: u32 = 2;
 
 /// The sections of a file without analyses, in the order of the header.
 pub const SECTIONS: usize = 8;
@@ -117,8 +130,27 @@ impl Contents {
         };
         for (word, senses) in headwords {
             let first = contents.senses.len() as u32;
+            let entries = senses
+                .iter()
+                .enumerate()
+                .filter_map(|(at, sense)| {
+                    Some(EntryRecord {
+                        entry: LexicalEntry {
+                            identity: EntryIdentity {
+                                source: source.to_owned(),
+                                headword: word.clone(),
+                                id: format!("sense-{at}"),
+                            },
+                            part_of_speech: Some(sense.part_of_speech.clone()?),
+                            pronunciations: Vec::new(),
+                        },
+                        senses: vec![first + at as u32],
+                    })
+                })
+                .collect();
             contents.senses.extend(senses);
             contents.headwords.push(Headword {
+                entries,
                 word,
                 senses: (first..contents.senses.len() as u32).collect(),
                 translations: Vec::new(),
@@ -128,9 +160,25 @@ impl Contents {
     }
 }
 
+/// Attach entries whose sense positions are local to each headword's list.
+pub(crate) fn attach_entries(
+    contents: &mut Contents,
+    mut entries: BTreeMap<String, Vec<EntryRecord>>,
+) {
+    for headword in &mut contents.headwords {
+        headword.entries = entries.remove(&headword.word).unwrap_or_default();
+        for entry in &mut headword.entries {
+            for sense in &mut entry.senses {
+                *sense = headword.senses[*sense as usize];
+            }
+        }
+    }
+}
+
 /// One sense, shared by the headwords that have it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SenseRecord {
+    pub part_of_speech: Option<PartOfSpeech>,
     pub definition: String,
     /// The words of the sense, the headword itself included.
     pub members: Vec<String>,
@@ -170,7 +218,7 @@ impl SenseMetadata {
 
     /// The class tag and the description of a label `(tag; description)`
     /// or `(tag)`; `None` for a label of another shape.
-    fn parts(&self) -> Option<(&str, Option<&str>)> {
+    pub(crate) fn parts(&self) -> Option<(&str, Option<&str>)> {
         let inner = self
             .label
             .trim()
@@ -201,11 +249,19 @@ impl SenseMetadata {
 /// One headword as written in the source.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Headword {
+    pub entries: Vec<EntryRecord>,
     pub word: String,
     /// Positions in [`Contents::senses`], in the order of the article.
     pub senses: Vec<u32>,
     /// Translations for the article as a whole.
     pub translations: Vec<String>,
+}
+
+/// A lexical entry and the source sense positions explicitly associated with it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EntryRecord {
+    pub entry: LexicalEntry,
+    pub senses: Vec<u32>,
 }
 
 /// An irregular form and the lemmas it is a form of.
@@ -237,11 +293,14 @@ pub enum WriteError {
     /// A key or a record is longer than [`MAX_RECORD`]; this is its key or
     /// the start of its definition.
     TooLarge(String),
+    /// A new metadata record contains a blank required field or no sound.
+    Metadata,
 }
 
 impl fmt::Display for WriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Metadata => write!(f, "invalid lexical metadata"),
             Self::Source => write!(f, "the source id is empty or too long"),
             Self::EmptyKey => write!(f, "an empty headword or form"),
             Self::Unsorted(key) => write!(f, "{key:?} is out of order or repeated"),
@@ -269,11 +328,15 @@ pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
         let mut body = Vec::new();
         put_text(&mut body, &sense.definition)?;
         put_texts(&mut body, &sense.members)?;
-        // A trailing tagged extension keeps metadata-free version-1 bytes
-        // unchanged and legacy records readable without extra index reads.
+        // Tagged extensions preserve legacy record layouts. The v2 header
+        // ensures older applications reject new metadata at open.
         if let Some(metadata) = &sense.metadata {
             body.extend_from_slice(b"META");
             put_text(&mut body, metadata.label())?;
+        }
+        if let Some(pos) = &sense.part_of_speech {
+            body.extend_from_slice(b"POS2");
+            put_pos_value(&mut body, pos)?;
         }
         let len = bounded(body.len(), &sense.definition)?;
         sense_offsets.push(senses.len() as u64);
@@ -296,6 +359,63 @@ pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
             record.extend_from_slice(&offset.to_le_bytes());
         }
         put_texts(&mut record, &headword.translations)?;
+        if !headword.entries.is_empty() {
+            record.extend_from_slice(b"ENT2");
+            put_count(&mut record, headword.entries.len(), &headword.word)?;
+            for entry in &headword.entries {
+                if entry.entry.identity.id.trim().is_empty()
+                    || entry.entry.identity.headword.trim().is_empty()
+                {
+                    return Err(WriteError::Metadata);
+                }
+                put_text(&mut record, &entry.entry.identity.id)?;
+                put_text(&mut record, &entry.entry.identity.headword)?;
+                record.push(u8::from(entry.entry.part_of_speech.is_some()));
+                if let Some(pos) = &entry.entry.part_of_speech {
+                    put_pos_value(&mut record, pos)?;
+                }
+                put_count(&mut record, entry.senses.len(), &headword.word)?;
+                for sense in &entry.senses {
+                    if !headword.senses.contains(sense) {
+                        return Err(WriteError::UnknownSense {
+                            word: headword.word.clone(),
+                            sense: *sense,
+                        });
+                    }
+                    // Stored as a position in this headword's sense list.
+                    record.extend_from_slice(
+                        &(headword
+                            .senses
+                            .iter()
+                            .position(|known| known == sense)
+                            .unwrap() as u32)
+                            .to_le_bytes(),
+                    );
+                }
+                put_count(
+                    &mut record,
+                    entry.entry.pronunciations.len(),
+                    &headword.word,
+                )?;
+                for sound in &entry.entry.pronunciations {
+                    if sound.text.is_none() && sound.audio.is_empty() {
+                        return Err(WriteError::Metadata);
+                    }
+                    put_optional(&mut record, sound.text.as_deref())?;
+                    put_optional(&mut record, sound.notation.as_deref())?;
+                    put_texts(&mut record, &sound.labels)?;
+                    put_texts(&mut record, &sound.raw_labels)?;
+                    put_count(&mut record, sound.audio.len(), &headword.word)?;
+                    for audio in &sound.audio {
+                        if audio.url.trim().is_empty() {
+                            return Err(WriteError::Metadata);
+                        }
+                        put_text(&mut record, &audio.url)?;
+                        put_optional(&mut record, audio.format.as_deref())?;
+                    }
+                }
+            }
+        }
         words.push(&headword.word, &record)?;
     }
 
@@ -411,6 +531,61 @@ fn put_text(out: &mut Vec<u8>, text: &str) -> Result<(), WriteError> {
     Ok(())
 }
 
+fn pos_tag(category: Option<Pos>) -> u8 {
+    match category {
+        None => 0,
+        Some(Pos::Noun) => 1,
+        Some(Pos::Verb) => 2,
+        Some(Pos::Adjective) => 3,
+        Some(Pos::Adverb) => 4,
+        Some(Pos::Pronoun) => 5,
+        Some(Pos::Determiner) => 6,
+        Some(Pos::Article) => 7,
+        Some(Pos::Preposition) => 8,
+        Some(Pos::Postposition) => 9,
+        Some(Pos::Conjunction) => 10,
+        Some(Pos::Interjection) => 11,
+        Some(Pos::Numeral) => 12,
+        Some(Pos::Particle) => 13,
+        Some(Pos::ProperNoun) => 14,
+        Some(Pos::Auxiliary) => 15,
+        Some(Pos::AdjectiveSatellite) => 16,
+        Some(Pos::Affix) => 17,
+        Some(Pos::Prefix) => 18,
+        Some(Pos::Suffix) => 19,
+        Some(Pos::Infix) => 20,
+        Some(Pos::Circumfix) => 21,
+        Some(Pos::Contraction) => 22,
+        Some(Pos::Abbreviation) => 23,
+        Some(Pos::Acronym) => 24,
+        Some(Pos::Symbol) => 25,
+        Some(Pos::Letter) => 26,
+        Some(Pos::Phrase) => 27,
+        Some(Pos::Proverb) => 28,
+        Some(Pos::Idiom) => 29,
+        Some(Pos::Punctuation) => 30,
+    }
+}
+
+fn put_pos_value(out: &mut Vec<u8>, pos: &PartOfSpeech) -> Result<(), WriteError> {
+    if pos.label.trim().is_empty() {
+        return Err(WriteError::Metadata);
+    }
+    out.push(pos_tag(pos.category));
+    put_text(out, &pos.label)
+}
+
+fn put_optional(out: &mut Vec<u8>, text: Option<&str>) -> Result<(), WriteError> {
+    out.push(u8::from(text.is_some()));
+    if let Some(text) = text {
+        if text.trim().is_empty() {
+            return Err(WriteError::Metadata);
+        }
+        put_text(out, text)?;
+    }
+    Ok(())
+}
+
 fn put_texts(out: &mut Vec<u8>, texts: &[String]) -> Result<(), WriteError> {
     put_count(out, texts.len(), texts.first().map_or("", String::as_str))?;
     texts.iter().try_for_each(|text| put_text(out, text))
@@ -444,7 +619,7 @@ impl Header {
         if cursor.take(MAGIC.len())? != MAGIC {
             return Err(Damage("it does not start with the index magic"));
         }
-        if cursor.u32()? != VERSION {
+        if !matches!(cursor.u32()?, 1 | VERSION) {
             return Err(Damage("its format version is unknown"));
         }
         let count = cursor.u32()? as usize;
@@ -527,36 +702,99 @@ pub fn fits(offset: u64, len: u32, section: Section) -> bool {
 }
 
 /// The sense offsets and the translations of a word record.
-pub fn decode_word(record: &[u8]) -> Result<(Vec<u64>, Vec<String>), Damage> {
+pub fn decode_word(record: &[u8]) -> Result<(Vec<u64>, Vec<String>, Vec<EntryRecord>), Damage> {
     let mut cursor = Cursor(record);
     let mut senses = Vec::new();
     for _ in 0..cursor.u32()? {
         senses.push(cursor.u64()?);
     }
     let translations = cursor.texts()?;
+    let mut entries = Vec::new();
+    if !cursor.0.is_empty() {
+        if cursor.take(4)? != b"ENT2" {
+            return Err(Damage("a word has an unknown metadata extension"));
+        }
+        for _ in 0..cursor.u32()? {
+            let id = cursor.nonblank()?;
+            let headword = cursor.nonblank()?;
+            let part_of_speech = cursor.pos()?;
+            let mut associated = Vec::new();
+            for _ in 0..cursor.u32()? {
+                let at = cursor.u32()?;
+                if at as usize >= senses.len() {
+                    return Err(Damage("an entry refers to a missing sense"));
+                }
+                associated.push(at);
+            }
+            let mut pronunciations = Vec::new();
+            for _ in 0..cursor.u32()? {
+                let text = cursor.optional()?;
+                let notation = cursor.optional()?;
+                let labels = cursor.texts()?;
+                let raw_labels = cursor.texts()?;
+                let mut audio = Vec::new();
+                for _ in 0..cursor.u32()? {
+                    audio.push(Audio {
+                        url: cursor.nonblank()?,
+                        format: cursor.optional()?,
+                    });
+                }
+                if text.is_none() && audio.is_empty() {
+                    return Err(Damage("an empty pronunciation record"));
+                }
+                pronunciations.push(Pronunciation {
+                    text,
+                    notation,
+                    labels,
+                    raw_labels,
+                    audio,
+                });
+            }
+            entries.push(EntryRecord {
+                entry: LexicalEntry {
+                    identity: EntryIdentity {
+                        id,
+                        headword,
+                        source: String::new(),
+                    },
+                    part_of_speech,
+                    pronunciations,
+                },
+                senses: associated,
+            });
+        }
+    }
     cursor.end()?;
-    Ok((senses, translations))
+    Ok((senses, translations, entries))
 }
 
-/// A sense record from its body, the bytes after its length.
+/// A sense record from its body, including the legacy MyThes extension.
 pub fn decode_sense(body: &[u8]) -> Result<SenseRecord, Damage> {
     let mut cursor = Cursor(body);
     let definition = cursor.text()?;
     let members = cursor.texts()?;
-    let metadata = if cursor.0.is_empty() {
-        None
-    } else {
-        if cursor.take(4)? != b"META" {
-            return Err(Damage("a sense has an unknown metadata extension"));
+    let mut metadata = None;
+    let mut part_of_speech = None;
+    while !cursor.0.is_empty() {
+        match cursor.take(4)? {
+            b"META" if metadata.is_none() && part_of_speech.is_none() => {
+                let label = cursor.nonblank()?;
+                metadata = Some(
+                    SenseMetadata::from_label(&label)
+                        .ok_or(Damage("a sense metadata label is empty"))?,
+                );
+            }
+            b"POS2" if part_of_speech.is_none() => {
+                part_of_speech = Some(cursor.pos_value()?);
+            }
+            _ => return Err(Damage("a sense has an unknown metadata extension")),
         }
-        let label = cursor.text()?;
-        Some(SenseMetadata::from_label(&label).ok_or(Damage("a sense metadata label is empty"))?)
-    };
-    cursor.end()?;
+    }
     Ok(SenseRecord {
         definition,
         members,
         metadata,
+        part_of_speech,
     })
 }
 
@@ -610,6 +848,71 @@ impl<'a> Cursor<'a> {
     fn u64(&mut self) -> Result<u64, Damage> {
         let bytes = self.take(8)?;
         Ok(u64::from_le_bytes(bytes.try_into().map_err(|_| SHORT)?))
+    }
+
+    fn nonblank(&mut self) -> Result<String, Damage> {
+        let text = self.text()?;
+        if text.trim().is_empty() {
+            return Err(Damage("a metadata text is blank"));
+        }
+        Ok(text)
+    }
+
+    fn optional(&mut self) -> Result<Option<String>, Damage> {
+        match self.take(1)?[0] {
+            0 => Ok(None),
+            1 => self.nonblank().map(Some),
+            _ => Err(Damage("an optional metadata tag is unknown")),
+        }
+    }
+
+    fn pos(&mut self) -> Result<Option<PartOfSpeech>, Damage> {
+        match self.take(1)?[0] {
+            0 => Ok(None),
+            1 => self.pos_value().map(Some),
+            _ => Err(Damage("an optional grammar tag is unknown")),
+        }
+    }
+
+    fn pos_value(&mut self) -> Result<PartOfSpeech, Damage> {
+        let category = match self.take(1)?[0] {
+            0 => None,
+            1 => Some(Pos::Noun),
+            2 => Some(Pos::Verb),
+            3 => Some(Pos::Adjective),
+            4 => Some(Pos::Adverb),
+            5 => Some(Pos::Pronoun),
+            6 => Some(Pos::Determiner),
+            7 => Some(Pos::Article),
+            8 => Some(Pos::Preposition),
+            9 => Some(Pos::Postposition),
+            10 => Some(Pos::Conjunction),
+            11 => Some(Pos::Interjection),
+            12 => Some(Pos::Numeral),
+            13 => Some(Pos::Particle),
+            14 => Some(Pos::ProperNoun),
+            15 => Some(Pos::Auxiliary),
+            16 => Some(Pos::AdjectiveSatellite),
+            17 => Some(Pos::Affix),
+            18 => Some(Pos::Prefix),
+            19 => Some(Pos::Suffix),
+            20 => Some(Pos::Infix),
+            21 => Some(Pos::Circumfix),
+            22 => Some(Pos::Contraction),
+            23 => Some(Pos::Abbreviation),
+            24 => Some(Pos::Acronym),
+            25 => Some(Pos::Symbol),
+            26 => Some(Pos::Letter),
+            27 => Some(Pos::Phrase),
+            28 => Some(Pos::Proverb),
+            29 => Some(Pos::Idiom),
+            30 => Some(Pos::Punctuation),
+            _ => return Err(Damage("an unknown grammar category")),
+        };
+        Ok(PartOfSpeech {
+            category,
+            label: self.nonblank()?,
+        })
     }
 
     fn text(&mut self) -> Result<String, Damage> {
@@ -716,16 +1019,19 @@ pub(crate) mod tests {
             source: "test-1".to_owned(),
             senses: vec![
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "sloping land beside water".to_owned(),
                     members: texts(&["bank", "shore"]),
                     metadata: None,
                 },
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "a financial institution".to_owned(),
                     members: texts(&["bank", "depository", "bank"]),
                     metadata: None,
                 },
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "a proposal for a course of action".to_owned(),
                     members: texts(&["advice"]),
                     metadata: None,
@@ -733,21 +1039,25 @@ pub(crate) mod tests {
             ],
             headwords: vec![
                 Headword {
+                    entries: Vec::new(),
                     word: "Bánk".to_owned(),
                     senses: vec![],
                     translations: texts(&["Банк"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "advice".to_owned(),
                     senses: vec![2],
                     translations: vec![],
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "bank".to_owned(),
                     senses: vec![0, 1],
                     translations: texts(&["берег", "банк"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "shore".to_owned(),
                     senses: vec![0],
                     translations: vec![],
@@ -865,7 +1175,7 @@ pub(crate) mod tests {
         assert_eq!(words.len(), contents.headwords.len());
         for ((key, record), headword) in words.iter().zip(&contents.headwords) {
             assert_eq!(key, &headword.word);
-            let (offsets, translations) = decode_word(record).expect("word record");
+            let (offsets, translations, _) = decode_word(record).expect("word record");
             assert_eq!(translations, headword.translations);
             let senses: Vec<_> = offsets.iter().map(|at| sense_at(&file, *at)).collect();
             let expected: Vec<_> = headword
@@ -1186,5 +1496,85 @@ pub(crate) mod tests {
         not_text.extend_from_slice(&2u32.to_le_bytes());
         not_text.extend_from_slice(&[0xff, 0xfe]);
         assert_eq!(decode_form(&not_text), Err(Damage("a text is not UTF-8")));
+    }
+    #[test]
+    fn new_metadata_tags_utf8_counts_and_record_limits_are_strict() {
+        let mut contents = sample();
+        contents.headwords[0].entries.push(EntryRecord {
+            entry: LexicalEntry {
+                identity: EntryIdentity {
+                    source: "test-1".into(),
+                    headword: "Bánk".into(),
+                    id: "entry".into(),
+                },
+                part_of_speech: Some(PartOfSpeech {
+                    category: Some(Pos::Noun),
+                    label: "raw source grammar".into(),
+                }),
+                pronunciations: vec![Pronunciation {
+                    text: Some("sound".into()),
+                    notation: Some("IPA".into()),
+                    ..Default::default()
+                }],
+            },
+            senses: Vec::new(),
+        });
+        let file = encode(&contents).unwrap();
+        let words = table(
+            &file,
+            SectionId::WordTable,
+            SectionId::WordKeys,
+            SectionId::WordRecords,
+        );
+        let record = &words[0].1;
+        let (_, _, decoded) = decode_word(record).unwrap();
+        assert_eq!(
+            decoded[0].entry.part_of_speech,
+            contents.headwords[0].entries[0].entry.part_of_speech
+        );
+        let extension = record
+            .windows(4)
+            .position(|bytes| bytes == b"ENT2")
+            .unwrap();
+        let mut cursor = Cursor(&record[extension + 8..]);
+        cursor.text().unwrap();
+        cursor.text().unwrap();
+        let optional_pos = record.len() - cursor.0.len();
+        for (at, byte) in [
+            (extension, b'?'),
+            (extension + 12, 255),
+            (optional_pos, 2),
+            (optional_pos + 1, 255),
+        ] {
+            let mut broken = record.clone();
+            broken[at] = byte;
+            assert!(decode_word(&broken).is_err(), "invalid byte at {at}");
+        }
+        let mut broken = record.clone();
+        broken[extension + 4..extension + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_word(&broken).is_err());
+        let mut broken = record.clone();
+        broken.push(0);
+        assert!(decode_word(&broken).is_err());
+        contents.headwords[0].entries[0].entry.pronunciations[0].text =
+            Some("x".repeat(MAX_RECORD as usize));
+        assert!(matches!(encode(&contents), Err(WriteError::TooLarge(_))));
+    }
+
+    #[test]
+    fn sense_pos_and_legacy_labels_coexist_and_reject_unknown_category_tags() {
+        let mut body = Vec::new();
+        put_text(&mut body, "definition").unwrap();
+        put_texts(&mut body, &[]).unwrap();
+        body.extend_from_slice(b"META");
+        put_text(&mut body, "(v; description)").unwrap();
+        body.extend_from_slice(b"POS2");
+        let category_at = body.len();
+        put_pos_value(&mut body, &PartOfSpeech::from_label("verb").unwrap()).unwrap();
+        let sense = decode_sense(&body).unwrap();
+        assert_eq!(sense.metadata.unwrap().label(), "(v; description)");
+        assert_eq!(sense.part_of_speech.unwrap().category, Some(Pos::Verb));
+        body[category_at] = 255;
+        assert!(decode_sense(&body).is_err());
     }
 }

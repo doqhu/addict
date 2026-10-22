@@ -6,8 +6,12 @@
 //! were written for this project.
 
 /// What a dictionary says about one word.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Article {
+    /// Lexical entries, including entries that have no definition.
+    pub entries: Vec<LexicalEntry>,
+    /// Source sense grammar and lexical associations, independent of displayed senses.
+    pub sense_metadata: Vec<SourcedSense>,
     /// The senses of the word, in the order of the dictionary.
     pub senses: Vec<Sense>,
     /// Translations of the word into Russian, for the article as a whole.
@@ -17,11 +21,161 @@ pub struct Article {
 /// One sense of a word.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sense {
+    /// Grammar explicitly supplied for this sense.
+    pub part_of_speech: Option<PartOfSpeech>,
+    /// Source entries associated with this sense; absent associations stay unknown.
+    pub entries: Vec<EntryIdentity>,
     /// The definition, in the language of the dictionary it comes from:
     /// English for an English index, Spanish for a Spanish one.
     pub definition: String,
     /// Words of that language close to this sense; may be empty.
     pub synonyms: Vec<String>,
+}
+
+/// Metadata-bearing source sense before presentation projections or precedence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourcedSense {
+    pub source: String,
+    pub headword: String,
+    pub sense: Sense,
+}
+
+/// A source's POS label with a normalized category when recognized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartOfSpeech {
+    pub category: Option<Pos>,
+    pub label: String,
+}
+
+/// Shared grammar categories, independent of thesaurus label conventions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pos {
+    Noun,
+    Verb,
+    Adjective,
+    Adverb,
+    Pronoun,
+    Determiner,
+    Article,
+    Preposition,
+    Postposition,
+    Conjunction,
+    Interjection,
+    Numeral,
+    Particle,
+    ProperNoun,
+    Auxiliary,
+    AdjectiveSatellite,
+    Affix,
+    Prefix,
+    Suffix,
+    Infix,
+    Circumfix,
+    Contraction,
+    Abbreviation,
+    Acronym,
+    Symbol,
+    Letter,
+    Phrase,
+    Proverb,
+    Idiom,
+    Punctuation,
+}
+
+impl PartOfSpeech {
+    pub fn from_label(label: &str) -> Option<Self> {
+        if label.trim().is_empty() {
+            return None;
+        }
+        let category = match label.trim().to_lowercase().as_str() {
+            "n" | "noun" | "commonnoun" | "sustantivo" | "nom" | "substantiu" => Some(Pos::Noun),
+            "v" | "verb" | "verbo" | "vt" | "vi" | "transitiveverb" | "intransitiveverb" => {
+                Some(Pos::Verb)
+            }
+            "a"
+            | "adj"
+            | "adjective"
+            | "adjectiu"
+            | "adjetivo"
+            | "ordinaladjective"
+            | "possessiveadjective" => Some(Pos::Adjective),
+            "s" | "adjective satellite" | "adjective_satellite" | "adj_satellite" => {
+                Some(Pos::AdjectiveSatellite)
+            }
+            "r" | "adv" | "adverb" | "adverbi" => Some(Pos::Adverb),
+            "pron"
+            | "pronoun"
+            | "personalpronoun"
+            | "indefinitepronoun"
+            | "possessivepronoun"
+            | "demonstrativepronoun"
+            | "relativepronoun"
+            | "interrogativepronoun" => Some(Pos::Pronoun),
+            "det" | "determiner" => Some(Pos::Determiner),
+            "art" | "article" => Some(Pos::Article),
+            "prep" | "preposition" => Some(Pos::Preposition),
+            "postp" | "postposition" => Some(Pos::Postposition),
+            "conj" | "conjunction" => Some(Pos::Conjunction),
+            "intj" | "interjection" => Some(Pos::Interjection),
+            "num" | "numeral" | "number" => Some(Pos::Numeral),
+            "particle" => Some(Pos::Particle),
+            "name" | "proper noun" | "propernoun" | "proper-noun" | "propn" => {
+                Some(Pos::ProperNoun)
+            }
+            "aux" | "auxiliary" | "auxiliaryverb" => Some(Pos::Auxiliary),
+            "affix" => Some(Pos::Affix),
+            "prefix" => Some(Pos::Prefix),
+            "suffix" => Some(Pos::Suffix),
+            "infix" => Some(Pos::Infix),
+            "circumfix" => Some(Pos::Circumfix),
+            "contraction" => Some(Pos::Contraction),
+            "abbrev" | "abbreviation" => Some(Pos::Abbreviation),
+            "acronym" => Some(Pos::Acronym),
+            "symbol" => Some(Pos::Symbol),
+            "character" | "letter" => Some(Pos::Letter),
+            "phrase" | "expression" => Some(Pos::Phrase),
+            "proverb" => Some(Pos::Proverb),
+            "idiom" => Some(Pos::Idiom),
+            "punct" | "punctuation" => Some(Pos::Punctuation),
+            _ => None,
+        };
+        Some(Self {
+            category,
+            label: label.to_owned(),
+        })
+    }
+}
+
+/// Stable provenance for a lexical entry, even after headword reductions.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EntryIdentity {
+    pub source: String,
+    pub headword: String,
+    pub id: String,
+}
+
+/// A single source sound record. Independent records are never paired.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Pronunciation {
+    pub text: Option<String>,
+    pub notation: Option<String>,
+    pub labels: Vec<String>,
+    pub raw_labels: Vec<String>,
+    pub audio: Vec<Audio>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Audio {
+    pub url: String,
+    /// The source's format name, when supplied (for example mp3 or ogg).
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LexicalEntry {
+    pub identity: EntryIdentity,
+    pub part_of_speech: Option<PartOfSpeech>,
+    pub pronunciations: Vec<Pronunciation>,
 }
 
 /// A source of articles. It is shared with the thread that runs the lookups.
@@ -128,9 +282,13 @@ impl Dictionary for Sample {
         let key = word.trim().to_lowercase();
         let (_, senses, translations) = ENTRIES.iter().find(|(entry, _, _)| *entry == key)?;
         Some(Article {
+            sense_metadata: Vec::new(),
+            entries: Vec::new(),
             senses: senses
                 .iter()
                 .map(|(definition, synonyms)| Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: (*definition).to_owned(),
                     synonyms: owned(synonyms),
                 })

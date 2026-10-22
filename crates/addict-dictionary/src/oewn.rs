@@ -23,6 +23,8 @@ use std::{
     io::BufRead,
 };
 
+use addict_core::dictionary::{EntryIdentity, LexicalEntry, PartOfSpeech, Pronunciation};
+
 use quick_xml::{
     Reader,
     events::{BytesStart, Event},
@@ -30,7 +32,7 @@ use quick_xml::{
 
 pub use crate::xml::ParseError;
 use crate::{
-    format::{Contents, ExceptionForm, Headword, SenseRecord},
+    format::{Contents, EntryRecord, ExceptionForm, Headword, SenseRecord},
     xml,
 };
 
@@ -39,6 +41,8 @@ const UNKNOWN_ENTITY: &str = "an unknown entity in a definition";
 
 struct Entry {
     id: String,
+    part_of_speech: Option<PartOfSpeech>,
+    pronunciations: Vec<Pronunciation>,
     lemma: Option<String>,
     forms: Vec<String>,
     synsets: Vec<String>,
@@ -47,6 +51,7 @@ struct Entry {
 }
 
 struct Synset {
+    part_of_speech: Option<PartOfSpeech>,
     id: String,
     members: Vec<String>,
     definition: String,
@@ -56,12 +61,12 @@ struct Synset {
 #[derive(Default)]
 struct Parsed {
     /// Lemma and synset ids of each entry, in file order.
-    entries: Vec<(String, Vec<String>)>,
+    entries: Vec<(String, Vec<String>, LexicalEntry)>,
     lemma_of: HashMap<String, String>,
     /// The lemma of the entry each sense id is in.
     lemma_of_sense: HashMap<String, String>,
     /// Definition and member entry ids of each synset, in file order.
-    synsets: Vec<(String, Vec<String>)>,
+    synsets: Vec<(String, Vec<String>, Option<PartOfSpeech>)>,
     synset_at: HashMap<String, u32>,
     forms: BTreeMap<String, BTreeSet<String>>,
 }
@@ -88,7 +93,19 @@ impl Parsed {
                 .entry(sense)
                 .or_insert_with(|| lemma.clone());
         }
-        self.entries.push((lemma, entry.synsets));
+        self.entries.push((
+            lemma.clone(),
+            entry.synsets,
+            LexicalEntry {
+                identity: EntryIdentity {
+                    source: String::new(),
+                    headword: lemma,
+                    id: entry.id,
+                },
+                part_of_speech: entry.part_of_speech,
+                pronunciations: entry.pronunciations,
+            },
+        ));
         Ok(())
     }
 
@@ -101,7 +118,8 @@ impl Parsed {
                 synset.id
             )));
         }
-        self.synsets.push((synset.definition, synset.members));
+        self.synsets
+            .push((synset.definition, synset.members, synset.part_of_speech));
         Ok(())
     }
 
@@ -110,19 +128,27 @@ impl Parsed {
             return Err(malformed("no LexicalEntry element found".to_owned()));
         }
         let mut headwords: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-        for (lemma, synsets) in self.entries {
-            let senses = headwords.entry(lemma).or_default();
+        let mut metadata: BTreeMap<String, Vec<EntryRecord>> = BTreeMap::new();
+        for (lemma, synsets, mut entry) in self.entries {
+            let senses = headwords.entry(lemma.clone()).or_default();
+            let mut associated = Vec::new();
+            entry.identity.source = source.to_owned();
             for synset in synsets {
                 let at = self.synset_at.get(&synset).ok_or_else(|| {
                     malformed(format!("a sense refers to the missing synset {synset}"))
                 })?;
                 senses.push(*at);
+                associated.push(*at);
             }
+            metadata.entry(lemma).or_default().push(EntryRecord {
+                entry,
+                senses: associated,
+            });
         }
         let senses = self
             .synsets
             .into_iter()
-            .map(|(definition, member_ids)| {
+            .map(|(definition, member_ids, part_of_speech)| {
                 let mut members: Vec<String> = Vec::new();
                 for id in member_ids {
                     // A member that is neither an entry nor a sense of the
@@ -138,6 +164,7 @@ impl Parsed {
                     }
                 }
                 SenseRecord {
+                    part_of_speech,
                     definition,
                     members,
                     metadata: None,
@@ -150,6 +177,7 @@ impl Parsed {
             headwords: headwords
                 .into_iter()
                 .map(|(word, senses)| Headword {
+                    entries: metadata.remove(&word).unwrap_or_default(),
                     word,
                     senses,
                     translations: Vec::new(),
@@ -175,6 +203,8 @@ struct Open {
     synset: Option<Synset>,
     /// The text of the open Definition element.
     definition: Option<String>,
+    pronunciation: Option<Pronunciation>,
+    form_depth: Option<u32>,
     /// How many elements are open: a file cut between two entries is still
     /// cut.
     depth: u32,
@@ -185,7 +215,23 @@ impl Open {
     /// to `parsed`, a definition to its synset.
     fn end(&mut self, name: &[u8], parsed: &mut Parsed) -> Result<(), ParseError> {
         self.depth = self.depth.saturating_sub(1);
+        if self.form_depth == Some(self.depth + 1) {
+            self.form_depth = None;
+        }
         match name {
+            b"Pronunciation" => {
+                if let (Some(mut sound), Some(entry)) =
+                    (self.pronunciation.take(), self.entry.as_mut())
+                {
+                    sound.text = sound
+                        .text
+                        .filter(|text| !text.trim().is_empty())
+                        .map(|text| text.trim().to_owned());
+                    if sound.text.is_some() && !entry.pronunciations.contains(&sound) {
+                        entry.pronunciations.push(sound);
+                    }
+                }
+            }
             b"LexicalEntry" => {
                 if let Some(entry) = self.entry.take() {
                     parsed.entry(entry)?;
@@ -230,6 +276,18 @@ pub fn parse(input: impl BufRead, source: &str) -> Result<Contents, ParseError> 
                     b"Definition" if open.synset.is_some() => {
                         open.definition = Some(String::new());
                     }
+                    b"Form" => {
+                        open.form_depth = Some(open.depth);
+                        child(&element, open.entry.as_mut())?;
+                    }
+                    b"Pronunciation" if open.entry.is_some() && open.form_depth.is_none() => {
+                        open.pronunciation = Some(Pronunciation {
+                            text: Some(String::new()),
+                            notation: attribute(&element, "notation")?,
+                            labels: attribute(&element, "variety")?.into_iter().collect(),
+                            ..Default::default()
+                        });
+                    }
                     _ => child(&element, open.entry.as_mut())?,
                 }
             }
@@ -240,16 +298,38 @@ pub fn parse(input: impl BufRead, source: &str) -> Result<Contents, ParseError> 
             },
             Event::End(element) => open.end(element.local_name().as_ref(), &mut parsed)?,
             Event::Text(text) => {
+                if let Some(sound) = open.pronunciation.as_mut() {
+                    xml::push_content(
+                        sound.text.as_mut().expect("capture"),
+                        text.xml10_content(),
+                        malformed,
+                    )?;
+                }
                 if let Some(definition) = open.definition.as_mut() {
                     xml::push_content(definition, text.xml10_content(), malformed)?;
                 }
             }
             Event::CData(text) => {
+                if let Some(sound) = open.pronunciation.as_mut() {
+                    xml::push_content(
+                        sound.text.as_mut().expect("capture"),
+                        text.xml10_content(),
+                        malformed,
+                    )?;
+                }
                 if let Some(definition) = open.definition.as_mut() {
                     xml::push_content(definition, text.xml10_content(), malformed)?;
                 }
             }
             Event::GeneralRef(reference) => {
+                if let Some(sound) = open.pronunciation.as_mut() {
+                    xml::push_reference(
+                        sound.text.as_mut().expect("capture"),
+                        &reference,
+                        malformed,
+                        UNKNOWN_ENTITY,
+                    )?;
+                }
                 if let Some(definition) = open.definition.as_mut() {
                     xml::push_reference(definition, &reference, malformed, UNKNOWN_ENTITY)?;
                 }
@@ -267,6 +347,8 @@ pub fn parse(input: impl BufRead, source: &str) -> Result<Contents, ParseError> 
 fn new_entry(element: &BytesStart<'_>) -> Result<Entry, ParseError> {
     Ok(Entry {
         id: required(element, "id")?,
+        part_of_speech: None,
+        pronunciations: Vec::new(),
         lemma: None,
         forms: Vec::new(),
         synsets: Vec::new(),
@@ -276,6 +358,9 @@ fn new_entry(element: &BytesStart<'_>) -> Result<Entry, ParseError> {
 
 fn new_synset(element: &BytesStart<'_>) -> Result<Synset, ParseError> {
     Ok(Synset {
+        part_of_speech: attribute(element, "partOfSpeech")?
+            .as_deref()
+            .and_then(PartOfSpeech::from_label),
         id: required(element, "id")?,
         members: attribute(element, "members")?
             .unwrap_or_default()
@@ -302,6 +387,9 @@ fn child(element: &BytesStart<'_>, entry: Option<&mut Entry>) -> Result<(), Pars
                 )));
             }
             entry.lemma = Some(lemma);
+            entry.part_of_speech = attribute(element, "partOfSpeech")?
+                .as_deref()
+                .and_then(PartOfSpeech::from_label);
         }
         b"Form" => entry.forms.extend(attribute(element, "writtenForm")?),
         b"Sense" => {

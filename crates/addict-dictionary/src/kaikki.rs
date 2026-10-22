@@ -44,11 +44,12 @@ use std::{
     io::{self, BufRead},
 };
 
+use addict_core::dictionary::{Audio, EntryIdentity, LexicalEntry, PartOfSpeech, Pronunciation};
 use serde::Deserialize;
 
 use crate::{
     analysis::{self, Analyses, Shape},
-    format::{AnalysedForm, Contents, ExceptionForm, SenseRecord},
+    format::{self, AnalysedForm, Contents, EntryRecord, ExceptionForm, SenseRecord},
 };
 
 /// The analyses being gathered: per form, per lemma, the shapes.
@@ -102,6 +103,8 @@ struct Entry {
     synonyms: Vec<Synonym>,
     #[serde(default)]
     forms: Vec<Form>,
+    #[serde(default)]
+    sounds: Vec<Sound>,
 }
 
 #[derive(Deserialize)]
@@ -138,6 +141,72 @@ struct Form {
     tags: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct Sound {
+    #[serde(default)]
+    ipa: Option<String>,
+    #[serde(default)]
+    enpr: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    raw_tags: Vec<String>,
+    #[serde(default)]
+    mp3_url: Option<String>,
+    #[serde(default)]
+    ogg_url: Option<String>,
+}
+
+fn sound_records(sounds: &[Sound]) -> Vec<Pronunciation> {
+    let mut records = Vec::new();
+    for sound in sounds {
+        let audio: Vec<_> = [("mp3", &sound.mp3_url), ("ogg", &sound.ogg_url)]
+            .into_iter()
+            .filter_map(|(format, url)| {
+                url.as_ref()
+                    .filter(|url| !url.trim().is_empty())
+                    .map(|url| Audio {
+                        url: url.clone(),
+                        format: Some(format.to_owned()),
+                    })
+            })
+            .collect();
+        let texts: Vec<_> = [("IPA", &sound.ipa), ("enPR", &sound.enpr)]
+            .into_iter()
+            .filter_map(|(notation, text)| {
+                text.as_ref()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(|text| (notation, text))
+            })
+            .collect();
+        if texts.is_empty() && !audio.is_empty() {
+            let record = Pronunciation {
+                audio,
+                labels: sound.tags.clone(),
+                raw_labels: sound.raw_tags.clone(),
+                ..Default::default()
+            };
+            if !records.contains(&record) {
+                records.push(record);
+            }
+        } else {
+            for (notation, text) in texts {
+                let record = Pronunciation {
+                    text: Some(text.clone()),
+                    notation: Some(notation.to_owned()),
+                    labels: sound.tags.clone(),
+                    raw_labels: sound.raw_tags.clone(),
+                    audio: audio.clone(),
+                };
+                if !records.contains(&record) {
+                    records.push(record);
+                }
+            }
+        }
+    }
+    records
+}
+
 /// Whether `sense` has a gloss that is not blank.
 fn has_gloss(sense: &Sense) -> bool {
     sense.glosses.iter().any(|gloss| !gloss.trim().is_empty())
@@ -167,6 +236,7 @@ pub fn is_word(text: &str) -> bool {
 pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Contents, ParseError> {
     let mut entries = 0;
     let mut headwords: BTreeMap<String, Vec<SenseRecord>> = BTreeMap::new();
+    let mut metadata: BTreeMap<String, Vec<EntryRecord>> = BTreeMap::new();
     let mut forms: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut analyses = Gathered::new();
     for (at, line) in reader.lines().enumerate() {
@@ -190,9 +260,27 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
         if entry.pos.as_deref() == Some("verb") {
             add_analyses(&mut analyses, &word, &entry.forms);
         }
-        let senses = sense_records(&word, &entry.senses, &entry.synonyms);
-        if !senses.is_empty() {
-            headwords.entry(word).or_default().extend(senses);
+        let mut senses = sense_records(&word, &entry.senses, &entry.synonyms);
+        let part_of_speech = entry.pos.as_deref().and_then(PartOfSpeech::from_label);
+        for sense in &mut senses {
+            sense.part_of_speech = part_of_speech.clone();
+        }
+        let pronunciations = sound_records(&entry.sounds);
+        if !senses.is_empty() || part_of_speech.is_some() || !pronunciations.is_empty() {
+            let records = headwords.entry(word.clone()).or_default();
+            metadata.entry(word.clone()).or_default().push(EntryRecord {
+                entry: LexicalEntry {
+                    identity: EntryIdentity {
+                        source: source.to_owned(),
+                        headword: word.clone(),
+                        id: format!("line-{}", at + 1),
+                    },
+                    part_of_speech,
+                    pronunciations,
+                },
+                senses: (records.len() as u32..(records.len() + senses.len()) as u32).collect(),
+            });
+            records.extend(senses);
         }
     }
     if entries == 0 {
@@ -200,6 +288,7 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
     }
 
     let mut contents = Contents::of_senses(source, headwords);
+    format::attach_entries(&mut contents, metadata);
     contents.forms = forms
         .into_iter()
         .map(|(form, lemmas)| ExceptionForm { form, lemmas })
@@ -299,6 +388,7 @@ fn sense_records(word: &str, senses: &[Sense], synonyms: &[Synonym]) -> Vec<Sens
             (
                 sense.sense_index.as_deref(),
                 SenseRecord {
+                    part_of_speech: None,
                     definition,
                     members: Vec::new(),
                     metadata: None,
@@ -404,8 +494,8 @@ pub(crate) mod tests {
         let contents = parsed();
         assert_eq!(contents.source, "fixture-es");
         let words: Vec<_> = contents.headwords.iter().map(|h| h.word.as_str()).collect();
-        // No `bank` of the other language, no glossless `arromanzar`.
-        assert_eq!(words, ["banco", "bancos", "cerrar"]);
+        // No `bank` of the other language; glossless grammar is retained.
+        assert_eq!(words, ["arromanzar", "banco", "bancos", "cerrar"]);
         let banco = senses_of(&contents, "banco");
         let definitions: Vec<_> = banco.iter().map(|s| s.definition.as_str()).collect();
         assert_eq!(

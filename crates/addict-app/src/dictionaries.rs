@@ -144,6 +144,36 @@ pub enum Answer {
     Unreadable(IndexFile),
 }
 
+impl Answer {
+    /// Newly retained lexical data must not hide useful content in another language.
+    /// Legacy answers without metadata keep their existing fallback behavior.
+    fn metadata_only(&self) -> bool {
+        let text = |value: &String| !value.trim().is_empty();
+        let sense = |value: &addict_core::dictionary::Sense| {
+            text(&value.definition) || value.synonyms.iter().any(text)
+        };
+        match self {
+            Self::Article(article) => {
+                (!article.entries.is_empty() || !article.sense_metadata.is_empty())
+                    && !article.senses.iter().any(sense)
+                    && !article.translations.iter().any(text)
+            }
+            Self::Grouped(grouped) => {
+                (!grouped.entries.is_empty() || !grouped.sense_metadata.is_empty())
+                    && !grouped.definitions.iter().flatten().any(sense)
+                    && !grouped.russian.iter().flatten().any(text)
+                    && !grouped.english.iter().flatten().any(text)
+                    && !grouped
+                        .synonyms
+                        .iter()
+                        .flatten()
+                        .any(|group| text(&group.definition) || group.synonyms.iter().any(text))
+            }
+            Self::FromRussian(_) | Self::NoEntry | Self::NotImported | Self::Unreadable(_) => false,
+        }
+    }
+}
+
 /// The answer of one lookup and where the indexes stood when it was given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Looked {
@@ -188,20 +218,28 @@ pub trait Articles: Send + Sync {
     }
 
     /// What the source says about `word`, read first in the `chosen`
-    /// language, with the language that answered. The chosen language
-    /// answers whenever it gives anything but [`Answer::NoEntry`]. When it
-    /// has no entry, the other languages are asked in the order of
-    /// [`FALLBACK`], and the first that gives an article answers; one with
-    /// no index, no entry or an unreadable file is passed over. When none
-    /// has the word, the chosen language's answer is given, with where the
-    /// indexes stood at the last lookup.
+    /// language, with the language that answered. The chosen language's
+    /// errors and missing indexes retain precedence. A miss or an answer
+    /// containing only new metadata searches the other languages in
+    /// [`FALLBACK`] order for visible content. If none answers, keep the
+    /// first metadata candidate (or the chosen miss) with the latest index states.
     fn look_up_first(&self, chosen: Language, word: &str) -> (Language, Looked) {
         let mut first = self.look_up_in(chosen, word);
-        if first.answer != Answer::NoEntry {
+        let mut answered = chosen;
+        if first.answer != Answer::NoEntry && !first.answer.metadata_only() {
             return (chosen, first);
         }
         for language in FALLBACK.into_iter().filter(|other| *other != chosen) {
             let looked = self.look_up_in(language, word);
+            if looked.answer.metadata_only() {
+                if first.answer == Answer::NoEntry {
+                    first = looked;
+                    answered = language;
+                } else {
+                    first.indexes = looked.indexes;
+                }
+                continue;
+            }
             match looked.answer {
                 // A lookup in a language never gives a Russian answer.
                 Answer::Article(_) | Answer::Grouped(_) | Answer::FromRussian(_) => {
@@ -212,7 +250,7 @@ pub trait Articles: Send + Sync {
                 }
             }
         }
-        (chosen, first)
+        (answered, first)
     }
 }
 
@@ -695,11 +733,13 @@ pub mod tests {
             source: "english-1".to_owned(),
             senses: vec![
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "sloping land beside a body of water".to_owned(),
                     members: texts(&["bank", "shore"]),
                     metadata: None,
                 },
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "change location".to_owned(),
                     members: texts(&["go"]),
                     metadata: None,
@@ -707,11 +747,13 @@ pub mod tests {
             ],
             headwords: vec![
                 Headword {
+                    entries: Vec::new(),
                     word: "bank".to_owned(),
                     senses: vec![0],
                     translations: Vec::new(),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "go".to_owned(),
                     senses: vec![1],
                     translations: Vec::new(),
@@ -730,17 +772,20 @@ pub mod tests {
         Contents {
             source: "russian-1".to_owned(),
             senses: vec![SenseRecord {
+                part_of_speech: None,
                 definition: "An edge of river, lake, or other watercourse.".to_owned(),
                 members: Vec::new(),
                 metadata: None,
             }],
             headwords: vec![
                 Headword {
+                    entries: Vec::new(),
                     word: "bank".to_owned(),
                     senses: vec![0],
                     translations: texts(&["берег", "банк"]),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "go".to_owned(),
                     senses: Vec::new(),
                     translations: texts(&["идти"]),
@@ -758,16 +803,19 @@ pub mod tests {
             source: "spanish-1".to_owned(),
             senses: vec![
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "Empresa que ofrece servicios monetarios.".to_owned(),
                     members: Vec::new(),
                     metadata: None,
                 },
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "Mueble alargado para sentarse.".to_owned(),
                     members: texts(&["banca"]),
                     metadata: None,
                 },
                 SenseRecord {
+                    part_of_speech: None,
                     definition: "Una palabra inventada.".to_owned(),
                     members: Vec::new(),
                     metadata: None,
@@ -775,11 +823,13 @@ pub mod tests {
             ],
             headwords: vec![
                 Headword {
+                    entries: Vec::new(),
                     word: "banco".to_owned(),
                     senses: vec![0, 1],
                     translations: Vec::new(),
                 },
                 Headword {
+                    entries: Vec::new(),
                     word: "bank".to_owned(),
                     senses: vec![2],
                     translations: Vec::new(),
@@ -797,12 +847,18 @@ pub mod tests {
     /// no index of another kind asked.
     fn spanish_banco() -> Answer {
         Answer::Grouped(Grouped {
+            entries: Vec::new(),
+            sense_metadata: Vec::new(),
             definitions: Some(vec![
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "Empresa que ofrece servicios monetarios.".to_owned(),
                     synonyms: Vec::new(),
                 },
                 Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "Mueble alargado para sentarse.".to_owned(),
                     synonyms: texts(&["banca"]),
                 },
@@ -983,6 +1039,8 @@ pub mod tests {
 
     fn english_bank() -> Vec<Sense> {
         vec![Sense {
+            part_of_speech: None,
+            entries: Vec::new(),
             definition: "sloping land beside a body of water".to_owned(),
             synonyms: texts(&["shore"]),
         }]
@@ -990,7 +1048,11 @@ pub mod tests {
 
     fn russian_bank() -> Article {
         Article {
+            sense_metadata: Vec::new(),
+            entries: Vec::new(),
             senses: vec![Sense {
+                part_of_speech: None,
+                entries: Vec::new(),
                 definition: "An edge of river, lake, or other watercourse.".to_owned(),
                 synonyms: Vec::new(),
             }],
@@ -1020,6 +1082,8 @@ pub mod tests {
         let dictionaries = dir.dictionaries();
         assert_eq!(dictionaries.indexes(), Indexes::OPEN);
         let bank = Article {
+            sense_metadata: Vec::new(),
+            entries: Vec::new(),
             senses: english_bank(),
             translations: texts(&["берег", "банк"]),
         };
@@ -1071,6 +1135,8 @@ pub mod tests {
         assert_eq!(
             looked.answer,
             Answer::Article(Article {
+                sense_metadata: Vec::new(),
+                entries: Vec::new(),
                 senses: english_bank(),
                 translations: Vec::new(),
             })
@@ -1117,6 +1183,8 @@ pub mod tests {
         assert_eq!(
             looked.answer,
             Answer::Article(Article {
+                sense_metadata: Vec::new(),
+                entries: Vec::new(),
                 senses: english_bank(),
                 translations: Vec::new(),
             })
@@ -1128,6 +1196,8 @@ pub mod tests {
         assert_eq!(
             looked.answer,
             Answer::Article(Article {
+                sense_metadata: Vec::new(),
+                entries: Vec::new(),
                 senses: english_bank(),
                 translations: texts(&["берег", "банк"]),
             })
@@ -1271,12 +1341,14 @@ pub mod tests {
             for (definition, members) in senses {
                 numbers.push(contents.senses.len() as u32);
                 contents.senses.push(SenseRecord {
+                    part_of_speech: None,
                     definition: (*definition).to_owned(),
                     members: texts(members),
                     metadata: None,
                 });
             }
             contents.headwords.push(Headword {
+                entries: Vec::new(),
                 word: word.to_owned(),
                 senses: numbers,
                 translations: texts(translations),
@@ -1301,12 +1373,14 @@ pub mod tests {
             for (definition, members) in *senses {
                 numbers.push(contents.senses.len() as u32);
                 contents.senses.push(SenseRecord {
+                    part_of_speech: None,
                     definition: (*definition).to_owned(),
                     members: texts(members),
                     metadata: None,
                 });
             }
             contents.headwords.push(Headword {
+                entries: Vec::new(),
                 word: (*word).to_owned(),
                 senses: numbers,
                 translations: texts(translations),
@@ -1458,7 +1532,11 @@ pub mod tests {
         assert_eq!(
             looked.answer,
             Answer::Grouped(Grouped {
+                entries: Vec::new(),
+                sense_metadata: Vec::new(),
                 definitions: Some(vec![Sense {
+                    part_of_speech: None,
+                    entries: Vec::new(),
                     definition: "Conjunt d'objectes reunits.".to_owned(),
                     synonyms: Vec::new(),
                 }]),
@@ -1566,6 +1644,188 @@ pub mod tests {
         let (language, looked) = dictionaries.look_up_first(Language::En, "banc");
         assert_eq!(language, Language::Ca);
         assert_eq!(russian_of(&looked.answer), Some(texts(&["скамья"])));
+    }
+
+    /// A real Kaikki import with retained metadata and blank visible content.
+    fn metadata_only_contents(code: &str, word: &str) -> Contents {
+        let json = serde_json::json!({
+            "word": word, "lang_code": code, "pos": "noun",
+            "sounds": [{"ipa": "source sound", "mp3_url": "https://example.org/sound.mp3"}],
+            "senses": [{"glosses": ["", "  "]}]
+        })
+        .to_string();
+        addict_dictionary::kaikki::parse(json.as_bytes(), code, &format!("metadata-{code}"))
+            .unwrap()
+    }
+
+    #[test]
+    fn metadata_only_chosen_languages_allow_english_content_and_direct_metadata_lookup() {
+        let dir = DataDir::new("metadata-chosen-fallback");
+        dir.import(Source::Oewn);
+        for (source, code) in [(Source::KaikkiEs, "es"), (Source::DbnaryCa, "ca")] {
+            dir.write(source, &metadata_only_contents(code, "bank"));
+        }
+        let dictionaries = dir.dictionaries();
+        for chosen in [Language::Es, Language::Ca] {
+            let direct = dictionaries.look_up_in(chosen, "bank");
+            let Answer::Grouped(grouped) = &direct.answer else {
+                panic!("{direct:?}")
+            };
+            assert_eq!(grouped.entries.len(), 1);
+            assert_eq!(
+                grouped.entries[0].pronunciations[0].text.as_deref(),
+                Some("source sound")
+            );
+            assert_eq!(grouped.definitions, Some(Vec::new()));
+            assert!(direct.answer.metadata_only());
+            let (language, looked) = dictionaries.look_up_first(chosen, "bank");
+            assert_eq!(language, Language::En);
+            assert_eq!(looked.answer, dictionaries.look_up("bank").answer);
+            assert!(
+                matches!(&looked.answer, Answer::Article(article) if !article.senses.is_empty())
+            );
+            assert_eq!(looked.indexes, dictionaries.indexes());
+        }
+    }
+
+    #[test]
+    fn metadata_only_english_is_skipped_for_a_later_translation_only_fallback() {
+        let dir = DataDir::new("metadata-english-fallback");
+        dir.write(Source::Oewn, &metadata_only_contents("en", "bank"));
+        dir.write(Source::KaikkiEs, &metadata_only_contents("es", "bank"));
+        dir.write(
+            Source::WikdictEsRu,
+            &headwords("es-ru", &[("bank", &[], &["банк"])]),
+        );
+        dir.write(Source::DbnaryCa, &metadata_only_contents("ca", "another"));
+        let dictionaries = dir.dictionaries();
+        assert!(dictionaries.look_up("bank").answer.metadata_only());
+        for chosen in [Language::Ca, Language::En, Language::Es] {
+            let (language, looked) = dictionaries.look_up_first(chosen, "bank");
+            assert_eq!(language, Language::Es);
+            assert_eq!(russian_of(&looked.answer), Some(texts(&["банк"])));
+            assert!(!looked.answer.metadata_only());
+            assert_eq!(looked.indexes, dictionaries.indexes());
+        }
+    }
+
+    #[test]
+    fn without_visible_content_fallback_keeps_the_first_metadata_candidate_and_language() {
+        let dir = DataDir::new("metadata-no-content");
+        for (source, code) in [
+            (Source::Oewn, "en"),
+            (Source::KaikkiEs, "es"),
+            (Source::DbnaryCa, "ca"),
+        ] {
+            dir.write(source, &metadata_only_contents(code, "bank"));
+        }
+        let dictionaries = dir.dictionaries();
+        for chosen in Language::ALL {
+            let (language, looked) = dictionaries.look_up_first(chosen, "bank");
+            assert_eq!(language, chosen);
+            assert_eq!(
+                looked.answer,
+                dictionaries.look_up_in(chosen, "bank").answer
+            );
+            assert!(looked.answer.metadata_only());
+            assert_eq!(looked.indexes, dictionaries.indexes());
+        }
+        // A miss keeps the first fallback's metadata even if later lookups fail.
+        dir.write(Source::DbnaryCa, &metadata_only_contents("ca", "another"));
+        std::fs::write(dir.index(Source::KaikkiEs), b"damaged index").unwrap();
+        let dictionaries = dir.dictionaries();
+        let (language, looked) = dictionaries.look_up_first(Language::Ca, "bank");
+        assert_eq!(language, Language::En);
+        assert_eq!(looked.answer, dictionaries.look_up("bank").answer);
+        assert!(looked.answer.metadata_only());
+        assert_eq!(looked.indexes.spanish, State::Unreadable);
+        assert_eq!(looked.indexes, dictionaries.indexes());
+    }
+
+    #[test]
+    fn chosen_missing_or_unreadable_indexes_keep_precedence_with_metadata_elsewhere() {
+        let dir = DataDir::new("metadata-errors");
+        dir.write(Source::Oewn, &metadata_only_contents("en", "bank"));
+        dir.write(
+            Source::WikdictCaRu,
+            &headwords("ca-ru", &[("bank", &[], &["банк"])]),
+        );
+        let dictionaries = dir.dictionaries();
+        assert_eq!(
+            dictionaries.look_up_first(Language::Es, "bank").1.answer,
+            Answer::NotImported
+        );
+        std::fs::write(dir.index(Source::KaikkiEs), b"damaged index").unwrap();
+        let (language, looked) = dictionaries.look_up_first(Language::Es, "bank");
+        assert_eq!(language, Language::Es);
+        assert_eq!(looked.answer, Answer::Unreadable(SPANISH));
+    }
+
+    #[test]
+    fn fallback_content_detection_ignores_blank_text_and_preserves_legacy_empty_answers() {
+        use addict_core::dictionary::LexicalEntry;
+        let blank_sense = Sense {
+            part_of_speech: None,
+            entries: Vec::new(),
+            definition: "  ".to_owned(),
+            synonyms: texts(&["", "\t"]),
+        };
+        let article = Article {
+            entries: vec![LexicalEntry::default()],
+            senses: vec![blank_sense.clone()],
+            translations: texts(&["", " "]),
+            ..Default::default()
+        };
+        assert!(Answer::Article(article.clone()).metadata_only());
+        let mut useful = article.clone();
+        useful.senses[0].definition = "definition".to_owned();
+        assert!(!Answer::Article(useful).metadata_only());
+        let mut useful = article.clone();
+        useful.senses[0].synonyms.push("synonym".to_owned());
+        assert!(!Answer::Article(useful).metadata_only());
+        let mut useful = article;
+        useful.translations.push("translation".to_owned());
+        assert!(!Answer::Article(useful).metadata_only());
+        let grouped = Grouped {
+            entries: vec![LexicalEntry::default()],
+            definitions: Some(vec![blank_sense]),
+            russian: Some(texts(&["", " "])),
+            english: Some(texts(&["", "\n"])),
+            synonyms: Some(vec![addict_dictionary::index::SynonymGroup {
+                headword: "word".to_owned(),
+                definition: " ".to_owned(),
+                metadata: None,
+                synonyms: texts(&["", " "]),
+            }]),
+            ..Default::default()
+        };
+        assert!(Answer::Grouped(grouped.clone()).metadata_only());
+        for kind in [
+            Kind::Definitions,
+            Kind::Russian,
+            Kind::Synonyms,
+            Kind::English,
+        ] {
+            let mut useful = grouped.clone();
+            match kind {
+                Kind::Definitions => {
+                    useful.definitions.as_mut().unwrap()[0].definition = "definition".to_owned()
+                }
+                Kind::Russian => useful
+                    .russian
+                    .as_mut()
+                    .unwrap()
+                    .push("translation".to_owned()),
+                Kind::Synonyms => useful.synonyms.as_mut().unwrap()[0]
+                    .synonyms
+                    .push("synonym".to_owned()),
+                Kind::English => useful.english.as_mut().unwrap().push("gloss".to_owned()),
+                Kind::FromRussian => unreachable!("not a reading-language content kind"),
+            }
+            assert!(!Answer::Grouped(useful).metadata_only(), "{kind:?}");
+        }
+        assert!(!Answer::Article(Article::default()).metadata_only());
+        assert!(!Answer::Grouped(Grouped::default()).metadata_only());
     }
 
     #[test]
@@ -1781,5 +2041,162 @@ pub mod tests {
         );
         assert_eq!(Sampled.look_up("sat").answer, Answer::NoEntry);
         assert_eq!(Sampled.indexes(), Indexes::OPEN);
+    }
+    #[test]
+    fn english_source_sense_associations_survive_answer_lookup_and_shown() {
+        use crate::{
+            manual::result_in,
+            view::{Lookup, Shown},
+        };
+        use addict_core::dictionary::Pos;
+        use addict_platform::work::Outcome;
+
+        let freedict = addict_dictionary::freedict::parse(
+            br#"<TEI><entry>
+            <form><orth>bank</orth><pron notation="IPA">bank transcription</pron></form>
+            <sense><gramGrp><pos>noun</pos></gramGrp><sense><def>FreeDict noun</def></sense>
+            <sense><gramGrp><pos>verb</pos></gramGrp><def>FreeDict verb</def></sense>
+            </sense></entry></TEI>"#
+                .as_slice(),
+            "freedict-source",
+        )
+        .unwrap();
+        let wordnet = addict_dictionary::oewn::parse(
+            br#"<LexicalResource><Lexicon>
+            <LexicalEntry id="wordnet-bank-n"><Lemma writtenForm="bank" partOfSpeech="n"/>
+            <Sense id="bank-sense" synset="bank-synset"/></LexicalEntry>
+            <Synset id="bank-synset" members="wordnet-bank-n" partOfSpeech="n">
+            <Definition>WordNet noun</Definition></Synset></Lexicon></LexicalResource>"#
+                .as_slice(),
+            "wordnet-source",
+        )
+        .unwrap();
+        for legacy in [false, true] {
+            let dir = DataDir::new("source-sense-transport");
+            dir.write(Source::Freedict, &freedict);
+            let mut definitions = wordnet.clone();
+            if legacy {
+                definitions
+                    .headwords
+                    .iter_mut()
+                    .for_each(|word| word.entries.clear());
+                definitions
+                    .senses
+                    .iter_mut()
+                    .for_each(|sense| sense.part_of_speech = None);
+            }
+            let mut bytes = encode(&definitions).unwrap();
+            if legacy {
+                bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+            }
+            std::fs::write(dir.index(Source::Oewn), bytes).unwrap();
+            let dictionaries = dir.dictionaries();
+            for word in ["bank", "Banks"] {
+                let looked = dictionaries.look_up_in(Language::En, word);
+                let Answer::Article(article) = &looked.answer else {
+                    panic!("{looked:?}")
+                };
+                assert_eq!(article.senses.len(), 1);
+                assert_eq!(article.senses[0].definition, "WordNet noun");
+                let metadata: Vec<_> = article
+                    .sense_metadata
+                    .iter()
+                    .filter(|sense| sense.source == "freedict-source")
+                    .collect();
+                assert_eq!(metadata.len(), 2);
+                let entry = article
+                    .entries
+                    .iter()
+                    .find(|entry| entry.identity.source == "freedict-source")
+                    .unwrap();
+                assert_eq!(entry.identity.id, "entry-1");
+                assert_eq!(entry.identity.headword, "bank");
+                assert_eq!(
+                    entry.pronunciations[0].text.as_deref(),
+                    Some("bank transcription")
+                );
+                for (record, pos) in metadata.iter().zip([Pos::Noun, Pos::Verb]) {
+                    assert_eq!(record.headword, "bank");
+                    assert_eq!(
+                        record.sense.part_of_speech.as_ref().unwrap().category,
+                        Some(pos)
+                    );
+                    assert!(record.sense.entries.contains(&entry.identity));
+                    assert!(record.sense.entries.iter().all(|identity| {
+                        article
+                            .entries
+                            .iter()
+                            .any(|entry| &entry.identity == identity)
+                    }));
+                }
+                let expected = article.clone();
+                let lookup = result_in(Outcome::Finished(looked), word, Language::En).unwrap();
+                assert_eq!(lookup, Lookup::Article(expected));
+                let mut shown = Shown::default();
+                shown.show(Some(lookup.clone()));
+                assert_eq!(shown.lookup(), Some(&lookup));
+            }
+        }
+    }
+
+    #[test]
+    fn grammar_pronunciation_and_audio_survive_application_answers_and_lookup_transport() {
+        use crate::{
+            manual::result_in,
+            view::{Lookup, Shown},
+        };
+        use addict_core::dictionary::Pos;
+        use addict_platform::work::Outcome;
+        for (source, language, code, word) in [
+            (Source::Oewn, Language::En, "en", "bank"),
+            (Source::KaikkiEs, Language::Es, "es", "banco"),
+            (Source::DbnaryCa, Language::Ca, "ca", "banc"),
+        ] {
+            let dir = DataDir::new("metadata-transport");
+            let json = r#"{"word":"WORD","lang_code":"LANG","pos":"noun","sounds":[{"ipa":"source transcription","tags":["source region"],"mp3_url":"https://example.org/sound.mp3"}],"senses":[{"glosses":["source definition"]}]}"#.replace("WORD", word).replace("LANG", code);
+            let contents =
+                addict_dictionary::kaikki::parse(json.as_bytes(), code, "metadata-source").unwrap();
+            dir.write(source, &contents);
+            let looked = dir.dictionaries().look_up_in(language, word);
+            let lookup = result_in(Outcome::Finished(looked), word, language).unwrap();
+            let entries = match &lookup {
+                Lookup::Article(article) => {
+                    assert_eq!(language, Language::En);
+                    assert_eq!(
+                        article.senses[0].part_of_speech.as_ref().unwrap().category,
+                        Some(Pos::Noun)
+                    );
+                    assert_eq!(article.senses[0].entries[0], article.entries[0].identity);
+                    &article.entries
+                }
+                Lookup::Grouped {
+                    language: actual,
+                    grouped,
+                } => {
+                    assert_eq!(*actual, language);
+                    assert_eq!(
+                        grouped.definitions.as_ref().unwrap()[0]
+                            .part_of_speech
+                            .as_ref()
+                            .unwrap()
+                            .category,
+                        Some(Pos::Noun)
+                    );
+                    &grouped.entries
+                }
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(entries[0].identity.source, "metadata-source");
+            assert_eq!(entries[0].identity.headword, word);
+            assert_eq!(entries[0].part_of_speech.as_ref().unwrap().label, "noun");
+            let sound = &entries[0].pronunciations[0];
+            assert_eq!(sound.text.as_deref(), Some("source transcription"));
+            assert_eq!(sound.notation.as_deref(), Some("IPA"));
+            assert_eq!(sound.labels, ["source region"]);
+            assert_eq!(sound.audio[0].url, "https://example.org/sound.mp3");
+            let mut shown = Shown::default();
+            shown.show(Some(lookup.clone()));
+            assert_eq!(shown.lookup(), Some(&lookup));
+        }
     }
 }

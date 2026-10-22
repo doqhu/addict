@@ -728,7 +728,11 @@ pub(crate) mod tests {
 
     fn banco() -> addict_dictionary::lookup::Grouped {
         addict_dictionary::lookup::Grouped {
+            entries: Vec::new(),
+            sense_metadata: Vec::new(),
             definitions: Some(vec![addict_core::dictionary::Sense {
+                part_of_speech: None,
+                entries: Vec::new(),
                 definition: "Mueble alargado para sentarse.".to_owned(),
                 synonyms: vec!["banca".to_owned()],
             }]),
@@ -1064,6 +1068,8 @@ pub(crate) mod tests {
         // English is the result it always was.
         for outcome in [
             finished(Answer::Article(addict_core::dictionary::Article {
+                sense_metadata: Vec::new(),
+                entries: Vec::new(),
                 senses: Vec::new(),
                 translations: vec!["банк".to_owned()],
             })),

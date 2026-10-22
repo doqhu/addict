@@ -71,6 +71,7 @@ pub fn parse(bytes: &[u8], source: &str) -> Result<Contents, ParseError> {
         .into_iter()
         .filter(|(_, translations)| !translations.is_empty())
         .map(|(word, translations)| Headword {
+            entries: Vec::new(),
             word,
             senses: Vec::new(),
             translations,
@@ -118,25 +119,28 @@ pub fn unstressed_word(word: &str) -> String {
 /// its order. The headwords stay in byte order, each once. Nothing else of
 /// the contents changes; a file of other headwords is not given here.
 pub fn unstressed(contents: Contents) -> Contents {
-    let mut merged: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for headword in contents.headwords {
-        let translations = merged.entry(unstressed_word(&headword.word)).or_default();
-        for translation in headword.translations {
-            if !translations.contains(&translation) {
-                translations.push(translation);
+    let mut merged: BTreeMap<String, Headword> = BTreeMap::new();
+    for mut headword in contents.headwords {
+        let key = unstressed_word(&headword.word);
+        if key.is_empty() {
+            continue;
+        }
+        // Preserve the original written headword in entry identities.
+        for entry in &mut headword.entries {
+            if entry.entry.identity.headword.is_empty() {
+                entry.entry.identity.headword = headword.word.clone();
             }
         }
+        let collected = merged.entry(key.clone()).or_insert_with(|| Headword {
+            word: key,
+            ..Default::default()
+        });
+        crate::combined::append_unique(&mut collected.translations, headword.translations);
+        crate::combined::append_unique(&mut collected.senses, headword.senses);
+        crate::combined::append_unique(&mut collected.entries, headword.entries);
     }
     Contents {
-        headwords: merged
-            .into_iter()
-            .filter(|(word, _)| !word.is_empty())
-            .map(|(word, translations)| Headword {
-                word,
-                senses: Vec::new(),
-                translations,
-            })
-            .collect(),
+        headwords: merged.into_values().collect(),
         ..contents
     }
 }
@@ -324,6 +328,7 @@ pub(crate) mod tests {
 
     fn headword(word: &str, translations: &[&str]) -> Headword {
         Headword {
+            entries: Vec::new(),
             word: word.to_owned(),
             senses: Vec::new(),
             translations: texts(translations),
@@ -376,5 +381,36 @@ pub(crate) mod tests {
         assert_eq!(unstressed_word("кни\u{0301}га"), "книга");
         assert_eq!(unstressed_word("bank"), "bank");
         assert_eq!(unstressed_word("\u{0400}\u{0450}\u{040D}\u{045D}"), "ЕеИи");
+    }
+    #[test]
+    fn removing_stress_preserves_senses_entries_and_original_headword_provenance() {
+        let json = r#"{"word":"ба́нк","lang_code":"ru","pos":"noun","sounds":[{"ipa":"stressed"}],"senses":[{"glosses":["one"]}]}
+{"word":"банк","lang_code":"ru","pos":"verb","sounds":[{"ipa":"plain"}],"senses":[{"glosses":["two"]}]}"#;
+        let contents = crate::kaikki::parse(json.as_bytes(), "ru", "provenance").unwrap();
+        let merged = unstressed(contents);
+        assert_eq!(merged.headwords.len(), 1);
+        assert_eq!(merged.headwords[0].word, "банк");
+        assert_eq!(merged.headwords[0].senses.len(), 2);
+        assert_eq!(merged.headwords[0].entries.len(), 2);
+        assert_eq!(
+            merged.headwords[0].entries[0].entry.identity.headword,
+            "ба́нк"
+        );
+        assert_eq!(
+            merged.headwords[0].entries[1].entry.identity.headword,
+            "банк"
+        );
+        let bytes = format::encode(&merged).unwrap();
+        let dir = crate::testdir::TempDir::new("unstressed-metadata");
+        let path = dir.path().join("word.index");
+        std::fs::write(&path, bytes).unwrap();
+        let article = crate::Index::open(&path)
+            .unwrap()
+            .find("банк")
+            .unwrap()
+            .unwrap();
+        assert_eq!(article.entries.len(), 2);
+        assert_eq!(article.senses[0].entries[0].headword, "ба́нк");
+        assert_eq!(article.senses[1].entries[0].headword, "банк");
     }
 }
