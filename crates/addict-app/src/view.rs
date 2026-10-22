@@ -25,7 +25,7 @@
 use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 
 use addict_core::{
-    dictionary::{Article, Sense},
+    dictionary::{Article, LexicalEntry, PartOfSpeech, Pos, Pronunciation, Sense},
     input::{Source, WindowState},
     translation::{Refusal, Request, Source as Language},
 };
@@ -974,6 +974,9 @@ pub struct Explained<'a> {
 pub struct SenseText<'a> {
     /// Its number in the list, from 1.
     pub number: usize,
+    /// Its part of speech, as [`pos_label`] names it: its own, or the one
+    /// its entries agree on; `None` when neither is known.
+    pub pos: Option<&'a str>,
     /// Its definition as the dictionary gives it.
     pub definition: &'a str,
     /// What is said about it when it is the chosen one.
@@ -1010,6 +1013,173 @@ pub struct ResultTexts<'a> {
     pub glosses: Option<Listed<'a>>,
     /// The chosen English gloss, when one of [`ResultTexts::glosses`] is.
     pub gloss: Option<ChosenGloss<'a>>,
+    /// For an article, the pronunciations of its entries in source order,
+    /// each once; the window shows [`PRONUNCIATION_PREVIEW`] of them and the
+    /// rest behind [`SHOW_MORE`].
+    pub pronunciations: Vec<PronunciationText<'a>>,
+}
+
+/// How many pronunciations the card shows before [`SHOW_MORE`].
+pub(crate) const PRONUNCIATION_PREVIEW: usize = 3;
+
+/// The tooltip of the toggle that shows the pronunciations past
+/// [`PRONUNCIATION_PREVIEW`].
+pub(crate) const MORE_PRONUNCIATIONS: &str = "Pronunciations of the word";
+
+/// What the play button of a pronunciation says when hovered.
+pub(crate) const PLAY_TOOLTIP: &str = "Play the pronunciation";
+
+/// The tooltip of a play button whose playback failed. It names no cause:
+/// the media backend's message may be translated.
+pub(crate) const PLAYBACK_FAILED: &str = "Playback failed.";
+
+/// One pronunciation of an article: plain texts, never markup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PronunciationText<'a> {
+    /// The headword of the entry it belongs to; see
+    /// [`PronunciationText::prefix`].
+    pub headword: &'a str,
+    /// The transcription; `None` for a record that has a recording only.
+    pub transcription: Option<&'a str>,
+    /// What stands beside it: the source's labels, such as a region, and
+    /// the notation when it is not IPA.
+    pub labels: Vec<&'a str>,
+    /// The recording to play: an ogg one when the record has one, else its
+    /// first; `None` when it has none.
+    pub audio: Option<&'a str>,
+}
+
+impl<'a> PronunciationText<'a> {
+    /// What stands before the pronunciation when the window shows `word`:
+    /// the headword of its entry when it is another word, as the lemma of
+    /// a verb form is.
+    pub fn prefix(&self, word: &str) -> Option<&'a str> {
+        let word = word.trim();
+        (!word.is_empty()
+            && !self.headword.trim().is_empty()
+            && self.headword.trim().to_lowercase() != word.to_lowercase())
+        .then_some(self.headword)
+    }
+}
+
+/// The pronunciations of `entries`, in their order, a record with the same
+/// headword, transcription, notation and labels as one before it skipped (a
+/// record without a transcription also needs the same recordings); a skipped
+/// record lends its recording to the kept one when that has none.
+fn pronunciation_texts(entries: &[LexicalEntry]) -> Vec<PronunciationText<'_>> {
+    let mut kept: Vec<(&Pronunciation, PronunciationText<'_>)> = Vec::new();
+    for entry in entries {
+        for record in &entry.pronunciations {
+            let audio = record
+                .audio
+                .iter()
+                .find(|audio| {
+                    audio
+                        .format
+                        .as_deref()
+                        .is_some_and(|format| format.eq_ignore_ascii_case("ogg"))
+                        || audio.url.to_lowercase().ends_with(".ogg")
+                })
+                .or(record.audio.first())
+                .map(|audio| audio.url.as_str());
+            let transcription = record
+                .text
+                .as_deref()
+                .filter(|text| !text.trim().is_empty());
+            if transcription.is_none() && audio.is_none() {
+                continue;
+            }
+            let headword = entry.identity.headword.as_str();
+            if let Some((_, earlier)) = kept.iter_mut().find(|(earlier, text)| {
+                text.headword == headword
+                    && earlier.text == record.text
+                    && earlier.notation == record.notation
+                    && earlier.labels == record.labels
+                    // Each recording without a transcription keeps its row.
+                    && (transcription.is_some() || earlier.audio == record.audio)
+            }) {
+                earlier.audio = earlier.audio.or(audio);
+                continue;
+            }
+            let mut labels: Vec<&str> = record
+                .labels
+                .iter()
+                .map(String::as_str)
+                .filter(|label| !label.trim().is_empty())
+                .collect();
+            if let Some(notation) = record.notation.as_deref().filter(|notation| {
+                transcription.is_some()
+                    && !notation.trim().is_empty()
+                    && !notation.trim().eq_ignore_ascii_case("IPA")
+            }) {
+                labels.push(notation);
+            }
+            kept.push((
+                record,
+                PronunciationText {
+                    headword: &entry.identity.headword,
+                    transcription,
+                    labels,
+                    audio,
+                },
+            ));
+        }
+    }
+    kept.into_iter().map(|(_, text)| text).collect()
+}
+
+/// The name of the part of speech `pos`: a fixed English one for a known
+/// category, the source's label as written for another.
+pub fn pos_label(pos: &PartOfSpeech) -> &str {
+    let Some(category) = pos.category else {
+        return &pos.label;
+    };
+    match category {
+        Pos::Noun => "noun",
+        Pos::Verb => "verb",
+        Pos::Adjective | Pos::AdjectiveSatellite => "adjective",
+        Pos::Adverb => "adverb",
+        Pos::Pronoun => "pronoun",
+        Pos::Determiner => "determiner",
+        Pos::Article => "article",
+        Pos::Preposition => "preposition",
+        Pos::Postposition => "postposition",
+        Pos::Conjunction => "conjunction",
+        Pos::Interjection => "interjection",
+        Pos::Numeral => "numeral",
+        Pos::Particle => "particle",
+        Pos::ProperNoun => "proper noun",
+        Pos::Auxiliary => "auxiliary verb",
+        Pos::Affix => "affix",
+        Pos::Prefix => "prefix",
+        Pos::Suffix => "suffix",
+        Pos::Infix => "infix",
+        Pos::Circumfix => "circumfix",
+        Pos::Contraction => "contraction",
+        Pos::Abbreviation => "abbreviation",
+        Pos::Acronym => "acronym",
+        Pos::Symbol => "symbol",
+        Pos::Letter => "letter",
+        Pos::Phrase => "phrase",
+        Pos::Proverb => "proverb",
+        Pos::Idiom => "idiom",
+        Pos::Punctuation => "punctuation",
+    }
+}
+
+/// The part of speech of `sense`: its own or, without one, the one its
+/// entries among `entries` agree on; `None` when they disagree or say
+/// nothing.
+fn sense_pos<'a>(sense: &'a Sense, entries: &'a [LexicalEntry]) -> Option<&'a str> {
+    if let Some(pos) = &sense.part_of_speech {
+        return Some(pos_label(pos));
+    }
+    let mut labels = entries
+        .iter()
+        .filter(|entry| sense.entries.contains(&entry.identity))
+        .filter_map(|entry| entry.part_of_speech.as_ref().map(pos_label));
+    let first = labels.next()?;
+    labels.all(|label| label == first).then_some(first)
 }
 
 /// The English gloss chosen in an article of a language beside English.
@@ -1107,6 +1277,7 @@ fn lookup_texts<'a>(
         word_synonyms: None,
         glosses: None,
         gloss: None,
+        pronunciations: Vec::new(),
     };
     match lookup {
         Lookup::Pending => line(Cow::Borrowed(PENDING)),
@@ -1154,7 +1325,13 @@ fn article_texts<'a>(
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
 ) -> ResultTexts<'a> {
-    let (hint, senses) = sense_texts(&article.senses, chosen, definition, key_file);
+    let (hint, senses) = sense_texts(
+        &article.senses,
+        &article.entries,
+        chosen,
+        definition,
+        key_file,
+    );
     ResultTexts {
         line: None,
         analysis: Analysis::default(),
@@ -1170,6 +1347,7 @@ fn article_texts<'a>(
         word_synonyms: None,
         glosses: None,
         gloss: None,
+        pronunciations: pronunciation_texts(&article.entries),
     }
 }
 
@@ -1189,7 +1367,7 @@ fn grouped_texts<'a>(
         Some(Choice::Sense(index)) => Some(index),
         Some(Choice::Gloss(_)) | None => None,
     };
-    let (hint, rows) = sense_texts(senses, chosen, definition, key_file);
+    let (hint, rows) = sense_texts(senses, &grouped.entries, chosen, definition, key_file);
     let hint = match &grouped.definitions {
         None => Some(missing_definitions(language)),
         Some(senses) if senses.is_empty() => Some(no_definitions(language)),
@@ -1242,13 +1420,16 @@ fn grouped_texts<'a>(
         word_synonyms,
         glosses: Some(glosses),
         gloss,
+        pronunciations: pronunciation_texts(&grouped.entries),
     }
 }
 
 /// The rows of `senses` with the sense `chosen` explained, and the hint that
-/// stands above them while none is chosen; no hint for an empty list.
+/// stands above them while none is chosen; no hint for an empty list. A
+/// sense's part of speech comes from `entries` when it has none of its own.
 fn sense_texts<'a>(
     senses: &'a [Sense],
+    entries: &'a [LexicalEntry],
     chosen: Option<usize>,
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
@@ -1260,6 +1441,7 @@ fn sense_texts<'a>(
         .enumerate()
         .map(|(index, sense)| SenseText {
             number: index + 1,
+            pos: sense_pos(sense, entries),
             definition: &sense.definition,
             explained: (chosen == Some(index)).then(|| Explained {
                 mark: EXPLANATION_MARK,
@@ -1452,6 +1634,9 @@ pub struct Shown {
     choice: Option<Choice>,
     definition: Option<(u64, Online)>,
     next_definition: u64,
+    /// Counts the results shown, so the window knows a new one from the
+    /// same one shown again.
+    generation: u64,
 }
 
 impl Shown {
@@ -1459,6 +1644,7 @@ impl Shown {
     /// one before is forgotten.
     pub fn show(&mut self, lookup: Option<Lookup>) {
         self.lookup = lookup;
+        self.generation = self.generation.wrapping_add(1);
         self.elsewhere = None;
         self.choice = None;
         self.definition = None;
@@ -1590,6 +1776,12 @@ impl Shown {
     /// stands; `None` until it is asked for.
     pub fn definition(&self) -> Option<&Online> {
         self.definition.as_ref().map(|(_, online)| online)
+    }
+
+    /// A number that changes each time another result, or none, is shown,
+    /// and not when a sense or gloss is chosen in it.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The shown result.
@@ -4230,5 +4422,314 @@ mod tests {
             "The copied text is too long (54828 characters; the limit is 1000). \
              Copy one sentence, or type it."
         );
+    }
+
+    mod metadata {
+        use addict_core::{
+            dictionary::{
+                Article, Audio, EntryIdentity, LexicalEntry, PartOfSpeech, Pronunciation, Sense,
+            },
+            translation::Source as Language,
+        };
+        use addict_dictionary::lookup::Grouped;
+
+        use super::super::{Lookup, PronunciationText, pos_label, result_texts};
+
+        fn identity(headword: &str, id: &str) -> EntryIdentity {
+            EntryIdentity {
+                source: "test".to_owned(),
+                headword: headword.to_owned(),
+                id: id.to_owned(),
+            }
+        }
+
+        fn ipa(text: &str, labels: &[&str]) -> Pronunciation {
+            Pronunciation {
+                text: Some(text.to_owned()),
+                notation: Some("IPA".to_owned()),
+                labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+                ..Pronunciation::default()
+            }
+        }
+
+        fn audio(url: &str, format: &str) -> Audio {
+            Audio {
+                url: url.to_owned(),
+                format: Some(format.to_owned()),
+            }
+        }
+
+        fn sense(pos: Option<&str>, entries: &[EntryIdentity], definition: &str) -> Sense {
+            Sense {
+                part_of_speech: pos.and_then(PartOfSpeech::from_label),
+                entries: entries.to_vec(),
+                definition: definition.to_owned(),
+                synonyms: Vec::new(),
+            }
+        }
+
+        fn entry(
+            identity: EntryIdentity,
+            pos: Option<&str>,
+            pronunciations: Vec<Pronunciation>,
+        ) -> LexicalEntry {
+            LexicalEntry {
+                identity,
+                part_of_speech: pos.and_then(PartOfSpeech::from_label),
+                pronunciations,
+            }
+        }
+
+        /// `lead` as OEWN gives it: a noun and a verb entry, each with US
+        /// and GB IPA, the GB one shared, and no recording.
+        fn lead() -> Lookup {
+            let (noun, verb) = (identity("lead", "n"), identity("lead", "v"));
+            Lookup::Article(Article {
+                entries: vec![
+                    entry(
+                        noun.clone(),
+                        Some("n"),
+                        vec![ipa("lɛd", &["US"]), ipa("lɛd", &["GB"])],
+                    ),
+                    entry(
+                        verb.clone(),
+                        Some("v"),
+                        vec![ipa("liːd", &["US"]), ipa("lɛd", &["GB"])],
+                    ),
+                ],
+                sense_metadata: Vec::new(),
+                senses: vec![
+                    sense(Some("n"), &[noun], "a soft heavy metal"),
+                    sense(None, &[verb], "take somebody somewhere"),
+                ],
+                translations: Vec::new(),
+            })
+        }
+
+        fn grouped(entries: Vec<LexicalEntry>, senses: Vec<Sense>) -> Lookup {
+            Lookup::Grouped {
+                language: Language::Es,
+                grouped: Grouped {
+                    entries,
+                    definitions: Some(senses),
+                    ..Grouped::default()
+                },
+            }
+        }
+
+        #[test]
+        fn every_sense_of_an_english_word_has_its_part_of_speech() {
+            let lookup = lead();
+            let texts = result_texts(&lookup, None, None, None);
+            let pos: Vec<_> = texts.senses.iter().map(|sense| sense.pos).collect();
+            assert_eq!(pos, [Some("noun"), Some("verb")]);
+            assert_eq!(
+                texts.pronunciations,
+                [
+                    PronunciationText {
+                        headword: "lead",
+                        transcription: Some("lɛd"),
+                        labels: vec!["US"],
+                        audio: None,
+                    },
+                    PronunciationText {
+                        headword: "lead",
+                        transcription: Some("lɛd"),
+                        labels: vec!["GB"],
+                        audio: None,
+                    },
+                    PronunciationText {
+                        headword: "lead",
+                        transcription: Some("liːd"),
+                        labels: vec!["US"],
+                        audio: None,
+                    },
+                ]
+            );
+            assert_eq!(texts.pronunciations[0].prefix("Lead"), None);
+        }
+
+        #[test]
+        fn a_sense_takes_the_part_of_speech_its_entries_agree_on() {
+            let (a, b) = (identity("x", "a"), identity("x", "b"));
+            let lookup = grouped(
+                vec![
+                    entry(a.clone(), Some("noun"), Vec::new()),
+                    entry(b.clone(), Some("verb"), Vec::new()),
+                    entry(identity("x", "c"), Some("n"), Vec::new()),
+                ],
+                vec![
+                    sense(None, std::slice::from_ref(&a), "one"),
+                    sense(None, &[a.clone(), b], "two"),
+                    sense(None, &[a, identity("x", "c")], "three"),
+                    sense(None, &[], "four"),
+                ],
+            );
+            let texts = result_texts(&lookup, None, None, None);
+            let pos: Vec<_> = texts.senses.iter().map(|sense| sense.pos).collect();
+            assert_eq!(pos, [Some("noun"), None, Some("noun"), None]);
+        }
+
+        #[test]
+        fn a_recording_is_played_ogg_first_and_a_record_may_have_no_text() {
+            let gracias = identity("gracias", "1");
+            let lookup = grouped(
+                vec![entry(
+                    gracias.clone(),
+                    Some("intj"),
+                    vec![
+                        Pronunciation {
+                            audio: vec![
+                                audio("https://example.org/Gracias.mp3", "mp3"),
+                                audio("https://example.org/Gracias.ogg", "ogg"),
+                            ],
+                            ..ipa("/ˈɡɾa.θjas/", &["Spain"])
+                        },
+                        Pronunciation {
+                            labels: vec!["Mexico".to_owned()],
+                            audio: vec![audio("https://example.org/Gracias-mx.mp3", "mp3")],
+                            ..Pronunciation::default()
+                        },
+                    ],
+                )],
+                vec![sense(None, &[gracias], "agradecimiento")],
+            );
+            let texts = result_texts(&lookup, None, None, None);
+            assert_eq!(texts.senses[0].pos, Some("interjection"));
+            assert_eq!(
+                texts.pronunciations,
+                [
+                    PronunciationText {
+                        headword: "gracias",
+                        transcription: Some("/ˈɡɾa.θjas/"),
+                        labels: vec!["Spain"],
+                        audio: Some("https://example.org/Gracias.ogg"),
+                    },
+                    PronunciationText {
+                        headword: "gracias",
+                        transcription: None,
+                        labels: vec!["Mexico"],
+                        audio: Some("https://example.org/Gracias-mx.mp3"),
+                    },
+                ]
+            );
+        }
+
+        #[test]
+        fn the_pronunciation_of_a_verb_form_names_its_lemma() {
+            let hablar = identity("hablar", "1");
+            let lookup = grouped(
+                vec![entry(
+                    hablar.clone(),
+                    Some("verb"),
+                    vec![ipa("/aˈblaɾ/", &[])],
+                )],
+                vec![sense(None, &[hablar], "expresarse con palabras")],
+            );
+            let texts = result_texts(&lookup, None, None, None);
+            assert_eq!(texts.pronunciations[0].prefix("hablo"), Some("hablar"));
+            assert_eq!(texts.pronunciations[0].prefix(" Hablar "), None);
+            assert!(texts.pronunciations[0].labels.is_empty());
+        }
+
+        #[test]
+        fn an_article_without_metadata_is_as_before() {
+            let lookup = Lookup::Article(super::article());
+            let texts = result_texts(&lookup, None, None, None);
+            assert!(texts.pronunciations.is_empty());
+            assert!(texts.senses.iter().all(|sense| sense.pos.is_none()));
+            assert!(
+                result_texts(&super::spanish(), None, None, None)
+                    .pronunciations
+                    .is_empty()
+            );
+        }
+
+        #[test]
+        fn every_variant_is_kept_in_source_order_and_dropped_once_repeated() {
+            let parlament = identity("parlament", "1");
+            let variants: Vec<_> = (1..=10).map(|n| ipa(&format!("v{n}"), &[])).collect();
+            let mut repeated = variants.clone();
+            repeated.push(ipa("v3", &[]));
+            repeated.push(Pronunciation {
+                notation: Some("enPR".to_owned()),
+                ..ipa("v3", &[])
+            });
+            let lookup = grouped(
+                vec![entry(parlament.clone(), Some("nom"), repeated)],
+                vec![sense(None, &[parlament], "assemblea")],
+            );
+            let texts = result_texts(&lookup, None, None, None);
+            let shown: Vec<_> = texts
+                .pronunciations
+                .iter()
+                .map(|text| (text.transcription.unwrap(), text.labels.clone()))
+                .collect();
+            let mut expected: Vec<_> = (1..=10)
+                .map(|n| (format!("v{n}"), Vec::<&str>::new()))
+                .collect();
+            expected.push(("v3".to_owned(), vec!["enPR"]));
+            assert_eq!(
+                shown,
+                expected
+                    .iter()
+                    .map(|(text, labels)| (text.as_str(), labels.clone()))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn distinct_recordings_and_headwords_keep_their_rows() {
+            let (parlar, parla) = (identity("parlar", "1"), identity("parla", "2"));
+            let recording = |url: &str| Pronunciation {
+                audio: vec![audio(url, "ogg")],
+                ..Pronunciation::default()
+            };
+            let lookup = grouped(
+                vec![
+                    entry(
+                        parlar.clone(),
+                        None,
+                        vec![
+                            recording("https://example.org/a.ogg"),
+                            recording("https://example.org/b.ogg"),
+                            recording("https://example.org/a.ogg"),
+                            ipa("/parˈla/", &[]),
+                        ],
+                    ),
+                    entry(parla.clone(), None, vec![ipa("/parˈla/", &[])]),
+                ],
+                vec![sense(None, &[parlar, parla], "dir")],
+            );
+            let texts = result_texts(&lookup, None, None, None);
+            let rows: Vec<_> = texts
+                .pronunciations
+                .iter()
+                .map(|text| (text.prefix("parlar"), text.transcription, text.audio))
+                .collect();
+            assert_eq!(
+                rows,
+                [
+                    (None, None, Some("https://example.org/a.ogg")),
+                    (None, None, Some("https://example.org/b.ogg")),
+                    (None, Some("/parˈla/"), None),
+                    (Some("parla"), Some("/parˈla/"), None),
+                ]
+            );
+        }
+
+        #[test]
+        fn an_unknown_part_of_speech_is_shown_as_written() {
+            let pos = PartOfSpeech::from_label(" sustantivo femenino ").unwrap();
+            assert_eq!(pos_label(&pos), "sustantivo femenino");
+            let known = PartOfSpeech::from_label("adjective_satellite").unwrap();
+            assert_eq!(pos_label(&known), "adjective");
+            let lookup = grouped(
+                Vec::new(),
+                vec![sense(Some("sustantivo femenino"), &[], "casa")],
+            );
+            let texts = result_texts(&lookup, None, None, None);
+            assert_eq!(texts.senses[0].pos, Some("sustantivo femenino"));
+        }
     }
 }

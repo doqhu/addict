@@ -44,10 +44,11 @@ use crate::{
     view::{
         ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL,
         COPIED_LABEL, COPY_LABEL, ChosenGloss, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER,
-        FORWARD_TOOLTIP, LANGUAGE_TOOLTIP, Listed, ONLINE_SOURCE, OnlineRow, OnlineState,
-        OnlineTexts, RETRY_LABEL, ResultTexts, SENSES_LABEL, SHOW_LESS, SHOW_MORE, SYNONYM_PREVIEW,
-        SenseText, Shown, SynonymTexts, binding_texts, choice_texts, command_in, indexes_text,
-        language_label, online_rows, sentence_markup, synonym_heading, texts,
+        FORWARD_TOOLTIP, LANGUAGE_TOOLTIP, Listed, MORE_PRONUNCIATIONS, ONLINE_SOURCE, OnlineRow,
+        OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
+        PronunciationText, RETRY_LABEL, ResultTexts, SENSES_LABEL, SHOW_LESS, SHOW_MORE,
+        SYNONYM_PREVIEW, SenseText, Shown, SynonymTexts, binding_texts, choice_texts, command_in,
+        indexes_text, language_label, online_rows, sentence_markup, synonym_heading, texts,
     },
     wrap::Wrap,
 };
@@ -472,29 +473,141 @@ fn fill_synonym_groups(container: &gtk::Box, texts: Option<SynonymTexts<'_>>, fi
                 }
                 meaning.append(&pills);
                 if !extra.is_empty() {
-                    let toggle = gtk::ToggleButton::builder()
-                        .label(SHOW_MORE)
-                        .halign(gtk::Align::Start)
-                        .css_classes(["synonym-toggle"])
-                        .build();
-                    toggle.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
-                    toggle.set_tooltip_text(Some(&title));
-                    toggle.connect_toggled(move |toggle| {
-                        let expanded = toggle.is_active();
-                        for pill in &extra {
-                            if let Some(pill) = pill.upgrade() {
-                                pill.set_visible(expanded);
-                            }
-                        }
-                        toggle.set_label(if expanded { SHOW_LESS } else { SHOW_MORE });
-                        toggle.update_state(&[gtk::accessible::State::Expanded(Some(expanded))]);
-                    });
-                    meaning.append(&toggle);
+                    meaning.append(&show_more_toggle(extra, &title));
                 }
                 container.append(&meaning);
             }
         }
     }
+}
+
+/// The toggle that shows the hidden widgets `extra` while it is active,
+/// [`SHOW_MORE`] or [`SHOW_LESS`] by its state, with `tooltip`.
+fn show_more_toggle(extra: Vec<glib::WeakRef<gtk::Widget>>, tooltip: &str) -> gtk::ToggleButton {
+    let toggle = gtk::ToggleButton::builder()
+        .label(SHOW_MORE)
+        .halign(gtk::Align::Start)
+        .css_classes(["synonym-toggle"])
+        .build();
+    toggle.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
+    toggle.set_tooltip_text(Some(tooltip));
+    toggle.connect_toggled(move |toggle| {
+        let expanded = toggle.is_active();
+        for widget in &extra {
+            if let Some(widget) = widget.upgrade() {
+                widget.set_visible(expanded);
+            }
+        }
+        toggle.set_label(if expanded { SHOW_LESS } else { SHOW_MORE });
+        toggle.update_state(&[gtk::accessible::State::Expanded(Some(expanded))]);
+    });
+    toggle
+}
+
+/// The stream that plays now, if any: one at a time.
+type Player = Rc<RefCell<Option<gtk::MediaFile>>>;
+
+/// Stops the stream of `player`, if one plays, and lets it go.
+fn stop(player: &Player) {
+    if let Some(stream) = player.borrow_mut().take() {
+        stream.set_playing(false);
+        stream.clear();
+    }
+}
+
+/// Puts `pronunciations` into `container`, a row each: the headword of its
+/// entry when it is not `word`, the transcription, its labels, dim, and a
+/// play button when it has a recording. The first
+/// [`PRONUNCIATION_PREVIEW`] are shown, the rest behind [`SHOW_MORE`].
+fn fill_pronunciations(
+    container: &gtk::Box,
+    pronunciations: &[PronunciationText<'_>],
+    word: &str,
+    player: &Player,
+) {
+    clear(container);
+    let mut extra = Vec::new();
+    for (index, pronunciation) in pronunciations.iter().enumerate() {
+        let row = pronunciation_row(pronunciation, word, player);
+        if index >= PRONUNCIATION_PREVIEW {
+            row.set_visible(false);
+            extra.push(row.upcast_ref::<gtk::Widget>().downgrade());
+        }
+        container.append(&row);
+    }
+    if !extra.is_empty() {
+        container.append(&show_more_toggle(extra, MORE_PRONUNCIATIONS));
+    }
+}
+
+/// The row of one pronunciation; see [`fill_pronunciations`].
+fn pronunciation_row(
+    pronunciation: &PronunciationText<'_>,
+    word: &str,
+    player: &Player,
+) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .spacing(8)
+        .css_classes(["pronunciation"])
+        .build();
+    let part = |text: &str, class: &str| {
+        wrapping(gtk::Label::builder().label(text))
+            .valign(gtk::Align::Center)
+            .css_classes([class])
+            .build()
+    };
+    if let Some(headword) = pronunciation.prefix(word) {
+        row.append(&part(headword, "pronunciation-headword"));
+    }
+    if let Some(transcription) = pronunciation.transcription {
+        row.append(&part(transcription, "transcription"));
+    }
+    if !pronunciation.labels.is_empty() {
+        row.append(&part(
+            &pronunciation.labels.join(", "),
+            "pronunciation-labels",
+        ));
+    }
+    if let Some(url) = pronunciation.audio {
+        row.append(&play_button(url, player));
+    }
+    row
+}
+
+/// The button that plays the recording at `url` through `player`: the
+/// stream that played before stops. A failed playback says why in the
+/// button's tooltip.
+fn play_button(url: &str, player: &Player) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .icon_name("media-playback-start-symbolic")
+        .tooltip_text(PLAY_TOOLTIP)
+        .focus_on_click(false)
+        .valign(gtk::Align::Center)
+        .css_classes(["play"])
+        .build();
+    button.update_property(&[gtk::accessible::Property::Label(PLAY_TOOLTIP)]);
+    let (url, player) = (url.to_owned(), player.clone());
+    button.connect_clicked(move |button| {
+        stop(&player);
+        button.set_tooltip_text(Some(PLAY_TOOLTIP));
+        button.remove_css_class("failed");
+        let stream = gtk::MediaFile::for_file(&gio::File::for_uri(&url));
+        let failed = {
+            let button = button.downgrade();
+            move |stream: &gtk::MediaFile| {
+                let Some(button) = button.upgrade().filter(|_| stream.error().is_some()) else {
+                    return;
+                };
+                button.set_tooltip_text(Some(PLAYBACK_FAILED));
+                button.add_css_class("failed");
+            }
+        };
+        failed(&stream);
+        stream.connect_error_notify(failed);
+        stream.play();
+        player.replace(Some(stream));
+    });
+    button
 }
 
 /// Puts `analysis` into `container`: a line per lemma, which wraps between
@@ -608,7 +721,8 @@ fn fill_glosses(
     }
 }
 
-/// The row of `sense`: its number and its definition, with the mark above
+/// The row of `sense`: its number, its part of speech as a dim tag when
+/// known, and its definition, with the mark above
 /// the definition when it is the chosen one. A click runs `chosen` with its
 /// index; it does not take the focus from the field.
 fn sense_row(sense: &SenseText<'_>, chosen: &SenseChosen) -> gtk::Button {
@@ -625,11 +739,24 @@ fn sense_row(sense: &SenseText<'_>, chosen: &SenseChosen) -> gtk::Button {
                 .build(),
         );
     }
-    text.append(
-        &wrapping(gtk::Label::builder().label(sense.definition))
-            .css_classes(["definition-text"])
-            .build(),
-    );
+    let definition = wrapping(gtk::Label::builder().label(sense.definition))
+        .css_classes(["definition-text"])
+        .hexpand(true)
+        .build();
+    if let Some(pos) = sense.pos {
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        line.append(
+            &gtk::Label::builder()
+                .label(pos)
+                .valign(gtk::Align::Start)
+                .css_classes(["pos"])
+                .build(),
+        );
+        line.append(&definition);
+        text.append(&line);
+    } else {
+        text.append(&definition);
+    }
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     content.append(&number);
     content.append(&text);
@@ -712,6 +839,8 @@ struct ResultArea {
     card: gtk::Box,
     article: gtk::Box,
     headword: gtk::Label,
+    /// Under the headword: the pronunciations of the article, a row each.
+    pronunciations: gtk::Box,
     line: gtk::Label,
     /// For a verb form, its analyses, a line per lemma, above the rest of
     /// the card.
@@ -745,6 +874,12 @@ fn result_area() -> ResultArea {
         .css_classes(["headword"])
         .visible(false)
         .build();
+    let pronunciations = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .css_classes(["pronunciations"])
+        .visible(false)
+        .build();
     let line = wrapping(gtk::Label::builder())
         .selectable(true)
         .css_classes(["result-line"])
@@ -763,6 +898,7 @@ fn result_area() -> ResultArea {
         .visible(false)
         .build();
     article.append(&headword);
+    article.append(&pronunciations);
     article.append(&line);
     article.append(&analysis);
     article.append(&translations);
@@ -846,6 +982,7 @@ fn result_area() -> ResultArea {
         card,
         article,
         headword,
+        pronunciations,
         line,
         analysis,
         translations,
@@ -959,6 +1096,12 @@ pub struct View {
     sense_chosen: Rc<RefCell<Option<SenseChosen>>>,
     /// Runs with the index of an English gloss when its row is clicked.
     gloss_chosen: Rc<RefCell<Option<SenseChosen>>>,
+    /// The recording that plays now; a new result stops it.
+    player: Player,
+    /// The [`Shown::generation`] of the result whose pronunciations are
+    /// shown: a choice in the same result leaves them, and their playback,
+    /// as they are.
+    pronounced: Cell<Option<u64>>,
 }
 
 impl View {
@@ -1026,6 +1169,8 @@ impl View {
             result,
             sense_chosen: Rc::new(RefCell::new(None)),
             gloss_chosen: Rc::new(RefCell::new(None)),
+            player: Rc::new(RefCell::new(None)),
+            pronounced: Cell::new(None),
         };
         view.render(state, Source::Manual);
         view.render_binding(binding);
@@ -1311,6 +1456,18 @@ impl View {
         let line = texts.line.as_deref().or(texts.elsewhere.as_deref());
         result.line.set_text(line.unwrap_or_default());
         result.line.set_visible(line.is_some());
+        if self.pronounced.replace(Some(shown.generation())) != Some(shown.generation()) {
+            stop(&self.player);
+            fill_pronunciations(
+                &result.pronunciations,
+                &texts.pronunciations,
+                &result.headword.text(),
+                &self.player,
+            );
+            result
+                .pronunciations
+                .set_visible(!texts.pronunciations.is_empty());
+        }
         fill_analysis(&result.analysis, &texts.analysis, &self.field);
         result.analysis.set_visible(!texts.analysis.is_empty());
         fill_listed(
@@ -1349,6 +1506,10 @@ impl View {
     /// the glosses.
     fn hide_result(&self) {
         let result = &self.result;
+        stop(&self.player);
+        self.pronounced.set(None);
+        clear(&result.pronunciations);
+        result.pronunciations.set_visible(false);
         result.article.set_visible(false);
         result.analysis.set_visible(false);
         result.senses.set_visible(false);
@@ -1419,14 +1580,20 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use addict_core::{
-        dictionary::{Dictionary, Sample},
+        dictionary::{
+            Article, Audio, Dictionary, EntryIdentity, LexicalEntry, PartOfSpeech, Pronunciation,
+            Sample,
+        },
         input::WindowState,
         sentence::words,
     };
     use gtk::{glib, prelude::*};
 
     use super::{View, fill_listed};
-    use crate::view::{BACK_TOOLTIP, COPIED_LABEL, COPY_LABEL, FORWARD_TOOLTIP, Listed};
+    use crate::view::{
+        BACK_TOOLTIP, COPIED_LABEL, COPY_LABEL, FORWARD_TOOLTIP, Listed, PLAY_TOOLTIP,
+        PLAYBACK_FAILED,
+    };
     use crate::{
         style,
         view::{Binding, Lookup, Online, OnlineTexts, Shown},
@@ -1462,10 +1629,9 @@ mod tests {
             .position(|word| &sentence[word.clone()] == "bank")
             .expect("bank");
         view.set_field_text(sentence);
+        view.render_sentence(sentence, &words, Some(bank));
         let mut shown = Shown::default();
-        shown.show(Some(Lookup::Article(
-            Sample.lookup("bank").expect("the sample article"),
-        )));
+        shown.show(Some(Lookup::Article(pronounced_bank())));
         shown.choose(0);
         view.render_result(&shown, None);
         let word = Online::Translated("берег".to_owned());
@@ -1518,6 +1684,143 @@ mod tests {
         let texture = renderer.render_texture(&node, None);
         texture.save_to_png(&path).expect("the PNG");
         window.destroy();
+    }
+
+    /// The sample article of "bank" with a part of speech on each sense and
+    /// two pronunciations, one with a recording.
+    fn pronounced_bank() -> Article {
+        let mut article = Sample.lookup("bank").expect("the sample article");
+        for (sense, pos) in article.senses.iter_mut().zip(["n", "n", "v"]) {
+            sense.part_of_speech = PartOfSpeech::from_label(pos);
+        }
+        let pronunciation = |label: &str, audio: Vec<Audio>| Pronunciation {
+            text: Some("bæŋk".to_owned()),
+            notation: Some("IPA".to_owned()),
+            labels: vec![label.to_owned()],
+            audio,
+            ..Pronunciation::default()
+        };
+        article.entries = vec![LexicalEntry {
+            identity: EntryIdentity {
+                source: "test".to_owned(),
+                headword: "bank".to_owned(),
+                id: "1".to_owned(),
+            },
+            part_of_speech: None,
+            pronunciations: vec![
+                pronunciation(
+                    "US",
+                    vec![Audio {
+                        url: "https://example.org/bank.ogg".to_owned(),
+                        format: Some("ogg".to_owned()),
+                    }],
+                ),
+                pronunciation("GB", Vec::new()),
+            ],
+        }];
+        article
+    }
+
+    /// The buttons with `class` under `widget`, at any depth.
+    fn buttons(widget: &gtk::Widget, class: &str) -> Vec<gtk::Button> {
+        let mut found = Vec::new();
+        let mut next = widget.first_child();
+        while let Some(child) = next {
+            if child.has_css_class(class)
+                && let Ok(button) = child.clone().downcast::<gtk::Button>()
+            {
+                found.push(button);
+            }
+            found.extend(buttons(&child, class));
+            next = child.next_sibling();
+        }
+        found
+    }
+
+    /// A pronunciation with a recording has a play button and one without
+    /// has none; a new result stops what plays and takes the rows away,
+    /// a choice in the same result keeps them. Run alone: GTK starts once
+    /// per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn only_a_recording_has_a_play_button() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(pronounced_bank())));
+        view.render_result(&shown, None);
+        let pronunciations = view.result.pronunciations.clone().upcast::<gtk::Widget>();
+        assert!(pronunciations.is_visible());
+        let rows: Vec<_> = {
+            let mut rows = Vec::new();
+            let mut next = pronunciations.first_child();
+            while let Some(row) = next {
+                next = row.next_sibling();
+                rows.push(row);
+            }
+            rows
+        };
+        assert_eq!(rows.len(), 2);
+        assert_eq!(buttons(&rows[0], "play").len(), 1);
+        assert!(buttons(&rows[1], "play").is_empty());
+        let play = &buttons(&rows[0], "play")[0];
+        assert_eq!(play.tooltip_text().as_deref(), Some(PLAY_TOOLTIP));
+        assert!(!play.gets_focus_on_click());
+        // A file that is not there: the stream fails, and says so in the
+        // tooltip, never in a dialog.
+        let missing = std::env::temp_dir().join("addict-no-such-recording.ogg");
+        let mut article = pronounced_bank();
+        article.entries[0].pronunciations[0].audio[0].url =
+            gtk::gio::File::for_path(&missing).uri().into();
+        shown.show(Some(Lookup::Article(article)));
+        view.render_result(&shown, None);
+        let play = buttons(&pronunciations, "play").remove(0);
+        play.emit_clicked();
+        assert!(view.player.borrow().is_some());
+        let context = glib::MainContext::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !play.has_css_class("failed") && std::time::Instant::now() < until {
+            context.iteration(false);
+        }
+        assert!(play.has_css_class("failed"));
+        assert_eq!(play.tooltip_text().as_deref(), Some(PLAYBACK_FAILED));
+        // A choice keeps the rows and the stream; a new result stops it.
+        shown.choose(0);
+        view.render_result(&shown, None);
+        assert!(view.player.borrow().is_some());
+        assert!(play.parent().is_some());
+        shown.show(Some(Lookup::Article(
+            Sample.lookup("bank").expect("the sample article"),
+        )));
+        view.render_result(&shown, None);
+        assert!(view.player.borrow().is_none());
+        assert!(pronunciations.first_child().is_none());
+        assert!(!pronunciations.is_visible());
+        // Five variants: three shown, two behind Show more.
+        let mut article = pronounced_bank();
+        article.entries[0].pronunciations = (1..=5)
+            .map(|n| Pronunciation {
+                text: Some(format!("v{n}")),
+                ..Pronunciation::default()
+            })
+            .collect();
+        shown.show(Some(Lookup::Article(article)));
+        view.render_result(&shown, None);
+        let mut children = Vec::new();
+        let mut next = pronunciations.first_child();
+        while let Some(child) = next {
+            next = child.next_sibling();
+            children.push(child);
+        }
+        assert_eq!(children.len(), 6);
+        let visible: Vec<_> = children[..5].iter().map(|row| row.is_visible()).collect();
+        assert_eq!(visible, [true, true, true, false, false]);
+        let toggle = children[5]
+            .clone()
+            .downcast::<gtk::ToggleButton>()
+            .expect("the toggle");
+        toggle.set_active(true);
+        assert!(children[..5].iter().all(|row| row.is_visible()));
     }
 
     #[test]

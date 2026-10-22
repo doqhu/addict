@@ -62,7 +62,16 @@
 //! word and not to a sense. What the article lacks has its own line: no
 //! English definitions, no synonyms for the chosen sense, no Russian
 //! translation. Choosing a sense looks nothing up, and the next result
-//! forgets the choice.
+//! forgets the choice. Each sense row starts with its part of speech as a
+//! small dim tag when the dictionary gives one, for the sense or for all of
+//! its entries alike. Under the headword stand the transcriptions of the
+//! article's entries, each once, with their regional labels and, for an
+//! entry of another headword such as the lemma of a verb form, that
+//! headword; the first three are shown and the rest behind Show more. Each
+//! transcription that has a recording, and each recording without a
+//! transcription, has a play button, which streams it with GTK's media playback: one recording plays
+//! at a time, and a new result stops it. A playback that fails says so in
+//! the button's tooltip.
 //!
 //! A click on a word of a sentence also asks DeepL, online, for two Russian
 //! texts: the word translated in that sentence, for which the word and the
