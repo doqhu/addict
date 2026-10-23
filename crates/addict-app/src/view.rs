@@ -1062,10 +1062,41 @@ impl<'a> PronunciationText<'a> {
     }
 }
 
+/// `text` as compared with another transcription: without the slashes around
+/// a phonemic transcription or the brackets around a phonetic one, and
+/// without syllable dots, so `kʌʃ`, `/kʌʃ/` and `[kʌʃ]` are one, and
+/// `ˈkʌʃɪŋ` is `/ˈkʌ.ʃɪŋ/`; a phonetic transcription that says more, such
+/// as `[kʰʌʃ]`, stays apart.
+fn transcription_key(text: &str) -> String {
+    let text = text.trim();
+    let text = [('/', '/'), ('[', ']')]
+        .into_iter()
+        .find_map(|(open, close)| text.strip_prefix(open)?.strip_suffix(close))
+        .unwrap_or(text);
+    text.chars().filter(|c| *c != '.').collect()
+}
+
+/// The notation of `record` as compared with another one's: `None` for IPA,
+/// which is not named on a row, as for a record that names no notation.
+fn notation_key(record: &Pronunciation) -> Option<String> {
+    record
+        .notation
+        .as_deref()
+        .map(str::trim)
+        .filter(|notation| !notation.is_empty() && !notation.eq_ignore_ascii_case("IPA"))
+        .map(str::to_lowercase)
+}
+
 /// The pronunciations of `entries`, in their order, a record with the same
 /// headword, transcription, notation and labels as one before it skipped (a
 /// record without a transcription also needs the same recordings); a skipped
 /// record lends its recording to the kept one when that has none.
+/// Transcriptions are compared by [`transcription_key`] and notations by
+/// [`notation_key`]; the kept row shows the first record's text. A
+/// transcription without labels is dropped when the same headword has it
+/// with labels, as that row says more. The rows of
+/// one headword are then grouped, the headwords in the order they first
+/// appear and each one's rows in source order.
 fn pronunciation_texts(entries: &[LexicalEntry]) -> Vec<PronunciationText<'_>> {
     let mut kept: Vec<(&Pronunciation, PronunciationText<'_>)> = Vec::new();
     for entry in entries {
@@ -1090,10 +1121,12 @@ fn pronunciation_texts(entries: &[LexicalEntry]) -> Vec<PronunciationText<'_>> {
                 continue;
             }
             let headword = entry.identity.headword.as_str();
+            let key = transcription.map(transcription_key);
+            let notation = notation_key(record);
             if let Some((_, earlier)) = kept.iter_mut().find(|(earlier, text)| {
                 text.headword == headword
-                    && earlier.text == record.text
-                    && earlier.notation == record.notation
+                    && text.transcription.map(transcription_key) == key
+                    && notation_key(earlier) == notation
                     && earlier.labels == record.labels
                     // Each recording without a transcription keeps its row.
                     && (transcription.is_some() || earlier.audio == record.audio)
@@ -1125,7 +1158,47 @@ fn pronunciation_texts(entries: &[LexicalEntry]) -> Vec<PronunciationText<'_>> {
             ));
         }
     }
-    kept.into_iter().map(|(_, text)| text).collect()
+    // The rows of a headword stand together, in the order of its first row,
+    // so that one word's transcriptions from two sources are side by side;
+    // the order is taken before a row gives way, so a word keeps its place.
+    let mut headwords: Vec<&str> = Vec::new();
+    for (_, text) in &kept {
+        if !headwords.contains(&text.headword) {
+            headwords.push(text.headword);
+        }
+    }
+    // A transcription without labels says less than the same one with
+    // labels, so it gives way to that row and lends it its recording.
+    let labelled =
+        |record: &Pronunciation| record.labels.iter().any(|label| !label.trim().is_empty());
+    let mut index = 0;
+    while index < kept.len() {
+        let (record, text) = &kept[index];
+        let (headword, audio) = (text.headword, text.audio);
+        let key = text.transcription.map(transcription_key);
+        let notation = notation_key(record);
+        let fuller = (key.is_some() && !labelled(record))
+            .then(|| {
+                kept.iter().position(|(other, text)| {
+                    labelled(other)
+                        && text.headword == headword
+                        && text.transcription.map(transcription_key) == key
+                        && notation_key(other) == notation
+                })
+            })
+            .flatten();
+        match fuller {
+            Some(fuller) => {
+                let text = &mut kept[fuller].1;
+                text.audio = text.audio.or(audio);
+                kept.remove(index);
+            }
+            None => index += 1,
+        }
+    }
+    let mut texts: Vec<_> = kept.into_iter().map(|(_, text)| text).collect();
+    texts.sort_by_key(|text| headwords.iter().position(|word| *word == text.headword));
+    texts
 }
 
 /// The name of the part of speech `pos`: a fixed English one for a known
@@ -4675,6 +4748,167 @@ mod tests {
                     .iter()
                     .map(|(text, labels)| (text.as_str(), labels.clone()))
                     .collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn a_transcription_written_with_brackets_or_syllable_dots_is_one_row() {
+            let (crushing, crush) = (identity("crushing", "1"), identity("crush", "2"));
+            let bare = |text: &str| Pronunciation {
+                text: Some(text.to_owned()),
+                ..Pronunciation::default()
+            };
+            let lookup = grouped(
+                vec![
+                    entry(crushing.clone(), None, vec![bare("ˈkʌʃɪŋ")]),
+                    entry(crush.clone(), None, vec![bare("kʌʃ")]),
+                    entry(
+                        crushing.clone(),
+                        None,
+                        vec![Pronunciation {
+                            audio: vec![audio("https://example.org/crushing.ogg", "ogg")],
+                            ..ipa("/ˈkʌ.ʃɪŋ/", &[])
+                        }],
+                    ),
+                    entry(
+                        crush.clone(),
+                        None,
+                        vec![ipa("/kʌʃ/", &[]), ipa("[kʌʃ]", &[]), ipa("[kʰʌʃ]", &[])],
+                    ),
+                ],
+                vec![sense(None, &[crushing, crush], "pressing hard")],
+            );
+            let texts = result_texts(&lookup, None, None, None);
+            let rows: Vec<_> = texts
+                .pronunciations
+                .iter()
+                .map(|text| (text.headword, text.transcription, text.audio))
+                .collect();
+            assert_eq!(
+                rows,
+                [
+                    (
+                        "crushing",
+                        Some("ˈkʌʃɪŋ"),
+                        Some("https://example.org/crushing.ogg")
+                    ),
+                    ("crush", Some("kʌʃ"), None),
+                    ("crush", Some("[kʰʌʃ]"), None),
+                ]
+            );
+        }
+
+        #[test]
+        fn the_rows_of_a_headword_stand_together_in_source_order() {
+            let (paga, pagar, pago) = (
+                identity("paga", "1"),
+                identity("pagar", "2"),
+                identity("pago", "3"),
+            );
+            let lookup = grouped(
+                vec![
+                    entry(paga.clone(), None, vec![ipa("[ˈpaɣa]", &[])]),
+                    entry(pagar.clone(), None, vec![ipa("[paˈɣaɾ]", &[])]),
+                    entry(pago.clone(), None, vec![ipa("[ˈpaɣo]", &[])]),
+                    entry(paga.clone(), None, vec![ipa("/ˈpaga/", &[])]),
+                    entry(pagar.clone(), None, vec![ipa("/paˈgar/", &[])]),
+                    entry(pago.clone(), None, vec![ipa("/ˈpago/", &[])]),
+                ],
+                vec![sense(None, &[paga, pagar, pago], "pagar")],
+            );
+            let texts = result_texts(&lookup, None, None, None);
+            let rows: Vec<_> = texts
+                .pronunciations
+                .iter()
+                .map(|text| (text.headword, text.transcription.unwrap()))
+                .collect();
+            assert_eq!(
+                rows,
+                [
+                    ("paga", "[ˈpaɣa]"),
+                    ("paga", "/ˈpaga/"),
+                    ("pagar", "[paˈɣaɾ]"),
+                    ("pagar", "/paˈgar/"),
+                    ("pago", "[ˈpaɣo]"),
+                    ("pago", "/ˈpago/"),
+                ]
+            );
+        }
+
+        #[test]
+        fn a_transcription_without_labels_gives_way_to_the_same_one_with_labels() {
+            let (tancat, tancar) = (identity("tancat", "1"), identity("tancar", "2"));
+            let lookup = grouped(
+                vec![
+                    entry(
+                        tancat.clone(),
+                        None,
+                        vec![
+                            Pronunciation {
+                                audio: vec![audio("https://example.org/tancat.ogg", "ogg")],
+                                ..ipa("/taŋˈkat/", &[])
+                            },
+                            ipa("/təŋˈkat/", &[]),
+                        ],
+                    ),
+                    entry(
+                        tancar.clone(),
+                        None,
+                        vec![ipa("/taŋˈkar/", &[]), ipa("/taŋˈka/", &[])],
+                    ),
+                    entry(
+                        tancat.clone(),
+                        None,
+                        vec![
+                            ipa("[təŋˈkat]", &["Balearic", "Central"]),
+                            ipa("[taŋˈkat]", &["Valencia"]),
+                        ],
+                    ),
+                    entry(
+                        tancar.clone(),
+                        None,
+                        vec![
+                            ipa("[taŋˈkaɾ]", &["Valencia"]),
+                            ipa("[taŋˈka]", &["Northwestern"]),
+                        ],
+                    ),
+                    // Another headword's labels are not this one's.
+                    entry(
+                        identity("tanca", "3"),
+                        None,
+                        vec![ipa("[taŋˈkat]", &["Valencia"])],
+                    ),
+                ],
+                vec![sense(None, &[tancat, tancar], "tancar")],
+            );
+            let texts = result_texts(&lookup, None, None, None);
+            let rows: Vec<_> = texts
+                .pronunciations
+                .iter()
+                .map(|text| {
+                    (
+                        text.headword,
+                        text.transcription.unwrap(),
+                        text.labels.clone(),
+                        text.audio,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                rows,
+                [
+                    ("tancat", "[təŋˈkat]", vec!["Balearic", "Central"], None),
+                    (
+                        "tancat",
+                        "[taŋˈkat]",
+                        vec!["Valencia"],
+                        Some("https://example.org/tancat.ogg")
+                    ),
+                    ("tancar", "/taŋˈkar/", vec![], None),
+                    ("tancar", "[taŋˈkaɾ]", vec!["Valencia"], None),
+                    ("tancar", "[taŋˈka]", vec!["Northwestern"], None),
+                    ("tanca", "[taŋˈkat]", vec!["Valencia"], None),
+                ]
             );
         }
 
