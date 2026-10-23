@@ -42,13 +42,15 @@ use gtk::{gdk, gio, glib, prelude::*};
 use crate::{
     dictionaries::Indexes,
     view::{
-        ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL,
-        COPIED_LABEL, COPY_LABEL, ChosenGloss, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER,
-        FORWARD_TOOLTIP, LANGUAGE_TOOLTIP, Listed, MORE_PRONUNCIATIONS, ONLINE_SOURCE, OnlineRow,
-        OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
-        PronunciationText, RETRY_LABEL, ResultTexts, SENSES_LABEL, SHOW_LESS, SHOW_MORE,
-        SYNONYM_PREVIEW, SenseText, Shown, SynonymTexts, binding_texts, choice_texts, command_in,
-        indexes_text, language_label, online_rows, sentence_markup, synonym_heading, texts,
+        ADD_KEY_LABEL, ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, Answer, AnswerLine,
+        BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COPIED_LABEL, COPY_LABEL, ChosenGloss,
+        DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, FORWARD_TOOLTIP, LANGUAGE_TOOLTIP,
+        LONE_WORD_TIP, Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE,
+        OnlineRow, OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
+        PronunciationText, RETRY_LABEL, ResultTexts, SENSES_LABEL, SHOW_LESS, SYNONYM_PREVIEW,
+        SenseText, Shown, SynonymTexts, WHOLE_WORD_LABEL, answer_texts, binding_texts,
+        choice_texts, command_in, indexes_text, language_label, online_rows, sentence_markup,
+        show_more, synonym_class, synonym_description, texts,
     },
     wrap::Wrap,
 };
@@ -374,35 +376,60 @@ fn caption(text: &str) -> gtk::Label {
 }
 
 /// Puts `listed` into `container`: its label as a caption and its items as
-/// pills of `pill_classes`, or the line of an empty list; nothing for
+/// pills of `pill_classes`, the first `preview` of them shown and the rest
+/// behind the toggle at the end, or the line of an empty list; nothing for
 /// `None`. With a `field`, each pill is a link that puts its item into the
 /// field as a paste does, and keeps the focus in the field.
 fn fill_listed(
     container: &gtk::Box,
-    listed: Option<Listed<'_>>,
+    listed: Option<&Listed<'_>>,
     pill_classes: &[&str],
     field: Option<&gtk::Entry>,
+    preview: usize,
 ) {
     clear(container);
     match listed {
         None => {}
         Some(Listed::Missing(line)) => {
             container.append(
-                &wrapping(gtk::Label::builder().label(line))
+                &wrapping(gtk::Label::builder().label(*line))
                     .css_classes(["hint"])
                     .build(),
             );
         }
         Some(Listed::Items { label, items }) => {
             container.append(&caption(label));
-            let pills = Wrap::new();
-            pills.add_css_class("pills");
-            for item in items {
-                pills.append(&synonym_pill(item, pill_classes, field));
-            }
-            container.append(&pills);
+            container.append(&pills(items, pill_classes, field, preview, label));
         }
     }
+}
+
+/// `items` as pills of `classes` in lines, the first `preview` shown and
+/// the rest behind a toggle at the end with `tooltip`; see
+/// [`synonym_pill`].
+fn pills(
+    items: &[String],
+    classes: &[&str],
+    field: Option<&gtk::Entry>,
+    preview: usize,
+    tooltip: &str,
+) -> Wrap {
+    let pills = Wrap::new();
+    pills.add_css_class("pills");
+    let mut extra = Vec::new();
+    for (number, item) in items.iter().enumerate() {
+        let pill = synonym_pill(item, classes, field);
+        if number >= preview {
+            pill.set_visible(false);
+            extra.push(pill.downgrade());
+        }
+        pills.append(&pill);
+    }
+    if !extra.is_empty() {
+        let hidden = extra.len();
+        pills.append(&show_more_toggle(extra, hidden, tooltip));
+    }
+    pills
 }
 
 /// Shared pill behavior for flat translations and independent synonym meanings.
@@ -430,66 +457,167 @@ fn synonym_pill(item: &str, classes: &[&str], field: Option<&gtk::Entry>) -> gtk
     link.upcast()
 }
 
-fn fill_synonym_groups(container: &gtk::Box, texts: Option<SynonymTexts<'_>>, field: &gtk::Entry) {
+/// Puts the synonym meanings `texts` into `container`: behind a disclosure
+/// with their label and how many they are, open while `open` is, a card
+/// each; or the line that there are none; nothing for `None`.
+fn fill_synonym_groups(
+    container: &gtk::Box,
+    texts: Option<&SynonymTexts<'_>>,
+    field: &gtk::Entry,
+    open: &Rc<Cell<bool>>,
+) {
     clear(container);
     match texts {
         None => {}
         Some(SynonymTexts::Missing(line)) => {
             container.append(
-                &wrapping(gtk::Label::builder().label(line))
+                &wrapping(gtk::Label::builder().label(*line))
                     .css_classes(["hint"])
                     .build(),
             );
         }
-        Some(SynonymTexts::Groups { label, groups }) => {
-            container.append(&caption(label));
-            for (index, group) in groups.iter().enumerate() {
-                // Numbered among the meanings of its own headword: a form
-                // can list the meanings of several headwords.
-                let number = 1 + groups[..index]
-                    .iter()
-                    .filter(|earlier| earlier.headword == group.headword)
-                    .count();
-                let title = synonym_heading(group, number);
-                let meaning = gtk::Box::new(gtk::Orientation::Vertical, 6);
-                meaning.add_css_class("synonym-meaning");
-                let heading = wrapping(gtk::Label::builder().label(title.as_str()))
-                    .css_classes(["synonym-heading"])
-                    .build();
-                if let Some(metadata) = &group.metadata {
-                    heading.set_tooltip_text(Some(metadata.label()));
-                }
-                meaning.append(&heading);
-                let pills = Wrap::new();
-                pills.add_css_class("pills");
-                let mut extra = Vec::new();
-                for (number, item) in group.synonyms.iter().enumerate() {
-                    let pill = synonym_pill(item, &["pill", "outline"], Some(field));
-                    if number >= SYNONYM_PREVIEW {
-                        pill.set_visible(false);
-                        extra.push(pill.downgrade());
-                    }
-                    pills.append(&pill);
-                }
-                meaning.append(&pills);
-                if !extra.is_empty() {
-                    meaning.append(&show_more_toggle(extra, &title));
-                }
-                container.append(&meaning);
+        Some(SynonymTexts::Groups {
+            label,
+            count,
+            groups,
+        }) => {
+            let list = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(8)
+                .visible(open.get())
+                .build();
+            for group in groups {
+                list.append(&meaning_card(group, field));
             }
+            container.append(&disclosure(label, count, &list, open));
+            container.append(&list);
         }
     }
 }
 
-/// The toggle that shows the hidden widgets `extra` while it is active,
-/// [`SHOW_MORE`] or [`SHOW_LESS`] by its state, with `tooltip`.
-fn show_more_toggle(extra: Vec<glib::WeakRef<gtk::Widget>>, tooltip: &str) -> gtk::ToggleButton {
+/// The button that shows `list` while it is active: a chevron, `label` and
+/// `count`; its state is kept in `open`.
+fn disclosure(
+    label: &str,
+    count: &str,
+    list: &gtk::Box,
+    open: &Rc<Cell<bool>>,
+) -> gtk::ToggleButton {
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    content.append(&gtk::Image::from_icon_name("pan-end-symbolic"));
+    content.append(
+        &gtk::Label::builder()
+            .label(label)
+            .xalign(0.0)
+            .css_classes(["section-label", "disclosure-label"])
+            .build(),
+    );
+    content.append(
+        &gtk::Label::builder()
+            .label(count)
+            .hexpand(true)
+            .xalign(1.0)
+            .css_classes(["dmeta"])
+            .build(),
+    );
     let toggle = gtk::ToggleButton::builder()
-        .label(SHOW_MORE)
+        .child(&content)
+        .active(open.get())
+        .focus_on_click(false)
+        .css_classes(["disclosure"])
+        .build();
+    toggle.update_state(&[gtk::accessible::State::Expanded(Some(open.get()))]);
+    let (list, open) = (list.downgrade(), open.clone());
+    toggle.connect_toggled(move |toggle| {
+        let expanded = toggle.is_active();
+        open.set(expanded);
+        if let Some(list) = list.upgrade() {
+            list.set_visible(expanded);
+        }
+        toggle.update_state(&[gtk::accessible::State::Expanded(Some(expanded))]);
+    });
+    toggle
+}
+
+/// The card of one synonym meaning: its headword, its class as a tag and
+/// what the source says it is, with how many synonyms it has at the end;
+/// under them its synonyms as links, the first [`SYNONYM_PREVIEW`] shown.
+/// The source's whole label is the tooltip of the head.
+fn meaning_card(group: &addict_dictionary::index::SynonymGroup, field: &gtk::Entry) -> gtk::Box {
+    let card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(10)
+        .css_classes(["meaning"])
+        .build();
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    head.append(
+        &gtk::Label::builder()
+            .label(group.headword.as_str())
+            .valign(gtk::Align::Baseline)
+            .css_classes(["mword"])
+            .build(),
+    );
+    if let Some(class) = synonym_class(group) {
+        head.append(
+            &gtk::Label::builder()
+                .label(class)
+                .valign(gtk::Align::Center)
+                .css_classes(["pos"])
+                .build(),
+        );
+    }
+    let description =
+        wrapping(gtk::Label::builder().label(synonym_description(group).unwrap_or_default()))
+            .hexpand(true)
+            .valign(gtk::Align::Baseline)
+            .css_classes(["mgloss"])
+            .build();
+    head.append(&description);
+    head.append(
+        &gtk::Label::builder()
+            .label(match group.synonyms.len() {
+                1 => "1 synonym".to_owned(),
+                count => format!("{count} synonyms"),
+            })
+            .valign(gtk::Align::Baseline)
+            .css_classes(["mcount"])
+            .build(),
+    );
+    if let Some(metadata) = &group.metadata {
+        head.set_tooltip_text(Some(metadata.label()));
+    }
+    card.append(&head);
+    card.append(&pills(
+        &group.synonyms,
+        &["pill", "outline"],
+        Some(field),
+        SYNONYM_PREVIEW,
+        &group.headword,
+    ));
+    card
+}
+
+/// The toggle that shows the hidden widgets `extra` while it is active:
+/// how many items, `hidden`, stand behind it, or [`SHOW_LESS`], by its
+/// state, beside a chevron, with `tooltip`.
+fn show_more_toggle(
+    extra: Vec<glib::WeakRef<gtk::Widget>>,
+    hidden: usize,
+    tooltip: &str,
+) -> gtk::ToggleButton {
+    let more = show_more(hidden);
+    let label = gtk::Label::new(Some(&more));
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    content.append(&label);
+    content.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
+    let toggle = gtk::ToggleButton::builder()
+        .child(&content)
         .halign(gtk::Align::Start)
-        .css_classes(["synonym-toggle"])
+        .valign(gtk::Align::Center)
+        .css_classes(["more"])
         .build();
     toggle.update_state(&[gtk::accessible::State::Expanded(Some(false))]);
+    toggle.update_property(&[gtk::accessible::Property::Label(&more)]);
     toggle.set_tooltip_text(Some(tooltip));
     toggle.connect_toggled(move |toggle| {
         let expanded = toggle.is_active();
@@ -498,7 +626,9 @@ fn show_more_toggle(extra: Vec<glib::WeakRef<gtk::Widget>>, tooltip: &str) -> gt
                 widget.set_visible(expanded);
             }
         }
-        toggle.set_label(if expanded { SHOW_LESS } else { SHOW_MORE });
+        let text = if expanded { SHOW_LESS } else { more.as_str() };
+        label.set_label(text);
+        toggle.update_property(&[gtk::accessible::Property::Label(text)]);
         toggle.update_state(&[gtk::accessible::State::Expanded(Some(expanded))]);
     });
     toggle
@@ -515,28 +645,33 @@ fn stop(player: &Player) {
     }
 }
 
-/// Puts `pronunciations` into `container`, a row each: the headword of its
-/// entry when it is not `word`, the transcription, its labels, dim, and a
-/// play button when it has a recording. The first
-/// [`PRONUNCIATION_PREVIEW`] are shown, the rest behind [`SHOW_MORE`].
+/// Puts `pronunciations` in rows: a play button when it has a recording,
+/// the headword of its entry when it is not `word`, the transcription and
+/// its labels, dim. The first [`PRONUNCIATION_PREVIEW`] go into `lead`,
+/// beside the headword, with the toggle that shows the others; those go
+/// into `rest`, under it, hidden until then.
 fn fill_pronunciations(
-    container: &gtk::Box,
+    lead: &gtk::Box,
+    rest: &gtk::Box,
     pronunciations: &[PronunciationText<'_>],
     word: &str,
     player: &Player,
 ) {
-    clear(container);
-    let mut extra = Vec::new();
+    clear(lead);
+    clear(rest);
+    rest.set_visible(false);
     for (index, pronunciation) in pronunciations.iter().enumerate() {
         let row = pronunciation_row(pronunciation, word, player);
-        if index >= PRONUNCIATION_PREVIEW {
-            row.set_visible(false);
-            extra.push(row.upcast_ref::<gtk::Widget>().downgrade());
+        if index < PRONUNCIATION_PREVIEW {
+            lead.append(&row);
+        } else {
+            rest.append(&row);
         }
-        container.append(&row);
     }
-    if !extra.is_empty() {
-        container.append(&show_more_toggle(extra, MORE_PRONUNCIATIONS));
+    let hidden = pronunciations.len().saturating_sub(PRONUNCIATION_PREVIEW);
+    if hidden > 0 {
+        let extra = vec![rest.upcast_ref::<gtk::Widget>().downgrade()];
+        lead.append(&show_more_toggle(extra, hidden, MORE_PRONUNCIATIONS));
     }
 }
 
@@ -556,6 +691,9 @@ fn pronunciation_row(
             .css_classes([class])
             .build()
     };
+    if let Some(url) = pronunciation.audio {
+        row.append(&play_button(url, player));
+    }
     if let Some(headword) = pronunciation.prefix(word) {
         row.append(&part(headword, "pronunciation-headword"));
     }
@@ -567,9 +705,6 @@ fn pronunciation_row(
             &pronunciation.labels.join(", "),
             "pronunciation-labels",
         ));
-    }
-    if let Some(url) = pronunciation.audio {
-        row.append(&play_button(url, player));
     }
     row
 }
@@ -679,7 +814,7 @@ fn fill_analysis(container: &gtk::Box, analysis: &Analysis, field: &gtk::Entry) 
 /// nothing for `None`. A click runs `clicked` with the index of the gloss.
 fn fill_glosses(
     container: &gtk::Box,
-    listed: Option<Listed<'_>>,
+    listed: Option<&Listed<'_>>,
     chosen: Option<&ChosenGloss<'_>>,
     clicked: &SenseChosen,
     action: Option<&gtk::Button>,
@@ -689,7 +824,7 @@ fn fill_glosses(
         None => {}
         Some(Listed::Missing(line)) => {
             container.append(
-                &wrapping(gtk::Label::builder().label(line))
+                &wrapping(gtk::Label::builder().label(*line))
                     .css_classes(["hint"])
                     .build(),
             );
@@ -760,6 +895,15 @@ fn sense_row(sense: &SenseText<'_>, chosen: &SenseChosen) -> gtk::Button {
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     content.append(&number);
     content.append(&text);
+    if let Some(count) = &sense.count {
+        content.append(
+            &gtk::Label::builder()
+                .label(count.as_str())
+                .valign(gtk::Align::Start)
+                .css_classes(["scount"])
+                .build(),
+        );
+    }
     let row = gtk::Button::builder()
         .child(&content)
         .focus_on_click(false)
@@ -786,9 +930,10 @@ fn explained_box(
     let synonyms = gtk::Box::new(gtk::Orientation::Vertical, 6);
     fill_listed(
         &synonyms,
-        Some(explained.synonyms),
+        Some(&explained.synonyms),
         &["pill", "outline"],
         Some(field),
+        SYNONYM_PREVIEW,
     );
     below.prepend(&synonyms);
     below
@@ -829,40 +974,153 @@ fn definition_block(block: &Block<'_>) -> gtk::Box {
     translated
 }
 
-/// The result area, which scrolls: the card of the word with the online
-/// texts at its foot, the list of senses and, for a language beside English, the synonyms of
-/// the word and its English glosses.
+/// The result area, which scrolls: the card of the word, with the answer
+/// first, the tip for a lone word, the list of senses and, for a language
+/// beside English, the synonyms of the word no sense took and its English
+/// glosses.
 struct ResultArea {
     area: gtk::ScrolledWindow,
-    /// The raised surface: the article above, the online texts below it;
-    /// shown while either is.
+    /// The raised surface; shown while the article or the answer is.
     card: gtk::Box,
     article: gtk::Box,
     headword: gtk::Label,
-    /// Under the headword: the pronunciations of the article, a row each.
+    /// Beside the headword: its first pronunciation and the toggle that
+    /// shows the others.
+    lead: gtk::Box,
+    /// Under the headword: the other pronunciations, a row each.
     pronunciations: gtk::Box,
     line: gtk::Label,
-    /// For a verb form, its analyses, a line per lemma, above the rest of
-    /// the card.
+    /// The answer: what it is, the Russian, large, the sentence under it,
+    /// the dictionary's other translations and where it came from.
+    answer: AnswerBox,
+    /// Without a DeepL key: what a key would give, and the button that adds
+    /// one.
+    no_key: gtk::Box,
+    add_key: gtk::Button,
+    /// For a verb form, its analyses, a line per lemma.
     analysis: gtk::Box,
-    translations: gtk::Box,
-    /// The online texts: their rows and, under them, the line that names
-    /// DeepL.
-    online: gtk::Box,
-    online_rows: gtk::Grid,
+    /// For a word translated in its sentence: the dictionary's translations
+    /// of the word as a whole, beside their label.
+    whole: gtk::Box,
+    whole_pills: gtk::Box,
+    /// Under the card of a word looked up without its sentence.
+    tip: gtk::Box,
     senses: gtk::Box,
     /// What stands above the list: the kind and the language of the senses,
     /// set for each result.
     senses_caption: gtk::Label,
     hint: gtk::Label,
     rows: gtk::Box,
-    /// Under the senses, for a language beside English: the synonyms of the
-    /// word as a whole, as pills.
+    /// Under the senses, for a language beside English: the synonym
+    /// meanings of the word that no sense took, behind a disclosure.
     word_synonyms: gtk::Box,
     /// Under them, for a language beside English: the English glosses, as
     /// rows to choose.
     glosses: gtk::Box,
     definition_action: gtk::Button,
+}
+
+/// The widgets of the answer; see [`ResultArea::answer`].
+struct AnswerBox {
+    root: gtk::Box,
+    label: gtk::Label,
+    word: gtk::Label,
+    word_spinner: gtk::Spinner,
+    sentence: gtk::Label,
+    sentence_spinner: gtk::Spinner,
+    pills: gtk::Box,
+    missing: gtk::Label,
+    source_icon: gtk::Image,
+    source: gtk::Label,
+}
+
+/// A line of the answer with the spinner shown while it is pending.
+fn answer_line(class: &str) -> (gtk::Box, gtk::Label, gtk::Spinner) {
+    let row = gtk::Box::builder().spacing(8).build();
+    let spinner = gtk::Spinner::builder()
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    let label = wrapping(gtk::Label::builder())
+        .selectable(true)
+        .hexpand(true)
+        .css_classes([class])
+        .build();
+    row.append(&spinner);
+    row.append(&label);
+    (row, label, spinner)
+}
+
+fn answer_box() -> AnswerBox {
+    let root = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .css_classes(["answer"])
+        .visible(false)
+        .build();
+    let label = gtk::Label::builder()
+        .xalign(0.0)
+        .css_classes(["answer-label"])
+        .build();
+    let (word_row, word, word_spinner) = answer_line("answer-word");
+    let (sentence_row, sentence, sentence_spinner) = answer_line("answer-sentence");
+    let pills = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    pills.add_css_class("answer-pills");
+    let missing = wrapping(gtk::Label::builder())
+        .css_classes(["hint"])
+        .build();
+    let source_row = gtk::Box::builder()
+        .spacing(6)
+        .css_classes(["online-source"])
+        .build();
+    let source_icon = gtk::Image::from_icon_name("web-browser-symbolic");
+    let source = gtk::Label::new(None);
+    source_row.append(&source_icon);
+    source_row.append(&source);
+    root.append(&label);
+    root.append(&word_row);
+    root.append(&sentence_row);
+    root.append(&pills);
+    root.append(&missing);
+    root.append(&source_row);
+    AnswerBox {
+        root,
+        label,
+        word,
+        word_spinner,
+        sentence,
+        sentence_spinner,
+        pills,
+        missing,
+        source_icon,
+        source,
+    }
+}
+
+/// Puts `line` into `label`, styled by how it reads, with `spinner` turning
+/// while it is pending; hides the row without a line.
+fn fill_answer_line(label: &gtk::Label, spinner: &gtk::Spinner, line: Option<&AnswerLine<'_>>) {
+    let row = label.parent().expect("the row of the line");
+    row.set_visible(line.is_some());
+    let Some((text, state)) = line else {
+        label.set_text("");
+        spinner.set_spinning(false);
+        return;
+    };
+    label.set_text(text);
+    label.set_selectable(*state != OnlineState::Pending);
+    for (class, on) in [
+        ("online-pending", *state == OnlineState::Pending),
+        ("online-failed", *state == OnlineState::Failed),
+    ] {
+        if on {
+            label.add_css_class(class);
+        } else {
+            label.remove_css_class(class);
+        }
+    }
+    spinner.set_visible(*state == OnlineState::Pending);
+    spinner.set_spinning(*state == OnlineState::Pending);
 }
 
 fn result_area() -> ResultArea {
@@ -872,8 +1130,16 @@ fn result_area() -> ResultArea {
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .selectable(true)
         .css_classes(["headword"])
-        .visible(false)
         .build();
+    let lead = gtk::Box::builder()
+        .spacing(8)
+        .valign(gtk::Align::Center)
+        .css_classes(["lead"])
+        .build();
+    let wordrow = Wrap::new();
+    wordrow.add_css_class("wordrow");
+    wordrow.append(&headword);
+    wordrow.append(&lead);
     let pronunciations = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
@@ -885,35 +1151,60 @@ fn result_area() -> ResultArea {
         .css_classes(["result-line"])
         .visible(false)
         .build();
+    let answer = answer_box();
+    let add_key = gtk::Button::builder()
+        .label(ADD_KEY_LABEL)
+        .valign(gtk::Align::Center)
+        .focus_on_click(false)
+        .css_classes(["settings-button"])
+        .build();
+    let no_key = gtk::Box::builder()
+        .spacing(12)
+        .css_classes(["offline-note"])
+        .visible(false)
+        .build();
+    no_key.append(&gtk::Image::from_icon_name("network-offline-symbolic"));
+    let no_key_text = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .hexpand(true)
+        .build();
+    no_key_text.append(&wrapping(gtk::Label::builder().label(NO_KEY_LINE)).build());
+    no_key_text.append(
+        &wrapping(gtk::Label::builder().label(NO_KEY_HINT))
+            .css_classes(["hint"])
+            .build(),
+    );
+    no_key.append(&no_key_text);
+    no_key.append(&add_key);
     let analysis = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
         .css_classes(["analysis"])
         .visible(false)
         .build();
-    let translations = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let whole_pills = gtk::Box::builder().hexpand(true).build();
+    let whole = gtk::Box::builder()
+        .spacing(10)
+        .css_classes(["whole"])
+        .visible(false)
+        .build();
+    whole.append(
+        &gtk::Label::builder()
+            .label(WHOLE_WORD_LABEL)
+            .valign(gtk::Align::Start)
+            .css_classes(["hint", "whole-label"])
+            .build(),
+    );
+    whole.append(&whole_pills);
     let article = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(14)
         .visible(false)
         .build();
-    article.append(&headword);
+    article.append(&wordrow);
     article.append(&pronunciations);
     article.append(&line);
-    article.append(&analysis);
-    article.append(&translations);
-    let online_rows = gtk::Grid::builder()
-        .row_spacing(8)
-        .column_spacing(12)
-        .build();
-    let online = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(12)
-        .css_classes(["online"])
-        .visible(false)
-        .build();
-    online.append(&online_rows);
-    online.append(&online_source());
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(14)
@@ -921,7 +1212,21 @@ fn result_area() -> ResultArea {
         .visible(false)
         .build();
     card.append(&article);
-    card.append(&online);
+    card.append(&answer.root);
+    card.append(&no_key);
+    card.append(&analysis);
+    card.append(&whole);
+    let tip = gtk::Box::builder()
+        .spacing(10)
+        .css_classes(["tip"])
+        .visible(false)
+        .build();
+    tip.append(&gtk::Image::from_icon_name("format-justify-left-symbolic"));
+    tip.append(
+        &wrapping(gtk::Label::builder().label(LONE_WORD_TIP))
+            .hexpand(true)
+            .build(),
+    );
     let hint = wrapping(gtk::Label::builder())
         .css_classes(["hint"])
         .visible(false)
@@ -951,6 +1256,7 @@ fn result_area() -> ResultArea {
         .visible(false)
         .build();
     content.append(&card);
+    content.append(&tip);
     content.append(&senses);
     content.append(&word_synonyms);
     content.append(&glosses);
@@ -982,12 +1288,16 @@ fn result_area() -> ResultArea {
         card,
         article,
         headword,
+        lead,
         pronunciations,
         line,
+        answer,
+        no_key,
+        add_key,
         analysis,
-        translations,
-        online,
-        online_rows,
+        whole,
+        whole_pills,
+        tip,
         senses,
         senses_caption,
         hint,
@@ -998,57 +1308,71 @@ fn result_area() -> ResultArea {
     }
 }
 
-/// The dim line under the online rows: a globe and where they came from.
-fn online_source() -> gtk::Box {
-    let source = gtk::Box::builder()
-        .spacing(6)
-        .css_classes(["online-source"])
-        .build();
-    source.append(&gtk::Image::from_icon_name("web-browser-symbolic"));
-    source.append(&gtk::Label::new(Some(ONLINE_SOURCE)));
-    source
-}
-
-/// Puts `rows` into `grid`, a row each: the label on the left, dim, and
-/// the line on the right, which wraps; the word's line in bold, a pending
-/// one dim behind a spinner, a failed one in the warning's colour.
-fn fill_online(grid: &gtk::Grid, rows: &[OnlineRow<'_>]) {
-    while let Some(child) = grid.first_child() {
-        grid.remove(&child);
+/// Puts `answer` into the answer of `result`, the note without a key and
+/// the row of the word as a whole; hides them for `None`. Each translation
+/// is a link that puts it into `field`.
+fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &gtk::Entry) {
+    let widgets = &result.answer;
+    let shown = answer.is_some_and(|answer| {
+        answer.word.is_some() || answer.sentence.is_some() || answer.missing.is_some()
+    });
+    widgets.root.set_visible(shown);
+    result
+        .no_key
+        .set_visible(answer.is_some_and(|answer| answer.no_key));
+    clear(&widgets.pills);
+    clear(&result.whole_pills);
+    let Some(answer) = answer else {
+        result.whole.set_visible(false);
+        return;
+    };
+    widgets.label.set_text(answer.label);
+    fill_answer_line(&widgets.word, &widgets.word_spinner, answer.word.as_ref());
+    fill_answer_line(
+        &widgets.sentence,
+        &widgets.sentence_spinner,
+        answer.sentence.as_ref(),
+    );
+    if !answer.pills.is_empty() {
+        widgets.pills.append(&pills(
+            answer.pills,
+            &["pill", "small"],
+            Some(field),
+            usize::MAX,
+            answer.label,
+        ));
     }
-    for (row, online) in (0..).zip(rows) {
-        let label = gtk::Label::builder()
-            .label(online.label)
-            .xalign(0.0)
-            .yalign(0.0)
-            .valign(gtk::Align::Start)
-            .css_classes(["online-label"])
-            .build();
-        let line = wrapping(gtk::Label::builder())
-            .label(&*online.line)
-            .selectable(online.state != OnlineState::Pending)
-            .hexpand(true)
-            .build();
-        match online.state {
-            OnlineState::Translated if online.word => line.add_css_class("online-word"),
-            OnlineState::Translated => {}
-            OnlineState::Pending => line.add_css_class("online-pending"),
-            OnlineState::Failed => line.add_css_class("online-failed"),
+    widgets.pills.set_visible(!answer.pills.is_empty());
+    widgets.missing.set_text(answer.missing.unwrap_or_default());
+    widgets.missing.set_visible(answer.missing.is_some());
+    widgets.source.set_text(answer.source);
+    widgets
+        .source_icon
+        .set_icon_name(Some(if answer.source == OFFLINE_SOURCE {
+            "accessories-dictionary-symbolic"
+        } else {
+            "web-browser-symbolic"
+        }));
+    match &answer.whole {
+        Some(Listed::Items { items, .. }) => {
+            result.whole_pills.append(&pills(
+                items,
+                &["pill", "small"],
+                Some(field),
+                usize::MAX,
+                WHOLE_WORD_LABEL,
+            ));
+            result.whole.set_visible(true);
         }
-        grid.attach(&label, 0, row, 1, 1);
-        if online.state == OnlineState::Pending {
-            let pending = gtk::Box::builder().spacing(8).build();
-            pending.append(
-                &gtk::Spinner::builder()
-                    .spinning(true)
-                    .valign(gtk::Align::Center)
+        Some(Listed::Missing(line)) => {
+            result.whole_pills.append(
+                &wrapping(gtk::Label::builder().label(*line))
+                    .css_classes(["hint"])
                     .build(),
             );
-            pending.append(&line);
-            grid.attach(&pending, 1, row, 1, 1);
-        } else {
-            grid.attach(&line, 1, row, 1, 1);
+            result.whole.set_visible(true);
         }
+        None => result.whole.set_visible(false),
     }
 }
 
@@ -1102,6 +1426,16 @@ pub struct View {
     /// shown: a choice in the same result leaves them, and their playback,
     /// as they are.
     pronounced: Cell<Option<u64>>,
+    /// The dictionary's translations of the shown result and the online
+    /// rows, kept apart because they come apart: the answer is made of
+    /// both.
+    translations: RefCell<Option<Listed<'static>>>,
+    online: RefCell<Vec<OnlineRow<'static>>>,
+    /// Whether the synonyms of the word that no sense took are shown; a new
+    /// result closes them, a choice in the same one keeps them.
+    synonyms_open: Rc<Cell<bool>>,
+    /// The text of the field is one word, with no sentence around it.
+    lone_word: Cell<bool>,
 }
 
 impl View {
@@ -1171,6 +1505,10 @@ impl View {
             gloss_chosen: Rc::new(RefCell::new(None)),
             player: Rc::new(RefCell::new(None)),
             pronounced: Cell::new(None),
+            translations: RefCell::new(None),
+            online: RefCell::new(Vec::new()),
+            synonyms_open: Rc::new(Cell::new(false)),
+            lone_word: Cell::new(false),
         };
         view.render(state, Source::Manual);
         view.render_binding(binding);
@@ -1396,6 +1734,11 @@ impl View {
             .connect_clicked(move |_| action());
     }
 
+    /// Runs `add` each time Add DeepL key… is pressed in the card.
+    pub fn connect_add_key(&self, add: impl Fn() + 'static) {
+        self.result.add_key.connect_clicked(move |_| add());
+    }
+
     /// The text the field holds now.
     pub fn field_text(&self) -> String {
         self.field.text().into()
@@ -1413,6 +1756,10 @@ impl View {
             .unwrap_or_default();
         self.result.headword.set_text(headword);
         self.result.headword.set_visible(!headword.is_empty());
+        self.lone_word.set(words.len() == 1);
+        if words.len() != 1 {
+            self.result.tip.set_visible(false);
+        }
         if words.len() < 2 {
             self.sentence.set_visible(false);
             self.sentence.set_markup("");
@@ -1460,38 +1807,38 @@ impl View {
         result.line.set_visible(line.is_some());
         if self.pronounced.replace(Some(shown.generation())) != Some(shown.generation()) {
             stop(&self.player);
+            self.synonyms_open.set(false);
             fill_pronunciations(
+                &result.lead,
                 &result.pronunciations,
                 &texts.pronunciations,
                 &result.headword.text(),
                 &self.player,
             );
-            result
-                .pronunciations
-                .set_visible(!texts.pronunciations.is_empty());
         }
         fill_analysis(&result.analysis, &texts.analysis, &self.field);
         result.analysis.set_visible(!texts.analysis.is_empty());
-        fill_listed(
-            &result.translations,
-            texts.translations,
-            &["pill"],
-            Some(&self.field),
-        );
-        result
-            .translations
-            .set_visible(texts.translations.is_some());
+        self.translations
+            .replace(texts.translations.clone().map(Listed::into_owned));
         result.article.set_visible(true);
+        result
+            .tip
+            .set_visible(self.lone_word.get() && texts.senses.len() > 1);
 
         self.render_senses(&texts, visible);
         // Hidden for English, which has neither.
-        fill_synonym_groups(&result.word_synonyms, texts.word_synonyms, &self.field);
+        fill_synonym_groups(
+            &result.word_synonyms,
+            texts.word_synonyms.as_ref(),
+            &self.field,
+            &self.synonyms_open,
+        );
         result
             .word_synonyms
             .set_visible(texts.word_synonyms.is_some());
         fill_glosses(
             &result.glosses,
-            texts.glosses,
+            texts.glosses.as_ref(),
             texts.gloss.as_ref(),
             &forwarding(&self.gloss_chosen),
             visible.then_some(&result.definition_action),
@@ -1510,13 +1857,15 @@ impl View {
         let result = &self.result;
         stop(&self.player);
         self.pronounced.set(None);
+        clear(&result.lead);
         clear(&result.pronunciations);
         result.pronunciations.set_visible(false);
         result.article.set_visible(false);
         result.analysis.set_visible(false);
+        result.tip.set_visible(false);
         result.senses.set_visible(false);
-        fill_listed(&result.translations, None, &[], None);
-        fill_listed(&result.word_synonyms, None, &[], None);
+        self.translations.replace(None);
+        clear(&result.word_synonyms);
         result.word_synonyms.set_visible(false);
         clear(&result.glosses);
         result.glosses.set_visible(false);
@@ -1546,29 +1895,40 @@ impl View {
             .set_visible(!texts.senses.is_empty() || texts.hint.is_some());
     }
 
-    /// Shows the rows of `online`, or hides them when there is none.
+    /// Shows the online texts `online` in the answer, with the
+    /// dictionary's translations of the shown result.
     pub fn render_online(&self, online: &OnlineTexts<'_>, key_file: Option<&std::path::Path>) {
         self.release_focus();
-        let rows = online_rows(online, key_file);
-        fill_online(&self.result.online_rows, &rows);
-        self.result.online.set_visible(!rows.is_empty());
+        self.online.replace(
+            online_rows(online, key_file)
+                .into_iter()
+                .map(OnlineRow::into_owned)
+                .collect(),
+        );
         self.show_area();
     }
 
-    /// Shows the card and the result area while they have something in
-    /// them; the online texts are set off from an article above them.
+    /// Fills the answer from what is kept of the result and the online
+    /// texts, then shows the card and the result area while they have
+    /// something in them.
     fn show_area(&self) {
         let result = &self.result;
+        {
+            let translations = self.translations.borrow();
+            let online = self.online.borrow();
+            fill_answer(
+                result,
+                answer_texts(translations.as_ref(), &online).as_ref(),
+                &self.field,
+            );
+        }
         // The flags of their own: `is_visible` would also ask the hidden
         // area itself.
-        let (article, online) = (result.article.get_visible(), result.online.get_visible());
-        if article {
-            result.online.add_css_class("under-article");
-        } else {
-            result.online.remove_css_class("under-article");
-        }
-        result.card.set_visible(article || online);
-        result.area.set_visible(article || online);
+        let shown = result.article.get_visible()
+            || result.answer.root.get_visible()
+            || result.no_key.get_visible();
+        result.card.set_visible(shown);
+        result.area.set_visible(shown);
     }
 
     /// Puts the focus back into the field when it is in the result area,
@@ -1607,7 +1967,7 @@ mod tests {
     use super::{View, fill_listed};
     use crate::view::{
         BACK_TOOLTIP, COPIED_LABEL, COPY_LABEL, FORWARD_TOOLTIP, Listed, PLAY_TOOLTIP,
-        PLAYBACK_FAILED,
+        PLAYBACK_FAILED, SHOW_LESS,
     };
     use crate::{
         style,
@@ -1752,6 +2112,28 @@ mod tests {
         found
     }
 
+    /// What a "more" toggle says: the label inside it.
+    fn toggle_text(toggle: &gtk::ToggleButton) -> String {
+        toggle
+            .child()
+            .and_then(|content| content.first_child())
+            .and_downcast::<gtk::Label>()
+            .expect("the label of the toggle")
+            .label()
+            .into()
+    }
+
+    /// The children of `widget`, in order.
+    fn children(widget: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
+        let mut children = Vec::new();
+        let mut next = widget.first_child();
+        while let Some(child) = next {
+            next = child.next_sibling();
+            children.push(child);
+        }
+        children
+    }
+
     /// A pronunciation with a recording has a play button and one without
     /// has none; a new result stops what plays and takes the rows away,
     /// a choice in the same result keeps them. Run alone: GTK starts once
@@ -1764,21 +2146,25 @@ mod tests {
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(pronounced_bank())));
         view.render_result(&shown, None);
-        let pronunciations = view.result.pronunciations.clone().upcast::<gtk::Widget>();
-        assert!(pronunciations.is_visible());
-        let rows: Vec<_> = {
-            let mut rows = Vec::new();
-            let mut next = pronunciations.first_child();
-            while let Some(row) = next {
-                next = row.next_sibling();
-                rows.push(row);
-            }
-            rows
-        };
-        assert_eq!(rows.len(), 2);
-        assert_eq!(buttons(&rows[0], "play").len(), 1);
-        assert!(buttons(&rows[1], "play").is_empty());
-        let play = &buttons(&rows[0], "play")[0];
+        // The first stands beside the headword, the second under it, behind
+        // the toggle.
+        let lead = view.result.lead.clone().upcast::<gtk::Widget>();
+        let rest = view.result.pronunciations.clone().upcast::<gtk::Widget>();
+        let leading = children(&lead);
+        assert_eq!(leading.len(), 2);
+        assert_eq!(buttons(&leading[0], "play").len(), 1);
+        let toggle = leading[1]
+            .clone()
+            .downcast::<gtk::ToggleButton>()
+            .expect("the toggle");
+        assert_eq!(toggle_text(&toggle), "1 more");
+        let under = children(&rest);
+        assert_eq!(under.len(), 1);
+        assert!(buttons(&under[0], "play").is_empty());
+        assert!(!rest.is_visible());
+        toggle.set_active(true);
+        assert!(rest.is_visible());
+        let play = &buttons(&leading[0], "play")[0];
         assert_eq!(play.tooltip_text().as_deref(), Some(PLAY_TOOLTIP));
         assert!(!play.gets_focus_on_click());
         // A file that is not there: the stream fails, and says so in the
@@ -1789,7 +2175,7 @@ mod tests {
             gtk::gio::File::for_path(&missing).uri().into();
         shown.show(Some(Lookup::Article(article)));
         view.render_result(&shown, None);
-        let play = buttons(&pronunciations, "play").remove(0);
+        let play = buttons(&lead, "play").remove(0);
         play.emit_clicked();
         assert!(view.player.borrow().is_some());
         let context = glib::MainContext::default();
@@ -1809,9 +2195,10 @@ mod tests {
         )));
         view.render_result(&shown, None);
         assert!(view.player.borrow().is_none());
-        assert!(pronunciations.first_child().is_none());
-        assert!(!pronunciations.is_visible());
-        // Five variants: three shown, two behind Show more.
+        assert!(lead.first_child().is_none());
+        assert!(rest.first_child().is_none());
+        assert!(!rest.is_visible());
+        // Five variants: one shown, four behind the toggle.
         let mut article = pronounced_bank();
         article.entries[0].pronunciations = (1..=5)
             .map(|n| Pronunciation {
@@ -1821,27 +2208,24 @@ mod tests {
             .collect();
         shown.show(Some(Lookup::Article(article)));
         view.render_result(&shown, None);
-        let mut children = Vec::new();
-        let mut next = pronunciations.first_child();
-        while let Some(child) = next {
-            next = child.next_sibling();
-            children.push(child);
-        }
-        assert_eq!(children.len(), 6);
-        let visible: Vec<_> = children[..5].iter().map(|row| row.is_visible()).collect();
-        assert_eq!(visible, [true, true, true, false, false]);
-        let toggle = children[5]
+        let leading = children(&lead);
+        assert_eq!(leading.len(), 2);
+        assert_eq!(children(&rest).len(), 4);
+        assert!(!rest.is_visible());
+        let toggle = leading[1]
             .clone()
             .downcast::<gtk::ToggleButton>()
             .expect("the toggle");
+        assert_eq!(toggle_text(&toggle), "4 more");
         toggle.set_active(true);
-        assert!(children[..5].iter().all(|row| row.is_visible()));
+        assert!(rest.is_visible());
+        assert_eq!(toggle_text(&toggle), SHOW_LESS);
     }
 
     #[test]
     #[ignore = "needs a display; run alone"]
     fn synonym_meanings_expand_wrap_collapse_and_submit_revealed_members() {
-        use crate::view::{SHOW_LESS, SHOW_MORE, SynonymTexts};
+        use crate::view::SynonymTexts;
         use addict_dictionary::{format::SenseMetadata, index::SynonymGroup};
         gtk::init().expect("a display");
         let field = gtk::Entry::new();
@@ -1849,44 +2233,55 @@ mod tests {
         let heard = submitted.clone();
         field.connect_activate(move |_| heard.set(true));
         let container = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        let groups = [SynonymGroup {
+        let group = SynonymGroup {
             headword: "fer".to_owned(),
             definition: String::new(),
             metadata: SenseMetadata::from_label("(v; beure)"),
             synonyms: (1..=9).map(|n| format!("synonym {n}")).collect(),
-        }];
+        };
+        let open = Rc::new(Cell::new(false));
         super::fill_synonym_groups(
             &container,
-            Some(SynonymTexts::Groups {
-                label: "Catalan synonyms",
-                groups: &groups,
+            Some(&SynonymTexts::Groups {
+                label: "More Catalan synonyms",
+                count: "1 meaning not matched to a sense".to_owned(),
+                groups: vec![&group],
             }),
             &field,
+            &open,
         );
-        let meaning = container.last_child().expect("meaning");
-        let heading = meaning
+        // Closed at first: the disclosure opens the cards and keeps its
+        // state in `open`.
+        let disclosure = container
             .first_child()
-            .and_downcast::<gtk::Label>()
-            .expect("heading");
-        assert_eq!(heading.label(), "fer · Verb · Meaning 1 — beure");
-        let pills = heading.next_sibling().expect("pills");
-        let toggle = meaning
-            .last_child()
+            .and_downcast::<gtk::ToggleButton>()
+            .expect("the disclosure");
+        let list = container.last_child().expect("the list");
+        assert!(!list.is_visible());
+        disclosure.set_active(true);
+        assert!(list.is_visible());
+        assert!(open.get());
+        let meaning = list.first_child().expect("meaning");
+        let head = meaning.first_child().expect("head");
+        let texts: Vec<String> = children(&head)
+            .into_iter()
+            .filter_map(|child| child.downcast::<gtk::Label>().ok())
+            .map(|label| label.label().into())
+            .collect();
+        assert_eq!(texts, ["fer", "verb", "beure", "9 synonyms"]);
+        let pills = head.next_sibling().expect("pills");
+        let mut members = children(&pills);
+        let toggle = members
+            .pop()
             .and_downcast::<gtk::ToggleButton>()
             .expect("toggle");
         assert!(toggle.is_focusable());
-        assert_eq!(toggle.label().as_deref(), Some(SHOW_MORE));
-        let mut members = Vec::new();
-        let mut next = pills.first_child();
-        while let Some(child) = next {
-            next = child.next_sibling();
-            members.push(child);
-        }
+        assert_eq!(toggle_text(&toggle), "3 more");
         assert_eq!(members.len(), 9);
         assert_eq!(members.iter().filter(|child| child.is_visible()).count(), 6);
         let preview_height = pills.measure(gtk::Orientation::Vertical, 140).1;
         toggle.set_active(true);
-        assert_eq!(toggle.label().as_deref(), Some(SHOW_LESS));
+        assert_eq!(toggle_text(&toggle), SHOW_LESS);
         assert!(members.iter().all(|child| child.is_visible()));
         assert!(pills.measure(gtk::Orientation::Vertical, 140).1 > preview_height);
         let last = members[8].clone().downcast::<gtk::Button>().expect("link");
@@ -1895,7 +2290,7 @@ mod tests {
         assert_eq!(field.text(), "synonym 9");
         assert!(submitted.get());
         toggle.set_active(false);
-        assert_eq!(toggle.label().as_deref(), Some(SHOW_MORE));
+        assert_eq!(toggle_text(&toggle), "3 more");
         assert_eq!(members.iter().filter(|child| child.is_visible()).count(), 6);
         assert_eq!(
             pills.measure(gtk::Orientation::Vertical, 140).1,
@@ -1920,10 +2315,16 @@ mod tests {
         let items = ["shore".to_owned(), "riverside".to_owned()];
         let listed = || Listed::Items {
             label: "SYNONYMS",
-            items: &items,
+            items: std::borrow::Cow::Borrowed(&items[..]),
         };
         let synonyms = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        fill_listed(&synonyms, Some(listed()), &["pill"], Some(&field));
+        fill_listed(
+            &synonyms,
+            Some(&listed()),
+            &["pill"],
+            Some(&field),
+            usize::MAX,
+        );
         let pills = synonyms.last_child().expect("the pills");
         let link = pills
             .last_child()
@@ -1935,7 +2336,7 @@ mod tests {
         assert!(submitted.get());
 
         let plain = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        fill_listed(&plain, Some(listed()), &["pill"], None);
+        fill_listed(&plain, Some(&listed()), &["pill"], None, usize::MAX);
         let pills = plain.last_child().expect("the pills");
         assert!(pills.first_child().and_downcast::<gtk::Label>().is_some());
     }
@@ -1957,7 +2358,9 @@ mod tests {
             Sample.lookup("bank").expect("the sample article"),
         )));
         view.render_result(&shown, None);
-        let pills = view.result.translations.last_child().expect("the pills");
+        // Offline, the first translation is the answer and the others are
+        // pills under it.
+        let pills = view.result.answer.pills.first_child().expect("the pills");
         let link = pills
             .first_child()
             .and_downcast::<gtk::Button>()
@@ -2012,7 +2415,7 @@ mod tests {
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(pronounced_bank())));
         view.render_result(&shown, None);
-        let play = buttons(&view.result.pronunciations.clone().upcast(), "play").remove(0);
+        let play = buttons(&view.result.lead.clone().upcast(), "play").remove(0);
         assert!(play.grab_focus());
         assert_eq!(
             gtk::prelude::GtkWindowExt::focus(&window).as_ref(),

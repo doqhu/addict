@@ -616,6 +616,17 @@ fn word_synonyms_label(language: Language) -> &'static str {
     }
 }
 
+/// What stands before the synonym meanings of the word that no sense took,
+/// under the senses of `language`. No wildcard arm, as in
+/// [`definitions_label`].
+fn more_synonyms_label(language: Language) -> &'static str {
+    match language {
+        Language::En => "More English synonyms",
+        Language::Es => "More Spanish synonyms",
+        Language::Ca => "More Catalan synonyms",
+    }
+}
+
 /// The line of a language with no synonyms index imported. No wildcard arm,
 /// as in [`definitions_label`].
 fn missing_synonyms(language: Language) -> &'static str {
@@ -864,12 +875,13 @@ fn missing_english(language: Language) -> &'static str {
 }
 
 /// Items under their label, or the line that says there are none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Listed<'a> {
-    /// The items as the dictionary gives them, never empty.
+    /// The items as the dictionary gives them, never empty; owned when they
+    /// were put together from more than one source.
     Items {
         label: &'static str,
-        items: &'a [String],
+        items: Cow<'a, [String]>,
     },
     /// The line of an empty list.
     Missing(&'static str),
@@ -877,20 +889,38 @@ pub enum Listed<'a> {
 
 impl<'a> Listed<'a> {
     fn of(label: &'static str, items: &'a [String], missing: &'static str) -> Self {
+        Self::of_cow(label, Cow::Borrowed(items), missing)
+    }
+
+    fn of_cow(label: &'static str, items: Cow<'a, [String]>, missing: &'static str) -> Self {
         if items.is_empty() {
             Self::Missing(missing)
         } else {
             Self::Items { label, items }
         }
     }
+
+    /// The same list, holding its own items.
+    pub fn into_owned(self) -> Listed<'static> {
+        match self {
+            Self::Items { label, items } => Listed::Items {
+                label,
+                items: Cow::Owned(items.into_owned()),
+            },
+            Self::Missing(line) => Listed::Missing(line),
+        }
+    }
 }
 
-/// Separate synonym meanings, or the existing missing-source/result line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The synonym meanings of the word that no sense took, or the
+/// missing-source/result line.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SynonymTexts<'a> {
     Groups {
         label: &'static str,
-        groups: &'a [addict_dictionary::index::SynonymGroup],
+        /// What stands beside the label: how many meanings there are.
+        count: String,
+        groups: Vec<&'a addict_dictionary::index::SynonymGroup>,
     },
     Missing(&'static str),
 }
@@ -901,7 +931,7 @@ impl SynonymTexts<'_> {
     #[cfg(test)]
     pub fn line(&self) -> String {
         match self {
-            Self::Groups { label, groups } => format!(
+            Self::Groups { label, groups, .. } => format!(
                 "{label} {}",
                 groups
                     .iter()
@@ -916,39 +946,104 @@ impl SynonymTexts<'_> {
 }
 
 pub(crate) const SYNONYM_PREVIEW: usize = 6;
-pub(crate) const SHOW_MORE: &str = "Show more";
 pub(crate) const SHOW_LESS: &str = "Show less";
 
-/// Uses only explicit source information, with an ordinal for unlabeled
-/// meanings. The complete original grammatical label remains available.
-pub(crate) fn synonym_heading(
-    group: &addict_dictionary::index::SynonymGroup,
-    number: usize,
-) -> String {
-    use addict_dictionary::format::GrammaticalClass;
-    let mut text = group.headword.clone();
-    if let Some(metadata) = &group.metadata {
-        let class = match metadata.class() {
-            Some(GrammaticalClass::Verb) => "Verb",
-            Some(GrammaticalClass::Adjective) => "Adjective",
-            Some(GrammaticalClass::Noun) => "Noun",
-            Some(GrammaticalClass::Adverb) => "Adverb",
-            None => "",
-        };
-        if !class.is_empty() {
-            write!(text, " · {class}").expect("write string");
-        }
+/// What the toggle says while `hidden` items stand behind it.
+pub(crate) fn show_more(hidden: usize) -> String {
+    format!("{hidden} more")
+}
+
+/// How many synonyms a sense has, as its row says while it is not chosen.
+fn synonyms_count(count: usize) -> String {
+    match count {
+        1 => "1 synonym".to_owned(),
+        _ => format!("{count} synonyms"),
     }
-    write!(text, " · Meaning {number}").expect("write string");
-    let description = group
+}
+
+/// How many synonym meanings stand under the word's own disclosure; those
+/// of a word with senses are the ones no sense took.
+fn meanings_count(count: usize, beside_senses: bool) -> String {
+    let meanings = match count {
+        1 => "1 meaning".to_owned(),
+        _ => format!("{count} meanings"),
+    };
+    if beside_senses {
+        format!("{meanings} not matched to a sense")
+    } else {
+        meanings
+    }
+}
+
+/// The grammatical class of a synonym meaning, from its source's label
+/// only; `None` when the source gives none.
+pub(crate) fn synonym_class(
+    group: &addict_dictionary::index::SynonymGroup,
+) -> Option<&'static str> {
+    use addict_dictionary::format::GrammaticalClass;
+    match group.metadata.as_ref()?.class()? {
+        GrammaticalClass::Verb => Some("verb"),
+        GrammaticalClass::Adjective => Some("adjective"),
+        GrammaticalClass::Noun => Some("noun"),
+        GrammaticalClass::Adverb => Some("adverb"),
+    }
+}
+
+/// What the source says a synonym meaning is, when it says anything.
+pub(crate) fn synonym_description(group: &addict_dictionary::index::SynonymGroup) -> Option<&str> {
+    group
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.description())
-        .or_else(|| (!group.definition.trim().is_empty()).then_some(group.definition.as_str()));
-    if let Some(description) = description {
-        write!(text, " — {description}").expect("write string");
+        .or_else(|| (!group.definition.trim().is_empty()).then_some(group.definition.as_str()))
+}
+
+/// For each of `groups`, the index of the sense it belongs to: the first
+/// sense with synonyms that the group holds every one of, so the group is
+/// that sense's meaning in the synonyms index. A sense without synonyms
+/// takes no group: nothing ties them.
+fn matched_groups(
+    senses: &[Sense],
+    groups: &[addict_dictionary::index::SynonymGroup],
+) -> Vec<Option<usize>> {
+    let key = |text: &str| text.trim().to_lowercase();
+    groups
+        .iter()
+        .map(|group| {
+            let held: Vec<String> = group.synonyms.iter().map(|text| key(text)).collect();
+            senses.iter().position(|sense| {
+                !sense.synonyms.is_empty()
+                    && sense
+                        .synonyms
+                        .iter()
+                        .all(|synonym| held.contains(&key(synonym)))
+            })
+        })
+        .collect()
+}
+
+/// The synonyms of `sense` with those of the `groups` that belong to it
+/// after them, each once, in source order; borrowed when no group adds one.
+fn sense_synonyms<'a>(
+    sense: &'a Sense,
+    groups: impl Iterator<Item = &'a addict_dictionary::index::SynonymGroup>,
+) -> Cow<'a, [String]> {
+    let key = |text: &str| text.trim().to_lowercase();
+    let mut seen: Vec<String> = sense.synonyms.iter().map(|text| key(text)).collect();
+    let mut added = Vec::new();
+    for synonym in groups.flat_map(|group| &group.synonyms) {
+        if !seen.contains(&key(synonym)) {
+            seen.push(key(synonym));
+            added.push(synonym.clone());
+        }
     }
-    text
+    if added.is_empty() {
+        Cow::Borrowed(&sense.synonyms)
+    } else {
+        let mut all = sense.synonyms.clone();
+        all.extend(added);
+        Cow::Owned(all)
+    }
 }
 
 /// An online text in a block of its own: what it is and its line.
@@ -979,6 +1074,8 @@ pub struct SenseText<'a> {
     pub pos: Option<&'a str>,
     /// Its definition as the dictionary gives it.
     pub definition: &'a str,
+    /// How many synonyms it has, while it is not the chosen one and has any.
+    pub count: Option<String>,
     /// What is said about it when it is the chosen one.
     pub explained: Option<Explained<'a>>,
 }
@@ -1014,13 +1111,14 @@ pub struct ResultTexts<'a> {
     /// The chosen English gloss, when one of [`ResultTexts::glosses`] is.
     pub gloss: Option<ChosenGloss<'a>>,
     /// For an article, the pronunciations of its entries in source order,
-    /// each once; the window shows [`PRONUNCIATION_PREVIEW`] of them and the
-    /// rest behind [`SHOW_MORE`].
+    /// each once; the window shows [`PRONUNCIATION_PREVIEW`] of them beside
+    /// the headword and the rest behind a toggle.
     pub pronunciations: Vec<PronunciationText<'a>>,
 }
 
-/// How many pronunciations the card shows before [`SHOW_MORE`].
-pub(crate) const PRONUNCIATION_PREVIEW: usize = 3;
+/// How many pronunciations stand beside the headword, before the toggle
+/// that shows the others.
+pub(crate) const PRONUNCIATION_PREVIEW: usize = 1;
 
 /// The tooltip of the toggle that shows the pronunciations past
 /// [`PRONUNCIATION_PREVIEW`].
@@ -1366,7 +1464,7 @@ fn lookup_texts<'a>(
             line: None,
             translations: Some(Listed::Items {
                 label: from_russian_label(*language),
-                items: translations,
+                items: Cow::Borrowed(translations),
             }),
             ..line(Cow::Borrowed(""))
         },
@@ -1401,6 +1499,7 @@ fn article_texts<'a>(
     let (hint, senses) = sense_texts(
         &article.senses,
         &article.entries,
+        &[],
         chosen,
         definition,
         key_file,
@@ -1440,7 +1539,15 @@ fn grouped_texts<'a>(
         Some(Choice::Sense(index)) => Some(index),
         Some(Choice::Gloss(_)) | None => None,
     };
-    let (hint, rows) = sense_texts(senses, &grouped.entries, chosen, definition, key_file);
+    let groups = grouped.synonyms.as_deref().unwrap_or_default();
+    let (hint, rows) = sense_texts(
+        senses,
+        &grouped.entries,
+        groups,
+        chosen,
+        definition,
+        key_file,
+    );
     let hint = match &grouped.definitions {
         None => Some(missing_definitions(language)),
         Some(senses) if senses.is_empty() => Some(no_definitions(language)),
@@ -1451,15 +1558,32 @@ fn grouped_texts<'a>(
         Some(russian) => Listed::of(RUSSIAN_LABEL, russian, NO_TRANSLATION),
     };
     let in_senses = senses.iter().any(|sense| !sense.synonyms.is_empty());
+    // A meaning that a sense took stands under that sense: only the others
+    // are the word's.
+    let matched = matched_groups(senses, groups);
+    let unmatched: Vec<_> = groups
+        .iter()
+        .zip(&matched)
+        .filter(|(_, sense)| sense.is_none())
+        .map(|(group, _)| group)
+        .collect();
     let word_synonyms = match &grouped.synonyms {
         // The senses have their own: nothing to say about the word.
         None if in_senses => None,
         None => Some(SynonymTexts::Missing(missing_synonyms(language))),
-        Some(synonyms) if synonyms.is_empty() && in_senses => None,
-        Some(synonyms) if synonyms.is_empty() => Some(SynonymTexts::Missing(NO_WORD_SYNONYMS)),
-        Some(groups) => Some(SynonymTexts::Groups {
+        Some(_) if unmatched.is_empty() && (in_senses || matched.iter().any(Option::is_some)) => {
+            None
+        }
+        Some(_) if unmatched.is_empty() => Some(SynonymTexts::Missing(NO_WORD_SYNONYMS)),
+        Some(_) if senses.is_empty() => Some(SynonymTexts::Groups {
             label: word_synonyms_label(language),
-            groups,
+            count: meanings_count(unmatched.len(), false),
+            groups: unmatched,
+        }),
+        Some(_) => Some(SynonymTexts::Groups {
+            label: more_synonyms_label(language),
+            count: meanings_count(unmatched.len(), true),
+            groups: unmatched,
         }),
     };
     let glosses = match &grouped.english {
@@ -1500,32 +1624,48 @@ fn grouped_texts<'a>(
 /// The rows of `senses` with the sense `chosen` explained, and the hint that
 /// stands above them while none is chosen; no hint for an empty list. A
 /// sense's part of speech comes from `entries` when it has none of its own.
+/// A sense's synonyms are its own and those of the synonym meanings of
+/// `groups` that belong to it, as [`matched_groups`] finds them.
 fn sense_texts<'a>(
     senses: &'a [Sense],
     entries: &'a [LexicalEntry],
+    groups: &'a [addict_dictionary::index::SynonymGroup],
     chosen: Option<usize>,
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
 ) -> (Option<&'static str>, Vec<SenseText<'a>>) {
     let chosen = chosen.filter(|index| *index < senses.len());
     let hint = (!senses.is_empty() && chosen.is_none()).then_some(CHOOSE_SENSE);
+    let matched = matched_groups(senses, groups);
     let rows = senses
         .iter()
         .enumerate()
-        .map(|(index, sense)| SenseText {
-            number: index + 1,
-            pos: sense_pos(sense, entries),
-            definition: &sense.definition,
-            explained: (chosen == Some(index)).then(|| Explained {
-                mark: EXPLANATION_MARK,
-                definition: definition
-                    .filter(|_| !sense.definition.trim().is_empty())
-                    .map(|online| Block {
-                        label: DEFINITION_LABEL,
-                        line: online_line(online, key_file),
-                    }),
-                synonyms: Listed::of(SYNONYMS_LABEL, &sense.synonyms, NO_SYNONYMS),
-            }),
+        .map(|(index, sense)| {
+            let synonyms = sense_synonyms(
+                sense,
+                groups
+                    .iter()
+                    .zip(&matched)
+                    .filter(|(_, sense)| **sense == Some(index))
+                    .map(|(group, _)| group),
+            );
+            let chosen = chosen == Some(index);
+            SenseText {
+                number: index + 1,
+                pos: sense_pos(sense, entries),
+                definition: &sense.definition,
+                count: (!chosen && !synonyms.is_empty()).then(|| synonyms_count(synonyms.len())),
+                explained: chosen.then(|| Explained {
+                    mark: EXPLANATION_MARK,
+                    definition: definition
+                        .filter(|_| !sense.definition.trim().is_empty())
+                        .map(|online| Block {
+                            label: DEFINITION_LABEL,
+                            line: online_line(online, key_file),
+                        }),
+                    synonyms: Listed::of_cow(SYNONYMS_LABEL, synonyms, NO_SYNONYMS),
+                }),
+            }
         })
         .collect();
     (hint, rows)
@@ -1573,8 +1713,32 @@ const ONLINE_LONE_LABEL: &str = "Without a sentence";
 /// What stands beside the online translation of the sentence itself.
 const ONLINE_SENTENCE_LABEL: &str = "Whole sentence";
 
-/// The dim line under the online rows: where they came from.
+/// The dim line under the answer: where it came from.
 pub(crate) const ONLINE_SOURCE: &str = "Online · DeepL";
+
+/// The dim line under an answer from the offline dictionary alone.
+pub(crate) const OFFLINE_SOURCE: &str = "Offline dictionary";
+
+/// The dim line under an answer that has both.
+pub(crate) const BOTH_SOURCES: &str = "Online · DeepL, offline dictionary";
+
+/// What stands above the online translation of a word without a sentence,
+/// with the dictionary's translations under it.
+const ANSWER_LONE_LABEL: &str = "Russian";
+
+/// What stands before the dictionary's translations when the word is
+/// translated in its sentence.
+pub(crate) const WHOLE_WORD_LABEL: &str = "The word as a whole:";
+
+/// The note that stands in the card while there is no DeepL key: what is
+/// not done, what a key would give, and the button that adds one.
+pub(crate) const NO_KEY_LINE: &str = "The sentence is not translated offline.";
+pub(crate) const NO_KEY_HINT: &str = "With a DeepL key, the word is translated in its sentence.";
+pub(crate) const ADD_KEY_LABEL: &str = "Add DeepL key…";
+
+/// The tip under the card of a word looked up without its sentence.
+pub(crate) const LONE_WORD_TIP: &str =
+    "Select the whole sentence, not only the word, to see how it is translated there.";
 
 /// The line of an online request that still runs.
 const ONLINE_PENDING: &str = "Translating online…";
@@ -1605,6 +1769,133 @@ pub struct OnlineRow<'a> {
     pub state: OnlineState,
     /// The translation of the word, which stands out from the sentence.
     pub word: bool,
+    /// Which online text it is.
+    pub kind: OnlineKind,
+    /// The request was refused because there is no DeepL key at all.
+    pub no_key: bool,
+}
+
+/// Which online text a row holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnlineKind {
+    /// The chosen word, translated in its sentence.
+    Word,
+    /// The only word of the text, translated without a sentence.
+    Lone,
+    /// The sentence itself.
+    Sentence,
+}
+
+impl OnlineRow<'_> {
+    /// The same row, holding its own line.
+    pub fn into_owned(self) -> OnlineRow<'static> {
+        OnlineRow {
+            line: Cow::Owned(self.line.into_owned()),
+            ..self
+        }
+    }
+}
+
+/// One line of the answer and how it reads.
+pub type AnswerLine<'a> = (Cow<'a, str>, OnlineState);
+
+/// The answer at the top of the card: the Russian the word has, first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer<'a> {
+    /// What it is.
+    pub label: &'static str,
+    /// The answer itself, large: the word in its sentence, the word without
+    /// one, or the first translation of the dictionary.
+    pub word: Option<AnswerLine<'a>>,
+    /// Under it, the sentence translated.
+    pub sentence: Option<AnswerLine<'a>>,
+    /// Under them, the other translations of the dictionary, as pills.
+    pub pills: &'a [String],
+    /// The line of a dictionary with no translation, in place of the pills.
+    pub missing: Option<&'static str>,
+    /// Where the answer came from.
+    pub source: &'static str,
+    /// For a word translated in its sentence, the dictionary's translations
+    /// of the word as a whole, which stand beside [`WHOLE_WORD_LABEL`] under
+    /// the analysis, or the line that there are none.
+    pub whole: Option<Listed<'a>>,
+    /// There is no DeepL key: the card says what one would give.
+    pub no_key: bool,
+}
+
+/// The answer of `translations`, the dictionary's, and the online `rows`,
+/// or `None` when neither has anything. The word translated in its
+/// sentence is the answer when it is asked for, with the dictionary's
+/// translations as [`Answer::whole`]; else the word translated without a
+/// sentence, with the dictionary's as pills; else the dictionary's first,
+/// with its others as pills. Rows refused for want of a key are no answer:
+/// [`Answer::no_key`] says so instead.
+pub fn answer_texts<'a>(
+    translations: Option<&'a Listed<'a>>,
+    rows: &'a [OnlineRow<'a>],
+) -> Option<Answer<'a>> {
+    let no_key = !rows.is_empty() && rows.iter().all(|row| row.no_key);
+    let find = |kind: OnlineKind| {
+        rows.iter()
+            .filter(|_| !no_key)
+            .find(|row| row.kind == kind)
+            .map(|row| (Cow::Borrowed(row.line.as_ref()), row.state))
+    };
+    let (label, items, missing) = match translations {
+        Some(Listed::Items { label, items }) => (Some(*label), items.as_ref(), None),
+        Some(Listed::Missing(line)) => (None, &[][..], Some(*line)),
+        None => (None, &[][..], None),
+    };
+    let label = label.unwrap_or(RUSSIAN_LABEL).trim_end_matches(':');
+    let sentence = find(OnlineKind::Sentence);
+    if let Some(word) = find(OnlineKind::Word) {
+        return Some(Answer {
+            label: ONLINE_WORD_LABEL,
+            word: Some(word),
+            sentence,
+            pills: &[],
+            missing: None,
+            source: ONLINE_SOURCE,
+            whole: translations.cloned(),
+            no_key,
+        });
+    }
+    if let Some(lone) = find(OnlineKind::Lone) {
+        return Some(Answer {
+            label: ANSWER_LONE_LABEL,
+            word: Some(lone),
+            sentence,
+            pills: items,
+            missing,
+            source: if items.is_empty() {
+                ONLINE_SOURCE
+            } else {
+                BOTH_SOURCES
+            },
+            whole: None,
+            no_key,
+        });
+    }
+    if items.is_empty() && missing.is_none() && sentence.is_none() && !no_key {
+        return None;
+    }
+    let source = match (items.is_empty(), sentence.is_some()) {
+        (false, true) => BOTH_SOURCES,
+        (true, true) => ONLINE_SOURCE,
+        (_, false) => OFFLINE_SOURCE,
+    };
+    Some(Answer {
+        label,
+        word: items
+            .first()
+            .map(|first| (Cow::Borrowed(first.as_str()), OnlineState::Translated)),
+        sentence,
+        pills: items.get(1..).unwrap_or_default(),
+        missing,
+        source,
+        whole: None,
+        no_key,
+    })
 }
 
 /// The online texts as rows: the word in its sentence, the word without a
@@ -1615,19 +1906,36 @@ pub struct OnlineRow<'a> {
 pub fn online_rows<'a>(texts: &OnlineTexts<'a>, key_file: Option<&Path>) -> Vec<OnlineRow<'a>> {
     let mut rows = Vec::new();
     if let Some(online) = texts.word {
-        rows.push(online_row(ONLINE_WORD_LABEL, online, key_file, true));
+        rows.push(online_row(
+            ONLINE_WORD_LABEL,
+            online,
+            key_file,
+            OnlineKind::Word,
+        ));
     }
     if let Some(online) = texts.lone {
-        rows.push(online_row(ONLINE_LONE_LABEL, online, key_file, true));
+        rows.push(online_row(
+            ONLINE_LONE_LABEL,
+            online,
+            key_file,
+            OnlineKind::Lone,
+        ));
     }
     if let Some(whole) = texts.sentence {
         rows.push(match whole {
-            Whole::Asked(online) => online_row(ONLINE_SENTENCE_LABEL, online, key_file, false),
+            Whole::Asked(online) => online_row(
+                ONLINE_SENTENCE_LABEL,
+                online,
+                key_file,
+                OnlineKind::Sentence,
+            ),
             Whole::TooLong => OnlineRow {
                 label: ONLINE_SENTENCE_LABEL,
                 line: Cow::Borrowed(ONLINE_TOO_LONG),
                 state: OnlineState::Failed,
                 word: false,
+                kind: OnlineKind::Sentence,
+                no_key: false,
             },
         });
     }
@@ -1639,7 +1947,7 @@ fn online_row<'a>(
     label: &'static str,
     online: &'a Online,
     key_file: Option<&Path>,
-    word: bool,
+    kind: OnlineKind,
 ) -> OnlineRow<'a> {
     let state = match online {
         Online::Pending => OnlineState::Pending,
@@ -1650,7 +1958,9 @@ fn online_row<'a>(
         label,
         line: online_line(online, key_file),
         state,
-        word,
+        word: kind != OnlineKind::Sentence,
+        kind,
+        no_key: matches!(online, Online::Refused(Refusal::Key)),
     }
 }
 
@@ -1919,6 +2229,7 @@ mod tests {
     };
     use addict_dictionary::lookup::{Grouped, VerbForm};
     use addict_platform::{atspi::ContextFailure, foreground::Source as Foregrounded};
+    use std::borrow::Cow;
 
     fn definition_shown() -> Shown {
         let mut shown = Shown::default();
@@ -2733,10 +3044,10 @@ mod tests {
 
     /// `listed` as one line: its label and the items after it, separated by
     /// commas, or the line of an empty list.
-    fn listed_line(listed: Listed<'_>) -> String {
+    fn listed_line(listed: &Listed<'_>) -> String {
         match listed {
             Listed::Items { label, items } => format!("{label} {}", items.join(", ")),
-            Listed::Missing(line) => line.to_owned(),
+            Listed::Missing(line) => (*line).to_owned(),
         }
     }
 
@@ -2759,11 +3070,11 @@ mod tests {
                     lines.push(block.label.to_owned());
                     lines.push(block.line.to_string());
                 }
-                lines.push(listed_line(explained.synonyms));
+                lines.push(listed_line(&explained.synonyms));
             }
         }
         lines.push(String::new());
-        lines.extend(texts.translations.map(listed_line));
+        lines.extend(texts.translations.as_ref().map(listed_line));
         lines
     }
 
@@ -3631,9 +3942,9 @@ mod tests {
     /// one line, or nothing where there is no section.
     fn sections(texts: &ResultTexts<'_>) -> [Option<String>; 3] {
         [
-            texts.translations.map(listed_line),
-            texts.word_synonyms.map(|synonyms| synonyms.line()),
-            texts.glosses.map(listed_line),
+            texts.translations.as_ref().map(listed_line),
+            texts.word_synonyms.as_ref().map(|synonyms| synonyms.line()),
+            texts.glosses.as_ref().map(listed_line),
         ]
     }
 
@@ -3733,7 +4044,7 @@ mod tests {
             sections(&texts),
             [
                 Some(format!("{RUSSIAN_LABEL} банк, скамейка")),
-                Some("Spanish synonyms of the word entidad, asiento".to_owned()),
+                Some("More Spanish synonyms entidad, asiento".to_owned()),
                 Some(format!(
                     "{ENGLISH_LABEL} bank (financial institution), bench"
                 )),
@@ -3747,7 +4058,7 @@ mod tests {
             explained.synonyms,
             Listed::Items {
                 label: SYNONYMS_LABEL,
-                items: &["banca".to_owned()],
+                items: Cow::Owned(vec!["banca".to_owned()]),
             }
         );
     }
@@ -3847,16 +4158,19 @@ mod tests {
             metadata: SenseMetadata::from_label("(v; beure)"),
             synonyms: vec!["prendre".to_owned(); 9],
         };
-        assert_eq!(
-            super::synonym_heading(&group, 3),
-            "fer · Verb · Meaning 3 — beure"
-        );
+        fn head(group: &SynonymGroup) -> (Option<&'static str>, Option<&str>) {
+            (
+                super::synonym_class(group),
+                super::synonym_description(group),
+            )
+        }
+        assert_eq!(head(&group), (Some("verb"), Some("beure")));
         group.metadata = SenseMetadata::from_label("(v)");
-        assert_eq!(super::synonym_heading(&group, 2), "fer · Verb · Meaning 2");
+        assert_eq!(head(&group), (Some("verb"), None));
         group.metadata = None;
-        assert_eq!(super::synonym_heading(&group, 1), "fer · Meaning 1");
+        assert_eq!(head(&group), (None, None));
         group.metadata = SenseMetadata::from_label("(unknown)");
-        assert_eq!(super::synonym_heading(&group, 4), "fer · Meaning 4");
+        assert_eq!(head(&group), (None, None));
         let groups = vec![group.clone(), group];
         let lookup = Lookup::Grouped {
             language: Language::Ca,
@@ -3866,11 +4180,174 @@ mod tests {
             },
         };
         let texts = result_texts(&lookup, None, None, None);
-        let Some(SynonymTexts::Groups { groups: shown, .. }) = texts.word_synonyms else {
+        let Some(SynonymTexts::Groups {
+            groups: shown,
+            label,
+            count,
+        }) = texts.word_synonyms
+        else {
             panic!("groups");
         };
-        assert_eq!(shown, groups);
+        // Without senses, the meanings are the word's own.
+        assert_eq!(label, "Catalan synonyms of the word");
+        assert_eq!(count, "2 meanings");
+        assert_eq!(shown, groups.iter().collect::<Vec<_>>());
         assert_eq!(shown[0].synonyms.len(), 9);
+    }
+
+    /// The thesaurus meaning that holds every synonym a sense gives is that
+    /// sense's: its synonyms join the sense's, each once, and the sense's
+    /// row counts them; the meanings no sense took stay the word's, under
+    /// a label that says so.
+    #[test]
+    fn a_synonym_meaning_that_holds_a_sense_s_synonyms_joins_that_sense() {
+        use addict_dictionary::index::SynonymGroup;
+        let group = |synonyms: &[&str]| SynonymGroup {
+            headword: "tenir".to_owned(),
+            definition: String::new(),
+            metadata: None,
+            synonyms: synonyms.iter().map(|text| (*text).to_owned()).collect(),
+        };
+        let sense = |synonyms: &[&str]| Sense {
+            part_of_speech: None,
+            entries: Vec::new(),
+            definition: "d".to_owned(),
+            synonyms: synonyms.iter().map(|text| (*text).to_owned()).collect(),
+        };
+        let lookup = Lookup::Grouped {
+            language: Language::Ca,
+            grouped: Grouped {
+                definitions: Some(vec![
+                    sense(&["posseir"]),
+                    sense(&["contenir", "incloure"]),
+                    sense(&["considerar", "estimar"]),
+                    sense(&[]),
+                ]),
+                synonyms: Some(vec![
+                    group(&["valorar", "estimar", "avaluar"]),
+                    group(&["Contenir", "incloure", "comprendre", "englobar"]),
+                    group(&["abundar"]),
+                ]),
+                ..Grouped::default()
+            },
+        };
+        let texts = result_texts(&lookup, Some(1), None, None);
+        let counts: Vec<_> = texts
+            .senses
+            .iter()
+            .map(|row| row.count.as_deref())
+            .collect();
+        // The chosen one says its synonyms under it; one with none says
+        // nothing.
+        assert_eq!(counts, [Some("1 synonym"), None, Some("2 synonyms"), None]);
+        let explained = texts.senses[1].explained.as_ref().expect("explained");
+        assert_eq!(
+            listed_line(&explained.synonyms),
+            format!("{SYNONYMS_LABEL} contenir, incloure, comprendre, englobar")
+        );
+        let Some(SynonymTexts::Groups {
+            label,
+            count,
+            groups,
+        }) = &texts.word_synonyms
+        else {
+            panic!("the meanings no sense took");
+        };
+        assert_eq!(*label, "More Catalan synonyms");
+        assert_eq!(count, "2 meanings not matched to a sense");
+        let firsts: Vec<_> = groups
+            .iter()
+            .map(|group| group.synonyms[0].as_str())
+            .collect();
+        assert_eq!(firsts, ["valorar", "abundar"]);
+        let unchosen = result_texts(&lookup, None, None, None);
+        assert_eq!(unchosen.senses[1].count.as_deref(), Some("4 synonyms"));
+    }
+
+    fn row(kind: super::OnlineKind, line: &str, state: OnlineState) -> super::OnlineRow<'static> {
+        super::OnlineRow {
+            label: "",
+            line: Cow::Owned(line.to_owned()),
+            state,
+            word: kind != super::OnlineKind::Sentence,
+            kind,
+            no_key: false,
+        }
+    }
+
+    /// The word in its sentence is the answer, with the sentence under it
+    /// and the dictionary's translations beside the word as a whole.
+    #[test]
+    fn the_word_in_its_sentence_is_the_answer() {
+        use super::{OnlineKind, answer_texts};
+        let items = ["иметь".to_owned(), "держать".to_owned()];
+        let translations = Listed::Items {
+            label: RUSSIAN_LABEL,
+            items: Cow::Borrowed(&items[..]),
+        };
+        let rows = [
+            row(OnlineKind::Word, "есть", OnlineState::Translated),
+            row(
+                OnlineKind::Sentence,
+                "У них есть дом.",
+                OnlineState::Translated,
+            ),
+        ];
+        let answer = answer_texts(Some(&translations), &rows).expect("an answer");
+        assert_eq!(answer.label, "In this sentence");
+        assert_eq!(answer.word.expect("the word").0, "есть");
+        assert_eq!(answer.sentence.expect("the sentence").0, "У них есть дом.");
+        assert!(answer.pills.is_empty());
+        assert_eq!(answer.whole, Some(translations.clone()));
+        assert_eq!(answer.source, super::ONLINE_SOURCE);
+        assert!(!answer.no_key);
+    }
+
+    /// Offline, the dictionary's first translation is the answer and the
+    /// others are pills; without a key, the card says what one would give.
+    #[test]
+    fn offline_the_dictionary_answers_and_a_missing_key_is_a_note() {
+        use super::{OnlineKind, answer_texts};
+        let items = ["иметь".to_owned(), "держать".to_owned()];
+        let translations = Listed::Items {
+            label: RUSSIAN_LABEL,
+            items: Cow::Borrowed(&items[..]),
+        };
+        let answer = answer_texts(Some(&translations), &[]).expect("an answer");
+        assert_eq!(answer.label, "Russian, for the word as a whole");
+        assert_eq!(answer.word.expect("the first").0, "иметь");
+        assert_eq!(answer.pills, &items[1..]);
+        assert_eq!(answer.source, super::OFFLINE_SOURCE);
+        assert!(!answer.no_key);
+        let mut refused = row(
+            OnlineKind::Word,
+            "A DeepL key is required.",
+            OnlineState::Failed,
+        );
+        refused.no_key = true;
+        let rows = [refused];
+        let answer = answer_texts(Some(&translations), &rows).expect("an answer");
+        assert_eq!(answer.word.expect("the first").0, "иметь");
+        assert!(answer.no_key);
+        assert_eq!(answer_texts(None, &[]), None);
+    }
+
+    /// A word without a sentence, translated online, is the answer, with
+    /// the dictionary's translations as pills under it.
+    #[test]
+    fn a_lone_word_online_has_the_dictionary_under_it() {
+        use super::{OnlineKind, answer_texts};
+        let items = ["иметь".to_owned()];
+        let translations = Listed::Items {
+            label: RUSSIAN_LABEL,
+            items: Cow::Borrowed(&items[..]),
+        };
+        let rows = [row(OnlineKind::Lone, "", OnlineState::Pending)];
+        let answer = answer_texts(Some(&translations), &rows).expect("an answer");
+        assert_eq!(answer.label, "Russian");
+        assert_eq!(answer.word.expect("pending").1, OnlineState::Pending);
+        assert_eq!(answer.pills, &items[..]);
+        assert_eq!(answer.source, super::BOTH_SOURCES);
     }
 
     #[test]
@@ -3926,7 +4403,7 @@ mod tests {
         assert_eq!(texts.glosses, None);
         assert_eq!(texts.senses_label, "English definitions");
         assert_eq!(
-            texts.translations.map(listed_line),
+            texts.translations.as_ref().map(listed_line),
             Some(format!("{RUSSIAN_LABEL} раз, два"))
         );
         for lookup in every_lookup() {
@@ -3976,7 +4453,7 @@ mod tests {
             explained.synonyms,
             Listed::Items {
                 label: SYNONYMS_LABEL,
-                items: &["banca".to_owned()],
+                items: Cow::Owned(vec!["banca".to_owned()]),
             }
         );
         assert_eq!(explained.definition, None);

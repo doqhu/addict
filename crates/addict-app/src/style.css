@@ -246,10 +246,15 @@ window.addict label.headword {
   font-weight: 600;
 }
 
-/* The pronunciations under the headword: the transcription in the
- * text's colour, the headword of another entry and the labels dim, and a
- * small round play button; one whose playback failed is in the warning's
- * colour. */
+/* The headword with its first pronunciation beside it, and the others
+ * under it: the transcription in the text's colour, the headword of
+ * another entry and the labels dim, and a small round play button; one
+ * whose playback failed is in the warning's colour. */
+window.addict wrap.wordrow > .lead {
+  margin-left: 6px;
+  margin-top: 6px;
+}
+
 window.addict .pronunciations {
   margin-top: -6px;
 }
@@ -358,8 +363,13 @@ window.addict label.pill {
   background: var(--chip);
 }
 
-window.addict wrap.pills > label.pill:first-child:not(.outline),
-window.addict wrap.pills > button.pill-link:first-child > label.pill:not(.outline) {
+window.addict label.pill.small {
+  padding: 2px 10px;
+  font-size: 0.9em;
+}
+
+window.addict wrap.pills > label.pill:first-child:not(.outline):not(.small),
+window.addict wrap.pills > button.pill-link:first-child > label.pill:not(.outline):not(.small) {
   background: var(--accent-soft);
   font-weight: 600;
 }
@@ -399,32 +409,44 @@ window.addict .online-definition {
   line-height: 1.5;
 }
 
-/* The online texts at the foot of the card: a label column, dim, beside
- * the lines; a hairline sets them off from an article above them, and a
- * dim line under them names DeepL. */
-window.addict .online.under-article {
-  border-top: 1px solid var(--line);
-  padding-top: 14px;
+/* The answer, first in the card: tinted with the accent, what it is in a
+ * small dim line, the Russian large, the sentence under it, the other
+ * translations as pills on the surface, and where it came from, dim. */
+window.addict .answer {
+  background: var(--accent-soft);
+  border-radius: 14px;
+  padding: 14px 16px;
 }
 
-window.addict label.online-label {
-  min-width: 120px;
+window.addict label.answer-label {
   color: var(--muted);
-  font-size: 0.87em;
-  /* The label is smaller than the line beside it: down to its baseline. */
-  margin-top: 2px;
+  font-size: 0.8em;
 }
 
-window.addict label.online-word {
+window.addict label.answer-word {
+  font-size: 1.75em;
   font-weight: 600;
+}
+
+window.addict label.answer-sentence {
+  margin-top: 4px;
+}
+
+window.addict .answer-pills {
+  margin-top: 6px;
+}
+
+window.addict .answer label.pill {
+  background: var(--surface);
 }
 
 window.addict label.online-pending {
   color: var(--muted);
   font-size: 0.93em;
+  font-weight: normal;
 }
 
-window.addict .online spinner {
+window.addict .answer spinner {
   color: var(--accent);
   min-width: 14px;
   min-height: 14px;
@@ -433,15 +455,40 @@ window.addict .online spinner {
 window.addict label.online-failed {
   color: var(--warn);
   font-size: 0.93em;
+  font-weight: normal;
 }
 
 window.addict .online-source {
   color: var(--muted);
   font-size: 0.8em;
+  margin-top: 6px;
 }
 
 window.addict .online-source image {
   -gtk-icon-size: 13px;
+}
+
+/* Without a DeepL key: a quiet note with the button that adds one. */
+window.addict .offline-note {
+  padding: 10px 12px 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+}
+
+window.addict .offline-note > image {
+  color: var(--muted);
+}
+
+/* The dictionary's translations of a word translated in its sentence, and
+ * the tip under the card of a word without its sentence. */
+window.addict label.whole-label {
+  margin-top: 2px;
+}
+
+window.addict .tip {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 0.9em;
 }
 
 /* The senses: a quiet row each, a number in a circle, the chosen one
@@ -488,6 +535,13 @@ window.addict label.pos {
   color: var(--muted);
   font-size: 0.8em;
   font-style: italic;
+}
+
+window.addict label.scount {
+  color: var(--muted);
+  font-size: 0.8em;
+  margin-top: 2px;
+  font-feature-settings: "tnum";
 }
 
 window.addict label.mark {
@@ -689,20 +743,86 @@ window.addict.settings headerbar windowcontrols button:hover {
   background: var(--line);
 }
 
-/* Independent meanings keep their source ordering and expandable pills. */
-window.addict .synonym-meaning {
-  padding: 8px 0;
-}
-window.addict label.synonym-heading {
-  font-weight: 600;
-}
-window.addict button.synonym-toggle {
-  padding: 3px 8px;
+/* The toggle at the end of a list of pills: how many are hidden, in the
+ * accent, on a chip, with a chevron that turns while they are shown. */
+window.addict button.more {
   min-height: 24px;
+  padding: 0 8px 0 10px;
+  border-radius: 999px;
   border: none;
   background: var(--chip);
   color: var(--accent);
   box-shadow: none;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+window.addict button.more:hover {
+  background: var(--line);
+}
+
+window.addict button.more image {
+  -gtk-icon-size: 12px;
+}
+
+window.addict button.more:checked image {
+  -gtk-icon-transform: rotate(180deg);
+}
+
+/* The disclosure of the synonyms no sense took: a quiet outlined row, its
+ * chevron turning while it is open, and a card for each meaning. */
+window.addict button.disclosure {
+  min-height: 44px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  box-shadow: none;
+  color: var(--fg);
+}
+
+window.addict button.disclosure:hover {
+  background: var(--chip);
+}
+
+window.addict button.disclosure image {
+  color: var(--muted);
+}
+
+window.addict button.disclosure:checked image {
+  -gtk-icon-transform: rotate(90deg);
+}
+
+window.addict label.disclosure-label {
+  color: var(--fg);
+}
+
+window.addict label.dmeta {
+  color: var(--muted);
+  font-size: 0.85em;
+}
+
+window.addict .meaning {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px 14px;
+}
+
+window.addict label.mword {
+  font-family: "Newsreader", "Source Serif 4", "Noto Serif", Georgia, serif;
+  font-size: 1.1em;
+  font-weight: 600;
+}
+
+window.addict label.mgloss {
+  font-weight: 600;
+}
+
+window.addict label.mcount {
+  color: var(--muted);
+  font-size: 0.85em;
+  font-feature-settings: "tnum";
 }
 
 /* A button reached by the keyboard: the same solid ring as a focused field. */

@@ -257,6 +257,8 @@ enum Event {
     Forward,
     /// The user explicitly requested the selected dictionary definition.
     DefinitionAction,
+    /// Add DeepL key… was pressed in the card: the Settings window is shown.
+    AddKey,
     /// The separate definition job ended with its individual request number;
     /// it was sent from `source`. `elapsed` is the time the request took, as
     /// the worker saw it; taken only when evidence is recorded.
@@ -609,6 +611,7 @@ impl Session {
             Event::Back => self.back(),
             Event::Forward => self.forward(),
             Event::DefinitionAction => self.definition_action(),
+            Event::AddKey => self.show_settings(),
             Event::DefinitionTranslated {
                 number,
                 source,
@@ -2098,6 +2101,10 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     let definition = sender.clone();
     view.connect_definition_action(move || {
         let _ = definition.unbounded_send(Event::DefinitionAction);
+    });
+    let add_key = sender.clone();
+    view.connect_add_key(move || {
+        let _ = add_key.unbounded_send(Event::AddKey);
     });
     let sense = sender.clone();
     view.connect_sense_chosen(move |index| {

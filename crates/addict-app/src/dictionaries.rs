@@ -1400,22 +1400,23 @@ pub mod tests {
     fn section_lines(language: Language, grouped: Grouped) -> (&'static str, Vec<String>) {
         let lookup = crate::view::Lookup::Grouped { language, grouped };
         let texts = crate::view::result_texts(&lookup, None, None, None);
-        let line = |listed: Option<crate::view::Listed<'_>>| match listed {
+        let line = |listed: Option<&crate::view::Listed<'_>>| match listed {
             Some(crate::view::Listed::Items { label, items }) => {
                 format!("{label} {}", items.join(", "))
             }
-            Some(crate::view::Listed::Missing(line)) => line.to_owned(),
+            Some(crate::view::Listed::Missing(line)) => (*line).to_owned(),
             None => String::new(),
         };
         (
             texts.senses_label,
             vec![
-                line(texts.translations),
+                line(texts.translations.as_ref()),
                 format!("{} senses", texts.senses.len()),
                 texts
                     .word_synonyms
+                    .as_ref()
                     .map_or_else(String::new, |synonyms| synonyms.line()),
-                line(texts.glosses),
+                line(texts.glosses.as_ref()),
             ],
         )
     }
@@ -1460,7 +1461,7 @@ pub mod tests {
                 texts(&[
                     "Russian, for the word as a whole: банк",
                     "1 senses",
-                    "Spanish synonyms of the word entidad",
+                    "More Spanish synonyms entidad",
                     "English glosses bench",
                 ])
             )
