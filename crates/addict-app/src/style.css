@@ -1,42 +1,48 @@
 /* The look of the window: a quiet ground, one surface for the list of
- * senses, one accent. The palette is the window's own, light and dark, so
- * the window looks the same under any GTK theme; the widgets carry the
- * classes that `widgets.rs` and `resident.rs` give them. Needs GTK 4.20:
- * custom properties and the color-scheme media query. */
+ * senses, one accent. The palette is taken from the icon's mosaic: aged
+ * ivory ground, a petrol green accent, terracotta for warnings and a sea
+ * blue for a good state. Hairlines (`--line`) only part things; a control's
+ * own border is `--line-strong`, at least 3:1 on what it sits on, and the
+ * focus is a solid ring of the accent. The palette is the window's own,
+ * light and dark, so the window looks the same under any GTK theme; the
+ * widgets carry the classes that `widgets.rs` and `resident.rs` give them.
+ * Needs GTK 4.20: custom properties and the color-scheme media query. */
 
 :root {
-  --bg: #f6f6f8;
-  --surface: #ffffff;
-  --head: #ededf1;
-  --line: #e2e2e8;
-  --fg: #1b1b21;
-  --muted: #5b5b68;
-  --chip: #f0f0f4;
-  --accent: #2f5bd3;
-  --accent-soft: #eef2fc;
+  --bg: #f7f2e8;
+  --surface: #fffdf8;
+  --head: #eee7d8;
+  --line: #e3dbca;
+  --line-strong: #8d8572;
+  --fg: #1f2420;
+  --muted: #5e5a4f;
+  --chip: #f0e9da;
+  --accent: #2c5a50;
+  --accent-soft: #e2ebe4;
   --on-accent: #ffffff;
-  --warn-bg: #fdf1e3;
-  --warn: #8a4b0c;
-  --good-bg: #e7f4ec;
-  --good: #1d6b3c;
+  --warn-bg: #f7e4d8;
+  --warn: #97431f;
+  --good-bg: #e0ecf0;
+  --good: #21566a;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1c1c20;
-    --surface: #26262b;
-    --head: #2d2d33;
-    --line: #3a3a42;
-    --fg: #ececf0;
-    --muted: #a6a6b2;
-    --chip: #33333a;
-    --accent: #8aa8ff;
-    --accent-soft: #2a3150;
-    --on-accent: #10131f;
-    --warn-bg: #3a2c1d;
-    --warn: #f3c38a;
-    --good-bg: #1f3328;
-    --good: #8fd6a8;
+    --bg: #1a1d1b;
+    --surface: #232725;
+    --head: #2a2e2b;
+    --line: #383d39;
+    --line-strong: #7a827c;
+    --fg: #ede6d8;
+    --muted: #aca796;
+    --chip: #2f3431;
+    --accent: #8cc3b4;
+    --accent-soft: #253f39;
+    --on-accent: #10201c;
+    --warn-bg: #3d271c;
+    --warn: #f0a882;
+    --good-bg: #1e3139;
+    --good: #95cbdd;
   }
 }
 
@@ -105,7 +111,7 @@ window.addict entry.lookup {
   min-height: 44px;
   padding: 0 12px;
   border-radius: 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   background: var(--surface);
   color: var(--fg);
   box-shadow: none;
@@ -114,7 +120,7 @@ window.addict entry.lookup {
 
 window.addict entry.lookup:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  box-shadow: 0 0 0 2px var(--accent);
 }
 
 window.addict entry.lookup > text > placeholder {
@@ -126,7 +132,7 @@ window.addict button.capture {
   min-height: 44px;
   padding: 0 16px;
   border-radius: 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   background: var(--surface);
   color: var(--fg);
   box-shadow: none;
@@ -143,7 +149,7 @@ window.addict .history > button {
   min-height: 44px;
   min-width: 34px;
   padding: 0 6px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   background: var(--surface);
   color: var(--fg);
   box-shadow: none;
@@ -174,7 +180,7 @@ window.addict .language > button {
   min-height: 44px;
   min-width: 34px;
   padding: 0 4px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   background: var(--surface);
   color: var(--muted);
   box-shadow: none;
@@ -584,7 +590,7 @@ window.addict button.settings-button {
   min-height: 36px;
   padding: 0 14px;
   border-radius: 10px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   background: var(--chip);
   color: var(--fg);
   box-shadow: none;
@@ -621,7 +627,7 @@ window.addict entry.key {
   min-height: 44px;
   padding: 0 4px 0 12px;
   border-radius: 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   background: var(--surface);
   color: var(--fg);
   box-shadow: none;
@@ -630,7 +636,7 @@ window.addict entry.key {
 
 window.addict entry.key:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  box-shadow: 0 0 0 2px var(--accent);
 }
 
 window.addict entry.key > text > placeholder {
@@ -697,4 +703,10 @@ window.addict button.synonym-toggle {
   background: var(--chip);
   color: var(--accent);
   box-shadow: none;
+}
+
+/* A button reached by the keyboard: the same solid ring as a focused field. */
+window.addict button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
