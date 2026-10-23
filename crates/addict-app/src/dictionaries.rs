@@ -1416,7 +1416,10 @@ pub mod tests {
                     .word_synonyms
                     .as_ref()
                     .map_or_else(String::new, |synonyms| synonyms.line()),
-                line(texts.glosses.as_ref()),
+                texts
+                    .glosses
+                    .as_ref()
+                    .map_or_else(String::new, crate::view::GlossTexts::line),
             ],
         )
     }

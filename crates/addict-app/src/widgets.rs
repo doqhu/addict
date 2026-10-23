@@ -42,10 +42,11 @@ use gtk::{gdk, gio, glib, prelude::*};
 use crate::{
     dictionaries::Indexes,
     view::{
-        ADD_KEY_LABEL, ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, Answer, AnswerLine,
-        BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COPIED_LABEL, COPY_LABEL, ChosenGloss,
-        DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, FORWARD_TOOLTIP, LANGUAGE_TOOLTIP,
-        LONE_WORD_TIP, Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE,
+        ADD_KEY_LABEL, ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, AnalysisGroup, Answer,
+        AnswerLine, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COPIED_LABEL, COPY_LABEL,
+        ChosenGloss, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, FORM_TAG, FORWARD_TOOLTIP,
+        FormRow, GLOSS_NO_KEY, GlossRow, GlossTexts, LANGUAGE_TOOLTIP, LONE_WORD_TIP,
+        LOOK_UP_ENGLISH, Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE,
         OnlineRow, OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
         PronunciationText, RETRY_LABEL, ResultTexts, SENSES_LABEL, SHOW_LESS, SYNONYM_PREVIEW,
         SenseText, Shown, SynonymTexts, WHOLE_WORD_LABEL, answer_texts, binding_texts,
@@ -752,49 +753,12 @@ fn play_button(url: &str, player: &Player) -> gtk::Button {
 /// dim, on a line of its own.
 fn fill_analysis(container: &gtk::Box, analysis: &Analysis, field: &gtk::Entry) {
     clear(container);
-    let part = |text: &str, class: &str| {
-        gtk::Label::builder()
-            .label(text)
-            .css_classes([class])
-            .build()
-    };
     for line in &analysis.lines {
         let row = Wrap::new();
         row.add_css_class("analysis-line");
         row.update_property(&[gtk::accessible::Property::Label(&line.text())]);
-        let lemma = gtk::Button::builder()
-            .child(&part(&line.lemma, "lemma"))
-            .css_classes(["lemma-link"])
-            .focus_on_click(false)
-            .build();
-        lemma.set_cursor_from_name(Some("pointer"));
-        let held = field.downgrade();
-        let word = line.lemma.clone();
-        lemma.connect_clicked(move |_| {
-            if let Some(field) = held.upgrade() {
-                put_into_field(&field, &word);
-            }
-        });
-        row.append(&lemma);
-        row.append(&part(ANALYSIS_DASH, "analysis-mark"));
-        for (index, group) in line.groups.iter().enumerate() {
-            if index > 0 {
-                row.append(&part(ANALYSIS_SEPARATOR, "analysis-mark"));
-            }
-            let parts = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-            if let Some(persons) = &group.persons {
-                let tag = part(persons, "persons");
-                tag.set_valign(gtk::Align::Center);
-                parts.append(&tag);
-            }
-            if let Some(tense) = group.tense {
-                parts.append(&part(tense, "tense"));
-            }
-            if let Some(mood) = group.mood {
-                parts.append(&part(mood, "mood"));
-            }
-            row.append(&parts);
-        }
+        row.append(&lemma_link(&line.lemma, field));
+        append_analysis_groups(&row, &line.groups);
         container.append(&row);
     }
     if let Some(note) = &analysis.note {
@@ -807,53 +771,255 @@ fn fill_analysis(container: &gtk::Box, analysis: &Analysis, field: &gtk::Entry) 
     }
 }
 
-/// Puts the English glosses `listed` into `container`: its label as a
-/// caption and each gloss as a row of its own, which a click chooses, with
-/// the button that translates it, when `action` is given, and its online
-/// translation under the `chosen` one; or the line of an empty list;
-/// nothing for `None`. A click runs `clicked` with the index of the gloss.
+/// A plain label of `class`, a part of an analysis line.
+fn analysis_part(text: &str, class: &str) -> gtk::Label {
+    gtk::Label::builder()
+        .label(text)
+        .css_classes([class])
+        .build()
+}
+
+/// The lemma as a serif link in the accent that puts it into `field` as a
+/// paste does.
+fn lemma_link(lemma: &str, field: &gtk::Entry) -> gtk::Button {
+    let link = gtk::Button::builder()
+        .child(&analysis_part(lemma, "lemma"))
+        .css_classes(["lemma-link"])
+        .focus_on_click(false)
+        .build();
+    link.set_cursor_from_name(Some("pointer"));
+    let held = field.downgrade();
+    let word = lemma.to_owned();
+    link.connect_clicked(move |_| {
+        if let Some(field) = held.upgrade() {
+            put_into_field(&field, &word);
+        }
+    });
+    link
+}
+
+/// Appends the dash and `groups` to `row`: each its persons as a tag, its
+/// tense and its mood, with a dot between two.
+fn append_analysis_groups(row: &Wrap, groups: &[AnalysisGroup]) {
+    row.append(&analysis_part(ANALYSIS_DASH, "analysis-mark"));
+    for (index, group) in groups.iter().enumerate() {
+        if index > 0 {
+            row.append(&analysis_part(ANALYSIS_SEPARATOR, "analysis-mark"));
+        }
+        let parts = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        if let Some(persons) = &group.persons {
+            let tag = analysis_part(persons, "persons");
+            tag.set_valign(gtk::Align::Center);
+            parts.append(&tag);
+        }
+        if let Some(tense) = group.tense {
+            parts.append(&analysis_part(tense, "tense"));
+        }
+        if let Some(mood) = group.mood {
+            parts.append(&analysis_part(mood, "mood"));
+        }
+        row.append(&parts);
+    }
+}
+
+/// Runs with the English word of a gloss when its pill is clicked.
+type LookUp = Rc<dyn Fn(&str)>;
+
+/// Puts the English glosses `texts` into `container`: the label with how
+/// many there are, the hint, then a group per part of speech, its tag in
+/// the left column and a row per gloss, which a click chooses, and the
+/// forms last; or the line that there are none; nothing for `None`. Under
+/// the `chosen` gloss stand its online translation, or the line that a key
+/// is needed, and its English word, which `look_up` looks up.
 fn fill_glosses(
     container: &gtk::Box,
-    listed: Option<&Listed<'_>>,
+    texts: Option<&GlossTexts<'_>>,
     chosen: Option<&ChosenGloss<'_>>,
     clicked: &SenseChosen,
-    action: Option<&gtk::Button>,
+    look_up: &LookUp,
+    field: &gtk::Entry,
 ) {
     clear(container);
-    match listed {
-        None => {}
-        Some(Listed::Missing(line)) => {
+    let glosses = match texts {
+        None => return,
+        Some(GlossTexts::Missing(line)) => {
             container.append(
                 &wrapping(gtk::Label::builder().label(*line))
                     .css_classes(["hint"])
                     .build(),
             );
+            return;
         }
-        Some(Listed::Items { label, items }) => {
-            container.append(&caption(label));
-            let rows = gtk::Box::new(gtk::Orientation::Vertical, 2);
-            for (index, item) in items.iter().enumerate() {
-                let row = gtk::Button::builder()
-                    .child(
-                        &wrapping(gtk::Label::builder().label(item.as_str()))
-                            .css_classes(["definition-text"])
-                            .build(),
-                    )
-                    .focus_on_click(false)
-                    .css_classes(["sense"])
-                    .build();
-                let clicked = clicked.clone();
-                row.connect_clicked(move |_| clicked(index));
-                rows.append(&row);
-                let Some(chosen) = chosen.filter(|chosen| chosen.index == index) else {
-                    continue;
-                };
-                row.add_css_class("chosen");
-                rows.append(&explained_tail(action, chosen.definition.as_ref()));
-            }
-            container.append(&rows);
+        Some(GlossTexts::Glosses(glosses)) => glosses,
+    };
+    let head = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    head.append(&caption(glosses.label));
+    head.append(
+        &gtk::Label::builder()
+            .label(glosses.count.as_str())
+            .hexpand(true)
+            .xalign(1.0)
+            .css_classes(["dmeta"])
+            .build(),
+    );
+    container.append(&head);
+    container.append(
+        &wrapping(gtk::Label::builder().label(glosses.hint))
+            .css_classes(["hint"])
+            .build(),
+    );
+    for group in &glosses.groups {
+        let rows = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        for row in &group.rows {
+            let button = gloss_row(row);
+            let (clicked, index) = (clicked.clone(), row.index);
+            button.connect_clicked(move |_| clicked(index));
+            rows.append(&button);
+            let Some(chosen) = chosen.filter(|chosen| chosen.index == row.index) else {
+                continue;
+            };
+            button.add_css_class("chosen");
+            rows.append(&gloss_explained(chosen, row.lookup, look_up));
         }
+        container.append(&gloss_group(group.pos, &rows));
     }
+    if !glosses.forms.is_empty() {
+        let rows = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(10)
+            .css_classes(["gloss-forms"])
+            .build();
+        for form in &glosses.forms {
+            rows.append(&form_row(form, field));
+        }
+        container.append(&gloss_group(Some(FORM_TAG), &rows));
+    }
+}
+
+/// One group of glosses: a hairline above, the tag `pos` in the left
+/// column and `rows` beside it.
+fn gloss_group(pos: Option<&str>, rows: &gtk::Box) -> gtk::Box {
+    let group = gtk::Box::builder()
+        .spacing(8)
+        .css_classes(["gloss-group"])
+        .build();
+    let column = gtk::Box::builder()
+        .width_request(84)
+        .valign(gtk::Align::Start)
+        .css_classes(["gloss-pos"])
+        .build();
+    if let Some(pos) = pos {
+        column.append(
+            &gtk::Label::builder()
+                .label(pos)
+                .css_classes(["pos"])
+                .build(),
+        );
+    }
+    rows.set_hexpand(true);
+    group.append(&column);
+    group.append(rows);
+    group
+}
+
+/// The row of one gloss: its number, what it says, bold, and what the
+/// source adds, dim. It does not take the focus from the field.
+fn gloss_row(row: &GlossRow<'_>) -> gtk::Button {
+    let number = gtk::Label::builder()
+        .label(row.number.to_string())
+        .valign(gtk::Align::Start)
+        .css_classes(["number"])
+        .build();
+    let text = Wrap::new();
+    text.set_hexpand(true);
+    text.append(
+        &wrapping(gtk::Label::builder().label(row.head))
+            .css_classes(["gloss-head"])
+            .build(),
+    );
+    if let Some(qualifier) = row.qualifier {
+        text.append(
+            &wrapping(gtk::Label::builder().label(qualifier))
+                .css_classes(["gloss-qualifier"])
+                .build(),
+        );
+    }
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    content.append(&number);
+    content.append(&text);
+    gtk::Button::builder()
+        .child(&content)
+        .focus_on_click(false)
+        .css_classes(["sense"])
+        .build()
+}
+
+/// What stands under the chosen gloss: its online translation, or the line
+/// that a key is needed for it, and its English word as a pill that
+/// `look_up` looks up.
+fn gloss_explained(chosen: &ChosenGloss<'_>, lookup: Option<&str>, look_up: &LookUp) -> gtk::Box {
+    let below = explained_tail(None, chosen.definition.as_ref());
+    if chosen.no_key {
+        below.append(
+            &wrapping(gtk::Label::builder().label(GLOSS_NO_KEY))
+                .css_classes(["hint"])
+                .build(),
+        );
+    }
+    if let Some(word) = lookup {
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        line.append(
+            &gtk::Label::builder()
+                .label(LOOK_UP_ENGLISH)
+                .css_classes(["hint"])
+                .build(),
+        );
+        let pill = gtk::Button::builder()
+            .child(
+                &gtk::Label::builder()
+                    .label(word)
+                    .css_classes(["pill", "outline"])
+                    .build(),
+            )
+            .css_classes(["pill-link"])
+            .focus_on_click(false)
+            .build();
+        pill.set_cursor_from_name(Some("pointer"));
+        let (look_up, word) = (look_up.clone(), word.to_owned());
+        pill.connect_clicked(move |_| look_up(&word));
+        line.append(&pill);
+        below.append(&line);
+    }
+    below
+}
+
+/// The row of a gloss that names a form: its number, the description, dim,
+/// the lemma as a link into `field`, then the analysis of the word for it
+/// or what the source adds, dim.
+fn form_row(form: &FormRow<'_>, field: &gtk::Entry) -> Wrap {
+    let row = Wrap::new();
+    row.add_css_class("analysis-line");
+    let number = analysis_part(&form.number.to_string(), "number");
+    number.set_valign(gtk::Align::Center);
+    row.append(&number);
+    row.append(
+        &wrapping(gtk::Label::builder().label(form.description.as_str()))
+            .css_classes(["hint"])
+            .build(),
+    );
+    row.append(&lemma_link(form.lemma, field));
+    match (&form.analysis, form.qualifier) {
+        (Some(analysis), _) => append_analysis_groups(&row, &analysis.groups),
+        (None, Some(qualifier)) => {
+            row.append(
+                &wrapping(gtk::Label::builder().label(qualifier))
+                    .css_classes(["gloss-qualifier"])
+                    .build(),
+            );
+        }
+        (None, None) => {}
+    }
+    row
 }
 
 /// The row of `sense`: its number, its part of speech as a dim tag when
@@ -1420,6 +1586,9 @@ pub struct View {
     sense_chosen: Rc<RefCell<Option<SenseChosen>>>,
     /// Runs with the index of an English gloss when its row is clicked.
     gloss_chosen: Rc<RefCell<Option<SenseChosen>>>,
+    /// Runs with the English word of the chosen gloss when its pill is
+    /// clicked.
+    look_up_english: Rc<RefCell<Option<LookUp>>>,
     /// The recording that plays now; a new result stops it.
     player: Player,
     /// The [`Shown::generation`] of the result whose pronunciations are
@@ -1503,6 +1672,7 @@ impl View {
             result,
             sense_chosen: Rc::new(RefCell::new(None)),
             gloss_chosen: Rc::new(RefCell::new(None)),
+            look_up_english: Rc::new(RefCell::new(None)),
             player: Rc::new(RefCell::new(None)),
             pronounced: Cell::new(None),
             translations: RefCell::new(None),
@@ -1726,6 +1896,12 @@ impl View {
         self.gloss_chosen.replace(Some(Rc::new(chosen)));
     }
 
+    /// Runs `look_up` with the English word of the chosen gloss each time
+    /// its pill is clicked.
+    pub fn connect_look_up_english(&self, look_up: impl Fn(&str) + 'static) {
+        self.look_up_english.replace(Some(Rc::new(look_up)));
+    }
+
     /// Runs `action` each time the button that translates the definition of
     /// the chosen sense or gloss is clicked.
     pub fn connect_definition_action(&self, action: impl Fn() + 'static) {
@@ -1841,7 +2017,17 @@ impl View {
             texts.glosses.as_ref(),
             texts.gloss.as_ref(),
             &forwarding(&self.gloss_chosen),
-            visible.then_some(&result.definition_action),
+            &{
+                let slot = self.look_up_english.clone();
+                Rc::new(move |word: &str| {
+                    // Cloned out first: the handler builds the rows anew.
+                    let handler = slot.borrow().clone();
+                    if let Some(handler) = handler {
+                        handler(word);
+                    }
+                }) as LookUp
+            },
+            &self.field,
         );
         result.glosses.set_visible(texts.glosses.is_some());
         if shown.choice().is_none() {

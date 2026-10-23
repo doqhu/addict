@@ -1107,7 +1107,7 @@ pub struct ResultTexts<'a> {
     pub word_synonyms: Option<SynonymTexts<'a>>,
     /// For an article of a language beside English, its English glosses:
     /// rows to choose, one at a time with the senses.
-    pub glosses: Option<Listed<'a>>,
+    pub glosses: Option<GlossTexts<'a>>,
     /// The chosen English gloss, when one of [`ResultTexts::glosses`] is.
     pub gloss: Option<ChosenGloss<'a>>,
     /// For an article, the pronunciations of its entries in source order,
@@ -1359,8 +1359,268 @@ pub struct ChosenGloss<'a> {
     /// Its index among the glosses.
     pub index: usize,
     /// The online translation of the gloss, once asked for; never for a
-    /// blank gloss.
+    /// blank gloss, nor for one refused for want of a key.
     pub definition: Option<Block<'a>>,
+    /// The translation was refused because there is no DeepL key: the
+    /// line [`GLOSS_NO_KEY`] stands in its place.
+    pub no_key: bool,
+}
+
+/// The line under the label of the English glosses.
+const GLOSS_HINT: &str = "Click a gloss to see it in Russian and look the English word up.";
+
+/// What stands under the chosen gloss when it cannot be translated for want
+/// of a DeepL key.
+pub(crate) const GLOSS_NO_KEY: &str =
+    "The definition is translated online. Add a DeepL key in Settings.";
+
+/// What stands before the English word of the chosen gloss.
+pub(crate) const LOOK_UP_ENGLISH: &str = "Look up in English:";
+
+/// What stands before the lemma of a gloss that names a form of it, when
+/// the analysis of the word says which form.
+const FORM_OF: &str = "Form of";
+
+/// The tag of the glosses that name a form of another word.
+pub(crate) const FORM_TAG: &str = "form";
+
+/// The English glosses of a word, as the window lays them out, or the line
+/// that there are none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GlossTexts<'a> {
+    Glosses(Glosses<'a>),
+    Missing(&'static str),
+}
+
+/// The English glosses grouped by their part of speech, those that name a
+/// form of another word apart, after them; numbered in that order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Glosses<'a> {
+    pub label: &'static str,
+    /// What stands beside the label: how many glosses and forms.
+    pub count: String,
+    pub hint: &'static str,
+    pub groups: Vec<GlossGroup<'a>>,
+    pub forms: Vec<FormRow<'a>>,
+    /// The glosses as the dictionary gives them, in its order.
+    pub all: &'a [String],
+}
+
+/// The glosses of one part of speech; `pos` is `None` for those the source
+/// gives none for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlossGroup<'a> {
+    pub pos: Option<&'a str>,
+    pub rows: Vec<GlossRow<'a>>,
+}
+
+/// One gloss: what it says, bold, and what the source adds in parentheses,
+/// dim; the English word to look up, when one stands out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlossRow<'a> {
+    /// Its index among the glosses as the dictionary gives them.
+    pub index: usize,
+    /// Its number in the window, from 1.
+    pub number: usize,
+    pub head: &'a str,
+    pub qualifier: Option<&'a str>,
+    pub lookup: Option<&'a str>,
+}
+
+/// A gloss that names a form of another word: what form, the lemma as a
+/// link, and the analysis of the word for that lemma when there is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormRow<'a> {
+    pub number: usize,
+    /// "Form of" with an analysis, else the source's own words, such as
+    /// "Alternative form of".
+    pub description: String,
+    pub lemma: &'a str,
+    pub qualifier: Option<&'a str>,
+    pub analysis: Option<AnalysisLine>,
+}
+
+impl GlossTexts<'_> {
+    /// The section as one line: the label and every gloss in the
+    /// dictionary's order, or the missing line.
+    #[cfg(test)]
+    pub fn line(&self) -> String {
+        match self {
+            Self::Glosses(glosses) => format!("{} {}", glosses.label, glosses.all.join(", ")),
+            Self::Missing(line) => (*line).to_owned(),
+        }
+    }
+}
+
+/// `text` without what the source adds in parentheses at its end, and
+/// that addition: `sol (a unit of currency)` is `sol` and `a unit of
+/// currency`.
+fn split_qualifier(text: &str) -> (&str, Option<&str>) {
+    let text = text.trim();
+    match text.find(" (") {
+        Some(open) if text.ends_with(')') => {
+            let qualifier = text[open + 2..text.len() - 1].trim();
+            (
+                text[..open].trim(),
+                (!qualifier.is_empty()).then_some(qualifier),
+            )
+        }
+        _ => (text, None),
+    }
+}
+
+/// The words that mark the start of a gloss such as `third-person singular
+/// present indicative of soler` as the name of a form.
+const FORM_MARKS: [&str; 16] = [
+    "form",
+    "singular",
+    "plural",
+    "participle",
+    "gerund",
+    "infinitive",
+    "inflection",
+    "indicative",
+    "subjunctive",
+    "imperative",
+    "conditional",
+    "masculine",
+    "feminine",
+    "diminutive",
+    "augmentative",
+    "superlative",
+];
+
+/// The description and the lemma of a gloss that names a form of one word,
+/// such as `alternative form of soler`.
+fn form_of(head: &str) -> Option<(&str, &str)> {
+    let (description, lemma) = head.rsplit_once(" of ")?;
+    if lemma.is_empty() || lemma.contains(char::is_whitespace) {
+        return None;
+    }
+    let marked = description
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| FORM_MARKS.contains(&word));
+    marked.then_some((description, lemma))
+}
+
+/// `text` with its first letter in capitals.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// The English word of a gloss to look up: its first part, before a comma
+/// or a semicolon, without an article or the `to` of an infinitive;
+/// `None` when nothing but marks is left.
+fn english_lookup(head: &str) -> Option<&str> {
+    let first = head.split([',', ';']).next()?.trim();
+    let first = ["the ", "a ", "an ", "to "]
+        .iter()
+        .find_map(|article| first.strip_prefix(article))
+        .unwrap_or(first)
+        .trim_end_matches('.')
+        .trim();
+    first.chars().any(char::is_alphabetic).then_some(first)
+}
+
+/// The glosses `english` of a word read in `grouped`, laid out as
+/// [`Glosses`] says; each takes the part of speech its source gives it,
+/// and a form takes the analysis the word has for its lemma.
+fn gloss_texts<'a>(
+    english: &'a [String],
+    grouped: &'a Grouped,
+    analysis: &Analysis,
+) -> GlossTexts<'a> {
+    if english.is_empty() {
+        return GlossTexts::Missing(NO_GLOSS);
+    }
+    let pos_of = |gloss: &str| {
+        grouped
+            .sense_metadata
+            .iter()
+            .find(|sourced| sourced.sense.definition == gloss)
+            .and_then(|sourced| sourced.sense.part_of_speech.as_ref())
+            .map(pos_label)
+    };
+    let mut groups: Vec<GlossGroup<'a>> = Vec::new();
+    let mut forms = Vec::new();
+    for (index, gloss) in english.iter().enumerate() {
+        let (head, qualifier) = split_qualifier(gloss);
+        if let Some((description, lemma)) = form_of(head) {
+            let lowered = description.to_lowercase();
+            let analysis = analysis
+                .lines
+                .iter()
+                .find(|line| line.lemma == lemma)
+                .filter(|_| {
+                    !lowered
+                        .split(|c: char| !c.is_alphanumeric())
+                        .any(|word| word == "form")
+                })
+                .cloned();
+            forms.push(FormRow {
+                number: 0,
+                description: if analysis.is_some() {
+                    FORM_OF.to_owned()
+                } else {
+                    format!("{} of", capitalized(description))
+                },
+                lemma,
+                qualifier,
+                analysis,
+            });
+            continue;
+        }
+        let row = GlossRow {
+            index,
+            number: 0,
+            head,
+            qualifier,
+            lookup: english_lookup(head),
+        };
+        let pos = pos_of(gloss);
+        match groups.iter_mut().find(|group| group.pos == pos) {
+            Some(group) => group.rows.push(row),
+            None => groups.push(GlossGroup {
+                pos,
+                rows: vec![row],
+            }),
+        }
+    }
+    let mut number = 0;
+    for row in groups.iter_mut().flat_map(|group| &mut group.rows) {
+        number += 1;
+        row.number = number;
+    }
+    let glosses = number;
+    for form in &mut forms {
+        number += 1;
+        form.number = number;
+    }
+    let counted = |count: usize, one: &str, many: &str| match count {
+        1 => format!("1 {one}"),
+        _ => format!("{count} {many}"),
+    };
+    let (glosses, forms_count) = (
+        counted(glosses, "gloss", "glosses"),
+        counted(forms.len(), "form", "forms"),
+    );
+    let count = match (groups.is_empty(), forms.is_empty()) {
+        (_, true) => glosses,
+        (true, false) => forms_count,
+        (false, false) => format!("{glosses} · {forms_count}"),
+    };
+    GlossTexts::Glosses(Glosses {
+        label: ENGLISH_LABEL,
+        count,
+        hint: GLOSS_HINT,
+        groups,
+        forms,
+        all: english,
+    })
 }
 
 /// What is chosen in the shown result: a sense of its definitions or, in an
@@ -1586,29 +1846,34 @@ fn grouped_texts<'a>(
             groups: unmatched,
         }),
     };
+    let analysis = analysis(language, grouped);
     let glosses = match &grouped.english {
-        None => Listed::Missing(missing_english(language)),
-        Some(english) => Listed::of(ENGLISH_LABEL, english, NO_GLOSS),
+        None => GlossTexts::Missing(missing_english(language)),
+        Some(english) => gloss_texts(english, grouped, &analysis),
     };
     let gloss = match choice {
         Some(Choice::Gloss(index)) => grouped
             .english
             .as_deref()
             .and_then(|english| english.get(index))
-            .map(|text| ChosenGloss {
-                index,
-                definition: definition
-                    .filter(|_| !text.trim().is_empty())
-                    .map(|online| Block {
-                        label: DEFINITION_LABEL,
-                        line: online_line(online, key_file),
-                    }),
+            .map(|text| {
+                let no_key = matches!(definition, Some(Online::Refused(Refusal::Key)));
+                ChosenGloss {
+                    index,
+                    definition: definition
+                        .filter(|_| !text.trim().is_empty() && !no_key)
+                        .map(|online| Block {
+                            label: DEFINITION_LABEL,
+                            line: online_line(online, key_file),
+                        }),
+                    no_key,
+                }
             }),
         Some(Choice::Sense(_)) | None => None,
     };
     ResultTexts {
         line: None,
-        analysis: analysis(language, grouped),
+        analysis,
         elsewhere: None,
         senses_label: definitions_label(language),
         hint,
@@ -3944,7 +4209,7 @@ mod tests {
         [
             texts.translations.as_ref().map(listed_line),
             texts.word_synonyms.as_ref().map(|synonyms| synonyms.line()),
-            texts.glosses.as_ref().map(listed_line),
+            texts.glosses.as_ref().map(super::GlossTexts::line),
         ]
     }
 
@@ -4264,6 +4529,122 @@ mod tests {
         assert_eq!(unchosen.senses[1].count.as_deref(), Some("4 synonyms"));
     }
 
+    /// The English glosses of `sol` as the kaikki index gives them: grouped
+    /// by the part of speech of their source sense, in order of first
+    /// appearance, numbered in that order, a parenthesized addition apart,
+    /// and the glosses that name a form of `soler` after them, the one the
+    /// analysis knows as "Form of".
+    #[test]
+    fn the_glosses_of_sol_are_grouped_by_part_of_speech_with_the_forms_last() {
+        use super::{GlossTexts, english_lookup, form_of};
+        use addict_core::dictionary::SourcedSense;
+        let glosses = [
+            ("sun", "noun"),
+            ("sol (a unit of currency used in Peru)", "noun"),
+            ("alone (by oneself, solitary)", "adj"),
+            ("third-person singular present indicative of soler", "verb"),
+            ("unique", "adj"),
+            ("alternative form of soler", "verb"),
+            ("to solve", "verb"),
+        ];
+        let grouped = Grouped {
+            english: Some(
+                glosses
+                    .iter()
+                    .map(|(gloss, _)| (*gloss).to_owned())
+                    .collect(),
+            ),
+            sense_metadata: glosses
+                .iter()
+                .map(|(gloss, pos)| SourcedSense {
+                    source: "kaikki".to_owned(),
+                    headword: "sol".to_owned(),
+                    sense: Sense {
+                        part_of_speech: addict_core::dictionary::PartOfSpeech::from_label(pos),
+                        entries: Vec::new(),
+                        definition: (*gloss).to_owned(),
+                        synonyms: Vec::new(),
+                    },
+                })
+                .collect(),
+            ..Grouped::default()
+        };
+        let analysis = super::Analysis {
+            lines: vec![super::AnalysisLine {
+                lemma: "soler".to_owned(),
+                groups: Vec::new(),
+            }],
+            note: None,
+        };
+        let GlossTexts::Glosses(texts) =
+            super::gloss_texts(grouped.english.as_deref().unwrap(), &grouped, &analysis)
+        else {
+            panic!("glosses");
+        };
+        assert_eq!(texts.count, "5 glosses · 2 forms");
+        let laid: Vec<_> = texts
+            .groups
+            .iter()
+            .map(|group| {
+                let rows: Vec<_> = group
+                    .rows
+                    .iter()
+                    .map(|row| (row.number, row.head, row.qualifier, row.lookup))
+                    .collect();
+                (group.pos, rows)
+            })
+            .collect();
+        assert_eq!(
+            laid,
+            [
+                (
+                    Some("noun"),
+                    vec![
+                        (1, "sun", None, Some("sun")),
+                        (
+                            2,
+                            "sol",
+                            Some("a unit of currency used in Peru"),
+                            Some("sol")
+                        ),
+                    ]
+                ),
+                (
+                    Some("adjective"),
+                    vec![
+                        (3, "alone", Some("by oneself, solitary"), Some("alone")),
+                        (4, "unique", None, Some("unique")),
+                    ]
+                ),
+                (Some("verb"), vec![(5, "to solve", None, Some("solve"))]),
+            ]
+        );
+        let forms: Vec<_> = texts
+            .forms
+            .iter()
+            .map(|form| {
+                (
+                    form.number,
+                    form.description.as_str(),
+                    form.lemma,
+                    form.analysis.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            forms,
+            [
+                (6, "Form of", "soler", true),
+                (7, "Alternative form of", "soler", false),
+            ]
+        );
+        // A gloss that happens to hold "of" names no form.
+        assert_eq!(form_of("bank of a river"), None);
+        assert_eq!(english_lookup("the Sun"), Some("Sun"));
+        assert_eq!(english_lookup("to have, possess"), Some("have"));
+        assert_eq!(english_lookup("..."), None);
+    }
+
     fn row(kind: super::OnlineKind, line: &str, state: OnlineState) -> super::OnlineRow<'static> {
         super::OnlineRow {
             label: "",
@@ -4430,7 +4811,7 @@ mod tests {
         assert_eq!(texts.word_synonyms, None);
         assert_eq!(
             texts.glosses,
-            Some(Listed::Missing(
+            Some(super::GlossTexts::Missing(
                 "No Spanish-English dictionary is imported."
             ))
         );
@@ -4625,6 +5006,7 @@ mod tests {
                         label: super::DEFINITION_LABEL,
                         line: "скамья".into(),
                     }),
+                    no_key: false,
                 })
             );
             // The same gloss again keeps its answer; a sense takes its place.

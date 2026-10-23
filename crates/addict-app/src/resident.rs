@@ -259,6 +259,8 @@ enum Event {
     DefinitionAction,
     /// Add DeepL key… was pressed in the card: the Settings window is shown.
     AddKey,
+    /// The English word of a gloss was clicked: it is looked up in English.
+    LookUpEnglish(String),
     /// The separate definition job ended with its individual request number;
     /// it was sent from `source`. `elapsed` is the time the request took, as
     /// the worker saw it; taken only when evidence is recorded.
@@ -612,6 +614,7 @@ impl Session {
             Event::Forward => self.forward(),
             Event::DefinitionAction => self.definition_action(),
             Event::AddKey => self.show_settings(),
+            Event::LookUpEnglish(word) => self.look_up_english(&word),
             Event::DefinitionTranslated {
                 number,
                 source,
@@ -1531,7 +1534,19 @@ impl Session {
         let previous = self.shown.choice();
         if self.shown.choose_gloss(index) {
             self.chosen(previous);
+            // A gloss is translated as it is chosen, with no button: once,
+            // and again only after a refusal.
+            self.definition_action();
         }
+    }
+
+    /// The English word of a gloss was clicked: it goes into the field as a
+    /// paste puts it, and English becomes the reading language. The field
+    /// is newer than the shown text then, so the language change asks
+    /// nothing for the old one; the field's own events look the word up.
+    fn look_up_english(&mut self, word: &str) {
+        self.view.put_into_field(word);
+        self.language_chosen(Language::En);
     }
 
     /// Something was chosen where `previous` was: the job translating the
@@ -2101,6 +2116,10 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     let definition = sender.clone();
     view.connect_definition_action(move || {
         let _ = definition.unbounded_send(Event::DefinitionAction);
+    });
+    let english = sender.clone();
+    view.connect_look_up_english(move |word| {
+        let _ = english.unbounded_send(Event::LookUpEnglish(word.to_owned()));
     });
     let add_key = sender.clone();
     view.connect_add_key(move || {

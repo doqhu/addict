@@ -743,6 +743,35 @@ window.addict.settings headerbar windowcontrols button:hover {
   background: var(--line);
 }
 
+/* The English glosses: a group per part of speech, a hairline above it
+ * and its tag in a column on the left; a gloss bold with what the source
+ * adds dim beside it; the forms as analysis lines. */
+window.addict .gloss-group {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  margin-top: 4px;
+}
+
+window.addict .gloss-pos {
+  padding: 12px 0 0 4px;
+}
+
+window.addict label.gloss-head {
+  font-weight: 600;
+}
+
+window.addict label.gloss-qualifier {
+  color: var(--muted);
+}
+
+window.addict .gloss-forms {
+  padding: 12px 12px 6px;
+}
+
+window.addict .gloss-forms label.number {
+  margin-right: 6px;
+}
+
 /* The toggle at the end of a list of pills: how many are hidden, in the
  * accent, on a chip, with a chevron that turns while they are shown. */
 window.addict button.more {
