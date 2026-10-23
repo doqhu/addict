@@ -1410,6 +1410,7 @@ fn result_area() -> ResultArea {
     let content = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(16)
+        .css_classes(["result-content"])
         .build();
     let word_synonyms = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)

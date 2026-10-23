@@ -232,6 +232,17 @@ window.addict scrolledwindow.result > viewport {
   background: transparent;
 }
 
+/* The overlay scrollbar is drawn over the content: the area reaches into
+ * the window's right margin and its content stops where the rows above
+ * do, so the scrollbar stands in the margin and covers no text. */
+window.addict scrolledwindow.result {
+  margin-right: -20px;
+}
+
+window.addict scrolledwindow.result .result-content {
+  margin-right: 20px;
+}
+
 /* The card of the word: the one raised surface of the window. */
 window.addict .article-card {
   background: var(--surface);
