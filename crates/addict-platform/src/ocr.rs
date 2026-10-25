@@ -11,7 +11,9 @@
 //! [`OcrFailure::Failed`] and runs no child. An image whose upscaled size
 //! would be over [`MAX_SCALED_PIXELS`] is recognized as it is.
 //!
-//! The child runs as `tesseract <image> result -l <language> --psm <mode>`
+//! The child runs as `tesseract <image> result -l <language> --psm <mode>`,
+//! with `--tessdata-dir <dir>` first when the [`Tesseract`] has a data
+//! directory,
 //! with its working directory in a fresh `0700` temporary directory, stdin
 //! null and `PR_SET_PDEATHSIG(SIGKILL)`. Its exit is awaited through a pidfd,
 //! so the wait stays asynchronous, and it is reaped with `wait4`, which also
@@ -23,6 +25,15 @@
 //! stderr says so, or else when `tesseract --list-langs`, run then with the
 //! same rules and what is left of the limit, does not list the language. A
 //! listing that fails or outlives the limit leaves the failure as it was.
+//!
+//! Which program runs, and with which data, is a [`Tesseract`], found by one
+//! rule for every channel, [`Tesseract::locate`]: the configured program,
+//! else `tesseract` beside the running executable, else `tesseract` on
+//! `PATH`; the configured data directory, else `../share/tessdata` from the
+//! executable's directory, else Tesseract's own default, which honours
+//! `TESSDATA_PREFIX`. A data directory is given to both children as
+//! `--tessdata-dir`. A configured program that is not there is
+//! [`OcrFailure::TesseractMissing`], as one missing from `PATH` is.
 
 use std::{
     fs,
@@ -56,8 +67,11 @@ const STDERR_FILE: &str = "stderr";
 /// Where the output of `--list-langs` goes inside the temporary directory.
 const LANGUAGES_FILE: &str = "languages";
 
-/// The Tesseract program, found on `PATH`.
+/// The name of the Tesseract program, beside the executable or on `PATH`.
 const PROGRAM: &str = "tesseract";
+
+/// Where the data of a bundled Tesseract is, from the executable's directory.
+const BUNDLED_TESSDATA: &str = "../share/tessdata";
 
 /// Where the upscaled image goes inside the temporary directory.
 const SCALED_FILE: &str = "scaled.png";
@@ -135,11 +149,87 @@ pub struct Recognition {
     pub peak_rss_bytes: Option<u64>,
 }
 
-/// Recognizes the text of `image` with `params`; the child may run for
-/// `limit` at most.
-pub async fn recognize(image: &Path, params: &Params, limit: Duration) -> Recognition {
+/// The Tesseract program a recognition runs and the data directory it is
+/// given, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tesseract {
+    /// The program: a path, or a bare name that is looked up on `PATH`.
+    program: PathBuf,
+    /// The `--tessdata-dir` of both children; `None` leaves Tesseract its
+    /// own default.
+    tessdata: Option<PathBuf>,
+}
+
+impl Default for Tesseract {
+    /// `tesseract` on `PATH` with its own data.
+    fn default() -> Self {
+        Self {
+            program: PathBuf::from(PROGRAM),
+            tessdata: None,
+        }
+    }
+}
+
+impl Tesseract {
+    /// The Tesseract of the one rule. Program: `configured_program`, else
+    /// `tesseract` in `exe_dir` when that file exists, else `tesseract` on
+    /// `PATH`. Data: `configured_tessdata`, else `<exe_dir>/../share/tessdata`
+    /// when it is a directory, else none. A configured path that is not
+    /// absolute counts as unset; a configured one is taken as it is, even
+    /// when nothing is there. Only existence is checked here.
+    pub fn locate(
+        configured_program: Option<&Path>,
+        configured_tessdata: Option<&Path>,
+        exe_dir: Option<&Path>,
+    ) -> Self {
+        fn configured(path: Option<&Path>) -> Option<PathBuf> {
+            path.filter(|path| path.is_absolute()).map(Path::to_owned)
+        }
+        let program = configured(configured_program)
+            .or_else(|| {
+                exe_dir
+                    .map(|dir| dir.join(PROGRAM))
+                    .filter(|program| program.is_file())
+            })
+            .unwrap_or_else(|| PathBuf::from(PROGRAM));
+        let tessdata = configured(configured_tessdata).or_else(|| {
+            exe_dir
+                .map(|dir| dir.join(BUNDLED_TESSDATA))
+                .filter(|tessdata| tessdata.is_dir())
+        });
+        Self { program, tessdata }
+    }
+
+    /// The program that runs.
+    pub fn program(&self) -> &Path {
+        &self.program
+    }
+
+    /// The data directory given as `--tessdata-dir`, if any.
+    pub fn tessdata(&self) -> Option<&Path> {
+        self.tessdata.as_deref()
+    }
+
+    /// A command of the program with the data directory, if any.
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        if let Some(tessdata) = &self.tessdata {
+            command.arg("--tessdata-dir").arg(tessdata);
+        }
+        command
+    }
+}
+
+/// Recognizes the text of `image` with `params` by `tesseract`; the child
+/// may run for `limit` at most.
+pub async fn recognize(
+    tesseract: &Tesseract,
+    image: &Path,
+    params: &Params,
+    limit: Duration,
+) -> Recognition {
     run(
-        PROGRAM,
+        tesseract,
         image,
         params,
         limit,
@@ -149,10 +239,10 @@ pub async fn recognize(image: &Path, params: &Params, limit: Duration) -> Recogn
     .await
 }
 
-/// [`recognize`] with the program to run, the parent of the temporary
-/// directory and a callback that is given the pid of the child once it runs.
+/// [`recognize`] with the parent of the temporary directory and a callback
+/// that is given the pid of the child once it runs.
 async fn run(
-    program: &str,
+    tesseract: &Tesseract,
     image: &Path,
     params: &Params,
     limit: Duration,
@@ -161,7 +251,7 @@ async fn run(
 ) -> Recognition {
     let start = Instant::now();
     let (result, peak_rss_bytes) =
-        match attempt(program, image, params, limit, temp_root, started).await {
+        match attempt(tesseract, image, params, limit, temp_root, started).await {
             Ok((text, peak)) => (Ok(text), peak),
             Err((failure, peak)) => (Err(failure), peak),
         };
@@ -178,7 +268,7 @@ type Attempt = Result<(String, Option<u64>), (OcrFailure, Option<u64>)>;
 /// `limit`, and the outcome with the peak memory of the child when it was
 /// reaped after its own exit.
 async fn attempt(
-    program: &str,
+    tesseract: &Tesseract,
     image: &Path,
     params: &Params,
     limit: Duration,
@@ -203,7 +293,7 @@ async fn attempt(
     };
     // After the upscale: the limit is the child's own.
     let begun = Instant::now();
-    let mut command = match recognition_command(program, &image, params, &directory.0) {
+    let mut command = match recognition_command(tesseract, &image, params, &directory.0) {
         Ok(command) => command,
         Err(failure) => return failed(failure),
     };
@@ -230,7 +320,7 @@ async fn attempt(
         // Only after a failed exit: the recognition itself stays one child.
         Err(OcrFailure::Failed(detail)) if !exited_well(exit.status) => {
             let remaining = limit.saturating_sub(begun.elapsed());
-            match listed(program, params.language, &directory.0, remaining).await {
+            match listed(tesseract, params.language, &directory.0, remaining).await {
                 Some(false) => Err(OcrFailure::LanguageMissing),
                 Some(true) | None => Err(OcrFailure::Failed(detail)),
             }
@@ -264,17 +354,18 @@ async fn to_read(
     }
 }
 
-/// `tesseract <image> result -l <language> --psm <mode>`, run in `directory`
-/// with stdout null and stderr into a file there, which is created now.
+/// `tesseract [--tessdata-dir <dir>] <image> result -l <language> --psm
+/// <mode>`, run in `directory` with stdout null and stderr into a file
+/// there, which is created now.
 fn recognition_command(
-    program: &str,
+    tesseract: &Tesseract,
     image: &Path,
     params: &Params,
     directory: &Path,
 ) -> Result<Command, OcrFailure> {
     let stderr = fs::File::create(directory.join(STDERR_FILE))
         .map_err(|e| OcrFailure::Failed(format!("stderr file: {e}")))?;
-    let mut command = Command::new(program);
+    let mut command = tesseract.command();
     command
         .arg(image)
         .arg(OUTPUT_BASE)
@@ -317,15 +408,20 @@ fn upscale(image: &Path, scale: u8, directory: &Path) -> Result<PathBuf, String>
     Ok(path)
 }
 
-/// Whether `language` is a line of what `<program> --list-langs` prints,
-/// run in `directory` for `limit` at most; `None` when the listing did not
-/// end well in time. A listing still running at the limit, or dropped, is
-/// killed and reaped.
-async fn listed(program: &str, language: &str, directory: &Path, limit: Duration) -> Option<bool> {
+/// Whether `language` is a line of what `tesseract [--tessdata-dir <dir>]
+/// --list-langs` prints, run in `directory` for `limit` at most; `None` when
+/// the listing did not end well in time. A listing still running at the
+/// limit, or dropped, is killed and reaped.
+async fn listed(
+    tesseract: &Tesseract,
+    language: &str,
+    directory: &Path,
+    limit: Duration,
+) -> Option<bool> {
     let path = directory.join(LANGUAGES_FILE);
     let output = fs::File::create(&path).ok()?;
     let errors = output.try_clone().ok()?;
-    let mut command = Command::new(program);
+    let mut command = tesseract.command();
     command
         .arg("--list-langs")
         .current_dir(directory)
@@ -552,7 +648,7 @@ mod tests {
     };
 
     use super::{
-        MAX_SCALED_PIXELS, OUTPUT_LIMIT, OcrFailure, PROGRAM, Params, Recognition, TEMP_PREFIX,
+        MAX_SCALED_PIXELS, OUTPUT_LIMIT, OcrFailure, Params, Recognition, TEMP_PREFIX, Tesseract,
         outcome, run, upscale,
     };
 
@@ -605,10 +701,14 @@ mod tests {
             .build()
             .expect("runtime");
         let mut pid = None;
-        let recognition =
-            runtime.block_on(run(PROGRAM, image, &params, limit, &scratch.0, &mut |p| {
-                pid = Some(p)
-            }));
+        let recognition = runtime.block_on(run(
+            &Tesseract::default(),
+            image,
+            &params,
+            limit,
+            &scratch.0,
+            &mut |p| pid = Some(p),
+        ));
         (recognition, pid)
     }
 
@@ -795,8 +895,9 @@ mod tests {
         let mut pid = None;
         runtime.block_on(async {
             let mut started = |p| pid = Some(p);
+            let tesseract = Tesseract::default();
             let recognition = run(
-                PROGRAM,
+                &tesseract,
                 Path::new(FIXTURE),
                 &AS_IT_IS,
                 LIMIT,
@@ -820,8 +921,9 @@ mod tests {
         let mut pid = None;
         runtime.block_on(async {
             let mut started = |p| pid = Some(p);
+            let tesseract = Tesseract::default();
             let recognition = run(
-                PROGRAM,
+                &tesseract,
                 Path::new(FIXTURE),
                 &Params::ENGLISH,
                 LIMIT,
@@ -844,7 +946,10 @@ mod tests {
             .build()
             .expect("runtime");
         let recognition = runtime.block_on(run(
-            "addict-no-such-tesseract",
+            &Tesseract {
+                program: PathBuf::from("addict-no-such-tesseract"),
+                tessdata: None,
+            },
             Path::new(FIXTURE),
             &Params::ENGLISH,
             LIMIT,
@@ -858,16 +963,19 @@ mod tests {
 
     /// A fake `tesseract` in `scratch`, a shell script that fails the
     /// recognition with `stderr`, verbatim, and runs `listing` for
-    /// `--list-langs`. It writes the pid of each of its runs to `pids`. It
-    /// is given back once it can be run: another test's fork may still hold
-    /// it open for writing for a moment (`ETXTBSY`).
+    /// `--list-langs`. It writes the pid of each of its runs to `pids` and
+    /// its arguments to `args`. It is given back once it can be run: another
+    /// test's fork may still hold it open for writing for a moment
+    /// (`ETXTBSY`).
     fn fake(scratch: &Scratch, stderr: &str, listing: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let pids = scratch.0.join("pids");
+        let args = scratch.0.join("args");
         let path = scratch.0.join("fake-tesseract");
         let script = format!(
-            "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\necho $$ >> '{pids}'\nif [ \"$1\" = --list-langs ]; then\n{listing}\nfi\ncat >&2 <<'STDERR'\n{stderr}\nSTDERR\nexit 1\n",
-            pids = pids.display()
+            "#!/bin/sh\n[ \"$1\" = --probe ] && exit 0\necho $$ >> '{pids}'\necho \"$*\" >> '{args}'\ncase \" $* \" in *' --list-langs '*)\n{listing}\n;;\nesac\ncat >&2 <<'STDERR'\n{stderr}\nSTDERR\nexit 1\n",
+            pids = pids.display(),
+            args = args.display()
         );
         fs::write(&path, script).expect("script");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("mode");
@@ -888,12 +996,21 @@ mod tests {
 
     /// Recognizes the fixture with the program at `program`.
     fn faked(scratch: &Scratch, program: &Path, limit: Duration) -> Recognition {
+        let tesseract = Tesseract {
+            program: program.to_owned(),
+            tessdata: None,
+        };
+        faked_with(scratch, &tesseract, limit)
+    }
+
+    /// Recognizes the fixture with `tesseract`.
+    fn faked_with(scratch: &Scratch, tesseract: &Tesseract, limit: Duration) -> Recognition {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
         runtime.block_on(run(
-            program.to_str().expect("path"),
+            tesseract,
             Path::new(FIXTURE),
             &AS_IT_IS,
             limit,
@@ -988,6 +1105,196 @@ mod tests {
         let recognition = faked(&scratch, &program, LIMIT);
         assert_eq!(recognition.result, Err(OcrFailure::LanguageMissing));
         all_gone(&scratch, 1);
+    }
+
+    #[test]
+    fn a_data_directory_is_given_to_the_recognition_and_the_listing() {
+        let scratch = Scratch::new("tessdata");
+        let program = fake(
+            &scratch,
+            "Error opening data file",
+            "echo 'List of available languages (1):'\necho osd\nexit 0",
+        );
+        let tessdata = scratch.0.join("tessdata");
+        fs::create_dir(&tessdata).expect("tessdata");
+        let tesseract = Tesseract {
+            program,
+            tessdata: Some(tessdata.clone()),
+        };
+        let recognition = faked_with(&scratch, &tesseract, LIMIT);
+        assert_eq!(recognition.result, Err(OcrFailure::LanguageMissing));
+        let args = fs::read_to_string(scratch.0.join("args")).expect("args");
+        let runs: Vec<&str> = args.lines().collect();
+        let given = format!("--tessdata-dir {}", tessdata.display());
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert!(runs[0].starts_with(&given), "{}", runs[0]);
+        assert!(runs[0].ends_with("result -l eng --psm 6"), "{}", runs[0]);
+        assert_eq!(runs[1], format!("{given} --list-langs"));
+        all_gone(&scratch, 2);
+        assert!(scratch.leftovers().is_empty());
+    }
+
+    #[test]
+    fn a_data_directory_without_the_traineddata_is_language_missing() {
+        let scratch = Scratch::new("emptytessdata");
+        let tessdata = scratch.0.join("tessdata");
+        fs::create_dir(&tessdata).expect("tessdata");
+        let tesseract = Tesseract::locate(None, Some(&tessdata), None);
+        let recognition = faked_with(&scratch, &tesseract, LIMIT);
+        assert_eq!(recognition.result, Err(OcrFailure::LanguageMissing));
+        assert!(scratch.leftovers().is_empty());
+    }
+
+    #[test]
+    fn without_a_data_directory_none_is_given() {
+        let scratch = Scratch::new("notessdata");
+        let program = fake(&scratch, "Error opening data file", "echo osd\nexit 0");
+        let recognition = faked(&scratch, &program, LIMIT);
+        assert_eq!(recognition.result, Err(OcrFailure::LanguageMissing));
+        let args = fs::read_to_string(scratch.0.join("args")).expect("args");
+        assert!(!args.contains("--tessdata-dir"), "{args}");
+        assert_eq!(args.lines().nth(1), Some("--list-langs"));
+    }
+
+    #[test]
+    fn a_configured_program_that_is_not_there_is_tesseract_missing() {
+        let scratch = Scratch::new("configuredmissing");
+        let absent = scratch.0.join("no-tesseract");
+        let tesseract = Tesseract::locate(Some(&absent), None, None);
+        assert_eq!(tesseract.program(), absent);
+        let recognition = faked_with(&scratch, &tesseract, LIMIT);
+        assert_eq!(recognition.result, Err(OcrFailure::TesseractMissing));
+        assert!(scratch.leftovers().is_empty());
+    }
+
+    #[test]
+    fn a_configured_program_is_the_one_that_runs() {
+        let scratch = Scratch::new("configured");
+        let program = fake(&scratch, "Something else broke", "echo eng\nexit 0");
+        let tesseract = Tesseract::locate(Some(&program), None, None);
+        assert_eq!(tesseract.program(), program);
+        let recognition = faked_with(&scratch, &tesseract, LIMIT);
+        // The fake ran: its failure is what came out.
+        assert_eq!(
+            recognition.result,
+            Err(OcrFailure::Failed(
+                "tesseract exit status 1: Something else broke".to_owned()
+            ))
+        );
+        all_gone(&scratch, 2);
+    }
+
+    /// The `tesseract` that `PATH` finds, as the fixture tests run it.
+    fn tesseract_on_path() -> PathBuf {
+        std::env::var_os("PATH")
+            .iter()
+            .flat_map(std::env::split_paths)
+            .map(|dir| dir.join("tesseract"))
+            .find(|program| program.is_file())
+            .expect("tesseract on PATH")
+    }
+
+    #[test]
+    fn a_configured_program_outside_path_recognizes_the_fixture() {
+        let scratch = Scratch::new("configuredreal");
+        let link = scratch.0.join("elsewhere-tesseract");
+        std::os::unix::fs::symlink(tesseract_on_path(), &link).expect("link");
+        let tesseract = Tesseract::locate(Some(&link), None, None);
+        assert_eq!(tesseract.program(), link);
+        let recognition = faked_with(&scratch, &tesseract, LIMIT);
+        assert_eq!(
+            recognition.result.as_deref(),
+            Ok("The bank is beside the river.")
+        );
+        assert!(scratch.leftovers().is_empty());
+    }
+
+    /// An executable's directory `bin` in `scratch`, with a `tesseract`
+    /// beside it when `sibling`, and `share/tessdata` beside `bin` when
+    /// `data`.
+    fn exe_dir(scratch: &Scratch, sibling: bool, data: bool) -> PathBuf {
+        let bin = scratch.0.join("bin");
+        fs::create_dir(&bin).expect("bin");
+        if sibling {
+            fs::write(bin.join("tesseract"), "").expect("sibling");
+        }
+        if data {
+            fs::create_dir_all(scratch.0.join("share/tessdata")).expect("tessdata");
+        }
+        bin
+    }
+
+    #[test]
+    fn locate_takes_the_configured_paths_first() {
+        let scratch = Scratch::new("locateconfigured");
+        let bin = exe_dir(&scratch, true, true);
+        let program = Path::new("/opt/t/tesseract");
+        let tessdata = Path::new("/opt/t/tessdata");
+        let tesseract = Tesseract::locate(Some(program), Some(tessdata), Some(&bin));
+        assert_eq!(tesseract.program(), program);
+        assert_eq!(tesseract.tessdata(), Some(tessdata));
+    }
+
+    #[test]
+    fn locate_takes_the_bundled_sibling_and_data() {
+        let scratch = Scratch::new("locatebundled");
+        let bin = exe_dir(&scratch, true, true);
+        let tesseract = Tesseract::locate(None, None, Some(&bin));
+        assert_eq!(tesseract.program(), bin.join("tesseract"));
+        assert_eq!(
+            tesseract.tessdata(),
+            Some(bin.join("../share/tessdata").as_path())
+        );
+    }
+
+    #[test]
+    fn locate_falls_back_to_path_and_the_default_data() {
+        let scratch = Scratch::new("locateplain");
+        let bin = exe_dir(&scratch, false, false);
+        let plain = Tesseract::default();
+        assert_eq!(plain.program(), Path::new("tesseract"));
+        assert_eq!(plain.tessdata(), None);
+        assert_eq!(Tesseract::locate(None, None, Some(&bin)), plain);
+        assert_eq!(Tesseract::locate(None, None, None), plain);
+    }
+
+    #[test]
+    fn locate_takes_each_half_on_its_own() {
+        let scratch = Scratch::new("locatehalves");
+        let bin = exe_dir(&scratch, false, true);
+        let tesseract = Tesseract::locate(None, None, Some(&bin));
+        assert_eq!(tesseract.program(), Path::new("tesseract"));
+        assert!(tesseract.tessdata().is_some());
+        let configured = Path::new("/opt/t/tessdata");
+        let tesseract = Tesseract::locate(None, Some(configured), None);
+        assert_eq!(tesseract.program(), Path::new("tesseract"));
+        assert_eq!(tesseract.tessdata(), Some(configured));
+    }
+
+    #[test]
+    fn locate_ignores_what_is_not_a_file_or_directory() {
+        let scratch = Scratch::new("locatekinds");
+        let bin = scratch.0.join("bin");
+        // A directory named `tesseract` and a file named `tessdata`.
+        fs::create_dir_all(bin.join("tesseract")).expect("directory");
+        fs::create_dir(scratch.0.join("share")).expect("share");
+        fs::write(scratch.0.join("share/tessdata"), "").expect("file");
+        assert_eq!(
+            Tesseract::locate(None, None, Some(&bin)),
+            Tesseract::default()
+        );
+    }
+
+    #[test]
+    fn locate_counts_a_relative_or_empty_setting_as_unset() {
+        let scratch = Scratch::new("locaterelative");
+        let bin = exe_dir(&scratch, true, false);
+        for relative in ["tesseract", "bin/tesseract", "./tessdata", ""] {
+            let relative = Path::new(relative);
+            let tesseract = Tesseract::locate(Some(relative), Some(relative), Some(&bin));
+            assert_eq!(tesseract.program(), bin.join("tesseract"), "{relative:?}");
+            assert_eq!(tesseract.tessdata(), None, "{relative:?}");
+        }
     }
 
     /// The wait status of a child that exited with `code`.

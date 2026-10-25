@@ -130,9 +130,14 @@
 //! snapshot is taken the window comes back, saying that the capture is being
 //! read, and Tesseract recognizes its English text off the UI thread, with a
 //! limit; the snapshot and Tesseract's temporary files are deleted whatever
-//! the outcome. The text, as one line, replaces the field, and the source is
-//! "screen capture (OCR)": it is a new text, and from there everything is as
-//! for a typed one, with the whole text as the sentence. It is not submitted:
+//! the outcome. The Tesseract is found by one rule in every channel: the
+//! program named by the file `tesseract` of the configuration directory, else
+//! `tesseract` beside the executable, else on `PATH`; the data directory named
+//! by the file `tessdata` there, else `../share/tessdata` from the
+//! executable's directory, else Tesseract's own. The text, as one line,
+//! replaces the field, and the source is "screen capture (OCR)": it is a new
+//! text, and from there everything is as for a typed one, with the whole text
+//! as the sentence. It is not submitted:
 //! a lone word is looked up and not sent online. An edit keeps the source;
 //! a field without a word is manual input again. A capture that gives no text,
 //! for any reason, leaves the field as it was and says "No text was

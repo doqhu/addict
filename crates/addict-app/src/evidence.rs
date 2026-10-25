@@ -1116,7 +1116,7 @@ mod tests {
 
         use crate::{
             capture::{
-                OCR_LIMIT,
+                OCR_LIMIT, tesseract,
                 tests::{FIXTURE, children},
             },
             manual::tests::WAIT,
@@ -1136,7 +1136,15 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let _job = work.run(
             OCR_LIMIT * 2,
-            async { ocr::recognize(Path::new(FIXTURE), &Params::ENGLISH, OCR_LIMIT).await },
+            async {
+                ocr::recognize(
+                    &tesseract(),
+                    Path::new(FIXTURE),
+                    &Params::ENGLISH,
+                    OCR_LIMIT,
+                )
+                .await
+            },
             move |outcome| {
                 let _ = sender.send(outcome);
             },
