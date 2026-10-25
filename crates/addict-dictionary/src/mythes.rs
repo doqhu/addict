@@ -4,7 +4,7 @@
 //! The first line names the encoding, and only UTF-8 is read. Then each
 //! entry is a line `word|n` followed by its `n` meaning lines, each
 //! `(part of speech)|item|item…`. It is read the way the selection
-//! experiment read it (`experiments/exp9/sources.py`, `mythes`): a line that
+//! experiment read it (EXP-9 `sources.py`, `mythes`): a line that
 //! is not `word|n` where an entry should start is skipped.
 //!
 //! Each meaning line retains its full label as optional sense metadata,

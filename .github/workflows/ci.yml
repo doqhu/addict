@@ -44,9 +44,5 @@ jobs:
           mkdir -p "$CARGO_HOME"
           chown -R tester "$CARGO_HOME" "$GITHUB_WORKSPACE"
 
-      - name: Test the product crates
-        run: >-
-          runuser -u tester --
-          cargo test --locked
-          -p addict-core -p addict-platform -p addict-dictionary
-          -p addict-deepl -p addict-app
+      - name: Test the workspace
+        run: runuser -u tester -- cargo test --locked --workspace

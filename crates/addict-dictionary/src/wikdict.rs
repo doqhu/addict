@@ -3,7 +3,7 @@
 //!
 //! Of the database only the `translation` table is read, its `written_rep`
 //! and `trans_list` columns, the ones the selection experiment counted
-//! (`experiments/exp9/sources.py`, `wikdict_pair`): `written_rep` is the
+//! (EXP-9 `sources.py`, `wikdict_pair`): `written_rep` is the
 //! headword as written, and `trans_list` its translations, separated by `|`
 //! and trimmed. A row without a headword is skipped, and so is an empty
 //! translation. The rows of one headword, one per sense of an entry, are

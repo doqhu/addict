@@ -217,7 +217,7 @@ pub(crate) mod tests {
 
     pub(crate) const FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../experiments/exp4/ocr-fixture.png"
+        "/../addict-platform/tests/data/ocr-fixture.png"
     );
 
     /// Held by every test that starts a child process, so a test that counts

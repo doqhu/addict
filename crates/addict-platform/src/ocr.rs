@@ -556,10 +556,7 @@ mod tests {
         outcome, run, upscale,
     };
 
-    const FIXTURE: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../experiments/exp4/ocr-fixture.png"
-    );
+    const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/ocr-fixture.png");
 
     const LIMIT: Duration = Duration::from_secs(15);
 

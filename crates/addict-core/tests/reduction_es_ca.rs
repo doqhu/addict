@@ -1,4 +1,4 @@
-//! Parity of the Spanish and Catalan reduction with `experiments/exp9/rules.py`:
+//! Parity of the Spanish and Catalan reduction with EXP-9's `rules.py`:
 //! `data/reduction-es-ca.tsv` was written once by `rules.reduce_word` (rules
 //! only) over both EXP-9 target lists and the words of `test_rules.py`, for
 //! both languages. Each line is `lang<TAB>word<TAB>forms joined by |`, and

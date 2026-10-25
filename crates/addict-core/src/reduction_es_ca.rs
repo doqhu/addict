@@ -1,5 +1,5 @@
 //! Reducing a Spanish or Catalan word to the forms its dictionary headword
-//! may have: the port of `experiments/exp9/rules.py`, which gives the same
+//! may have: the port of EXP-9's `rules.py`, which gives the same
 //! forms in the same order.
 //!
 //! There is no model and no part of speech: every rule that matches gives a
