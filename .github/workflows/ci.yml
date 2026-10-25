@@ -47,6 +47,21 @@ jobs:
       - name: Test the workspace
         run: runuser -u tester -- cargo test --locked --workspace
 
+  reuse:
+    runs-on: ubuntu-24.04
+    env:
+      REUSE_VERSION: 6.2.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install reuse
+        run: |
+          python3 -m venv "$RUNNER_TEMP/reuse"
+          "$RUNNER_TEMP/reuse/bin/pip" install --quiet "reuse==$REUSE_VERSION"
+
+      - name: Check the licensing
+        run: '"$RUNNER_TEMP/reuse/bin/reuse" lint'
+
   secrets:
     runs-on: ubuntu-24.04
     env:

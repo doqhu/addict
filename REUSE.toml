@@ -1,0 +1,33 @@
+version = 1
+
+# Every file, so files added later need no header of their own. A file whose
+# own header says otherwise keeps it.
+[[annotations]]
+path = "**"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Ilia Gordeev <ilya.tanat@gmail.com>"
+SPDX-License-Identifier = "MIT"
+
+# The annotations below only record where a file came from; where several
+# annotations match a file, the last one wins.
+
+[[annotations]]
+path = "crates/addict-app/icons/*.png"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Ilia Gordeev <ilya.tanat@gmail.com>"
+SPDX-License-Identifier = "MIT"
+SPDX-FileComment = "source.png is the Gaudi mosaic letter a, made with an image-generation tool; the sizes are built from it by make-icons.py."
+
+[[annotations]]
+path = "crates/addict-platform/tests/data/ocr-fixture.png"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Ilia Gordeev <ilya.tanat@gmail.com>"
+SPDX-License-Identifier = "MIT"
+SPDX-FileComment = "A sentence rendered for the EXP-4 experiment."
+
+[[annotations]]
+path = "crates/addict-core/tests/data/reduction-es-ca.tsv"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Ilia Gordeev <ilya.tanat@gmail.com>"
+SPDX-License-Identifier = "MIT"
+SPDX-FileComment = "Written by EXP-9's rules.py over the project's own EXP-9 target word lists and the words of test_rules.py."
