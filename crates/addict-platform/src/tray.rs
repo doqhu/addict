@@ -1,8 +1,8 @@
 //! The tray icon of the resident application, a StatusNotifierItem.
 //!
 //! [`start`] spawns one worker thread that owns a session-bus connection and
-//! the item: the app icon and a menu of three entries, Show, Settings and
-//! Exit. A choice is handed to a plain `Send` callback, so the caller decides
+//! the item: the app icon and a menu of four entries, Show, Settings, About
+//! and Exit. A choice is handed to a plain `Send` callback, so the caller decides
 //! how to wake its own thread; nothing here polls. A click on the icon opens
 //! the menu.
 //!
@@ -34,6 +34,8 @@ pub enum TrayEvent {
     Show,
     /// Settings was chosen.
     Settings,
+    /// About was chosen.
+    About,
     /// Exit was chosen.
     Exit,
     /// There is no tray: `message` is one line saying why. Said once for each
@@ -44,9 +46,10 @@ pub enum TrayEvent {
 
 /// The entries of the menu, in order: what the user reads and what each one
 /// tells.
-pub const ENTRIES: [(&str, TrayEvent); 3] = [
+pub const ENTRIES: [(&str, TrayEvent); 4] = [
     ("Show", TrayEvent::Show),
     ("Settings", TrayEvent::Settings),
+    ("About", TrayEvent::About),
     ("Exit", TrayEvent::Exit),
 ];
 
@@ -256,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_is_show_settings_exit_in_that_order() {
+    fn the_menu_is_show_settings_about_exit_in_that_order() {
         let (item, _) = item();
         let labels: Vec<String> = item
             .menu()
@@ -266,7 +269,7 @@ mod tests {
                 _ => panic!("only standard items"),
             })
             .collect();
-        assert_eq!(labels, ["Show", "Settings", "Exit"]);
+        assert_eq!(labels, ["Show", "Settings", "About", "Exit"]);
     }
 
     #[test]
@@ -280,7 +283,12 @@ mod tests {
         }
         assert_eq!(
             *heard.lock().expect("heard"),
-            [TrayEvent::Show, TrayEvent::Settings, TrayEvent::Exit]
+            [
+                TrayEvent::Show,
+                TrayEvent::Settings,
+                TrayEvent::About,
+                TrayEvent::Exit
+            ]
         );
     }
 

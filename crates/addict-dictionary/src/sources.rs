@@ -7,6 +7,9 @@
 //! row. [`OCR`] holds the bundled OCR data and engine, which CREDITS and
 //! About list but the downloader skips. A credit line is the attribution
 //! only; what a license asks beyond it is a comment on the row.
+//!
+//! [`credits`] is the text of the `CREDITS` file at the root of the
+//! repository, made from both tables; a test keeps the file equal to it.
 
 use crate::import::Source;
 
@@ -152,6 +155,36 @@ pub const OCR: &[Row] = &[
     },
 ];
 
+/// The command that writes `CREDITS` anew from the tables.
+pub const WRITE_CREDITS: &str = "ADDICT_WRITE_CREDITS=1 cargo test -p addict-dictionary credits";
+
+/// The text of `CREDITS`: a header naming addict and its license, then a
+/// block per row, the indexes in table order and then, under its own
+/// heading, OCR. Each block is the index, its credit line, its license and
+/// its upstream file.
+pub fn credits() -> String {
+    let mut text = String::new();
+    text.push_str("Credits of addict\n");
+    text.push_str("=================\n\n");
+    text.push_str("addict is licensed under the MIT License (see LICENSES/MIT.txt).\n");
+    text.push_str("It uses the dictionary data and the OCR data and software below,\n");
+    text.push_str("each under its own license.\n\n");
+    text.push_str("This file is generated from crates/addict-dictionary/src/sources.rs;\n");
+    text.push_str(&format!(
+        "do not edit it, regenerate it with `{WRITE_CREDITS}`.\n"
+    ));
+    for (heading, rows) in [("Dictionary indexes", ROWS), ("OCR", OCR)] {
+        text.push_str(&format!("\n\n{heading}\n{}\n", "-".repeat(heading.len())));
+        for row in rows {
+            text.push_str(&format!(
+                "\n{}\n  Credit:   {}\n  License:  {}\n  Upstream: {}\n",
+                row.index, row.credit, row.license, row.upstream
+            ));
+        }
+    }
+    text
+}
+
 /// The row of `source`. No wildcard arm: a new source does not compile until
 /// it is given a row.
 pub fn row(source: Source) -> &'static Row {
@@ -252,6 +285,45 @@ mod tests {
         let expected: Vec<&str> = order.iter().map(|&source| row(source).index).collect();
         let actual: Vec<&str> = ROWS.iter().map(|row| row.index).collect();
         assert_eq!(actual, expected);
+    }
+
+    /// The committed `CREDITS` is the text of the tables. With
+    /// `ADDICT_WRITE_CREDITS=1` the test writes the file instead.
+    #[test]
+    fn credits_file_is_up_to_date() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../CREDITS");
+        let expected = credits();
+        if std::env::var_os("ADDICT_WRITE_CREDITS").is_some_and(|value| value == "1") {
+            std::fs::write(path, &expected).expect("writing CREDITS");
+            return;
+        }
+        let committed = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(
+            committed == expected,
+            "CREDITS differs from the tables in sources.rs: run `{WRITE_CREDITS}`"
+        );
+    }
+
+    /// Every row, of the indexes and then of OCR, is in the credits once
+    /// with its credit line, in table order.
+    #[test]
+    fn credits_list_every_row_once_in_order() {
+        let text = credits();
+        let mut from = 0;
+        for row in ROWS.iter().chain(OCR) {
+            let block = format!("\n{}\n  Credit:   {}\n", row.index, row.credit);
+            assert_eq!(text.matches(&block).count(), 1, "{}", row.index);
+            let at = text[from..].find(&block).expect("in table order") + from;
+            from = at + block.len();
+        }
+        let ocr = text.find("\nOCR\n").expect("the OCR heading");
+        let first_ocr = text
+            .find(&format!("\n{}\n", OCR[0].index))
+            .expect("OCR row");
+        let last_index = text
+            .find(&format!("\n{}\n", ROWS[ROWS.len() - 1].index))
+            .expect("index row");
+        assert!(last_index < ocr && ocr < first_ocr);
     }
 
     /// No index has two rows.

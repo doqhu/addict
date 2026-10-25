@@ -15,8 +15,8 @@
 //! file read by [`sqlite`], [`analysis`] is what a Spanish or Catalan verb
 //! form is, from the tags of a Kaikki conjugation table, [`import`] is the
 //! logic of `addict import`, and [`sources`] is the one table of dictionary
-//! sources, with their licenses and credit lines, that CREDITS, About →
-//! Credits and the downloader read.
+//! sources, with their licenses and credit lines, that CREDITS (the text
+//! its `credits` makes), About → Credits and the downloader read.
 
 #![forbid(unsafe_code)]
 

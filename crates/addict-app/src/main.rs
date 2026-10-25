@@ -155,14 +155,17 @@
 //! capture gives up a read that runs.
 //!
 //! The application has an icon in the top bar, a StatusNotifierItem, with a
-//! menu of Show, Settings and Exit, which a click on the icon opens. Show shows
-//! the window as a repeated launch does, without a read. Settings shows a window
-//! with the trigger of the shortcut, the file of the DeepL key and the state
-//! it is in, never the key, and a button that asks the portal for its dialog
-//! to change the shortcut; the line there says when it cannot. Exit ends the
-//! application. A session with no StatusNotifierWatcher says so once on
-//! stderr and goes on without the icon; the icon appears when a watcher
-//! comes, such as a shell extension that starts after the application.
+//! menu of Show, Settings, About and Exit, which a click on the icon opens.
+//! Show shows the window as a repeated launch does, without a read. Settings
+//! shows a window with the trigger of the shortcut, the file of the DeepL key
+//! and the state it is in, never the key, and a button that asks the portal
+//! for its dialog to change the shortcut; the line there says when it cannot.
+//! About shows a window with the icon, the name, the version and the license
+//! of the application, and a Credits page that lists every dictionary and OCR
+//! source with its credit line. Exit ends the application. A session with no
+//! StatusNotifierWatcher says so once on stderr and goes on without the icon;
+//! the icon appears when a watcher comes, such as a shell extension that
+//! starts after the application.
 //!
 //! The application is unique: a second launch exits at once and makes the
 //! resident instance show its window as it is, without a read.
@@ -204,10 +207,11 @@
 //! the Vulkan drivers the resident lets the loader list are [`gpu`]'s,
 //! and its portal and Tesseract adapters are `addict_platform`'s, the
 //! resident application is [`resident`]'s, the history of its field is
-//! [`history`]'s, the Settings window is
-//! [`settings`]'s, the texts of its window are
-//! [`view`]'s and the widgets of the window are [`widgets`]'s.
+//! [`history`]'s, the Settings window is [`settings`]'s, the About window and
+//! its credits are [`about`]'s, the texts of its window are [`view`]'s and the
+//! widgets of the window are [`widgets`]'s.
 
+mod about;
 mod cache;
 mod capture;
 mod dictionaries;
