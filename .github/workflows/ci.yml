@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    # addict-app needs GTK 4.20 or later, which Ubuntu does not ship.
+    container: registry.fedoraproject.org/fedora:43
+    env:
+      CARGO_HOME: /cargo
+      CARGO_TERM_COLOR: always
+    steps:
+      # Git before the checkout: without it, the checkout is a tarball, not a
+      # repository. Tesseract with English: the recognition tests run it.
+      # util-linux: runuser, which the image does not have.
+      - name: Install the build dependencies
+        run: >-
+          dnf -y install --setopt=install_weak_deps=False
+          gcc pkgconf-pkg-config gtk4-devel rust cargo git
+          tesseract tesseract-langpack-eng util-linux
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /cargo/registry
+            /cargo/git
+            target
+          key: test-fedora-43-${{ hashFiles('Cargo.lock') }}
+          restore-keys: test-fedora-43-
+
+      # The job runs as root, and root ignores file modes: the cache test of
+      # an unwritable directory would fail.
+      - name: Add the user that runs the tests
+        run: |
+          useradd --create-home tester
+          mkdir -p "$CARGO_HOME"
+          chown -R tester "$CARGO_HOME" "$GITHUB_WORKSPACE"
+
+      - name: Test the product crates
+        run: >-
+          runuser -u tester --
+          cargo test --locked
+          -p addict-core -p addict-platform -p addict-dictionary
+          -p addict-deepl -p addict-app
