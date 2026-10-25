@@ -108,7 +108,15 @@
 //! its line distinguishes key, connection, quota, language and timeout failures.
 //! Key failures name the configured key file; unsafe permissions name 0600.
 //! The next eligible click or Enter retries failed requests; successful
-//! translations stay available. No request is automatically retried.
+//! translations stay available. No request is automatically retried. Every
+//! answer, and never a refusal, is also kept on disk in
+//! `$XDG_CACHE_HOME/addict/translations.sqlite3`, or
+//! `$HOME/.cache/addict/translations.sqlite3`, mode `0600` in a `0700`
+//! directory with a `CACHEDIR.TAG`, and the same request is answered from
+//! there without DeepL, even after a restart, for up to 90 days since its
+//! last use and within 10 MB; the Settings window shows its size and clears
+//! it, and a cache file that cannot be used is deleted and does not stop a
+//! translation.
 //!
 //! A paste into the field with Ctrl+V, Shift+Insert or the menu replaces the
 //! whole field with the clipboard text as one line, and with it the input and
@@ -196,6 +204,7 @@
 //! [`settings`]'s, the texts of its window are
 //! [`view`]'s and the widgets of the window are [`widgets`]'s.
 
+mod cache;
 mod capture;
 mod context;
 mod dictionaries;

@@ -55,6 +55,7 @@ async fn a_word_with_its_sentence_is_sent_as_text_and_context_and_comes_back_rus
             "context": SENTENCE,
             "source_lang": "EN",
             "target_lang": "RU",
+            "model_type": "prefer_quality_optimized",
         })
     );
 }
@@ -71,7 +72,7 @@ async fn a_request_without_a_context_sends_none() {
     let body: serde_json::Value = serde_json::from_str(&stub.seen()[0].body).expect("JSON");
     assert_eq!(
         body,
-        serde_json::json!({"text": ["bank"], "source_lang": "EN", "target_lang": "RU"})
+        serde_json::json!({"text": ["bank"], "source_lang": "EN", "target_lang": "RU", "model_type": "prefer_quality_optimized"})
     );
 }
 
@@ -93,6 +94,7 @@ async fn a_spanish_word_with_its_sentence_is_sent_from_es() {
             "context": sentence,
             "source_lang": "ES",
             "target_lang": "RU",
+            "model_type": "prefer_quality_optimized",
         })
     );
 }
@@ -116,6 +118,7 @@ async fn a_catalan_sentence_is_sent_from_ca_without_context() {
             "text": ["La col·lecció d'art."],
             "source_lang": "CA",
             "target_lang": "RU",
+            "model_type": "prefer_quality_optimized",
         })
     );
 }

@@ -16,4 +16,4 @@ pub mod key;
 #[cfg(feature = "stub")]
 pub mod stub;
 
-pub use client::{DeepL, Language, Usage};
+pub use client::{DeepL, Language, Sent, Usage, sent};

@@ -1480,11 +1480,13 @@ pub(crate) mod tests {
             "context": RIVER,
             "source_lang": "EN",
             "target_lang": "RU",
+            "model_type": "prefer_quality_optimized",
         });
         let sentence = serde_json::json!({
             "text": [RIVER],
             "source_lang": "EN",
             "target_lang": "RU",
+            "model_type": "prefer_quality_optimized",
         });
         assert!(bodies.contains(&word), "{bodies:?}");
         assert!(bodies.contains(&sentence), "{bodies:?}");
@@ -1530,11 +1532,13 @@ pub(crate) mod tests {
                     "context": BANCO_SENTENCE,
                     "source_lang": "ES",
                     "target_lang": "RU",
+                    "model_type": "prefer_quality_optimized",
                 }),
                 serde_json::json!({
                     "text": [BANCO_SENTENCE],
                     "source_lang": "CA",
                     "target_lang": "RU",
+                    "model_type": "prefer_quality_optimized",
                 }),
             ]
         );
@@ -1607,11 +1611,13 @@ pub(crate) mod tests {
                     "context": BANCO_SENTENCE,
                     "source_lang": "ES",
                     "target_lang": "RU",
+                    "model_type": "prefer_quality_optimized",
                 }),
                 serde_json::json!({
                     "text": [BANCO_SENTENCE],
                     "source_lang": "CA",
                     "target_lang": "RU",
+                    "model_type": "prefer_quality_optimized",
                 }),
             ]
         );
@@ -1662,6 +1668,26 @@ pub(crate) mod tests {
             Some(Online::Refused(Refusal::UnsafeKey))
         );
         assert!(stub.seen().is_empty());
+    }
+
+    #[test]
+    fn a_cached_answer_survives_a_restart_and_the_server_is_not_asked_again() {
+        let stub = Stub::start(Reply::translation("берег")).expect("stub");
+        let key = KeyFile::new("cached", 0o600);
+        let temp = crate::cache::tests::TempDir::new("translate");
+        let started = || -> Arc<dyn Translator> {
+            Arc::new(crate::cache::Cached::new(
+                DeepL::with_base_url(&key.0, stub.base_url()),
+                Some(temp.cache()),
+            ))
+        };
+        let (first, _) = translated(started(), &bank_of_the_river(), WAIT);
+        assert_eq!(first, Outcome::Finished(Ok("берег".to_owned())));
+        assert_eq!(stub.seen().len(), 1);
+        // A new process: a new translator over the same directory.
+        let (second, _) = translated(started(), &bank_of_the_river(), WAIT);
+        assert_eq!(second, Outcome::Finished(Ok("берег".to_owned())));
+        assert_eq!(stub.seen().len(), 1);
     }
 
     #[test]

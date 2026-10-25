@@ -4,8 +4,10 @@
 //! application runs is found by the next request, and a request without a
 //! usable key sends nothing. The HTTP client, and with it the TLS state, is
 //! built by the first request that has a key. No request is repeated, nothing
-//! is cached and no connection is kept after its answer: between two requests
-//! the client holds nothing that wakes.
+//! is cached in this crate and no connection is kept after its answer: between
+//! two requests the client holds nothing that wakes. [`sent`] names every
+//! field a translate request sends, so a cache outside this crate can key on
+//! exactly what goes on the wire.
 //!
 //! No timer runs here. A request that gets no answer stays pending until its
 //! future is dropped; the deadline is the caller's.
@@ -70,6 +72,40 @@ pub struct Usage {
     pub character_limit: u64,
 }
 
+/// The model every translate request asks for. Naming it keeps the answer
+/// independent of a server default that can change.
+const MODEL_TYPE: &str = "prefer_quality_optimized";
+
+/// The formality of every translate request. It is not sent, so DeepL uses
+/// its default; it is named here so a cache key can hold it.
+const FORMALITY: &str = "default";
+
+/// Every field of a translate request that can change its answer, with the
+/// exact values the client sends for `request`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sent<'a> {
+    pub text: &'a str,
+    pub context: Option<&'a str>,
+    pub source_lang: &'static str,
+    pub target_lang: &'static str,
+    pub model_type: &'static str,
+    /// Not sent: DeepL's default formality applies.
+    pub formality: &'static str,
+}
+
+/// What a translate request for `request` sends. The body is built from it,
+/// so a key built from it cannot drift from the wire.
+pub fn sent(request: &Request) -> Sent<'_> {
+    Sent {
+        text: &request.text,
+        context: request.context.as_deref(),
+        source_lang: source_lang(request.source),
+        target_lang: TARGET_LANG,
+        model_type: MODEL_TYPE,
+        formality: FORMALITY,
+    }
+}
+
 /// The body of a translate request.
 #[derive(Serialize)]
 struct TranslateBody<'a> {
@@ -78,6 +114,19 @@ struct TranslateBody<'a> {
     context: Option<&'a str>,
     source_lang: &'static str,
     target_lang: &'static str,
+    model_type: &'static str,
+}
+
+impl<'a> From<Sent<'a>> for TranslateBody<'a> {
+    fn from(sent: Sent<'a>) -> Self {
+        Self {
+            text: [sent.text],
+            context: sent.context,
+            source_lang: sent.source_lang,
+            target_lang: sent.target_lang,
+            model_type: sent.model_type,
+        }
+    }
 }
 
 /// The answer to a translate request.
@@ -133,12 +182,7 @@ impl DeepL {
     /// The context is not translated.
     pub async fn translate(&self, request: &Request) -> Result<String, Refusal> {
         let (http, base, authorization) = self.prepared()?;
-        let body = TranslateBody {
-            text: [&request.text],
-            context: request.context.as_deref(),
-            source_lang: source_lang(request.source),
-            target_lang: TARGET_LANG,
-        };
+        let body = TranslateBody::from(sent(request));
         let sent = http
             .post(format!("{base}/v2/translate"))
             .header(AUTHORIZATION, authorization)

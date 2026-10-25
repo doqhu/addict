@@ -5,18 +5,71 @@
 //! to change it, and the DeepL key, with a masked field to enter one, the
 //! file it is saved in and the state that file is in. The window writes the
 //! key, on the runner, and never reads it back: the field starts empty and
-//! is cleared once the key is saved. The texts are plain functions of the
-//! state, so that they can be tested without a display.
+//! is cleared once the key is saved. Below the key, a line says how much the
+//! on-disk cache of the answers holds, with a button that clears it; the
+//! cache is read and cleared on the runner. The texts are plain functions of
+//! the state, so that they can be tested without a display.
 
 use std::{path::Path, time::Duration};
 
 use addict_deepl::key::{self, KeyError};
 use gtk::{glib, prelude::*};
 
-use crate::view::Binding;
+use crate::{cache::Footprint, view::Binding};
 
 /// How long reading the state of the key file may take.
 pub const KEY_CHECK_LIMIT: Duration = Duration::from_secs(2);
+
+/// How long reading the size of the cache, or clearing it, may take.
+pub const CACHE_LIMIT: Duration = Duration::from_secs(5);
+
+/// Where the size of the cache stands, as the window says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheState {
+    /// The size is being read.
+    Checking,
+    /// The cache holds this.
+    Read(Footprint),
+    /// The size could not be read: no runner, a timeout or a panic.
+    Unknown,
+}
+
+/// The line of the size of the cache. No wildcard arm: a new state does not
+/// compile until it is given its line.
+pub fn cache_text(state: CacheState) -> String {
+    match state {
+        CacheState::Checking => "Checking the cache…".to_owned(),
+        CacheState::Read(footprint) if footprint.rows == 0 => "The cache is empty.".to_owned(),
+        CacheState::Read(footprint) => format!("The cache holds {}.", size_text(footprint.bytes)),
+        CacheState::Unknown => "The size of the cache could not be read.".to_owned(),
+    }
+}
+
+/// `bytes` in decimal units, one decimal from a kilobyte up: `1.2 MB`.
+pub fn size_text(bytes: u64) -> String {
+    const KB: u64 = 1_000;
+    const MB: u64 = 1_000_000;
+    // Integer arithmetic: tenths, rounded half up.
+    let tenths = |unit: u64| (bytes * 10 + unit / 2) / unit;
+    if bytes < KB {
+        format!("{bytes} bytes")
+    } else if tenths(KB) < 10_000 {
+        let tenths = tenths(KB);
+        format!("{}.{} kB", tenths / 10, tenths % 10)
+    } else {
+        let tenths = tenths(MB);
+        format!("{}.{} MB", tenths / 10, tenths % 10)
+    }
+}
+
+/// The line after a clear of the cache: nothing on success, else why the
+/// cache was not cleared.
+pub fn clear_text(result: Result<(), &str>) -> String {
+    match result {
+        Ok(()) => String::new(),
+        Err(reason) => format!("The cache was not cleared: {reason}"),
+    }
+}
 
 /// Where the DeepL key stands, as the window says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +279,10 @@ pub struct Settings {
     status: gtk::Label,
     /// The line of the key's saves, apart from the shortcut's.
     key_status: gtk::Label,
+    /// The line of the size of the cache.
+    cache_size: gtk::Label,
+    /// The line of the clears of the cache.
+    cache_status: gtk::Label,
 }
 
 fn label(text: &str, classes: &[&str]) -> gtk::Label {
@@ -268,12 +325,13 @@ impl Settings {
     /// Builds the window, hidden, above `parent`. `on_change` runs when
     /// Change shortcut is pressed; `on_save` runs with the text of the key
     /// field, trimmed and not empty, when Save key or Enter in the field is
-    /// pressed.
+    /// pressed; `on_clear` runs when Clear cache is pressed.
     pub fn new(
         parent: &impl IsA<gtk::Window>,
         key_file: Option<&Path>,
         on_change: impl Fn() + 'static,
         on_save: impl Fn(String) + 'static,
+        on_clear: impl Fn() + 'static,
     ) -> Self {
         let keys = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
@@ -382,6 +440,24 @@ impl Settings {
             }
             None => key_file_row.append(&label(&saved_in_text(None), &["hint"])),
         }
+        // The cache of the answers: its size, and the button that clears it.
+        let cache_size = label(&cache_text(CacheState::Checking), &["hint"]);
+        cache_size.set_hexpand(true);
+        cache_size.set_valign(gtk::Align::Center);
+        let clear = gtk::Button::builder()
+            .label("Clear cache")
+            .valign(gtk::Align::Center)
+            .css_classes(["settings-button"])
+            .build();
+        clear.connect_clicked(move |_| on_clear());
+        let cache_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        cache_row.append(&cache_size);
+        cache_row.append(&clear);
+        let cache_status = label("", &["hint"]);
+        cache_status.set_visible(false);
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -406,6 +482,8 @@ impl Settings {
                 key_row.upcast_ref(),
                 key_status.upcast_ref(),
                 key_file_row.upcast_ref(),
+                cache_row.upcast_ref(),
+                cache_status.upcast_ref(),
             ],
         ));
         let footer = label(
@@ -449,6 +527,8 @@ impl Settings {
             change,
             status,
             key_status,
+            cache_size,
+            cache_status,
         };
         settings.render_binding(&Binding::Attempting, None);
         settings.render_key(None);
@@ -514,6 +594,16 @@ impl Settings {
     pub fn say_key(&self, text: &str) {
         say_in(&self.key_status, text);
     }
+
+    /// Shows the size of the cache.
+    pub fn render_cache(&self, state: CacheState) {
+        self.cache_size.set_label(&cache_text(state));
+    }
+
+    /// Sets the line of the clears of the cache.
+    pub fn say_cache(&self, text: &str) {
+        say_in(&self.cache_status, text);
+    }
 }
 
 #[cfg(test)]
@@ -521,10 +611,56 @@ mod tests {
     use addict_deepl::key::KeyError;
 
     use super::{
-        KeyState, NO_KEY_PLACE, REBINDING, badge, change_text, key_text, key_tone, save_text,
-        saved_in_text, trigger_keys, trigger_text,
+        CacheState, KeyState, NO_KEY_PLACE, REBINDING, badge, cache_text, change_text, clear_text,
+        key_text, key_tone, save_text, saved_in_text, size_text, trigger_keys, trigger_text,
     };
-    use crate::view::Binding;
+    use crate::{cache::Footprint, view::Binding};
+
+    #[test]
+    fn the_cache_line_says_its_size_or_that_it_is_empty() {
+        let read = |rows, bytes| CacheState::Read(Footprint { rows, bytes });
+        assert_eq!(cache_text(read(0, 0)), "The cache is empty.");
+        // The file of an empty cache still has its pages.
+        assert_eq!(cache_text(read(0, 20_480)), "The cache is empty.");
+        assert_eq!(cache_text(read(3, 1_234_567)), "The cache holds 1.2 MB.");
+        assert_eq!(cache_text(read(1, 24_576)), "The cache holds 24.6 kB.");
+        assert_eq!(
+            cache_text(CacheState::Unknown),
+            "The size of the cache could not be read."
+        );
+        let lines: std::collections::HashSet<_> = [
+            CacheState::Checking,
+            read(0, 0),
+            read(1, 1),
+            CacheState::Unknown,
+        ]
+        .into_iter()
+        .map(cache_text)
+        .collect();
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn a_size_is_in_decimal_units_with_one_decimal() {
+        assert_eq!(size_text(0), "0 bytes");
+        assert_eq!(size_text(999), "999 bytes");
+        assert_eq!(size_text(1_000), "1.0 kB");
+        assert_eq!(size_text(1_049), "1.0 kB");
+        assert_eq!(size_text(1_050), "1.1 kB");
+        assert_eq!(size_text(999_949), "999.9 kB");
+        assert_eq!(size_text(999_950), "1.0 MB");
+        assert_eq!(size_text(1_200_000), "1.2 MB");
+        assert_eq!(size_text(10_000_000), "10.0 MB");
+    }
+
+    #[test]
+    fn a_clear_says_nothing_when_it_worked_and_why_when_it_did_not() {
+        assert_eq!(clear_text(Ok(())), "");
+        assert_eq!(
+            clear_text(Err("Permission denied (os error 13)")),
+            "The cache was not cleared: Permission denied (os error 13)"
+        );
+    }
 
     #[test]
     fn every_key_state_has_a_distinct_line() {

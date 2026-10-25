@@ -182,6 +182,7 @@ use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
+    cache::{self, Cached},
     capture::{self, Capture, Captured, Failure, Timing},
     context::{self, Read, Reading},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
@@ -191,7 +192,7 @@ use crate::{
     manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
     online::{self, Kept, Subject},
     recording::Recording,
-    settings::{self, KeyState, Settings},
+    settings::{self, CacheState, KeyState, Settings},
     style,
     translate::{self, Translated},
     view::{
@@ -330,6 +331,13 @@ enum Event {
     /// The write of the key file ended: why it failed, in one line that
     /// does not hold the key.
     KeySaved(Outcome<Result<(), String>>),
+    /// The size of the cache, as the runner read it for the Settings window.
+    CacheSize(CacheState),
+    /// Clear cache was pressed in the Settings window.
+    ClearCache,
+    /// The clear of the cache on the runner ended: why it failed, in one
+    /// line.
+    CacheCleared(Outcome<Result<(), String>>),
     /// The read of the clipboard with this number ended: the line of its
     /// text, or why there is none.
     Clipboard(u64, Result<String, Missed>),
@@ -439,6 +447,12 @@ struct Session {
     /// What a word or a sentence is translated by online.
     translator: Arc<dyn Translator>,
     key_file: Option<std::path::PathBuf>,
+    /// The on-disk cache of the translator, for its size and its clear.
+    cache: Arc<cache::Store>,
+    /// The read of the size of the cache; dropping it gives it up.
+    cache_job: Option<Job>,
+    /// The clear of the cache; a newer clear replaces it.
+    clear_job: Option<Job>,
     /// The Settings window, which the tray shows.
     settings: Settings,
     /// The trigger the portal bound, for the Settings window.
@@ -603,6 +617,9 @@ impl Session {
             Event::KeyFile(state) => self.settings.render_key(Some(state)),
             Event::SaveKey(text) => self.save_key(text),
             Event::KeySaved(outcome) => self.key_saved(outcome),
+            Event::CacheSize(state) => self.settings.render_cache(state),
+            Event::ClearCache => self.clear_cache(),
+            Event::CacheCleared(outcome) => self.cache_cleared(outcome),
             Event::Launched => self.launched(),
             Event::Retry => self.retry(),
             Event::Sentence(text) => self.sentence_changed(text),
@@ -1839,8 +1856,74 @@ impl Session {
         self.settings.say("");
         self.settings.clear_key_entry();
         self.settings.say_key("");
+        self.settings.say_cache("");
         self.check_key();
+        self.check_cache();
         self.settings.present();
+    }
+
+    /// Reads the size of the cache on the runner, for the Settings window; a
+    /// read still running is given up.
+    fn check_cache(&mut self) {
+        self.settings.render_cache(CacheState::Checking);
+        let sender = self.sender.clone();
+        let cache = self.cache.clone();
+        self.cache_job = self.work.upgrade().map(|work| {
+            work.run(
+                settings::CACHE_LIMIT,
+                async move { cache.footprint() },
+                move |outcome| {
+                    let state = match outcome {
+                        Outcome::Finished(footprint) => CacheState::Read(footprint),
+                        Outcome::TimedOut | Outcome::Panicked => CacheState::Unknown,
+                        // Replaced by the next press of Settings or clear.
+                        Outcome::Cancelled => return,
+                    };
+                    let _ = sender.unbounded_send(Event::CacheSize(state));
+                },
+            )
+        });
+        if self.cache_job.is_none() {
+            self.settings.render_cache(CacheState::Unknown);
+        }
+    }
+
+    /// Clear cache was pressed: every row is deleted on the runner. A clear
+    /// still running is replaced.
+    fn clear_cache(&mut self) {
+        let Some(work) = self.work.upgrade() else {
+            self.settings
+                .say_cache(&settings::clear_text(Err("the runner is not available")));
+            return;
+        };
+        self.settings.say_cache("");
+        self.settings.render_cache(CacheState::Checking);
+        let sender = self.sender.clone();
+        let cache = self.cache.clone();
+        self.clear_job = Some(work.run(
+            settings::CACHE_LIMIT,
+            async move { cache.clear() },
+            move |outcome| {
+                let _ = sender.unbounded_send(Event::CacheCleared(outcome));
+            },
+        ));
+    }
+
+    /// The clear of the cache ended: the line says why when it failed, and
+    /// the size is read again either way. The job slot is left alone, as for
+    /// a save of the key.
+    fn cache_cleared(&mut self, outcome: Outcome<Result<(), String>>) {
+        let result = match outcome {
+            Outcome::Finished(result) => result,
+            Outcome::TimedOut => Err("the clear did not answer in time".to_owned()),
+            Outcome::Panicked => Err("the clear did not run".to_owned()),
+            // Replaced by a newer clear, whose end is awaited.
+            Outcome::Cancelled => return,
+        };
+        self.settings.say_cache(&settings::clear_text(
+            result.as_ref().map(|_| ()).map_err(String::as_str),
+        ));
+        self.check_cache();
     }
 
     /// Reads the state of the key file on the runner, for the Settings
@@ -2172,6 +2255,7 @@ fn start_settings(
 ) -> Settings {
     let change = sender.clone();
     let save = sender.clone();
+    let clear = sender.clone();
     Settings::new(
         window,
         key_file,
@@ -2180,6 +2264,9 @@ fn start_settings(
         },
         move |text| {
             let _ = save.unbounded_send(Event::SaveKey(text));
+        },
+        move || {
+            let _ = clear.unbounded_send(Event::ClearCache);
         },
     )
 }
@@ -2242,14 +2329,21 @@ fn start_language(
     Some(job)
 }
 
-/// The online translator and the key file it reads, for the window to name.
-/// Nothing is read or connected here: the key file and the network are the
-/// runner's, at the first click on a word of a sentence or the first submit
-/// of a lone word.
-fn online_translator() -> (Arc<dyn Translator>, Option<std::path::PathBuf>) {
-    let translator = DeepL::new();
-    let key_file = translator.key_file().map(std::path::Path::to_owned);
-    (Arc::new(translator), key_file)
+/// The online translator, DeepL behind the on-disk cache, the key file it
+/// reads, for the window to name, and the cache, for its size and its clear.
+/// Nothing is read, opened or connected here: the key file, the cache and the
+/// network are the runner's, at the first click on a word of a sentence or
+/// the first submit of a lone word.
+fn online_translator() -> (
+    Arc<dyn Translator>,
+    Option<std::path::PathBuf>,
+    Arc<cache::Store>,
+) {
+    let deepl = DeepL::new();
+    let key_file = deepl.key_file().map(std::path::Path::to_owned);
+    let translator = Cached::new(deepl, cache::cache_dir());
+    let store = translator.store();
+    (Arc::new(translator), key_file, store)
 }
 
 /// Hands each event of `receiver` to `session`, on the UI thread, for as
@@ -2293,7 +2387,7 @@ fn start(
     // path is made here; the file is the runner's.
     let language_file = language::path();
     let language_job = start_language(work.as_deref(), language_file.clone(), &sender);
-    let (translator, key_file) = online_translator();
+    let (translator, key_file, cache) = online_translator();
     let settings = start_settings(&window, key_file.as_deref(), &sender);
     let session = Session {
         binding,
@@ -2311,6 +2405,9 @@ fn start(
         articles: articles.clone(),
         translator,
         key_file,
+        cache,
+        cache_job: None,
+        clear_job: None,
         settings,
         trigger: None,
         key_job: None,
