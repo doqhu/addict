@@ -8,7 +8,7 @@ pub mod sentence;
 pub mod translation;
 
 /// Application id of the product; the single source of product identity.
-pub const APP_ID: &str = "dev.addict.Addict";
+pub const APP_ID: &str = "io.github.doqhu.Addict";
 
 #[cfg(test)]
 mod tests {
@@ -16,7 +16,7 @@ mod tests {
 
     #[test]
     fn app_id_value() {
-        assert_eq!(APP_ID, "dev.addict.Addict");
+        assert_eq!(APP_ID, "io.github.doqhu.Addict");
     }
 
     #[test]

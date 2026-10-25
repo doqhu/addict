@@ -35,7 +35,7 @@ build_harness='cargo build --release -p addict-app --example harness'
 # The data directory as the application finds it: a relative XDG_DATA_HOME is ignored.
 data=${XDG_DATA_HOME:-}
 [[ $data == /* ]] || data=$HOME/.local/share
-entry="$data/applications/dev.addict.Addict.desktop"
+entry="$data/applications/io.github.doqhu.Addict.desktop"
 # Each index with the published file it is imported from: the ten EN/ES/CA indexes, in the order of import::KNOWN.
 indexes=(oewn freedict wikdict-es-ru kaikki-es-Espanol omw-es kaikki-en-Spanish
   wikdict-ca-ru dbnary-ca sinonims-cat kaikki-en-Catalan)

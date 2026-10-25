@@ -43,7 +43,9 @@ fn writes_both_entries_and_prints_their_paths() {
     assert!(written.lines().any(|line| line == "X-Addict=true"));
     assert!(written.lines().any(|line| line == "NoDisplay=true"));
     assert!(
-        written.lines().any(|line| line == "Icon=dev.addict.Addict"),
+        written
+            .lines()
+            .any(|line| line == "Icon=io.github.doqhu.Addict"),
         "{written}"
     );
     // The same text in both directories.

@@ -232,7 +232,7 @@ mod tests {
         let heard = Arc::new(Mutex::new(Vec::new()));
         let sink = heard.clone();
         let item = Item {
-            app_id: "dev.addict.Addict".to_owned(),
+            app_id: "io.github.doqhu.Addict".to_owned(),
             on_event: Arc::new(move |event| sink.lock().expect("sink").push(event)),
             told_offline: AtomicBool::new(false),
         };
@@ -295,8 +295,8 @@ mod tests {
     #[test]
     fn the_icon_and_the_id_are_the_app_id() {
         let (item, _) = item();
-        assert_eq!(item.id(), "dev.addict.Addict");
-        assert_eq!(item.icon_name(), "dev.addict.Addict");
+        assert_eq!(item.id(), "io.github.doqhu.Addict");
+        assert_eq!(item.icon_name(), "io.github.doqhu.Addict");
     }
 
     #[test]
