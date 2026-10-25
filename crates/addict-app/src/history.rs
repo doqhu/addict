@@ -3,7 +3,7 @@
 //!
 //! A text is recorded when it is submitted, by Enter, a paste or a click on
 //! a synonym, and when it replaces the field, recognized in a capture or read
-//! from the accessibility bus or the clipboard; an empty text and the text
+//! from the primary selection or the clipboard; an empty text and the text
 //! already at the position are not. A text recorded after Back drops the
 //! texts ahead of the position. Typing records nothing, but Back from a typed
 //! text that is not the one at the position records it first, so Forward

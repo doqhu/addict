@@ -11,22 +11,16 @@ use std::{error::Error, fmt};
 pub enum Source {
     /// Typed or pasted by the user in the window.
     Manual,
-    /// Read from the focused application over AT-SPI.
-    AtSpi,
     /// Recognised from a screen capture.
     Ocr,
-    /// Read from the clipboard when the press gave no other context.
+    /// Read at a press from the primary selection, or from the clipboard
+    /// when the selection gave no line.
     Clipboard,
 }
 
 impl Source {
     /// Every source, each exactly once.
-    pub const ALL: [Source; 4] = [
-        Source::Manual,
-        Source::AtSpi,
-        Source::Ocr,
-        Source::Clipboard,
-    ];
+    pub const ALL: [Source; 3] = [Source::Manual, Source::Ocr, Source::Clipboard];
 }
 
 /// A word, an optional sentence and their source.
@@ -135,9 +129,8 @@ mod tests {
     fn position_in_all(source: Source) -> usize {
         match source {
             Source::Manual => 0,
-            Source::AtSpi => 1,
-            Source::Ocr => 2,
-            Source::Clipboard => 3,
+            Source::Ocr => 1,
+            Source::Clipboard => 2,
         }
     }
 

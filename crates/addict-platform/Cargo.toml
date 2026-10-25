@@ -1,7 +1,7 @@
 [package]
 name = "addict-platform"
 version = "0.1.0"
-description = "Addict platform adapters: portal, AT-SPI and capture, GTK-free"
+description = "Addict platform adapters: portal, capture and recognition, GTK-free"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -17,7 +17,6 @@ futures-util = "=0.3.34"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 ksni = "=0.3.6"
 libc = "=0.2.190"
-serde = "=1.0.229"
 tokio = { version = "=1.53.2", features = ["macros", "net", "rt", "sync", "time"] }
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
 

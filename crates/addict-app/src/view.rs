@@ -1,6 +1,6 @@
 //! What the window says about its state: the source label and the status,
-//! right under them the source line when a capture or a read of Android
-//! Studio gave no text, then the
+//! right under them the source line when a capture or the read of the
+//! selection and the clipboard gave no text, then the
 //! binding row when the shortcut is not bound and the line of the
 //! dictionary indexes when one is missing or unreadable, then the field
 //! for a word or a sentence, the text of the field with its words as links
@@ -15,7 +15,7 @@
 //! translated without a sentence; a dim line under them names DeepL.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
-//! [`binding_texts`], [`indexes_text`], [`failure_text`], [`read_failure_text`], [`too_long_text`],
+//! [`binding_texts`], [`indexes_text`], [`failure_text`], [`NOTHING_SELECTED_TEXT`], [`too_long_text`],
 //! [`sentence_markup`],
 //! [`choice_texts`] and [`online_rows`] are pure, and
 //! so is [`Shown`], the result with the sense chosen in it; they are tested
@@ -30,10 +30,7 @@ use addict_core::{
     translation::{Refusal, Request, Source as Language},
 };
 
-use addict_platform::{
-    atspi::ContextFailure, foreground::Source as Foregrounded, ocr::OcrFailure,
-    screenshot::CaptureFailure,
-};
+use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
 use addict_dictionary::{
     analysis::{Analyses, Number, Person, Shape, TenseMood},
@@ -82,7 +79,6 @@ pub fn texts(state: WindowState, source: Source) -> Texts {
 fn source_label(source: Source) -> &'static str {
     match source {
         Source::Manual => "manual input",
-        Source::AtSpi => "accessibility (AT-SPI)",
         Source::Ocr => "screen capture (OCR)",
         Source::Clipboard => "selection or clipboard",
     }
@@ -289,54 +285,10 @@ pub fn failure_text(failure: &Failure, language: Language) -> Cow<'static, str> 
     }
 }
 
-/// The command that turns accessibility on for the session's toolkits.
-pub(crate) const TURN_ON_ACCESSIBILITY: &str =
-    "gsettings set org.gnome.desktop.interface toolkit-accessibility true";
-
-/// What follows every line of a read that gave nothing: the manual path.
-const TYPE_OR_PASTE: &str = " Type or paste the sentence.";
-
-/// What the source line says for `failure`, a read of Android Studio that
-/// gave nothing: the cause, then the manual path. Accessibility that is off
-/// names the command that turns it on; the product does not run it. No
-/// wildcard arm: a new failure does not compile until it is given its line.
-pub fn read_failure_text(failure: &ContextFailure) -> Cow<'static, str> {
-    let cause: Cow<'static, str> = match failure {
-        ContextFailure::AccessibilityOff => format!(
-            "Accessibility is off, so Android Studio cannot be read. Turn it on with: \
-             {TURN_ON_ACCESSIBILITY}"
-        )
-        .into(),
-        ContextFailure::NotFromStudio(source) => match source {
-            Foregrounded::Other => {
-                "Super+Q was pressed outside Android Studio; only its editor is read.".into()
-            }
-            Foregrounded::Unknown => {
-                "The application in front is not known, so nothing was read.".into()
-            }
-            // The adapter reads when Android Studio is in front; should it
-            // ever say otherwise, nothing was read all the same.
-            Foregrounded::AndroidStudio => "Android Studio could not be read.".into(),
-        },
-        // Only a read whose application in front is not known looks for
-        // Android Studio on the bus: say that first, as for an unknown one,
-        // and how to make Android Studio readable after it.
-        ContextFailure::AppNotFound => "The application in front is not known, so nothing was \
-             read. To read Android Studio, start it with the AtkWrapper VM option and screen \
-             reader support."
-            .into(),
-        ContextFailure::NoSelection => "Nothing is selected in Android Studio.".into(),
-        ContextFailure::Ambiguous(_) => "Android Studio reports more than one selection.".into(),
-        ContextFailure::TimedOut => "Android Studio did not answer in time.".into(),
-        ContextFailure::Unavailable(detail) => {
-            format!("The accessibility bus is not available: {detail}").into()
-        }
-        ContextFailure::Failed(detail) => {
-            format!("Android Studio could not be read: {detail}").into()
-        }
-    };
-    format!("{cause}{TYPE_OR_PASTE}").into()
-}
+/// What the source line says when neither the primary selection nor the
+/// clipboard gave a line at a press: the cause, then the manual path.
+pub const NOTHING_SELECTED_TEXT: &str =
+    "Nothing is selected or copied. Type or paste the sentence.";
 
 /// What the button beside a source line that names a command says: it puts
 /// that command on the clipboard.
@@ -347,18 +299,16 @@ pub(crate) const COPIED_LABEL: &str = "Copied";
 
 /// The runnable command `line` names, built by the same functions that
 /// wrote it into the line: the install of Tesseract for a language, then the
-/// install of a language's data, then the command that turns accessibility
-/// on. `None` for a line that names none.
+/// install of a language's data. `None` for a line that names none.
 pub(crate) fn command_in(line: &str) -> Option<String> {
     let tesseract = Language::ALL.into_iter().map(install_tesseract);
     let data = Language::ALL.into_iter().map(install_language);
     tesseract
         .chain(data)
-        .chain(std::iter::once(TURN_ON_ACCESSIBILITY.to_owned()))
         .find(|command| line.contains(command.as_str()))
 }
 
-/// Where a text too long to take was held after a press without context.
+/// Where a text too long to take was held at a press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Held {
     /// Selected, the primary selection.
@@ -2482,8 +2432,8 @@ mod tests {
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
     use super::{
-        Held, TURN_ON_ACCESSIBILITY, command_in, failure_text, install_language, install_tesseract,
-        read_failure_text, too_long_text,
+        Held, NOTHING_SELECTED_TEXT, command_in, failure_text, install_language, install_tesseract,
+        too_long_text,
     };
     use crate::{
         capture::Failure,
@@ -2493,7 +2443,6 @@ mod tests {
         },
     };
     use addict_dictionary::lookup::{Grouped, VerbForm};
-    use addict_platform::{atspi::ContextFailure, foreground::Source as Foregrounded};
     use std::borrow::Cow;
 
     fn definition_shown() -> Shown {
@@ -3062,20 +3011,6 @@ mod tests {
     }
 
     #[test]
-    fn a_read_line_gives_the_accessibility_command_without_the_manual_path() {
-        for failure in &every_read_failure() {
-            let text = read_failure_text(failure);
-            let expected = (*failure == ContextFailure::AccessibilityOff)
-                .then(|| TURN_ON_ACCESSIBILITY.to_owned());
-            assert_eq!(command_in(&text), expected, "{text}");
-        }
-        assert_eq!(
-            command_in(&read_failure_text(&ContextFailure::AccessibilityOff)).as_deref(),
-            Some("gsettings set org.gnome.desktop.interface toolkit-accessibility true")
-        );
-    }
-
-    #[test]
     fn a_too_long_line_gives_no_command() {
         assert_eq!(
             command_in(&too_long_text(Held::Selection, 1234, 1000)),
@@ -3088,67 +3023,15 @@ mod tests {
         assert_eq!(command_in(""), None);
     }
 
-    /// Every failure of a read, each once.
-    fn every_read_failure() -> Vec<ContextFailure> {
-        vec![
-            ContextFailure::AccessibilityOff,
-            ContextFailure::NotFromStudio(Foregrounded::Other),
-            ContextFailure::NotFromStudio(Foregrounded::Unknown),
-            ContextFailure::NotFromStudio(Foregrounded::AndroidStudio),
-            ContextFailure::AppNotFound,
-            ContextFailure::NoSelection,
-            ContextFailure::Ambiguous(2),
-            ContextFailure::TimedOut,
-            ContextFailure::Unavailable("org.a11y.Bus GetAddress: no reply".to_owned()),
-            ContextFailure::Failed("GetText failed".to_owned()),
-        ]
-    }
-
     #[test]
-    fn the_read_lines_are_as_agreed() {
-        let lines: Vec<String> = every_read_failure()
-            .iter()
-            .map(|failure| read_failure_text(failure).into_owned())
-            .collect();
+    fn the_nothing_selected_line_is_one_line_with_the_manual_path_and_no_command() {
         assert_eq!(
-            lines,
-            [
-                "Accessibility is off, so Android Studio cannot be read. Turn it on with: gsettings set org.gnome.desktop.interface toolkit-accessibility true Type or paste the sentence.",
-                "Super+Q was pressed outside Android Studio; only its editor is read. Type or paste the sentence.",
-                "The application in front is not known, so nothing was read. Type or paste the sentence.",
-                "Android Studio could not be read. Type or paste the sentence.",
-                "The application in front is not known, so nothing was read. To read Android Studio, start it with the AtkWrapper VM option and screen reader support. Type or paste the sentence.",
-                "Nothing is selected in Android Studio. Type or paste the sentence.",
-                "Android Studio reports more than one selection. Type or paste the sentence.",
-                "Android Studio did not answer in time. Type or paste the sentence.",
-                "The accessibility bus is not available: org.a11y.Bus GetAddress: no reply Type or paste the sentence.",
-                "Android Studio could not be read: GetText failed Type or paste the sentence.",
-            ]
+            NOTHING_SELECTED_TEXT,
+            "Nothing is selected or copied. Type or paste the sentence."
         );
-    }
-
-    #[test]
-    fn every_read_line_is_one_line_and_ends_in_the_manual_path() {
-        let failures = every_read_failure();
-        for (i, a) in failures.iter().enumerate() {
-            for b in &failures[i + 1..] {
-                assert_ne!(
-                    read_failure_text(a),
-                    read_failure_text(b),
-                    "{a:?} and {b:?}"
-                );
-            }
-        }
-        for failure in &failures {
-            let text = read_failure_text(failure);
-            assert_eq!(text.lines().count(), 1, "{text}");
-            assert!(text.ends_with(" Type or paste the sentence."), "{text}");
-            assert_eq!(
-                text.contains(TURN_ON_ACCESSIBILITY),
-                *failure == ContextFailure::AccessibilityOff,
-                "{text}"
-            );
-        }
+        assert_eq!(NOTHING_SELECTED_TEXT.lines().count(), 1);
+        assert!(NOTHING_SELECTED_TEXT.ends_with(" Type or paste the sentence."));
+        assert_eq!(command_in(NOTHING_SELECTED_TEXT), None);
     }
 
     #[test]

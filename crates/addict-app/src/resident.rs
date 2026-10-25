@@ -45,68 +45,36 @@
 //! shown, also one that could not start, is recorded with `--evidence` as it
 //! is shown; a given-up one is not. The job is [`capture`](crate::capture)'s.
 //!
-//! The shortcut also starts the read of the focused editor, when that is
-//! Android Studio. The press first takes the source: the application the
-//! listener of [`addict_platform::foreground`] saw activated last, or, when
-//! the product's own window is active at the press, the source kept from the
-//! press that opened it. When the window is not active, the press also asks
-//! the listener, at once and before anything of the window changes, to probe
-//! whether a frame of Android Studio is active: Android Studio sends no
-//! activation, but its frame's state follows the focus. The job waits for
-//! that answer, and an active frame makes the source Android Studio; any
-//! other answer leaves the observed source. The job tells the source it
-//! settled on, and the session keeps it for the press of the running read,
-//! so a later press in the window keeps Android Studio.
-//!
-//! The press also takes whether accessibility is on, as the listener last
-//! read it; that is a property of the session and is not kept. The window is
-//! shown at once, in the waiting state with the source AT-SPI and the field
-//! cleared (the lookup and the online requests of the old text are given
-//! up), and one job on the runner asks the accessibility bus for the
-//! selected word and its sentence; nothing waits for it, nor for the probe,
-//! before the window is presented. With accessibility off, or with another
-//! source or none, the job ends without reading text.
-//!
-//! The sentence replaces the field as a new text with that word chosen, and
-//! the lookup of the word starts; as the click of a word it is the click
-//! path, but it asks nothing online: the online texts are asked when a word
-//! is clicked. A read that gives nothing is written to stderr and is
-//! followed by the read of the clipboard (below); when that gives nothing
-//! too, the waiting ends, the empty state stays with its focused field, and
-//! the source line says why the read of the bus gave nothing; the capture
-//! shares the line: they never run together. The line names the cause and
-//! the manual path, and goes, like the capture's, when the field is edited,
-//! Capture or the shortcut is pressed.
+//! The shortcut reads the text selected or copied, the same for every
+//! application. The press gives up a running capture and the read of the
+//! press before, and clears the field (the lookup and the online requests
+//! of the old text are given up); the window is shown at once, in the
+//! waiting state with the source "selection or clipboard", and nothing
+//! waits for the read before the window is presented. Wayland gives a
+//! client the clipboard only with its keyboard focus, so the read starts
+//! once the window is active, at once when it is already. The primary
+//! selection of the window's display, the text selected without a copy, is
+//! read first, and GTK's clipboard only when the selection gives no line.
+//! Waiting for the activity and both reads together end
+//! [`CLIPBOARD_LIMIT`] after the press, which cancels the read. A text of
+//! either as one line, of at most [`CLIPBOARD_MAX_CHARS`] characters,
+//! replaces the field as a new text with the source clipboard, without a
+//! word chosen unless it is one word, and nothing is asked online. A line
+//! that is exactly a command the window offered to copy, such as the
+//! install of Tesseract, is the user's Copy and counts as no line. When
+//! neither gives a line (empty, blank, not text, too long, a command,
+//! unreadable or late), why is written to stderr, the waiting ends, the
+//! empty state stays with its focused field, and the source line says that
+//! nothing is selected or copied, with the manual path; when one of them was
+//! too long, the line says that instead, the selection's before the
+//! clipboard's. The capture shares the line: they never run together. The
+//! line goes, like the capture's, when the field is edited, Capture or the
+//! shortcut is pressed.
 //!
 //! Each read has a number; a new press, an edit of the field and a capture
 //! give up the read that runs, and whatever it reports later is ignored and
-//! shows no line. A press also gives up a running capture. Every end of the
-//! read of the bus, also a given-up one and one that could not start, is
-//! recorded with `--evidence` as one `context` record, timed on the worker;
-//! the read of the clipboard after it is not. The job is
-//! [`context`](crate::context)'s.
-//!
-//! A read of the press that ends without context, for any cause, is written
-//! to stderr at once, and the window then reads the primary selection or the
-//! clipboard once, in place of showing the line: the waiting goes on with the
-//! source clipboard, and the field stays editable. Wayland gives a client the
-//! clipboard only with its keyboard focus, so the read starts once the window
-//! is active, at once when it is already. The primary selection of the
-//! window's display, the text selected without a copy, is read first, and
-//! GTK's clipboard only when the selection gives no line. Waiting for the
-//! activity and both reads together end after [`CLIPBOARD_LIMIT`], which
-//! cancels the read. A text of either as one line, of at most
-//! [`CLIPBOARD_MAX_CHARS`] characters, replaces the field as a new text with
-//! the source clipboard, as a read context does, without a word chosen unless
-//! it is one word, and nothing is asked online; the line is not shown. A
-//! line that is exactly a command the window offered to copy, such as the
-//! one that turns accessibility on, is the user's Copy and counts as no
-//! line. When neither gives a line (empty, blank, not text, too long, a
-//! command, unreadable or late), why is written to stderr, and the empty
-//! state stays with the line of the read; when one of them was too long, the line says that instead,
-//! the selection's before the clipboard's. The read has a number and is given
-//! up like the read it follows, by a press, an edit and a capture; what it
-//! reports later is ignored. Retry, a launch and a capture read no clipboard.
+//! shows no line. Retry, a launch, Show of the tray and a capture read no
+//! clipboard.
 //!
 //! The user reads in one language, chosen with the EN / ES / CA switch
 //! beside the field; English at first. The online requests about the
@@ -139,7 +107,7 @@
 //! The session keeps the history of the field for as long as the process
 //! lives, hiding the window included, and writes none of it: a submitted
 //! text, by Enter, a paste or a synonym, and a text that replaces the
-//! field, recognized or read from the bus or the clipboard, are recorded,
+//! field, recognized or read from the selection or the clipboard, are recorded,
 //! but not a typed one nor a click on a word of the sentence. Back and
 //! Forward left of the field, and Alt+Left and Alt+Right wherever the focus
 //! is, put the text before or after into the field as a paste does, so it
@@ -170,8 +138,6 @@ use addict_core::{
 };
 use addict_deepl::{DeepL, key};
 use addict_platform::{
-    atspi::ContextFailure,
-    foreground::{self, Accessibility, Foreground, Probe, Source as Foregrounded},
     ocr::OcrFailure,
     shortcut::{self, ShortcutEvent, ShortcutHandle},
     tray::{self, TrayEvent, TrayHandle},
@@ -184,7 +150,6 @@ use gtk::{gdk, gio, glib, prelude::*};
 use crate::{
     cache::{self, Cached},
     capture::{self, Capture, Captured, Failure, Timing},
-    context::{self, Read, Reading},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     evidence,
     history::History,
@@ -196,8 +161,8 @@ use crate::{
     style,
     translate::{self, Translated},
     view::{
-        Binding, Choice, Held, Lookup, Online, Shown, command_in, failure_text, read_failure_text,
-        too_long_text,
+        Binding, Choice, Held, Lookup, NOTHING_SELECTED_TEXT, Online, Shown, command_in,
+        failure_text, too_long_text,
     },
     widgets::View,
 };
@@ -211,8 +176,8 @@ const BIND_LIMIT: Duration = Duration::from_secs(60);
 /// How long the reset of the stored binding may take.
 const FORGET_LIMIT: Duration = Duration::from_secs(2);
 
-/// How long the read of the clipboard after a press without context may
-/// take, the wait for the window to be active included.
+/// How long the read of the selection and the clipboard may take from the
+/// press, the wait for the window to be active included.
 const CLIPBOARD_LIMIT: Duration = Duration::from_secs(1);
 
 /// What lives as long as the resident application.
@@ -226,9 +191,6 @@ struct Resident {
     _work: Option<Rc<Work>>,
     /// What the lookups ask.
     _articles: Arc<dyn Articles>,
-    /// The listener of the application in front; the session asks it at
-    /// each press.
-    _foreground: Rc<Foreground>,
     /// The icon in the top bar and its menu.
     _tray: TrayHandle,
 }
@@ -305,13 +267,6 @@ enum Event {
     Captured(u64),
     /// The capture job with this number ended.
     Recognized(u64, Outcome<Capture>),
-    /// The read of the accessibility bus with this number settled on this
-    /// application in front, before it reads.
-    ContextSource(u64, Foregrounded),
-    /// The read of the accessibility bus with this number ended. The time is
-    /// the read's, as the worker saw it; taken only when evidence is
-    /// recorded.
-    Context(u64, Outcome<Read>, Option<evidence::Elapsed>),
     /// The window became active.
     Active,
     /// A choice of the tray's menu, or its end.
@@ -484,9 +439,7 @@ struct Session {
     indexes: Option<Indexes>,
     /// Where the capture stands.
     capturing: Capturing,
-    /// Where the read of the accessibility bus stands.
-    reading: Reading,
-    /// Where the read of the clipboard after it stands.
+    /// Where the read of the selection and the clipboard of a press stands.
     copying: Copying,
     /// The language the user reads: the sentence requests are sent from
     /// it, and its indexes are looked up first.
@@ -499,11 +452,6 @@ struct Session {
     language_chosen: bool,
     /// The read or the write of the language file on the runner.
     language_job: Option<Job>,
-    /// The listener of the application in front; gone with the resident.
-    foreground: Weak<Foreground>,
-    /// What the press that last started a read took as the application in
-    /// front; none at first.
-    kept: Foregrounded,
 }
 
 /// Where the capture of a [`Session`] stands; at first no capture runs.
@@ -544,7 +492,7 @@ struct LookingUp {
 /// runs.
 #[derive(Default)]
 struct Copying {
-    /// The read, from the failed read of the bus to its end.
+    /// The read, from the press to its end.
     read: Option<ClipboardRead>,
     /// The number of the last started read. An event that carries another
     /// number, or comes when none runs, is from a read that was given up.
@@ -553,9 +501,6 @@ struct Copying {
 
 /// One read of the primary selection, then of the clipboard.
 struct ClipboardRead {
-    /// The source line of the read of the bus that failed, shown when the
-    /// clipboard gives nothing.
-    line: String,
     /// Cancels the read of the clipboard; `None` while the window is not yet
     /// active and nothing is read.
     cancellable: Option<gio::Cancellable>,
@@ -565,13 +510,12 @@ struct ClipboardRead {
 }
 
 impl Copying {
-    /// A new read starts after the failure that `line` says; the number of
-    /// the new one is given back.
-    fn begin(&mut self, line: String) -> u64 {
+    /// A new read starts, and the one before ends; the number of the new
+    /// one is given back.
+    fn begin(&mut self) -> u64 {
         self.end();
         self.number += 1;
         self.read = Some(ClipboardRead {
-            line,
             cancellable: None,
             selection: Rc::default(),
         });
@@ -667,8 +611,6 @@ impl Session {
             Event::Hidden => self.start_capture(),
             Event::Captured(number) => self.snapshot_taken(number),
             Event::Recognized(number, outcome) => self.recognized(number, outcome),
-            Event::ContextSource(number, source) => self.context_source(number, source),
-            Event::Context(number, outcome, elapsed) => self.context_read(number, outcome, elapsed),
             Event::Active => self.window_active(),
             Event::Clipboard(number, line) => self.copied(number, line),
         }
@@ -812,181 +754,34 @@ impl Session {
         self.reveal();
     }
 
-    /// Gives up the read of the accessibility bus and the read of the
-    /// clipboard after it: dropping the job cancels the one, the other is
-    /// cancelled, and whatever they report later is ignored. Whether a read
+    /// Gives up the read of the selection and the clipboard: it is
+    /// cancelled, and whatever it reports later is ignored. Whether a read
     /// ran.
     fn give_up_read(&mut self) -> bool {
-        let running = self.reading.running();
-        let ran = self.reading.end();
-        // A read given up is an outcome too: it ran for as long as this.
-        if let Some(started) = running {
-            self.record_context(
-                evidence::ContextEnd::Cancelled,
-                started,
-                started.probe.ended(),
-            );
-        }
         let copied = self.copying.end().is_some();
-        if matches!(
-            self.manual.reading(),
-            Some(Source::AtSpi | Source::Clipboard)
-        ) {
+        if self.manual.reading() == Some(Source::Clipboard) {
             self.manual.set_reading(None);
         }
-        ran || copied
+        copied
     }
 
     /// Clears the field for the read that starts now: a new empty text, so
     /// the lookup and the online requests of the old one are given up, and
-    /// the source line goes. The window shows the empty field and, with the
-    /// state of the read, the waiting state.
+    /// the source line goes.
     fn clear_for_read(&mut self) {
         self.view.clear_source_failure();
         let edit = self.manual.edit(String::new());
         self.view.set_field_text("");
         self.render_history();
-        self.manual.set_reading(Some(Source::AtSpi));
         self.text_replaced(edit);
     }
 
-    /// What the press takes as the application in front, and keeps for the
-    /// next press that finds the window active; with the probe of Android
-    /// Studio's frames when the window is not active, asked first.
-    fn take_source(&mut self) -> (Foregrounded, Option<Probe>) {
-        let listener = self.foreground.upgrade();
-        let window_active = self.window.is_active();
-        let probe = listener
-            .as_ref()
-            .filter(|_| !window_active)
-            .map(|listener| listener.probe());
-        let observed = listener.map_or(Foregrounded::Unknown, |listener| listener.source());
-        let source = context::choose_source(window_active, self.kept, observed);
-        self.kept = source;
-        (source, probe)
-    }
-
-    /// Whether accessibility is on, as the listener last read it. Taken at
-    /// each press and not kept: it is the session's, not the press's.
-    fn accessibility(&self) -> Accessibility {
-        self.foreground
-            .upgrade()
-            .map_or(Accessibility::Unknown, |listener| listener.accessibility())
-    }
-
-    /// Starts the read of the accessibility bus as the next number, with
-    /// `accessibility`, `source` in front and the `probe` of the press.
-    fn start_read(
-        &mut self,
-        accessibility: Accessibility,
-        source: Foregrounded,
-        probe: Option<Probe>,
-    ) {
-        let begun = context::Started {
-            probe: evidence::Probe::start(self.recording.is_some()),
-            accessibility,
-            source,
-        };
-        let number = self.reading.begin(begun);
-        let settled = self.sender.clone();
-        let sender = self.sender.clone();
-        let started = context::start(
-            self.work.upgrade().as_deref(),
-            accessibility,
-            source,
-            probe,
-            move |source| {
-                // On the worker: the UI thread wakes for the event.
-                let _ = settled.unbounded_send(Event::ContextSource(number, source));
-            },
-            move |outcome| {
-                // On the worker: the UI thread wakes for the event, and the
-                // time is the read's, not the redraw's.
-                let elapsed = begun.probe.ended();
-                let _ = sender.unbounded_send(Event::Context(number, outcome, elapsed));
-            },
-        );
-        match started {
-            Ok(job) => self.reading.run(job),
-            Err(failure) => {
-                // No time passed: the read could not start.
-                let end = evidence::ContextEnd::of(&Err(failure.clone()));
-                self.record_context(end, begun, begun.probe.not_started());
-                self.read_failed(&failure);
-            }
-        }
-    }
-
-    /// Writes the record of a read of the accessibility bus that ended as
-    /// `end`, when evidence is recorded and there is a time for it.
-    fn record_context(
-        &self,
-        end: evidence::ContextEnd,
-        started: context::Started,
-        elapsed: Option<evidence::Elapsed>,
-    ) {
-        let record = evidence::context_record(end, started.source, started.accessibility, elapsed);
-        if let Some((recording, record)) = self.recording.as_ref().zip(record) {
-            recording.context_ended(&record);
-        }
-    }
-
-    /// The read with `number` settled on `source`: when it is the one that
-    /// runs, that is the source its press keeps, for a later press in the
-    /// window. One that was given up changes nothing.
-    fn context_source(&mut self, number: u64, source: Foregrounded) {
-        if self.reading.is_running(number) {
-            self.kept = source;
-            self.reading.settle(number, source);
-        }
-    }
-
-    /// The read with `number` ended; one that was given up shows nothing.
-    /// The context replaces the field as a new text with the selected word
-    /// chosen and its lookup starts, nothing is asked online; a failure
-    /// leaves the field as it is and starts the read of the clipboard.
-    fn context_read(
-        &mut self,
-        number: u64,
-        outcome: Outcome<Read>,
-        elapsed: Option<evidence::Elapsed>,
-    ) {
-        if !self.reading.is_running(number) {
-            return;
-        }
-        let started = self.reading.running();
-        self.reading.end();
-        // A cancelled job was dropped here on purpose and shows nothing.
-        let Some(read) = context::read_result(outcome) else {
-            return;
-        };
-        if let Some(started) = started {
-            self.record_context(evidence::ContextEnd::of(&read), started, elapsed);
-        }
-        match read {
-            Ok(context) => {
-                let edit = self.manual.arrived(context);
-                self.replace_field(edit);
-            }
-            Err(failure) => self.read_failed(&failure),
-        }
-    }
-
-    /// The read gave nothing: the failure is logged at once, and the
-    /// clipboard is read in its place; the line that says why, with the
-    /// manual path, waits for it.
-    fn read_failed(&mut self, failure: &ContextFailure) {
-        eprintln!("addict: no context from the accessibility bus: {failure:?}");
-        self.give_up_read();
-        self.start_copy(read_failure_text(failure).into_owned());
-    }
-
     /// Starts the read of the primary selection and the clipboard as the
-    /// next number, after the failure that `line` says: the window waits
-    /// with the source clipboard, the read starts once the window is active,
-    /// and after [`CLIPBOARD_LIMIT`] it ends without text.
-    fn start_copy(&mut self, line: String) {
-        let number = self.copying.begin(line);
+    /// next number: the window waits with the source clipboard, the read
+    /// starts once the window is active, and after [`CLIPBOARD_LIMIT`] it
+    /// ends without text.
+    fn start_copy(&mut self) {
+        let number = self.copying.begin();
         self.manual.set_reading(Some(Source::Clipboard));
         self.view.render(self.manual.state(), self.manual.source());
         let late = self.sender.clone();
@@ -1056,8 +851,8 @@ impl Session {
     /// ended; one that was given up shows nothing. A `line` replaces the
     /// field as a new text with the source clipboard; nothing is asked
     /// online. Without one, the reason is logged, the waiting ends and the
-    /// source line says that a text was too long, when one was, or else why
-    /// the read of the bus gave nothing.
+    /// source line says that a text was too long, when one was, or else that
+    /// nothing is selected or copied.
     fn copied(&mut self, number: u64, line: Result<String, Missed>) {
         if !self.copying.is_running(number) {
             return;
@@ -1079,7 +874,7 @@ impl Session {
                     self.manual.set_reading(None);
                 }
                 self.view.render(self.manual.state(), self.manual.source());
-                let line = missed_line(read.line, read.selection.get(), missed.too_long);
+                let line = missed_line(read.selection.get(), missed.too_long);
                 self.view.render_source_failure(&line);
             }
         }
@@ -1106,7 +901,7 @@ impl Session {
     /// without context, looked up at once; nothing of it is sent online.
     ///
     /// The source line goes. A snapshot being recognized and a read of the
-    /// accessibility bus are given up: the user's text wins, and the state no
+    /// selection and the clipboard are given up: the user's text wins, and the state no
     /// longer says that a source is read.
     fn sentence_changed(&mut self, text: String) {
         self.view.clear_source_failure();
@@ -1125,13 +920,13 @@ impl Session {
         }
     }
 
-    /// A text that did not come from the field, recognized, read from the
-    /// accessibility bus or copied, replaced the manual input as `edit`: the
+    /// A text that did not come from the field, recognized, selected or
+    /// copied, replaced the manual input as `edit`: the
     /// field shows it, and what follows a new text follows.
     fn replace_field(&mut self, edit: Edit) {
         self.view.set_field_text(self.manual.sentence());
-        // `Cleared` is any new text with no word chosen, a sentence read
-        // without a selection too; an empty one is not recorded.
+        // `Cleared` is any new text with no word chosen; an empty one is
+        // not recorded.
         if edit != Edit::Same {
             self.history.record(self.manual.sentence());
         }
@@ -1197,7 +992,7 @@ impl Session {
                 self.render_manual();
                 self.show_result(None);
             }
-            Edit::Lone(run) | Edit::Chosen(run) => self.start_lookup(run),
+            Edit::Lone(run) => self.start_lookup(run),
         }
     }
 
@@ -1737,29 +1532,21 @@ impl Session {
         }
     }
 
-    /// The shortcut was pressed: the application in front is taken first,
-    /// then a running capture and read are given up, the field is cleared and
-    /// the window is shown at once in the waiting state with the source
-    /// AT-SPI, and the read of the accessibility bus starts, which ends at
-    /// once when that application was not Android Studio; the window does
-    /// not wait for it. A read that ends without context is followed by the
-    /// read of the clipboard: the window waits on with the source clipboard,
-    /// for at most [`CLIPBOARD_LIMIT`].
+    /// The shortcut was pressed: a running capture and read are given up,
+    /// the field is cleared, the read of the selection and the clipboard
+    /// starts and the window is shown at once in the waiting state with the
+    /// source clipboard; the window does not wait for the read, which ends
+    /// at most [`CLIPBOARD_LIMIT`] after the press.
     fn activated(
         &mut self,
         activation_token: Option<&str>,
         timestamp_ms: u64,
         receipt_ns: Option<u64>,
     ) {
-        // Before anything of the window changes: the window's own activity
-        // and the listener are what they were at the press, and the probe
-        // starts before the window can take the focus.
-        let (source, probe) = self.take_source();
-        let accessibility = self.accessibility();
         self.give_up_press();
         self.clear_for_read();
         // Started, not awaited: the window is presented below.
-        self.start_read(accessibility, source, probe);
+        self.start_copy();
         // Before `present()`: the first frame has the labels.
         self.view.render(self.manual.state(), self.manual.source());
         self.focus();
@@ -1803,24 +1590,13 @@ impl Session {
         self.settings.render_binding(&self.binding, None);
         self.end_rebinding();
         // No press stands behind this, so there is no token.
-        self.forget_source();
         if let Some(recording) = &self.recording {
             recording.shown_without_press();
         }
         self.window.present();
     }
 
-    /// The window is about to be shown without a press. Unless it is in
-    /// front already, no press opened it, so the source of an earlier press
-    /// is not its source.
-    fn forget_source(&mut self) {
-        if !self.window.is_active() {
-            self.kept = Foregrounded::Unknown;
-        }
-    }
-
     fn launched(&mut self) {
-        self.forget_source();
         self.view.render(self.manual.state(), self.manual.source());
         self.focus();
         // No `set_startup_id`: GTK has already applied the
@@ -2119,15 +1895,13 @@ fn is_offered_command(line: &str) -> bool {
 
 /// The source line when neither the selection nor the clipboard gave a
 /// line: that the selection was too long, when it was, else that the
-/// clipboard was, else `read`, why the read of the bus gave nothing.
-fn missed_line(
-    read: String,
-    selection: Option<(Held, usize)>,
-    clipboard: Option<(Held, usize)>,
-) -> String {
-    selection.or(clipboard).map_or(read, |(held, chars)| {
-        too_long_text(held, chars, CLIPBOARD_MAX_CHARS)
-    })
+/// clipboard was, else that nothing is selected or copied.
+fn missed_line(selection: Option<(Held, usize)>, clipboard: Option<(Held, usize)>) -> String {
+    selection
+        .or(clipboard)
+        .map_or(NOTHING_SELECTED_TEXT.to_owned(), |(held, chars)| {
+            too_long_text(held, chars, CLIPBOARD_MAX_CHARS)
+        })
 }
 
 /// Reads the text of `clipboard`, which holds what is `held`, once and
@@ -2379,9 +2153,6 @@ fn start(
     // Nothing is opened here: the indexes are files, and files are the
     // runner's.
     let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());
-    // One connection to the accessibility bus and a few strings; it asks
-    // nothing of the applications.
-    let listener = Rc::new(foreground::watch(|_| {}));
     let check = start_check(work.as_deref(), articles.clone(), &sender);
     // After the check: the runner takes its jobs in this order. Only the
     // path is made here; the file is the runner's.
@@ -2421,14 +2192,11 @@ fn start(
         check,
         indexes: None,
         capturing: Capturing::default(),
-        reading: Reading::default(),
         copying: Copying::default(),
         language: Language::default(),
         language_file,
         language_chosen: false,
         language_job,
-        foreground: Rc::downgrade(&listener),
-        kept: Foregrounded::Unknown,
     };
     serve(session, receiver);
     let tray = start_tray(&events);
@@ -2438,7 +2206,6 @@ fn start(
         events,
         _work: work,
         _articles: articles,
-        _foreground: listener,
         _tray: tray,
     }
 }
@@ -2524,7 +2291,7 @@ mod tests {
         reset_failure,
     };
     use crate::view::{
-        Held, TURN_ON_ACCESSIBILITY, install_language, install_tesseract, too_long_text,
+        Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
     };
     use addict_core::translation::Source as Language;
 
@@ -2543,13 +2310,15 @@ mod tests {
 
     #[test]
     fn a_line_that_is_an_offered_command_is_not_a_text() {
-        assert!(is_offered_command(TURN_ON_ACCESSIBILITY));
         for language in Language::ALL {
             assert!(is_offered_command(&install_tesseract(language)));
             assert!(is_offered_command(&install_language(language)));
         }
         assert!(!is_offered_command("bank"));
-        assert!(!is_offered_command(&format!("run {TURN_ON_ACCESSIBILITY}")));
+        assert!(!is_offered_command(&format!(
+            "run {}",
+            install_tesseract(Language::En)
+        )));
         assert!(!is_offered_command(
             "Catalan OCR data is not installed. Install it with: \
              sudo dnf install tesseract-langpack-cat"
@@ -2562,21 +2331,20 @@ mod tests {
         assert!(!copying.is_running(0));
         assert!(copying.end().is_none());
 
-        let first = copying.begin("first line".to_owned());
+        let first = copying.begin();
         assert!(copying.is_running(first));
         let cancellable = gio::Cancellable::new();
         copying.read.as_mut().expect("read").cancellable = Some(cancellable.clone());
 
         // A new read, after a new press, cancels the one that reads.
-        let second = copying.begin("second line".to_owned());
+        let second = copying.begin();
         assert!(cancellable.is_cancelled());
         assert_ne!(first, second);
         assert!(!copying.is_running(first));
         assert!(copying.is_running(second));
 
         // Ended by an edit or a capture: what it reports later is ignored.
-        let read = copying.end().expect("read");
-        assert_eq!(read.line, "second line");
+        assert!(copying.end().is_some());
         assert!(!copying.is_running(second));
         assert!(copying.end().is_none());
     }
@@ -2584,7 +2352,7 @@ mod tests {
     #[test]
     fn a_read_that_waits_for_the_window_is_ended_without_a_cancellable() {
         let mut copying = Copying::default();
-        let number = copying.begin("line".to_owned());
+        let number = copying.begin();
         // The window is not active yet: nothing is read, nothing to cancel.
         let read = copying.end().expect("read");
         assert!(read.cancellable.is_none());
@@ -2593,18 +2361,17 @@ mod tests {
 
     #[test]
     fn a_too_long_selection_is_named_before_the_clipboard() {
-        let read = || "Android Studio line".to_owned();
         let selection = Some((Held::Selection, 1200));
         let clipboard = Some((Held::Clipboard, 54828));
         let selected = too_long_text(Held::Selection, 1200, CLIPBOARD_MAX_CHARS);
         let copied = too_long_text(Held::Clipboard, 54828, CLIPBOARD_MAX_CHARS);
-        assert_eq!(missed_line(read(), selection, clipboard), selected);
+        assert_eq!(missed_line(selection, clipboard), selected);
         // The clipboard ran out of time: the selection still says so.
-        assert_eq!(missed_line(read(), selection, None), selected);
+        assert_eq!(missed_line(selection, None), selected);
         // The selection was blank.
-        assert_eq!(missed_line(read(), None, clipboard), copied);
-        // Neither was too long.
-        assert_eq!(missed_line(read(), None, None), read());
+        assert_eq!(missed_line(None, clipboard), copied);
+        // Neither was too long: nothing is selected or copied.
+        assert_eq!(missed_line(None, None), NOTHING_SELECTED_TEXT);
     }
 
     #[test]

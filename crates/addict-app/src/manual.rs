@@ -8,16 +8,13 @@
 //! goes with the sentence around it only, and with none when that sentence
 //! is the word alone.
 //!
-//! The text comes from the user, from a screen capture, from the
-//! accessibility bus or from the primary selection or the clipboard. A
-//! recognized text is always a new text with the source OCR, and an edit of
-//! it keeps that source; the source is manual again once the field holds no
-//! word. A text that arrived from the bus ([`Manual::arrived`]) is the
-//! sentence around the selected word, with that word chosen, and its source
-//! is AT-SPI; it is one sentence, as a typed text is. A text selected or
-//! copied ([`Manual::copied`]), read when a press gave no other context, is a
-//! new text as one line with the source clipboard, and one sentence too; only
-//! one of at most [`CLIPBOARD_MAX_CHARS`] counts ([`clipboard_line`]). While
+//! The text comes from the user, from a screen capture or from the primary
+//! selection or the clipboard. A recognized text is always a new text with
+//! the source OCR, and an edit of it keeps that source; the source is manual
+//! again once the field holds no word. A text selected or copied
+//! ([`Manual::copied`]), read at a press of the shortcut, is a new text as
+//! one line with the source clipboard, and one sentence, as a typed text is;
+//! only one of at most [`CLIPBOARD_MAX_CHARS`] counts ([`clipboard_line`]). While
 //! a source is being read and there is no input, the window says that it is
 //! being read.
 //!
@@ -41,10 +38,7 @@ use addict_core::{
     sentence,
     translation::{Source as Language, is_russian},
 };
-use addict_platform::{
-    atspi::Context,
-    work::{Job, Outcome, Work},
-};
+use addict_platform::work::{Job, Outcome, Work};
 
 use crate::{
     dictionaries::{Answer, Articles, Indexes, Looked, State},
@@ -91,9 +85,6 @@ pub enum Edit {
     /// The text is new and holds exactly one word, which is now the input.
     /// The lookup to start has this number.
     Lone(u64),
-    /// The text is new and a word of it, one of several, was chosen with it:
-    /// it is now the input. The lookup to start has this number.
-    Chosen(u64),
 }
 
 /// The text of the field, its words, where it came from and what was chosen
@@ -119,7 +110,7 @@ pub struct Manual {
     /// Where the text came from: the user, or a screen capture.
     source: Source,
     /// The source being read now, if one is: a capture being recognized, or
-    /// the focused application being asked over the accessibility bus.
+    /// the primary selection or the clipboard being read at a press.
     reading: Option<Source>,
 }
 
@@ -211,44 +202,7 @@ impl Manual {
         self.replace(text)
     }
 
-    /// The accessibility bus gave the `context` of a selection: the field
-    /// holds the sentence around the selected word, or the word alone when
-    /// there is none, as a new text with the source AT-SPI, and the reading
-    /// is over. The selected word is the one chosen: the word of the text
-    /// whose range is the selection's, or else the only one the selection
-    /// touches, so a word that stands twice in the sentence is the right
-    /// one. A text of one word has that word chosen, as always; when no word
-    /// is, nothing is chosen until a click. Never [`Edit::Same`].
-    pub fn arrived(&mut self, context: Context) -> Edit {
-        self.reading = None;
-        self.source = Source::AtSpi;
-        let Some(selected) = context.sentence else {
-            // A selection of several lines is one line.
-            return self.replace(sentence::pasted(&context.word).unwrap_or_default());
-        };
-        let edit = self.replace(selected.text);
-        if edit != Edit::Cleared {
-            return edit;
-        }
-        let range = selected.word;
-        let touching: Vec<usize> = (0..self.words.len())
-            .filter(|&index| {
-                let word = &self.words[index];
-                word.start < range.end && range.start < word.end
-            })
-            .collect();
-        let index = self
-            .words
-            .iter()
-            .position(|word| *word == range)
-            .or_else(|| (touching.len() == 1).then(|| touching[0]));
-        index
-            .and_then(|index| self.choose(index))
-            .map_or(Edit::Cleared, Edit::Chosen)
-    }
-
-    /// The primary selection or the clipboard gave `text` after a press
-    /// without other context: the
+    /// The primary selection or the clipboard gave `text` at a press: the
     /// field holds it as one line, a new text with the source clipboard, and
     /// the reading is over. A text of one word has that word chosen at once;
     /// in more words nothing is chosen until a click. A blank text leaves no
@@ -307,7 +261,7 @@ impl Manual {
     pub fn sentence_of(&self, index: usize) -> Option<(usize, Range<usize>)> {
         let word = self.words.get(index)?;
         match self.source {
-            Source::Manual | Source::AtSpi | Source::Clipboard => {
+            Source::Manual | Source::Clipboard => {
                 (self.words.len() > 1).then_some((0, 0..self.sentence.len()))
             }
             Source::Ocr => {
@@ -550,13 +504,9 @@ pub(crate) mod tests {
     use addict_core::{
         dictionary::{Dictionary, Sample},
         input::{Source, WindowState},
-        sentence,
         translation::Source as Language,
     };
-    use addict_platform::{
-        atspi::Context,
-        work::{Outcome, Work},
-    };
+    use addict_platform::work::{Outcome, Work};
 
     use super::{
         CLIPBOARD_MAX_CHARS, Edit, LOOKUP_LIMIT, Manual, NoLine, check_indexes, checks_again,
@@ -1841,176 +1791,20 @@ pub(crate) mod tests {
         assert_eq!(same.state(), WindowState::Empty);
     }
 
-    /// The context of the `nth` `needle` of `text`, as the bus adapter gives
-    /// it: the word and its sentence, cut by the core rule.
-    fn context(text: &str, needle: &str, nth: usize) -> Context {
-        let byte = text.match_indices(needle).nth(nth).expect("needle").0;
-        let start = text[..byte].chars().count();
-        let end = start + needle.chars().count();
-        Context {
-            word: needle.to_owned(),
-            sentence: sentence::of_selection(text, start, end),
-        }
-    }
-
-    /// The word of the field that is chosen.
-    fn chosen_word(manual: &Manual) -> Option<&str> {
-        manual
-            .chosen()
-            .map(|index| &manual.sentence()[manual.words()[index].clone()])
-    }
-
     #[test]
-    fn an_arrived_selection_is_its_sentence_with_the_word_chosen() {
+    fn a_selection_or_clipboard_being_read_is_the_waiting_state_until_an_input() {
         let mut manual = Manual::default();
-        manual.set_reading(Some(Source::AtSpi));
-        let text = "// The bank was closed. We sat on the bank of the river.";
-        let Edit::Chosen(run) = manual.arrived(context(text, "bank", 1)) else {
-            panic!("chosen");
-        };
-        assert_eq!(manual.sentence(), "We sat on the bank of the river.");
-        // The second `bank` of the text is the fifth word of this sentence.
-        assert_eq!(manual.chosen(), Some(4));
-        assert_eq!(chosen_word(&manual), Some("bank"));
-        let input = manual.input().expect("input");
-        assert_eq!(input.word(), "bank");
-        assert_eq!(input.sentence(), Some("We sat on the bank of the river."));
-        assert_eq!(input.source(), Source::AtSpi);
-        assert_eq!(
-            manual.state(),
-            WindowState::Contextual {
-                source: Source::AtSpi
-            }
-        );
-        assert_eq!(manual.source(), Source::AtSpi);
-        assert_eq!(manual.reading(), None);
-        assert!(manual.awaits(run));
-    }
-
-    #[test]
-    fn the_occurrence_that_was_selected_is_the_one_chosen() {
-        let text = "// Lead. The bank by the bank.";
-        for (nth, index) in [(0, 1), (1, 4)] {
-            let mut manual = Manual::default();
-            assert_eq!(
-                manual.arrived(context(text, "bank", nth)),
-                Edit::Chosen(manual.run)
-            );
-            assert_eq!(manual.chosen(), Some(index), "{nth}");
-        }
-    }
-
-    #[test]
-    fn an_arrived_text_is_always_a_new_text_and_drops_what_was_chosen() {
-        let mut manual = with_sentence(SENTENCE);
-        let old = manual.choose(4).expect("run");
-        let number = manual.text_number();
-        let edit = manual.arrived(context(&format!("// Lead. {SENTENCE}"), "bank", 0));
-        // The same text again is still new.
-        let Edit::Chosen(run) = edit else {
-            panic!("{edit:?}");
-        };
-        assert_ne!(run, old);
-        assert!(!manual.awaits(old));
-        assert!(manual.awaits(run));
-        assert_ne!(manual.text_number(), number);
-    }
-
-    #[test]
-    fn an_arrived_word_without_a_sentence_is_a_dictionary_input() {
-        let mut manual = Manual::default();
-        let word = Context {
-            word: "bank".to_owned(),
-            sentence: None,
-        };
-        let Edit::Lone(run) = manual.arrived(word) else {
-            panic!("lone");
-        };
-        assert_eq!(manual.sentence(), "bank");
-        assert_eq!(manual.input().expect("input").sentence(), None);
-        assert_eq!(manual.input().expect("input").source(), Source::AtSpi);
-        assert_eq!(
-            manual.state(),
-            WindowState::Dictionary {
-                source: Source::AtSpi
-            }
-        );
-        assert!(manual.awaits(run));
-    }
-
-    #[test]
-    fn an_arrived_sentence_that_is_the_word_alone_is_a_dictionary_input() {
-        let mut manual = Manual::default();
-        let arrived = context("// Lead. Bank.", "Bank", 0);
-        assert_eq!(
-            arrived.sentence.as_ref().map(|found| found.text.as_str()),
-            Some("Bank.")
-        );
-        let edit = manual.arrived(arrived);
-        assert!(matches!(edit, Edit::Lone(_)), "{edit:?}");
-        assert_eq!(manual.input().expect("input").sentence(), None);
-        assert_eq!(manual.source(), Source::AtSpi);
-    }
-
-    #[test]
-    fn an_arrived_selection_of_several_words_without_a_sentence_chooses_none() {
-        let mut manual = Manual::default();
-        let words = Context {
-            word: "the\n  bank".to_owned(),
-            sentence: None,
-        };
-        assert_eq!(manual.arrived(words), Edit::Cleared);
-        assert_eq!(manual.sentence(), "the bank");
-        assert_eq!(manual.chosen(), None);
-        assert_eq!(manual.input(), None);
-        assert_eq!(manual.state(), WindowState::Empty);
-        assert_eq!(manual.source(), Source::AtSpi);
-    }
-
-    #[test]
-    fn a_part_of_a_word_or_a_wider_selection_chooses_what_it_touches() {
-        let text = "We sat on the bank of the river.";
-        let wider = format!("// Lead. {text}");
-        let mut manual = Manual::default();
-        // `ban` is a part of `bank` only.
-        assert!(matches!(
-            manual.arrived(context(&wider, "ban", 0)),
-            Edit::Chosen(_)
-        ));
-        assert_eq!(chosen_word(&manual), Some("bank"));
-        // `the bank` touches two words: none is chosen, the text is there.
-        assert_eq!(
-            manual.arrived(context(&wider, "the bank", 0)),
-            Edit::Cleared
-        );
-        assert_eq!(manual.sentence(), text);
-        assert_eq!(manual.chosen(), None);
-        assert_eq!(manual.state(), WindowState::Empty);
-    }
-
-    #[test]
-    fn a_text_of_an_arrived_selection_that_has_no_word_is_manual() {
-        let mut manual = Manual::default();
-        let digits = context("// Lead. 42.", "42", 0);
-        assert!(digits.sentence.is_some());
-        assert_eq!(manual.arrived(digits), Edit::Cleared);
-        assert_eq!(manual.source(), Source::Manual);
-    }
-
-    #[test]
-    fn a_source_being_read_by_the_bus_is_the_waiting_state_until_an_input() {
-        let mut manual = Manual::default();
-        manual.set_reading(Some(Source::AtSpi));
+        manual.set_reading(Some(Source::Clipboard));
         assert_eq!(
             manual.state(),
             WindowState::Waiting {
-                source: Source::AtSpi
+                source: Source::Clipboard
             }
         );
         let texts = crate::view::texts(manual.state(), manual.source());
-        assert_eq!(texts.source, "accessibility (AT-SPI)");
+        assert_eq!(texts.source, "selection or clipboard");
         assert_eq!(texts.status, "reading the source…");
-        assert_eq!(manual.reading(), Some(Source::AtSpi));
+        assert_eq!(manual.reading(), Some(Source::Clipboard));
     }
 
     const CLIPBOARD_DICTIONARY: WindowState = WindowState::Dictionary {

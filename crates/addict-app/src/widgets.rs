@@ -1544,7 +1544,8 @@ fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &gtk::En
 }
 
 /// The source label and the status on one line, the source line when a
-/// capture or a read of Android Studio gave no text, then the binding row:
+/// capture or the read of the selection and the clipboard gave no text,
+/// then the binding row:
 /// its line, the detail and Retry; the line of the indexes when there is
 /// something to say about them; then the field for a word or a sentence, the text of the field with
 /// its words as links, and the result, which scrolls: the card of the word
@@ -1554,7 +1555,8 @@ pub struct View {
     root: gtk::Box,
     source: gtk::Label,
     status: gtk::Label,
-    /// Why the last capture or read of Android Studio gave no text, shared
+    /// Why the last capture or read of the selection and the clipboard gave
+    /// no text, shared
     /// by both: they never run together. Hidden until one gave nothing, and
     /// again once something new happens in the window.
     source_failure: SourceFailure,
@@ -1731,8 +1733,8 @@ impl View {
         self.retry.connect_clicked(move |_| retry());
     }
 
-    /// Shows `line`, why a capture or a read of Android Studio gave no
-    /// text, under the source and the status. [`View::render`] leaves it;
+    /// Shows `line`, why a capture or a read of the selection and the
+    /// clipboard gave no text, under the source and the status. [`View::render`] leaves it;
     /// [`View::clear_source_failure`] hides it.
     /// A line that names a runnable command shows Copy beside it.
     pub fn render_source_failure(&self, line: &str) {

@@ -998,7 +998,7 @@ val message = \"The charge will appear on your next statement. Keep the receipt.
 
     #[test]
     fn the_first_sentence_of_a_comment_that_starts_on_its_line_is_given() {
-        // Read from Android Studio on 2026-10-15.
+        // Read from an IDE editor on 2026-10-15.
         let text = "    val sync: SettingsSyncRepository = koinInject()\n    val source: TwisterAudioSource = koinInject()\n    // Created in this dialog's composition, never shared with an exercise player's listeners.\n    val player = koinInject()";
         let found = selected(text, "dialog", 0).expect("sentence");
         assert_eq!(

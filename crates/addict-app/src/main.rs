@@ -120,9 +120,10 @@
 //!
 //! A paste into the field with Ctrl+V, Shift+Insert or the menu replaces the
 //! whole field with the clipboard text as one line, and with it the input and
-//! the result; the pasted text is then submitted, as by Enter. This is the
-//! only time the clipboard is read: once per paste, without blocking the
-//! window. A clipboard that holds no text changes nothing.
+//! the result; the pasted text is then submitted, as by Enter. The clipboard
+//! is read once per paste, without blocking the window, and otherwise only at
+//! a press of the shortcut (below). A clipboard that holds no text changes
+//! nothing.
 //!
 //! Capture, beside the field, hides the window and asks the desktop for an
 //! interactive screenshot: the user chooses an area, or cancels. Once the
@@ -138,14 +139,15 @@
 //! recognized." until the next state is shown. Capture cannot be pressed
 //! while a capture runs.
 //!
-//! The shortcut also reads the focused editor: the window shows at once, empty
-//! and saying that the source, "accessibility (AT-SPI)", is being read, and an
-//! off-thread read asks the accessibility bus for the word selected in Android
-//! Studio and the sentence around it, with a limit. The sentence replaces the
-//! field, with the selected word chosen, and the article is looked up; nothing
-//! is sent online until a word is clicked. A read that gives nothing leaves the
-//! field empty. A new press, an edit of the field or a capture gives up a
-//! read that runs.
+//! The shortcut reads the text selected or copied, the same for every
+//! application: the window shows at once, empty and saying that the source,
+//! "selection or clipboard", is being read; once the window is active, the
+//! primary selection is read, then the clipboard when the selection gave no
+//! line, both within a limit from the press. The line replaces the field, a
+//! lone word is looked up, and nothing is sent online until a word is
+//! clicked. A read that gives nothing leaves the field empty and says that
+//! nothing is selected or copied. A new press, an edit of the field or a
+//! capture gives up a read that runs.
 //!
 //! The application has an icon in the top bar, a StatusNotifierItem, with a
 //! menu of Show, Settings and Exit, which a click on the icon opens. Show shows
@@ -185,20 +187,17 @@
 //! text; for each capture that ended as shown, its outcome, the time to the
 //! snapshot, the time and peak memory of the recognition, the memory of the
 //! process and how many child processes it has, and never the text, the
-//! snapshot or a failure's detail; for each read of the accessibility bus
-//! that ended or was given up, its outcome, its time apart from the window,
-//! the application in front it settled on, whether accessibility was on and
-//! the memory of the process, and never the word, the sentence or a
-//! failure's detail. Without the flag none of that exists.
+//! snapshot or a failure's detail. The read of the selection and the
+//! clipboard at a press is not recorded. Without the flag none of that
+//! exists.
 //!
 //! This module owns the command line and what each form of it starts; the entry
 //! commands are [`entries`]'s, the import is `addict_dictionary`'s, the indexes
 //! as a source of articles are [`dictionaries`]'s, the online translator is
 //! `addict_deepl`'s, what is asked of it and kept is [`online`]'s, where every
 //! request to it starts is [`translate`]'s, the capture job is [`capture`]'s,
-//! the accessibility read is [`context`]'s, the Vulkan drivers the resident
-//! lets the loader list are [`gpu`]'s,
-//! and its portal, accessibility and Tesseract adapters are `addict_platform`'s, the
+//! the Vulkan drivers the resident lets the loader list are [`gpu`]'s,
+//! and its portal and Tesseract adapters are `addict_platform`'s, the
 //! resident application is [`resident`]'s, the history of its field is
 //! [`history`]'s, the Settings window is
 //! [`settings`]'s, the texts of its window are
@@ -206,7 +205,6 @@
 
 mod cache;
 mod capture;
-mod context;
 mod dictionaries;
 mod entries;
 mod evidence;
