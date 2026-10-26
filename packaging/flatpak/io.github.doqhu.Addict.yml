@@ -26,6 +26,73 @@ finish-args:
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
 modules:
+  # Leptonica and Tesseract for screen capture: addict runs the tesseract
+  # beside its own executable with the data in ../share/tessdata. Kept: the
+  # shared libraries, the tesseract program and its named configs in
+  # share/tessdata; headers and build files are cleaned up.
+  - name: leptonica
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_PROG=OFF
+      - -DSW_BUILD=OFF
+    cleanup:
+      - /include
+      - /lib/cmake
+      - /lib/pkgconfig
+      - '*.a'
+      - '*.la'
+    sources:
+      - type: archive
+        url: https://github.com/DanBloomberg/leptonica/releases/download/1.87.0/leptonica-1.87.0.tar.gz
+        sha256: c73363397f96eb1295602bf44d708a994ad42046c791bf03ea0505d829bdb6a7
+
+  - name: tesseract
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_TRAINING_TOOLS=OFF
+      - -DBUILD_TESTS=OFF
+      - -DSW_BUILD=OFF
+      - -DOPENMP_BUILD=OFF
+      - -DGRAPHICS_DISABLED=ON
+      # addict gives tesseract a local image and local data: it never
+      # downloads or unpacks anything.
+      - -DDISABLE_CURL=ON
+      - -DDISABLE_ARCHIVE=ON
+      - -DENABLE_CCACHE=OFF
+    cleanup:
+      - /include
+      - /lib/cmake
+      - /lib/pkgconfig
+      - '*.a'
+      - '*.la'
+    sources:
+      - type: archive
+        url: https://github.com/tesseract-ocr/tesseract/archive/refs/tags/5.5.3.tar.gz
+        sha256: 9218e62793116d42a9f6d14cd9348518b27f382096eea3d0f2d1a24616bb5884
+
+  # The fast models of tessdata_fast 4.1.0, the data Fedora's langpacks
+  # ship; the languages are those addict reads (ocr_language, capture.rs).
+  - name: tessdata
+    buildsystem: simple
+    build-commands:
+      - install -Dm644 -t /app/share/tessdata eng.traineddata spa.traineddata cat.traineddata
+    sources:
+      - type: file
+        url: https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/eng.traineddata
+        sha256: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
+      - type: file
+        url: https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/spa.traineddata
+        sha256: 6f2e04d02774a18f01bed44b1111f2cd7f3ba7ac9dc4373cd3f898a40ea6b464
+      - type: file
+        url: https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/cat.traineddata
+        sha256: 250db73cd5b380d2798581295dc12f20d0828cdb335a65d833d12dfdbf57117d
+
   - name: addict
     buildsystem: simple
     build-options:
