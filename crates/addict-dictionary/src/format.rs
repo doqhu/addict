@@ -697,8 +697,12 @@ pub fn fits(offset: u64, len: u32, section: Section) -> bool {
             .is_some_and(|end| end <= section.len)
 }
 
+/// A decoded word record: its sense offsets, its translations and its
+/// entries.
+pub type Word = (Vec<u64>, Vec<String>, Vec<EntryRecord>);
+
 /// The sense offsets and the translations of a word record.
-pub fn decode_word(record: &[u8]) -> Result<(Vec<u64>, Vec<String>, Vec<EntryRecord>), Damage> {
+pub fn decode_word(record: &[u8]) -> Result<Word, Damage> {
     let mut cursor = Cursor(record);
     let mut senses = Vec::new();
     for _ in 0..cursor.u32()? {

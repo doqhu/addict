@@ -59,9 +59,9 @@ of the product without the test features, all the tests, and a guard that
 keeps GTK out of every crate but `addict-app`. Some tests run Tesseract, so
 install it with its English data.
 
-CI on GitHub runs the tests, `reuse lint` and a secret scan of the whole
-history, but not the format, lint and GTK checks, so run `scripts/check.sh`
-yourself.
+CI on GitHub runs the format and lint checks, the tests, `reuse lint` and a
+secret scan of the whole history, but not the build without the test
+features or the GTK guard, so run `scripts/check.sh` yourself.
 
 ## The workspace
 

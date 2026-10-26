@@ -10,6 +10,12 @@ publish.workspace = true
 name = "addict"
 path = "src/main.rs"
 
+# The acceptance harness, not shipped. Its tests cover the command line;
+# `src/evidence.rs` includes and tests its rules.
+[[example]]
+name = "harness"
+test = true
+
 [dependencies]
 addict-core = { path = "../addict-core" }
 addict-deepl = { path = "../addict-deepl" }

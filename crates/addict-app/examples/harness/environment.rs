@@ -22,31 +22,19 @@ pub struct Environment {
 /// Reads the environment. Every external command is bounded by `limit`; a
 /// command that is missing, fails or overruns leaves its field `null`.
 pub async fn capture_environment(limit: Duration) -> Environment {
-    let (gnome_shell, portal, portal_gnome, wl_paste) = tokio::join!(
+    let (gnome_shell, portal, portal_gnome, wl_paste, session_type) = tokio::join!(
         command_line(limit, "gnome-shell", &["--version"]),
-        command_line(
-            limit,
-            "rpm",
-            &["-q", "--qf", "%{VERSION}-%{RELEASE}", "xdg-desktop-portal"]
-        ),
-        command_line(
-            limit,
-            "rpm",
-            &[
-                "-q",
-                "--qf",
-                "%{VERSION}-%{RELEASE}",
-                "xdg-desktop-portal-gnome"
-            ]
-        ),
+        package_version(limit, "xdg-desktop-portal"),
+        package_version(limit, "xdg-desktop-portal-gnome"),
         command_line(limit, "wl-paste", &["--version"]),
+        session_type(limit),
     );
     Environment {
         os: os_pretty_name(),
         kernel: std::fs::read_to_string("/proc/sys/kernel/osrelease")
             .ok()
             .map(|s| s.trim().to_owned()),
-        session_type: env_var("XDG_SESSION_TYPE"),
+        session_type,
         current_desktop: env_var("XDG_CURRENT_DESKTOP"),
         wayland_display: env_var("WAYLAND_DISPLAY"),
         gnome_shell,
@@ -84,6 +72,80 @@ impl ClockMapping {
     }
 }
 
+/// The installed version of `package`, from the first package manager that
+/// knows it: rpm, then dpkg, then pacman. Each is asked as its own command,
+/// so a missing one costs nothing.
+async fn package_version(limit: Duration, package: &str) -> Option<String> {
+    let rpm = ["-q", "--qf", "%{VERSION}-%{RELEASE}", package];
+    let dpkg = ["-W", "-f", "${Version}", package];
+    let pacman = ["-Q", package];
+    first_version(
+        limit,
+        package,
+        &[("rpm", &rpm), ("dpkg-query", &dpkg), ("pacman", &pacman)],
+    )
+    .await
+}
+
+/// The version of `package` the first of `queries` gives.
+async fn first_version(
+    limit: Duration,
+    package: &str,
+    queries: &[(&str, &[&str])],
+) -> Option<String> {
+    for (program, args) in queries {
+        if let Some(version) = command_line(limit, program, args)
+            .await
+            .and_then(|line| version_of(&line, package))
+        {
+            return Some(version);
+        }
+    }
+    None
+}
+
+/// The version in a line that is a version alone (rpm, dpkg) or the name of
+/// `package` and its version (pacman); a line of another package gives none.
+fn version_of(line: &str, package: &str) -> Option<String> {
+    let version = line
+        .strip_prefix(package)
+        .and_then(|rest| rest.strip_prefix(' '))
+        .unwrap_or(line)
+        .trim();
+    (!version.is_empty() && !version.contains(' ')).then(|| version.to_owned())
+}
+
+/// `XDG_SESSION_TYPE`, or else the `Type` logind gives the session of
+/// `XDG_SESSION_ID`, or of the user's display session without it: a shell
+/// started outside the session lacks both variables.
+async fn session_type(limit: Duration) -> Option<String> {
+    session_type_of(
+        limit,
+        env_var("XDG_SESSION_TYPE"),
+        env_var("XDG_SESSION_ID"),
+    )
+    .await
+}
+
+/// The session type `variable` names, or else logind's of session `id`
+/// (`auto`, the caller's or the user's display session, without one).
+async fn session_type_of(
+    limit: Duration,
+    variable: Option<String>,
+    id: Option<String>,
+) -> Option<String> {
+    if variable.is_some() {
+        return variable;
+    }
+    let id = id.unwrap_or_else(|| "auto".into());
+    command_line(
+        limit,
+        "loginctl",
+        &["show-session", &id, "--property=Type", "--value"],
+    )
+    .await
+}
+
 fn env_var(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
@@ -98,7 +160,7 @@ fn os_pretty_name() -> Option<String> {
 
 /// Runs `future` for at most `limit`; `None` when the limit passed. The
 /// future is dropped then, so nothing keeps waiting behind the caller's back.
-async fn bounded<F: Future>(limit: Duration, future: F) -> Option<F::Output> {
+pub(super) async fn bounded<F: Future>(limit: Duration, future: F) -> Option<F::Output> {
     tokio::time::timeout(limit, future).await.ok()
 }
 
@@ -159,6 +221,73 @@ mod tests {
             portal_version: "1.20".into(),
             portal_timestamp_bits: 64,
         }
+    }
+
+    #[test]
+    fn a_line_gives_the_version_of_its_package_only() {
+        let portal = "xdg-desktop-portal";
+        assert_eq!(
+            version_of("1.20.3-1.fc44", portal).as_deref(),
+            Some("1.20.3-1.fc44")
+        );
+        assert_eq!(
+            version_of("xdg-desktop-portal 1.20.3-1", portal).as_deref(),
+            Some("1.20.3-1")
+        );
+        assert_eq!(version_of("xdg-desktop-portal-gnome 50.0-1", portal), None);
+        assert_eq!(version_of("xdg-desktop-portal ", portal), None);
+        assert_eq!(
+            version_of("package xdg-desktop-portal is not installed", portal),
+            None
+        );
+    }
+
+    /// A missing or failing package manager passes to the next one; when
+    /// none knows the package, the version is unknown.
+    #[test]
+    fn the_first_package_manager_that_knows_the_package_gives_its_version() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let limit = Duration::from_secs(2);
+        let portal = "xdg-desktop-portal";
+        let found = runtime.block_on(first_version(
+            limit,
+            portal,
+            &[
+                ("addict-no-such-program", &[]),
+                ("false", &[]),
+                ("echo", &["xdg-desktop-portal 1.20.3-1"]),
+                ("echo", &["9.9"]),
+            ],
+        ));
+        assert_eq!(found.as_deref(), Some("1.20.3-1"));
+        let none = runtime.block_on(first_version(
+            limit,
+            portal,
+            &[("addict-no-such-program", &[]), ("false", &[])],
+        ));
+        assert_eq!(none, None);
+    }
+
+    /// The variable wins; a session logind does not know gives no type.
+    #[test]
+    fn the_session_type_falls_back_to_logind() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let limit = Duration::from_secs(2);
+        let of = |variable: Option<&str>, id: Option<&str>| {
+            runtime.block_on(session_type_of(
+                limit,
+                variable.map(str::to_owned),
+                id.map(str::to_owned),
+            ))
+        };
+        assert_eq!(of(Some("x11"), Some("1")).as_deref(), Some("x11"));
+        assert_eq!(of(None, Some("no-such-session")), None);
     }
 
     #[test]

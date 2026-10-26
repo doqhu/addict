@@ -22,7 +22,7 @@ jobs:
       - name: Install the build dependencies
         run: >-
           dnf -y install --setopt=install_weak_deps=False
-          gcc pkgconf-pkg-config gtk4-devel rust cargo git
+          gcc pkgconf-pkg-config gtk4-devel rust cargo clippy rustfmt git
           tesseract tesseract-langpack-eng util-linux
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,6 +43,14 @@ jobs:
           useradd --create-home tester
           mkdir -p "$CARGO_HOME"
           chown -R tester "$CARGO_HOME" "$GITHUB_WORKSPACE"
+
+      - name: Check the format
+        run: runuser -u tester -- cargo fmt --all -- --check
+
+      - name: Check the lints
+        run: >-
+          runuser -u tester --
+          cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Test the workspace
         run: runuser -u tester -- cargo test --locked --workspace

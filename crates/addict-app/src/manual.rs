@@ -304,8 +304,8 @@ pub fn look_up(
     articles: Arc<dyn Articles>,
     word: String,
     on_outcome: impl FnOnce(Outcome<Looked>) + Send + 'static,
-) -> Result<Job, Lookup> {
-    let work = work.ok_or(Lookup::Unfinished)?;
+) -> Result<Job, Box<Lookup>> {
+    let work = work.ok_or_else(|| Box::new(Lookup::Unfinished))?;
     Ok(work.run(
         LOOKUP_LIMIT,
         async move { articles.look_up(&word) },
@@ -324,8 +324,8 @@ fn look_up_first(
     word: String,
     chosen: Language,
     on_outcome: impl FnOnce(Language, Outcome<Looked>) + Send + 'static,
-) -> Result<Job, Lookup> {
-    let work = work.ok_or(Lookup::Unfinished)?;
+) -> Result<Job, Box<Lookup>> {
+    let work = work.ok_or_else(|| Box::new(Lookup::Unfinished))?;
     Ok(work.run(
         LOOKUP_LIMIT,
         async move { articles.look_up_first(chosen, &word) },
@@ -347,8 +347,8 @@ fn look_up_russian(
     word: String,
     chosen: Language,
     on_outcome: impl FnOnce(Language, Outcome<Looked>) + Send + 'static,
-) -> Result<Job, Lookup> {
-    let work = work.ok_or(Lookup::Unfinished)?;
+) -> Result<Job, Box<Lookup>> {
+    let work = work.ok_or_else(|| Box::new(Lookup::Unfinished))?;
     Ok(work.run(
         LOOKUP_LIMIT,
         async move { articles.look_up_russian(chosen, &word) },
@@ -390,7 +390,7 @@ pub fn offline(
     chosen: Language,
     known: Option<Indexes>,
     on_outcome: impl FnOnce(Language, Outcome<Looked>) + Send + 'static,
-) -> Result<Job, Lookup> {
+) -> Result<Job, Box<Lookup>> {
     if is_russian(&word) {
         return look_up_russian(work, articles, word, chosen, on_outcome);
     }
@@ -401,7 +401,7 @@ pub fn offline(
                 Some(State::Open | State::Unreadable) => {
                     look_up_first(work, articles, word, chosen, on_outcome)
                 }
-                Some(State::Missing) | None => Err(Lookup::NoDictionary(chosen)),
+                Some(State::Missing) | None => Err(Box::new(Lookup::NoDictionary(chosen))),
             }
         }
     }
@@ -621,7 +621,10 @@ pub(crate) mod tests {
                         indexes,
                         |_, _| panic!("a lookup ended"),
                     );
-                    assert_eq!(started.err(), Some(Lookup::NoDictionary(language)));
+                    assert_eq!(
+                        started.err(),
+                        Some(Box::new(Lookup::NoDictionary(language)))
+                    );
                 }
             }
         }
@@ -639,7 +642,10 @@ pub(crate) mod tests {
                     Some(known),
                     |_, _| panic!("a lookup ended"),
                 );
-                assert_eq!(started.err(), Some(Lookup::NoDictionary(language)));
+                assert_eq!(
+                    started.err(),
+                    Some(Box::new(Lookup::NoDictionary(language)))
+                );
             }
         }
         // Also without a runner: nothing was to run.
@@ -651,7 +657,10 @@ pub(crate) mod tests {
             None,
             |_, _| {},
         );
-        assert_eq!(started.err(), Some(Lookup::NoDictionary(Language::Es)));
+        assert_eq!(
+            started.err(),
+            Some(Box::new(Lookup::NoDictionary(Language::Es)))
+        );
     }
 
     /// A source of articles that answers a lookup in its language, and in
@@ -895,7 +904,7 @@ pub(crate) mod tests {
             None,
             |_, _| panic!("a lookup ended"),
         );
-        assert_eq!(started.err(), Some(Lookup::Unfinished));
+        assert_eq!(started.err(), Some(Box::new(Lookup::Unfinished)));
     }
 
     #[test]
@@ -1063,7 +1072,7 @@ pub(crate) mod tests {
             None,
             |_, _| {},
         );
-        assert_eq!(started.err(), Some(Lookup::Unfinished));
+        assert_eq!(started.err(), Some(Box::new(Lookup::Unfinished)));
     }
 
     #[test]
@@ -1526,7 +1535,7 @@ pub(crate) mod tests {
                 let _ = sender.send(outcome);
             },
         );
-        assert_eq!(started.err(), Some(Lookup::Unfinished));
+        assert_eq!(started.err(), Some(Box::new(Lookup::Unfinished)));
         // The callback was dropped without being run.
         assert!(receiver.recv().is_err());
     }

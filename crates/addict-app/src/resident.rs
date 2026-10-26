@@ -1095,7 +1095,7 @@ impl Session {
             }
             Err(lookup) => {
                 let checks = manual::checks_again(&lookup, language);
-                self.show_result(Some(lookup));
+                self.show_result(Some(*lookup));
                 // No lookup event comes: what waited for one goes now.
                 self.send_deferred();
                 if checks {

@@ -155,6 +155,10 @@ pub const OCR: &[Row] = &[
     },
 ];
 
+/// The sections of the credits, in `CREDITS` and in the application: their
+/// headings and their rows, the indexes first.
+pub const SECTIONS: [(&str, &[Row]); 2] = [("Dictionary indexes", ROWS), ("OCR", OCR)];
+
 /// The command that writes `CREDITS` anew from the tables.
 pub const WRITE_CREDITS: &str = "ADDICT_WRITE_CREDITS=1 cargo test -p addict-dictionary credits";
 
@@ -173,7 +177,7 @@ pub fn credits() -> String {
     text.push_str(&format!(
         "do not edit it, regenerate it with `{WRITE_CREDITS}`.\n"
     ));
-    for (heading, rows) in [("Dictionary indexes", ROWS), ("OCR", OCR)] {
+    for (heading, rows) in SECTIONS {
         text.push_str(&format!("\n\n{heading}\n{}\n", "-".repeat(heading.len())));
         for row in rows {
             text.push_str(&format!(
@@ -324,6 +328,19 @@ mod tests {
             .find(&format!("\n{}\n", ROWS[ROWS.len() - 1].index))
             .expect("index row");
         assert!(last_index < ocr && ocr < first_ocr);
+    }
+
+    /// The sections hold every row once, the indexes and then OCR, in
+    /// table order.
+    #[test]
+    fn sections_list_every_row_once_in_table_order() {
+        let listed: Vec<&str> = SECTIONS
+            .iter()
+            .flat_map(|(_, rows)| rows.iter().map(|row| row.index))
+            .collect();
+        let table: Vec<&str> = ROWS.iter().chain(OCR).map(|row| row.index).collect();
+        assert_eq!(listed, table);
+        assert_eq!(listed.len(), 15);
     }
 
     /// No index has two rows.

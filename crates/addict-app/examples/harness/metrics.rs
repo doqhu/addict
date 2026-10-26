@@ -374,6 +374,11 @@ fn computed_latency(
         )
         .ok()
 }
+/// Whether `record` is the start of a session of the product, which names
+/// itself there; other programs' sessions share the evidence files.
+pub fn is_product_start(record: &Evidence) -> bool {
+    record.event == "broker-started" && record.details["application"] == "addict"
+}
 // A repeated session supersedes earlier ones for the same cell; evidence stays append-only.
 // Records without any `broker-started` are treated as one session.
 fn latest_session(
@@ -634,12 +639,15 @@ pub fn data_sets(files: &[PathBuf], commit: &str) -> io::Result<serde_json::Valu
     let files = files
         .iter()
         .map(|path| {
-            let bytes = std::fs::read(path)
-                .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+            let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+            // Streamed: the indexes are large, and the hash needs no copy.
+            let mut file = std::fs::File::open(path).map_err(named)?;
+            let mut hash = Sha256::new();
+            let bytes = io::copy(&mut file, &mut hash).map_err(named)?;
             Ok(serde_json::json!({
                 "name": path.file_name().map(|name| name.to_string_lossy()),
-                "bytes": bytes.len(),
-                "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                "bytes": bytes,
+                "sha256": format!("{:x}", hash.finalize()),
             }))
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -696,12 +704,13 @@ pub fn calibrate(records: &[Evidence], host: &CalibrationHost) -> Result<Calibra
             host.session_type
         ));
     }
-    let start = records
-        .iter()
-        .rposition(|r| r.event == "broker-started")
-        .ok_or("the records hold no session start")?;
-    let session = &records[start..];
-    let started = &session[0];
+    // The product's latest session, up to the next start of any program:
+    // another program's presses are not the product's.
+    let session = latest_session(records, |started, _| is_product_start(started));
+    let started = session
+        .first()
+        .filter(|r| is_product_start(r))
+        .ok_or("the records hold no session start of addict")?;
     if started.details["boot_id"].as_str() != Some(host.boot_id.as_str()) {
         return Err(format!(
             "the latest session was recorded on boot {}, this boot is {}",
@@ -958,11 +967,22 @@ pub fn parse_nvidia_apps(text: &str) -> Vec<(u32, Option<u64>)> {
         })
         .collect()
 }
-/// The GPU memory of `roots` and their descendants, and the power state of
-/// every card. A suspended NVIDIA card is not queried: the query would wake it.
-pub fn gpu(roots: &[u32]) -> io::Result<GpuRecord> {
+/// The cards under `drm`, by name. A system with no `drm` directory has no
+/// card, and a note says so.
+fn cards(drm: &std::path::Path, notes: &mut Vec<String>) -> io::Result<Vec<GpuCard>> {
+    let entries = match std::fs::read_dir(drm) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            notes.push(format!(
+                "{} does not exist: no card is known",
+                drm.display()
+            ));
+            return Ok(Vec::new());
+        }
+        Err(e) => return Err(e),
+    };
     let mut cards = Vec::new();
-    for entry in std::fs::read_dir("/sys/class/drm")? {
+    for entry in entries {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if !name
@@ -987,10 +1007,43 @@ pub fn gpu(roots: &[u32]) -> io::Result<GpuRecord> {
         });
     }
     cards.sort_by(|a, b| a.card.cmp(&b.card));
+    Ok(cards)
+}
+/// The output of `program` with `args`, or an error once `limit` passed;
+/// the child is killed then, so nothing keeps running behind the caller.
+async fn bounded_output(
+    program: &str,
+    args: &[&str],
+    limit: std::time::Duration,
+) -> io::Result<std::process::Output> {
+    let mut command = tokio::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    super::environment::bounded(limit, command.output())
+        .await
+        .unwrap_or_else(|| {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "it ran longer than {} s and was killed",
+                    limit.as_secs_f64()
+                ),
+            ))
+        })
+}
+/// How long `nvidia-smi` may take before it is killed: a hung driver must
+/// not stall the acceptance session.
+pub const NVIDIA_SMI_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The GPU memory of `roots` and their descendants, and the power state of
+/// every card. A suspended NVIDIA card is not queried: the query would wake it.
+pub async fn gpu(roots: &[u32]) -> io::Result<GpuRecord> {
+    let mut notes = Vec::new();
+    let cards = cards(std::path::Path::new("/sys/class/drm"), &mut notes)?;
     let pids = descendants(roots)?;
     let mut processes = Vec::new();
-    let mut notes = Vec::new();
     let mut seen = HashSet::new();
     let mut clients = 0;
     for &pid in &pids {
@@ -1042,12 +1095,15 @@ pub fn gpu(roots: &[u32]) -> io::Result<GpuRecord> {
             ));
             continue;
         }
-        let output = std::process::Command::new("nvidia-smi")
-            .args([
+        let output = bounded_output(
+            "nvidia-smi",
+            &[
                 "--query-compute-apps=pid,used_memory",
                 "--format=csv,noheader,nounits",
-            ])
-            .output();
+            ],
+            NVIDIA_SMI_LIMIT,
+        )
+        .await;
         match output {
             Ok(output) if output.status.success() => {
                 let apps = parse_nvidia_apps(&String::from_utf8_lossy(&output.stdout));
@@ -1833,7 +1889,7 @@ mod product_tests {
             Origin::Local,
             "broker-started",
             None,
-            json!({"pid":PID,"boot_id":"boot"}),
+            json!({"pid":PID,"boot_id":"boot","application":"addict"}),
         )];
         for n in 1..=count {
             rows.extend(press(Origin::Local, n, n == 1, 100));
@@ -1900,6 +1956,20 @@ mod product_tests {
         let mut rows = presses(10);
         rows.extend(presses(2));
         refused(&rows, &host(), "2 presses recorded");
+        // Another program's later session is not the product's: its presses
+        // are left out, and without the product nothing is calibrated.
+        let other_program = |count| {
+            let mut rows = presses(count);
+            rows[0].details["application"] = json!("exp4");
+            rows
+        };
+        let mut rows = presses(10);
+        rows.extend(other_program(2));
+        assert_eq!(
+            calibrate(&rows, &host()).unwrap().evidence,
+            calibrate(&presses(10), &host()).unwrap().evidence
+        );
+        refused(&other_program(10), &host(), "no session start of addict");
 
         let invocation = |rows: &mut [Evidence], n: usize| {
             rows.iter_mut()
@@ -2018,5 +2088,36 @@ mod product_tests {
             parse_nvidia_apps("1234, 56\n77, [N/A]\n\nheader\n"),
             [(1234, Some(56 << 20)), (77, None)]
         );
+    }
+
+    #[test]
+    fn a_system_without_drm_has_no_card_and_says_so() {
+        let mut notes = Vec::new();
+        let missing = std::env::temp_dir().join(format!("addict-no-drm-{}", std::process::id()));
+        assert!(cards(&missing, &mut notes).unwrap().is_empty());
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("does not exist"), "{}", notes[0]);
+    }
+
+    #[test]
+    fn a_command_that_hangs_is_killed_at_its_limit() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let hung = runtime.block_on(bounded_output(
+            "sleep",
+            &["30"],
+            std::time::Duration::from_millis(200),
+        ));
+        assert_eq!(hung.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let quick = runtime.block_on(bounded_output(
+            "true",
+            &[],
+            std::time::Duration::from_secs(5),
+        ));
+        assert!(quick.unwrap().status.success());
     }
 }

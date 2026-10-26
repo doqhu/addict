@@ -38,12 +38,6 @@ pub fn license_text() -> String {
     format!("Licensed under {}.", env!("CARGO_PKG_LICENSE"))
 }
 
-/// The sections of the Credits page: their headings and their rows, in the
-/// order of the table.
-pub fn credit_sections() -> [(&'static str, &'static [Row]); 2] {
-    [("Dictionary indexes", sources::ROWS), ("OCR", sources::OCR)]
-}
-
 /// The markup of one row: its index in bold, its credit line, its license.
 /// Every text is escaped before the markup is put around it.
 pub fn credit_markup(row: &Row) -> String {
@@ -164,7 +158,7 @@ fn credits_page() -> gtk::ScrolledWindow {
         .margin_start(16)
         .margin_end(16)
         .build();
-    for (heading, rows) in credit_sections() {
+    for (heading, rows) in sources::SECTIONS {
         let lines: Vec<gtk::Widget> = rows
             .iter()
             .map(|row| {
@@ -188,19 +182,8 @@ mod tests {
     use addict_dictionary::sources::{OCR, ROWS, Row};
     use gtk::{glib, prelude::*};
 
-    use super::{About, credit_markup, credit_sections, license_text, version_text};
+    use super::{About, credit_markup, license_text, version_text};
     use crate::style;
-
-    #[test]
-    fn the_credits_page_lists_every_row_once_in_table_order() {
-        let listed: Vec<&str> = credit_sections()
-            .iter()
-            .flat_map(|(_, rows)| rows.iter().map(|row| row.index))
-            .collect();
-        let table: Vec<&str> = ROWS.iter().chain(OCR).map(|row| row.index).collect();
-        assert_eq!(listed, table);
-        assert_eq!(listed.len(), 15);
-    }
 
     #[test]
     fn each_line_holds_its_index_and_its_credit() {
