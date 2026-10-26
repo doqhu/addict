@@ -1,0 +1,57 @@
+# The development manifest: what the maintainer builds and tests locally and
+# CI builds. It is not the Flathub manifest, which a person writes for the
+# submission (see README, Use of AI in addict).
+#
+#   flatpak run org.flatpak.Builder --force-clean --user --install \
+#       .flatpak-builder/build packaging/flatpak/io.github.doqhu.Addict.yml
+#
+# The build has no network: the crates come from cargo-sources.json, which
+# scripts/flatpak-sources.sh regenerates from Cargo.lock.
+id: io.github.doqhu.Addict
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: addict
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  # DeepL, for the online translations.
+  - --share=network
+  # The top-bar icon.
+  - --talk-name=org.kde.StatusNotifierWatcher
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+modules:
+  - name: addict
+    buildsystem: simple
+    build-options:
+      env:
+        # Where cargo-sources.json puts the vendored crates and the cargo
+        # configuration that points at them.
+        CARGO_HOME: /run/build/addict/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo --offline build --release --locked -p addict-app
+      - install -Dm755 target/release/addict /app/bin/addict
+      - install -Dm644 data/io.github.doqhu.Addict.desktop /app/share/applications/io.github.doqhu.Addict.desktop
+      - |
+        for size in 64 128 256 512; do
+          install -Dm644 crates/addict-app/icons/$size.png \
+            /app/share/icons/hicolor/${size}x${size}/apps/io.github.doqhu.Addict.png
+        done
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - .flatpak-builder
+          - target
+          - .idea
+          - _bmad
+          - _bmad-output
+          - experiments
+      - cargo-sources.json

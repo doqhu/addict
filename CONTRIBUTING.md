@@ -63,6 +63,11 @@ CI on GitHub runs the format and lint checks, the tests, `reuse lint` and a
 secret scan of the whole history, but not the build without the test
 features or the GTK guard, so run `scripts/check.sh` yourself.
 
+The Flatpak build has no network, so it takes the crates from
+`packaging/flatpak/cargo-sources.json`. If your change touches `Cargo.lock`,
+regenerate that file with `scripts/flatpak-sources.sh` (it needs
+`flatpak-cargo-generator` from flatpak-builder-tools) and commit it too.
+
 ## The workspace
 
 - `crates/addict-core` -- the product identity and the domain types.

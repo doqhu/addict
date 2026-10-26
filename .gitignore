@@ -7,3 +7,4 @@
 /experiments/
 __pycache__/
 /.idea/
+/.flatpak-builder/
