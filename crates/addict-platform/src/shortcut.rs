@@ -560,8 +560,8 @@ mod tests {
     #[test]
     fn the_binding_path_is_that_of_the_app_id_alone() {
         assert_eq!(
-            binding_path("dev.addict.Addict"),
-            "/org/gnome/settings-daemon/global-shortcuts/dev.addict.Addict/"
+            binding_path("io.github.doqhu.Addict"),
+            "/org/gnome/settings-daemon/global-shortcuts/io.github.doqhu.Addict/"
         );
     }
 

@@ -148,6 +148,7 @@ use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
+    about::About,
     cache::{self, Cached},
     capture::{self, Capture, Captured, Failure, Timing},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
@@ -410,6 +411,8 @@ struct Session {
     clear_job: Option<Job>,
     /// The Settings window, which the tray shows.
     settings: Settings,
+    /// The About window, which the tray shows.
+    about: About,
     /// The trigger the portal bound, for the Settings window.
     trigger: Option<String>,
     /// The read of the key file's state; dropping it gives it up.
@@ -1092,7 +1095,7 @@ impl Session {
             }
             Err(lookup) => {
                 let checks = manual::checks_again(&lookup, language);
-                self.show_result(Some(lookup));
+                self.show_result(Some(*lookup));
                 // No lookup event comes: what waited for one goes now.
                 self.send_deferred();
                 if checks {
@@ -1609,12 +1612,14 @@ impl Session {
 
     /// A choice of the tray. Show is a repeated launch: the window as it is,
     /// no read. Settings reads the state of the key file on the runner and
-    /// shows the window; Exit ends the application through its shutdown. A
-    /// tray that cannot be had is said once and changes nothing.
+    /// shows the window; About shows its window on its About page; Exit ends
+    /// the application through its shutdown. A tray that cannot be had is
+    /// said once and changes nothing.
     fn tray(&mut self, event: TrayEvent) {
         match event {
             TrayEvent::Show => self.launched(),
             TrayEvent::Settings => self.show_settings(),
+            TrayEvent::About => self.about.present(),
             TrayEvent::Exit => {
                 if let Some(application) = self.window.application() {
                     application.quit();
@@ -2160,6 +2165,7 @@ fn start(
     let language_job = start_language(work.as_deref(), language_file.clone(), &sender);
     let (translator, key_file, cache) = online_translator();
     let settings = start_settings(&window, key_file.as_deref(), &sender);
+    let about = About::new(&window);
     let session = Session {
         binding,
         view,
@@ -2180,6 +2186,7 @@ fn start(
         cache_job: None,
         clear_job: None,
         settings,
+        about,
         trigger: None,
         key_job: None,
         save_job: None,

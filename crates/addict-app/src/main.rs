@@ -130,9 +130,14 @@
 //! snapshot is taken the window comes back, saying that the capture is being
 //! read, and Tesseract recognizes its English text off the UI thread, with a
 //! limit; the snapshot and Tesseract's temporary files are deleted whatever
-//! the outcome. The text, as one line, replaces the field, and the source is
-//! "screen capture (OCR)": it is a new text, and from there everything is as
-//! for a typed one, with the whole text as the sentence. It is not submitted:
+//! the outcome. The Tesseract is found by one rule in every channel: the
+//! program named by the file `tesseract` of the configuration directory, else
+//! `tesseract` beside the executable, else on `PATH`; the data directory named
+//! by the file `tessdata` there, else `../share/tessdata` from the
+//! executable's directory, else Tesseract's own. The text, as one line,
+//! replaces the field, and the source is "screen capture (OCR)": it is a new
+//! text, and from there everything is as for a typed one, with the whole text
+//! as the sentence. It is not submitted:
 //! a lone word is looked up and not sent online. An edit keeps the source;
 //! a field without a word is manual input again. A capture that gives no text,
 //! for any reason, leaves the field as it was and says "No text was
@@ -150,14 +155,17 @@
 //! capture gives up a read that runs.
 //!
 //! The application has an icon in the top bar, a StatusNotifierItem, with a
-//! menu of Show, Settings and Exit, which a click on the icon opens. Show shows
-//! the window as a repeated launch does, without a read. Settings shows a window
-//! with the trigger of the shortcut, the file of the DeepL key and the state
-//! it is in, never the key, and a button that asks the portal for its dialog
-//! to change the shortcut; the line there says when it cannot. Exit ends the
-//! application. A session with no StatusNotifierWatcher says so once on
-//! stderr and goes on without the icon; the icon appears when a watcher
-//! comes, such as a shell extension that starts after the application.
+//! menu of Show, Settings, About and Exit, which a click on the icon opens.
+//! Show shows the window as a repeated launch does, without a read. Settings
+//! shows a window with the trigger of the shortcut, the file of the DeepL key
+//! and the state it is in, never the key, and a button that asks the portal
+//! for its dialog to change the shortcut; the line there says when it cannot.
+//! About shows a window with the icon, the name, the version and the license
+//! of the application, and a Credits page that lists every dictionary and OCR
+//! source with its credit line. Exit ends the application. A session with no
+//! StatusNotifierWatcher says so once on stderr and goes on without the icon;
+//! the icon appears when a watcher comes, such as a shell extension that
+//! starts after the application.
 //!
 //! The application is unique: a second launch exits at once and makes the
 //! resident instance show its window as it is, without a read.
@@ -199,10 +207,11 @@
 //! the Vulkan drivers the resident lets the loader list are [`gpu`]'s,
 //! and its portal and Tesseract adapters are `addict_platform`'s, the
 //! resident application is [`resident`]'s, the history of its field is
-//! [`history`]'s, the Settings window is
-//! [`settings`]'s, the texts of its window are
-//! [`view`]'s and the widgets of the window are [`widgets`]'s.
+//! [`history`]'s, the Settings window is [`settings`]'s, the About window and
+//! its credits are [`about`]'s, the texts of its window are [`view`]'s and the
+//! widgets of the window are [`widgets`]'s.
 
+mod about;
 mod cache;
 mod capture;
 mod dictionaries;

@@ -285,7 +285,7 @@ pub struct Settings {
     cache_status: gtk::Label,
 }
 
-fn label(text: &str, classes: &[&str]) -> gtk::Label {
+pub(crate) fn label(text: &str, classes: &[&str]) -> gtk::Label {
     gtk::Label::builder()
         .label(text)
         .halign(gtk::Align::Start)
@@ -296,7 +296,7 @@ fn label(text: &str, classes: &[&str]) -> gtk::Label {
 }
 
 /// A section: its label above a card holding `rows`.
-fn section(name: &str, rows: &[&gtk::Widget]) -> gtk::Box {
+pub(crate) fn section(name: &str, rows: &[&gtk::Widget]) -> gtk::Box {
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)

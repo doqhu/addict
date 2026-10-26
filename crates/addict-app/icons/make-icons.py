@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Builds the embedded app icons from the concept image.
+"""Builds the embedded app icons from the source image.
 
     python3 -I crates/addict-app/icons/make-icons.py \
-        assets/icon-concepts/gaudi/mosaic-a.png crates/addict-app/icons
+        crates/addict-app/icons/source.png crates/addict-app/icons
+
+`source.png` is the Gaudi mosaic letter a, made with an image-generation
+tool.
 
 Crops the source to its alpha box, centres it on a square with a margin and
 writes one PNG per size. Each PNG carries the tEXt chunk `X-Addict` = `true`,

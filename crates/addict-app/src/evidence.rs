@@ -1,5 +1,6 @@
 //! Measurement evidence of `--evidence`: one JSON line per fact, in the
-//! `Evidence` format that `addict-exp4 summarize` reads.
+//! `Evidence` format that the acceptance harness reads (the `harness` example,
+//! `examples/harness/`; its `summarize` judges a session).
 //!
 //! The application writes raw values only: the portal timestamp, the receipt
 //! time, the `wp_presentation` time. The acceptance latency is computed by the
@@ -30,9 +31,24 @@ use crate::{
     view::Online,
 };
 
+// The harness's format and rules, from the example's own files: the tests read
+// what the application writes as the harness reads it.
+#[cfg(test)]
+#[allow(dead_code)] // capture_environment: used by the harness CLI only
+#[path = "../examples/harness/environment.rs"]
+mod environment;
+#[cfg(test)]
+#[allow(dead_code)] // append: used by the harness CLI only
+#[path = "../examples/harness/format.rs"]
+mod format;
+#[cfg(test)]
+#[allow(dead_code)] // sample, gpu: used by the harness CLI only
+#[path = "../examples/harness/metrics.rs"]
+mod metrics;
+
 /// The version of the record format, as the harness checks it.
 const SCHEMA: u32 = 1;
-/// The product is the GTK4 resident cell of the harness's matrix.
+/// The product's labels in the format, those of the EXP-4 comparison it comes from.
 const BACKEND: &str = "gtk4";
 const MODE: &str = "resident";
 
@@ -595,10 +611,9 @@ impl Writer {
 mod tests {
     use std::path::PathBuf;
 
-    use addict_exp4::{
-        Evidence,
-        metrics::{self, ClockMapping, Summary},
-        protocol::{Backend, Mode, Origin as HarnessOrigin},
+    use super::{
+        format::{self, Backend, Evidence, Mode, Origin as HarnessOrigin},
+        metrics::{self, ClockMapping, ProductSummary},
     };
 
     use addict_core::dictionary::Article;
@@ -673,18 +688,22 @@ mod tests {
     }
 
     fn read(path: &Path) -> Vec<Evidence> {
-        metrics::read_evidence(path).expect("every line parses as harness evidence")
+        format::read_evidence(path).expect("every line parses as harness evidence")
     }
 
-    fn foliate(rows: &[Evidence], mapping: Option<&ClockMapping>) -> Summary {
-        metrics::summarize(rows, mapping)
+    fn summary(
+        rows: &[Evidence],
+        mapping: Option<&ClockMapping>,
+        origin: HarnessOrigin,
+    ) -> ProductSummary {
+        metrics::summarize_product(rows, mapping)
             .into_iter()
-            .find(|s| {
-                s.backend == Backend::Gtk4
-                    && s.mode == Mode::Resident
-                    && s.origin == HarnessOrigin::Foliate
-            })
-            .expect("the GTK4 resident Foliate row")
+            .find(|s| s.origin == origin)
+            .expect("a row of each application")
+    }
+
+    fn foliate(rows: &[Evidence], mapping: Option<&ClockMapping>) -> ProductSummary {
+        summary(rows, mapping, HarnessOrigin::Foliate)
     }
 
     #[test]
@@ -710,7 +729,7 @@ mod tests {
             ]
         );
         for row in &rows {
-            assert_eq!(row.schema, addict_exp4::SCHEMA);
+            assert_eq!(row.schema, format::SCHEMA);
             assert_eq!(
                 (row.backend, row.mode, row.origin),
                 (Backend::Gtk4, Mode::Resident, HarnessOrigin::Foliate)
@@ -984,12 +1003,7 @@ mod tests {
         let (without, with) = (session(false), session(true));
         assert_eq!(with.len(), without.len() + 2 * (5 + 6));
         let value = |summary| serde_json::to_value(summary).expect("a summary is JSON");
-        for mapping in [None, Some(&mapping())] {
-            assert_eq!(
-                value(foliate(&with, mapping)),
-                value(foliate(&without, mapping))
-            );
-        }
+        assert_eq!(value(foliate(&with, None)), value(foliate(&without, None)));
         let product = |rows: &[Evidence]| {
             let all = metrics::summarize_product(rows, Some(&mapping()));
             serde_json::to_value(all).expect("a summary is JSON")
@@ -1102,7 +1116,7 @@ mod tests {
 
         use crate::{
             capture::{
-                OCR_LIMIT,
+                OCR_LIMIT, tesseract,
                 tests::{FIXTURE, children},
             },
             manual::tests::WAIT,
@@ -1122,7 +1136,15 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let _job = work.run(
             OCR_LIMIT * 2,
-            async { ocr::recognize(Path::new(FIXTURE), &Params::ENGLISH, OCR_LIMIT).await },
+            async {
+                ocr::recognize(
+                    &tesseract(),
+                    Path::new(FIXTURE),
+                    &Params::ENGLISH,
+                    OCR_LIMIT,
+                )
+                .await
+            },
             move |outcome| {
                 let _ = sender.send(outcome);
             },
@@ -1214,17 +1236,19 @@ mod tests {
     }
 
     #[test]
-    fn records_of_android_studio_are_written_and_left_unsummarised() {
+    fn records_of_android_studio_land_in_its_row_not_in_foliate_s() {
         let file = TempFile::new("studio");
         let mut writer = start(&file.0, Origin::AndroidStudio);
         press(&mut writer, 1, true, true);
         press(&mut writer, 2, true, true);
         let rows = read(&file.0);
         assert_eq!(rows.len(), 9);
-        assert!(
-            metrics::summarize(&rows, Some(&mapping()))
-                .iter()
-                .all(|s| s.warm_attempts == 0)
+        let studio = summary(&rows, Some(&mapping()), HarnessOrigin::AndroidStudio);
+        assert_eq!((studio.warm_attempts, studio.valid_latency_samples), (1, 1));
+        let foliate = foliate(&rows, Some(&mapping()));
+        assert_eq!(
+            (foliate.warm_attempts, foliate.valid_latency_samples),
+            (0, 0)
         );
     }
 

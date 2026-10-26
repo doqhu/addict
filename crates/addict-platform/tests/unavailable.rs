@@ -47,7 +47,7 @@ fn run_child() {
 
 fn child_body() {
     let (sender, receiver) = mpsc::channel();
-    let handle = shortcut::start("dev.addict.Test", "LOGO+q", BIND_LIMIT, move |event| {
+    let handle = shortcut::start("io.github.doqhu.Test", "LOGO+q", BIND_LIMIT, move |event| {
         let _ = sender.send(event);
     });
 

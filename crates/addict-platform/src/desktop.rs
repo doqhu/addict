@@ -287,7 +287,7 @@ pub fn install_icon(dir: &Path, app_id: &str, size: u32, png: &[u8]) -> io::Resu
 mod tests {
     use super::*;
 
-    const APP_ID: &str = "dev.addict.Test";
+    const APP_ID: &str = "io.github.doqhu.Test";
 
     struct TempDir(PathBuf);
 
@@ -375,7 +375,7 @@ mod tests {
                 "[Desktop Entry]",
                 "Type=Application",
                 "Name=Addict",
-                "Icon=dev.addict.Test",
+                "Icon=io.github.doqhu.Test",
                 "Exec=\"/usr/bin/addict\"",
                 "Terminal=false",
                 "NoDisplay=true",
@@ -405,7 +405,7 @@ mod tests {
         let temp = TempDir::new("new");
         let dir = temp.0.join("share/applications");
         let path = install(&dir, APP_ID, Path::new("/usr/bin/addict")).expect("install");
-        assert_eq!(path, dir.join("dev.addict.Test.desktop"));
+        assert_eq!(path, dir.join("io.github.doqhu.Test.desktop"));
         assert_eq!(
             std::fs::read_to_string(&path).expect("read entry"),
             entry_text(APP_ID, Path::new("/usr/bin/addict"))
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn install_rejects_an_app_id_that_is_not_a_file_name() {
         let temp = TempDir::new("id");
-        for app_id in ["../evil", "single", "a..b", "dev.addict/x", "dev.1addict"] {
+        for app_id in ["../evil", "single", "a..b", "io.github/x", "io.1github"] {
             let error = install(&temp.0, app_id, Path::new("/usr/bin/addict")).expect_err(app_id);
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
@@ -580,7 +580,7 @@ mod tests {
     fn icon_lives_in_the_hicolor_directory_of_its_size() {
         assert_eq!(
             icon_path(Path::new("/d/icons"), APP_ID, 128),
-            PathBuf::from("/d/icons/hicolor/128x128/apps/dev.addict.Test.png")
+            PathBuf::from("/d/icons/hicolor/128x128/apps/io.github.doqhu.Test.png")
         );
     }
 

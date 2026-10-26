@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    # addict-app needs GTK 4.20 or later, which Ubuntu does not ship.
+    container: registry.fedoraproject.org/fedora:43
+    env:
+      CARGO_HOME: /cargo
+      CARGO_TERM_COLOR: always
+    steps:
+      # Git before the checkout: without it, the checkout is a tarball, not a
+      # repository. Tesseract with English: the recognition tests run it.
+      # util-linux: runuser, which the image does not have.
+      - name: Install the build dependencies
+        run: >-
+          dnf -y install --setopt=install_weak_deps=False
+          gcc pkgconf-pkg-config gtk4-devel rust cargo clippy rustfmt git
+          tesseract tesseract-langpack-eng util-linux
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /cargo/registry
+            /cargo/git
+            target
+          key: test-fedora-43-${{ hashFiles('Cargo.lock') }}
+          restore-keys: test-fedora-43-
+
+      # The job runs as root, and root ignores file modes: the cache test of
+      # an unwritable directory would fail.
+      - name: Add the user that runs the tests
+        run: |
+          useradd --create-home tester
+          mkdir -p "$CARGO_HOME"
+          chown -R tester "$CARGO_HOME" "$GITHUB_WORKSPACE"
+
+      - name: Check the format
+        run: runuser -u tester -- cargo fmt --all -- --check
+
+      - name: Check the lints
+        run: >-
+          runuser -u tester --
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Test the workspace
+        run: runuser -u tester -- cargo test --locked --workspace
+
+  reuse:
+    runs-on: ubuntu-24.04
+    env:
+      REUSE_VERSION: 6.2.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install reuse
+        run: |
+          python3 -m venv "$RUNNER_TEMP/reuse"
+          "$RUNNER_TEMP/reuse/bin/pip" install --quiet "reuse==$REUSE_VERSION"
+
+      - name: Check the licensing
+        run: '"$RUNNER_TEMP/reuse/bin/reuse" lint'
+
+  secrets:
+    runs-on: ubuntu-24.04
+    env:
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      # The whole history goes public, so the scan reads all of it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -fsSL -o "$archive" "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "$GITLEAKS_SHA256  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+
+      - name: Scan the history with the default rules
+        run: '"$RUNNER_TEMP/gitleaks" git --redact --no-banner .'
+
+      - name: Scan the history for DeepL keys and home paths
+        run: '"$RUNNER_TEMP/gitleaks" git --config .github/secret-scan.toml --redact --no-banner .'

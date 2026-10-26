@@ -3,7 +3,7 @@
 //!
 //! The file is pretty-printed Turtle: one block per subject, the blocks
 //! separated by an empty line, one predicate per line. It is read the way
-//! the selection experiment read it (`experiments/exp9/sources.py`,
+//! the selection experiment read it (EXP-9 `sources.py`,
 //! `dbnary_entries`), for its definitions only:
 //!
 //! - an entry block is a block with `ontolex:LexicalEntry` and the

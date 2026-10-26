@@ -61,14 +61,14 @@ pub fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-pub const ENTRY: &str = "dev.addict.Addict.desktop";
+pub const ENTRY: &str = "io.github.doqhu.Addict.desktop";
 
 pub const ICON_SIZES: [u32; 4] = [64, 128, 256, 512];
 
 /// The icon of `size` pixels in the data directory `data`.
 pub fn icon_in(data: &Path, size: u32) -> PathBuf {
     data.join(format!(
-        "icons/hicolor/{size}x{size}/apps/dev.addict.Addict.png"
+        "icons/hicolor/{size}x{size}/apps/io.github.doqhu.Addict.png"
     ))
 }
 

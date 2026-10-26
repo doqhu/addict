@@ -190,7 +190,7 @@ fn relative_or_empty_config_home_falls_back_to_home() {
         let applications = homes.applications_entry();
         let autostart = temp
             .path()
-            .join(".config/autostart/dev.addict.Addict.desktop");
+            .join(".config/autostart/io.github.doqhu.Addict.desktop");
         assert!(applications.is_file());
         assert!(autostart.is_file());
 

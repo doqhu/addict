@@ -1,11 +1,9 @@
 /target
+/_bmad/
 /_bmad-output/
 /_bmad-output-bak/
-/_bmad/render/
-/experiments/exp4/upstream/
-/crates/addict-ui-gpui/target/
+# Data the removed experiments left on disk, among it the dictionary sources
+# the ignored real-source tests read.
+/experiments/
 __pycache__/
-/experiments/exp7/data/
-/experiments/exp8/screenshots/
-/experiments/exp9/data/
 /.idea/

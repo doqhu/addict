@@ -4,7 +4,7 @@
 //! Only the entries of the language asked for are read, by their
 //! `lang_code`; the others are skipped. Of an entry, these fields are read,
 //! the same ones the selection experiment counted
-//! (`experiments/exp9/sources.py`, `kaikki`):
+//! (EXP-9 `sources.py`, `kaikki`):
 //!
 //! - `word`, the headword as written;
 //! - `senses[].glosses`, the definition of each sense, its glosses joined

@@ -10,6 +10,12 @@ publish.workspace = true
 name = "addict"
 path = "src/main.rs"
 
+# The acceptance harness, not shipped. Its tests cover the command line;
+# `src/evidence.rs` includes and tests its rules.
+[[example]]
+name = "harness"
+test = true
+
 [dependencies]
 addict-core = { path = "../addict-core" }
 addict-deepl = { path = "../addict-deepl" }
@@ -34,5 +40,7 @@ wayland-protocols = { version = "=0.32.13", features = ["client"] }
 addict-core = { path = "../addict-core", features = ["sample"] }
 # The stub of the DeepL server, for the tests only.
 addict-deepl = { path = "../addict-deepl", features = ["stub"] }
-# The harness is the format oracle of the evidence tests; no broker, no probe.
-addict-exp4 = { path = "../addict-exp4", default-features = false }
+# For the acceptance harness, the `harness` example, whose format and rules
+# the evidence tests include.
+serde = { version = "=1.0.229", features = ["derive"] }
+tokio = { version = "=1.53.2", features = ["macros", "process", "rt", "time"] }

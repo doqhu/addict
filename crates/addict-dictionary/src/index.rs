@@ -1024,7 +1024,7 @@ mod tests {
                         && sense.part_of_speech.as_ref().unwrap().category == Some(category)
                 })
                 .unwrap();
-            assert_eq!(sense.entries, [entry.identity.clone()]);
+            assert_eq!(sense.entries, std::slice::from_ref(&entry.identity));
         }
         let explicit = article
             .senses

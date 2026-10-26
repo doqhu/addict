@@ -13,8 +13,10 @@
 //! database, a DBnary Turtle file and a MyThes thesaurus into the writer's
 //! input, with what the first two do the same way in `xml` and the SQLite
 //! file read by [`sqlite`], [`analysis`] is what a Spanish or Catalan verb
-//! form is, from the tags of a Kaikki conjugation table, and [`import`] is
-//! the logic of `addict import`.
+//! form is, from the tags of a Kaikki conjugation table, [`import`] is the
+//! logic of `addict import`, and [`sources`] is the one table of dictionary
+//! sources, with their licenses and credit lines, that CREDITS (the text
+//! its `credits` makes), About → Credits and the downloader read.
 
 #![forbid(unsafe_code)]
 
@@ -29,6 +31,7 @@ pub mod kaikki;
 pub mod lookup;
 pub mod mythes;
 pub mod oewn;
+pub mod sources;
 pub mod sqlite;
 pub mod wikdict;
 mod xml;

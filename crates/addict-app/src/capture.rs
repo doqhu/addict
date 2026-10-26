@@ -9,15 +9,26 @@
 //! cancelled, stopped at its deadline or dropped: the guard that deletes it
 //! lives inside the job. What the window does with the text is
 //! [`resident`](crate::resident)'s.
+//!
+//! Which Tesseract runs is decided in the job, before each recognition, by
+//! [`tesseract`]: the files `tesseract`, a program path, and `tessdata`, a
+//! data directory, of the configuration directory,
+//! [`addict_deepl::key::config_dir`], and the directory of the running
+//! executable go to [`Tesseract::locate`]. Each file is its first nonblank
+//! line, trimmed; a file that is missing, cannot be read, is not a regular
+//! file, holds no nonblank line or a relative path is unset, and nothing is
+//! said about it.
 
 use std::{
+    fs::{self, File},
+    io::{self, Read},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use addict_core::{APP_ID, translation::Source as Language};
 use addict_platform::{
-    ocr::{self, OcrFailure, Params},
+    ocr::{self, OcrFailure, Params, Tesseract},
     screenshot::{self, CaptureFailure},
     work::{Job, Outcome, Work},
 };
@@ -86,6 +97,55 @@ impl Capture {
     }
 }
 
+/// The file of the configuration directory that names the Tesseract program.
+const PROGRAM_FILE: &str = "tesseract";
+
+/// The file of the configuration directory that names the data directory.
+const TESSDATA_FILE: &str = "tessdata";
+
+/// How many bytes of either file are read: a path at most `PATH_MAX`.
+const SETTING_LIMIT: u64 = 4096;
+
+/// The Tesseract of the one rule, from the two setting files and the
+/// directory of the running executable. This reads files, so it runs on the
+/// runner.
+pub fn tesseract() -> Tesseract {
+    let config = addict_deepl::key::config_dir();
+    let setting = |name| config.as_ref().and_then(|dir| setting(&dir.join(name)));
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_owned));
+    Tesseract::locate(
+        setting(PROGRAM_FILE).as_deref(),
+        setting(TESSDATA_FILE).as_deref(),
+        exe_dir.as_deref(),
+    )
+}
+
+/// The path the setting file at `path` names: its first nonblank line,
+/// trimmed; `None` when there is none or the file cannot be read.
+fn setting(path: &Path) -> Option<PathBuf> {
+    let content = read_setting(path).ok()?;
+    let line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    Some(PathBuf::from(line))
+}
+
+/// The first bytes of the regular file at `path`, as text.
+fn read_setting(path: &Path) -> io::Result<String> {
+    // Before opening: opening a pipe would wait for its writer.
+    if !fs::metadata(path)?.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut content = String::new();
+    File::open(path)?
+        .take(SETTING_LIMIT)
+        .read_to_string(&mut content)?;
+    Ok(content)
+}
+
 /// The milliseconds of `duration`.
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
@@ -130,19 +190,25 @@ pub fn start(
             Err(_) => return failed(Failure::CaptureTimedOut),
         };
         let params = Params::in_language(ocr_language(language));
-        let mut capture = recognize_snapshot(path, &params, on_captured).await;
+        let tesseract = tesseract();
+        let mut capture = recognize_snapshot(&tesseract, path, &params, on_captured).await;
         capture.timing.capture_ms = capture_ms;
         capture
     };
     Ok(work.run(JOB_LIMIT, job, on_outcome))
 }
 
-/// Recognizes the snapshot at `path` with `params` and deletes it, however
-/// this ends. The timing holds the recognition alone.
-async fn recognize_snapshot(path: PathBuf, params: &Params, on_captured: impl FnOnce()) -> Capture {
+/// Recognizes the snapshot at `path` with `tesseract` and `params` and
+/// deletes it, however this ends. The timing holds the recognition alone.
+async fn recognize_snapshot(
+    tesseract: &Tesseract,
+    path: PathBuf,
+    params: &Params,
+    on_captured: impl FnOnce(),
+) -> Capture {
     let snapshot = Snapshot(path);
     on_captured();
-    let recognition = ocr::recognize(snapshot.path(), params, OCR_LIMIT).await;
+    let recognition = ocr::recognize(tesseract, snapshot.path(), params, OCR_LIMIT).await;
     drop(snapshot);
     // Without an image nothing was recognized, so nothing was measured.
     let recognition_ms = match &recognition.result {
@@ -211,13 +277,13 @@ pub(crate) mod tests {
 
     use super::{
         CAPTURE_LIMIT, Capture, Captured, Failure, JOB_LIMIT, OCR_LIMIT, Timing, captured_result,
-        ocr_language, recognize_snapshot, start,
+        ocr_language, recognize_snapshot, setting, start, tesseract,
     };
     use crate::manual::tests::WAIT;
 
     pub(crate) const FIXTURE: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../experiments/exp4/ocr-fixture.png"
+        "/../addict-platform/tests/data/ocr-fixture.png"
     );
 
     /// Held by every test that starts a child process, so a test that counts
@@ -250,13 +316,17 @@ pub(crate) mod tests {
             let told = told.clone();
             move || told.store(true, Ordering::SeqCst)
         };
-        let _job = work.run(
-            JOB_LIMIT,
-            recognize_snapshot(path.clone(), &Params::ENGLISH, on_captured),
-            move |outcome| {
-                let _ = sender.send(outcome);
-            },
-        );
+        let shot = path.clone();
+        let _job =
+            work.run(
+                JOB_LIMIT,
+                async move {
+                    recognize_snapshot(&tesseract(), shot, &Params::ENGLISH, on_captured).await
+                },
+                move |outcome| {
+                    let _ = sender.send(outcome);
+                },
+            );
         let outcome = receiver.recv_timeout(WAIT).expect("outcome");
         let (captured, timing) = captured_result(outcome).expect("shown");
         assert_eq!(
@@ -282,11 +352,15 @@ pub(crate) mod tests {
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
         let (captured, recognizing) = mpsc::channel();
+        let shot = path.clone();
         let job = work.run(
             JOB_LIMIT,
-            recognize_snapshot(path.clone(), &Params::ENGLISH, move || {
-                let _ = captured.send(());
-            }),
+            async move {
+                recognize_snapshot(&tesseract(), shot, &Params::ENGLISH, move || {
+                    let _ = captured.send(());
+                })
+                .await
+            },
             move |outcome| {
                 let _ = sender.send(outcome);
             },
@@ -307,7 +381,7 @@ pub(crate) mod tests {
         let (sender, receiver) = mpsc::channel();
         let _job = work.run(
             JOB_LIMIT,
-            recognize_snapshot(path, &Params::ENGLISH, || {}),
+            async move { recognize_snapshot(&tesseract(), path, &Params::ENGLISH, || {}).await },
             move |outcome| {
                 let _ = sender.send(outcome);
             },
@@ -324,20 +398,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_setting_is_its_first_nonblank_line_trimmed() {
+        let directory = std::env::temp_dir().join(format!(
+            "addict-capture-test-setting-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).expect("directory");
+        let file = directory.join("tesseract");
+        std::fs::write(&file, "\n  \n  /opt/t/tesseract  \n/other\n").expect("setting");
+        assert_eq!(setting(&file), Some(PathBuf::from("/opt/t/tesseract")));
+        // Blank, missing, not a regular file, not text: unset.
+        std::fs::write(&file, " \n\t\n").expect("setting");
+        assert_eq!(setting(&file), None);
+        std::fs::write(&file, b"/opt/\xff\n").expect("setting");
+        assert_eq!(setting(&file), None);
+        assert_eq!(setting(&directory.join("absent")), None);
+        assert_eq!(setting(&directory), None);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn every_language_is_recognized_with_its_own_data() {
         assert_eq!(Language::ALL.map(ocr_language), ["eng", "spa", "cat"]);
     }
 
-    /// Whether Tesseract lists the data `language` as installed.
+    /// Whether the Tesseract of the rule lists the data `language` as
+    /// installed.
     fn installed(language: &str) -> bool {
-        std::process::Command::new("tesseract")
-            .arg("--list-langs")
-            .output()
-            .is_ok_and(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .any(|line| line.trim() == language)
-            })
+        let tesseract = tesseract();
+        let mut command = std::process::Command::new(tesseract.program());
+        if let Some(tessdata) = tesseract.tessdata() {
+            command.arg("--tessdata-dir").arg(tessdata);
+        }
+        command.arg("--list-langs").output().is_ok_and(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.trim() == language)
+        })
     }
 
     #[test]
@@ -353,7 +451,7 @@ pub(crate) mod tests {
         let params = Params::in_language(ocr_language(Language::Ca));
         let _job = work.run(
             JOB_LIMIT,
-            async move { recognize_snapshot(path, &params, || {}).await },
+            async move { recognize_snapshot(&tesseract(), path, &params, || {}).await },
             move |outcome| {
                 let _ = sender.send(outcome);
             },
