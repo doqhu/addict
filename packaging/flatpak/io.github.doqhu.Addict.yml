@@ -7,6 +7,22 @@
 #
 # The build has no network: the crates come from cargo-sources.json, which
 # scripts/flatpak-sources.sh regenerates from Cargo.lock.
+#
+# flatpak-builder-lint checks a build the way Flathub's build makes it: the
+# screenshots mirrored, with full URLs, and committed to their own ref.
+#
+#   flatpak run org.flatpak.Builder --force-clean \
+#       --repo=.flatpak-builder/repo \
+#       --mirror-screenshots-url=https://dl.flathub.org/media/ \
+#       --compose-url-policy=full \
+#       .flatpak-builder/build packaging/flatpak/io.github.doqhu.Addict.yml
+#   flatpak run --command=ostree org.flatpak.Builder commit \
+#       --repo=.flatpak-builder/repo \
+#       --canonical-permissions --branch=screenshots/$(uname -m) \
+#       .flatpak-builder/build/files/share/app-info/media
+#   flatpak run --command=flatpak-builder-lint org.flatpak.Builder \
+#       manifest packaging/flatpak/io.github.doqhu.Addict.yml
+#   (likewise builddir .flatpak-builder/build and repo .flatpak-builder/repo)
 id: io.github.doqhu.Addict
 runtime: org.gnome.Platform
 runtime-version: '50'
@@ -128,6 +144,7 @@ modules:
       - cargo --offline build --release --locked -p addict-app
       - install -Dm755 target/release/addict /app/bin/addict
       - install -Dm644 data/io.github.doqhu.Addict.desktop /app/share/applications/io.github.doqhu.Addict.desktop
+      - install -Dm644 data/io.github.doqhu.Addict.metainfo.xml /app/share/metainfo/io.github.doqhu.Addict.metainfo.xml
       - |
         for size in 64 128 256 512; do
           install -Dm644 crates/addict-app/icons/$size.png \

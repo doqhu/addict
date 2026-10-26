@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.doqhu.Addict</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <!-- addict, the crates built into it, Tesseract and its data, and Leptonica;
+       see the comment above the modules in packaging/flatpak. -->
+  <project_license>MIT AND Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND ISC AND Unicode-3.0 AND Unlicense AND Zlib AND CDLA-Permissive-2.0 AND bzip2-1.0.6 AND blessing</project_license>
+
+  <name>Addict</name>
+  <summary>Hotkey dictionary and translator</summary>
+  <developer id="io.github.doqhu">
+    <name>Ilia Gordeev</name>
+  </developer>
+
+  <description>
+    <p>
+      Addict is a hotkey translator for readers of English, Spanish and
+      Catalan. Select or copy a word or a sentence anywhere, press the
+      shortcut, and a small window shows the dictionary article of the word:
+      its senses, synonyms, transcriptions with recordings, and its Russian
+      translations.
+    </p>
+    <ul>
+      <li>One global shortcut reads the selected text, or the clipboard when nothing is selected, the same way in every application</li>
+      <li>Offline dictionary lookup in English, Spanish and Catalan, by the word as written and by its dictionary forms</li>
+      <li>Russian translations from the dictionaries and, online with a DeepL API key, of the clicked word in the context of its sentence and of the sentence itself</li>
+      <li>Capture: text that cannot be selected, such as text in an image or a video, is read from an area of the screen with Tesseract OCR</li>
+      <li>A Russian word is looked up the other way: its translations into the reading language</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.doqhu.Addict.desktop</launchable>
+
+  <url type="homepage">https://github.com/doqhu/addict</url>
+  <url type="bugtracker">https://github.com/doqhu/addict/issues</url>
+  <url type="vcs-browser">https://github.com/doqhu/addict</url>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <content_rating type="oars-1.1"/>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>The article of an English word</caption>
+      <image>https://raw.githubusercontent.com/doqhu/addict/ba021abdf6b4a1de547cc7fd299c8bede0cb57cf/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+
+  <releases>
+    <release version="0.1.0" date="2026-10-26"/>
+  </releases>
+</component>

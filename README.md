@@ -195,9 +195,10 @@ the maintainer. Code comments were written by AI along with the code.
   check and acceptance scripts, the development Flatpak manifest
   (`packaging/flatpak`), its sources script (`scripts/flatpak-sources.sh`),
   the crate license list's configuration (`packaging/licenses`) and script
-  (`scripts/crate-licenses.sh`), the desktop entry (`data`), the AppImage
-  recipe and the project configuration files (`Cargo.toml`, `REUSE.toml`,
-  `.gitignore`) are written by AI under the maintainer's direction.
+  (`scripts/crate-licenses.sh`), the desktop entry and the MetaInfo
+  (`data`), the AppImage recipe and the project configuration files
+  (`Cargo.toml`, `REUSE.toml`, `.gitignore`) are written by AI under the
+  maintainer's direction.
 
 ### Artwork
 

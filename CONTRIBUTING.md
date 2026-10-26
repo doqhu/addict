@@ -91,4 +91,6 @@ your contribution is licensed under it too. `REUSE.toml` covers every file,
 so a new file needs no license header. Data from another source needs its own
 entry in `crates/addict-dictionary/src/sources.rs`, which `CREDITS` is
 generated from. Any other file with third-party content, such as a screenshot
-that shows dictionary text, needs its own annotation in `REUSE.toml`.
+that shows dictionary text, needs its own annotation in `REUSE.toml`; so does
+a file whose format asks for another license, such as the MetaInfo
+(CC0-1.0).

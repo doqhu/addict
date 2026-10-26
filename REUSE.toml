@@ -9,8 +9,8 @@ SPDX-FileCopyrightText = "2026 Ilia Gordeev <ilya.tanat@gmail.com>"
 SPDX-License-Identifier = "MIT"
 
 # The annotations below record where a file came from, or give a file with
-# third-party content its own license; where several annotations match a file,
-# the last one wins.
+# third-party content, or a file whose format asks for another license, its
+# own license; where several annotations match a file, the last one wins.
 
 [[annotations]]
 path = "crates/addict-app/icons/*.png"
@@ -52,3 +52,10 @@ precedence = "override"
 SPDX-FileCopyrightText = "The authors of the Rust crates listed in the file"
 SPDX-License-Identifier = "MIT AND Apache-2.0 AND BSD-3-Clause AND ISC AND Unicode-3.0 AND Unlicense AND Zlib AND CDLA-Permissive-2.0 AND bzip2-1.0.6"
 SPDX-FileComment = "Generated from Cargo.lock by scripts/crate-licenses.sh."
+
+# AppStream asks for metadata under CC0-1.0.
+[[annotations]]
+path = "data/io.github.doqhu.Addict.metainfo.xml"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Ilia Gordeev <ilya.tanat@gmail.com>"
+SPDX-License-Identifier = "CC0-1.0"
