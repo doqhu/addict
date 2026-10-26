@@ -25,6 +25,15 @@ finish-args:
   - --talk-name=org.kde.StatusNotifierWatcher
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
+# Each module installs its licenses under share/licenses/io.github.doqhu.Addict.
+# Together they make the MetaInfo's project_license:
+#   MIT AND Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND ISC AND
+#   Unicode-3.0 AND Unlicense AND Zlib AND CDLA-Permissive-2.0 AND
+#   bzip2-1.0.6 AND blessing
+# addict is MIT; the crates' licenses are those of
+# packaging/licenses/crate-licenses.txt, blessing being SQLite's, which
+# rusqlite builds in; tesseract and its data are Apache-2.0; Leptonica is
+# BSD-2-Clause.
 modules:
   # Leptonica and Tesseract for screen capture: addict runs the tesseract
   # beside its own executable with the data in ../share/tessdata. Kept: the
@@ -38,6 +47,9 @@ modules:
       - -DBUILD_SHARED_LIBS=ON
       - -DBUILD_PROG=OFF
       - -DSW_BUILD=OFF
+    # The notice that must ship with the binary.
+    license-files:
+      - leptonica-license.txt
     cleanup:
       - /include
       - /lib/cmake
@@ -82,7 +94,12 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm644 -t /app/share/tessdata eng.traineddata spa.traineddata cat.traineddata
+    license-files:
+      - LICENSE
     sources:
+      - type: file
+        url: https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/LICENSE
+        sha256: cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
       - type: file
         url: https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/eng.traineddata
         sha256: 7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2
@@ -101,6 +118,12 @@ modules:
         # configuration that points at them.
         CARGO_HOME: /run/build/addict/cargo
         CARGO_NET_OFFLINE: 'true'
+    # CREDITS also names the dictionary sources, which the bundle does not
+    # carry: the app downloads them.
+    license-files:
+      - LICENSE
+      - CREDITS
+      - packaging/licenses/crate-licenses.txt
     build-commands:
       - cargo --offline build --release --locked -p addict-app
       - install -Dm755 target/release/addict /app/bin/addict

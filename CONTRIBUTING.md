@@ -67,6 +67,9 @@ The Flatpak build has no network, so it takes the crates from
 `packaging/flatpak/cargo-sources.json`. If your change touches `Cargo.lock`,
 regenerate that file with `scripts/flatpak-sources.sh` (it needs
 `flatpak-cargo-generator` from flatpak-builder-tools) and commit it too.
+Regenerate the list of the crates' licenses the same way, with
+`scripts/crate-licenses.sh` (it needs `cargo-about` 0.9.3), and commit
+`packaging/licenses/crate-licenses.txt`.
 
 ## The workspace
 
