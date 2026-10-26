@@ -59,9 +59,10 @@ of the product without the test features, all the tests, and a guard that
 keeps GTK out of every crate but `addict-app`. Some tests run Tesseract, so
 install it with its English data.
 
-CI on GitHub runs the format and lint checks, the tests, `reuse lint` and a
-secret scan of the whole history, but not the build without the test
-features or the GTK guard, so run `scripts/check.sh` yourself.
+CI on GitHub runs the format and lint checks, the tests, `reuse lint`, a
+secret scan of the whole history, and builds the Flatpak and checks it with
+`flatpak-builder-lint`, but not the build without the test features or the
+GTK guard, so run `scripts/check.sh` yourself.
 
 The Flatpak build has no network, so it takes the crates from
 `packaging/flatpak/cargo-sources.json`. If your change touches `Cargo.lock`,
@@ -69,7 +70,8 @@ regenerate that file with `scripts/flatpak-sources.sh` (it needs
 `flatpak-cargo-generator` from flatpak-builder-tools) and commit it too.
 Regenerate the list of the crates' licenses the same way, with
 `scripts/crate-licenses.sh` (it needs `cargo-about` 0.9.3), and commit
-`packaging/licenses/crate-licenses.txt`.
+`packaging/licenses/crate-licenses.txt`. CI regenerates both files and fails
+when either differs from the committed one.
 
 ## The workspace
 
