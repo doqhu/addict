@@ -8,7 +8,7 @@ a sentence and DeepL translates the word in that sentence, and the sentence
 itself, into Russian. Text that cannot be selected, such as an image or a
 video, can be captured from the screen and read with Tesseract OCR.
 
-![The addict window with the article of an English word](docs/screenshot.png)
+![The addict window with the article of a Catalan word](docs/screenshot.png)
 
 ## Features
 
