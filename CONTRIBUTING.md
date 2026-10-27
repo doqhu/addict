@@ -73,6 +73,10 @@ Regenerate the list of the crates' licenses the same way, with
 `packaging/licenses/crate-licenses.txt`. CI regenerates both files and fails
 when either differs from the committed one.
 
+Before you try a Flatpak you built from `packaging/flatpak`, run
+`addict uninstall` and quit the running addict, as the
+[README](README.md#build-from-source) says.
+
 ## The workspace
 
 - `crates/addict-core` -- the product identity and the domain types.

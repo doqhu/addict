@@ -78,6 +78,12 @@ directory; the entry also starts addict at login. The entry names the program
 by its full path, so run `install` again if you move the program.
 `addict uninstall` removes what `install` wrote.
 
+Before you switch to a Flatpak of addict (from Flathub, or built from
+`packaging/flatpak`), run `addict uninstall` and quit the running addict:
+choose Exit in its top-bar menu, or run `pkill -x addict` when there is no
+icon. The entry `install` wrote hides the Flatpak's, and a running addict
+built from source answers in place of the Flatpak.
+
 On the first start, GNOME asks you to confirm the shortcut; addict suggests
 Super+Q. You can change it later in Settings, from the top-bar icon.
 

@@ -42,10 +42,8 @@ finish-args:
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
 # Each module installs its licenses under share/licenses/io.github.doqhu.Addict.
-# Together they make the MetaInfo's project_license:
-#   MIT AND Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND ISC AND
-#   Unicode-3.0 AND Unlicense AND Zlib AND CDLA-Permissive-2.0 AND
-#   bzip2-1.0.6 AND blessing
+# Together they make the project_license of
+# data/io.github.doqhu.Addict.metainfo.xml, the one place it is written:
 # addict is MIT; the crates' licenses are those of
 # packaging/licenses/crate-licenses.txt, blessing being SQLite's, which
 # rusqlite builds in; tesseract and its data are Apache-2.0; Leptonica is
