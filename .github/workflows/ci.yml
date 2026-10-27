@@ -93,3 +93,82 @@ jobs:
 
       - name: Scan the history for DeepL keys and home paths
         run: '"$RUNNER_TEMP/gitleaks" git --config .github/secret-scan.toml --redact --no-banner .'
+
+  # The Flatpak's generated files: the crate sources and the crate licenses
+  # must be regenerated with every change to Cargo.lock.
+  flatpak-sources:
+    runs-on: ubuntu-24.04
+    env:
+      GENERATOR_REVISION: 9d86d336a39b9af38b86f114b6ce5820fe260f91
+      GENERATOR_SHA256: 0a2db6be87d75910facef28ab46d4d6460802e8419ab850d0caa6a364d26b380
+      CARGO_ABOUT_VERSION: 0.9.3
+      CARGO_ABOUT_SHA256: 3ad1e94ea1e63d69d1961f4fb15ccbbe9575d906111f96d2cb4dce6df48f71b4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The dependencies the script's header names, at the versions the
+      # committed file was made with. The venv's python3 runs the script.
+      - name: Install flatpak-cargo-generator
+        run: |
+          venv="$RUNNER_TEMP/generator"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --quiet aiohttp==3.14.5 PyYAML==6.0.3 tomlkit==0.15.2
+          script="$venv/bin/flatpak-cargo-generator"
+          curl -fsSL -o "$script" "https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/$GENERATOR_REVISION/cargo/flatpak-cargo-generator.py"
+          echo "$GENERATOR_SHA256  $script" | sha256sum --check --strict
+          chmod +x "$script"
+          echo "$venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install cargo-about
+        run: |
+          name="cargo-about-$CARGO_ABOUT_VERSION-x86_64-unknown-linux-musl"
+          archive="$RUNNER_TEMP/cargo-about.tar.gz"
+          curl -fsSL -o "$archive" "https://github.com/EmbarkStudios/cargo-about/releases/download/$CARGO_ABOUT_VERSION/$name.tar.gz"
+          echo "$CARGO_ABOUT_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/bin" --strip-components=1 "$name/cargo-about"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Regenerate the crate sources
+        run: scripts/flatpak-sources.sh
+
+      - name: Regenerate the crate licenses
+        run: scripts/crate-licenses.sh
+
+      - name: Check that the committed files are current
+        run: |
+          if ! git diff --exit-code --stat -- packaging/flatpak/cargo-sources.json packaging/licenses/crate-licenses.txt; then
+            echo "::error::The committed files differ from what Cargo.lock and packaging/licenses produce: run scripts/flatpak-sources.sh and scripts/crate-licenses.sh and commit what they write."
+            exit 1
+          fi
+
+  flatpak:
+    needs: flatpak-sources
+    runs-on: ubuntu-24.04
+    # flatpak-builder's sandbox needs a privileged container.
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-50
+      options: --privileged
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The screenshots mirrored, with full URLs and committed to their own
+      # ref, as Flathub's build makes them: the repo lint needs that. The
+      # build and the repo stay outside the checkout, which the addict module
+      # copies as its source. The bundle is uploaded as a workflow artifact.
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+        with:
+          manifest-path: packaging/flatpak/io.github.doqhu.Addict.yml
+          bundle: io.github.doqhu.Addict.flatpak
+          mirror-screenshots-url: https://dl.flathub.org/media/
+          build-dir: ../flatpak-build
+          repo-dir: ../flatpak-repo
+
+      - name: Lint the manifest
+        run: flatpak-builder-lint manifest packaging/flatpak/io.github.doqhu.Addict.yml
+
+      - name: Lint the build
+        run: flatpak-builder-lint builddir ../flatpak-build
+
+      - name: Lint the repository
+        run: flatpak-builder-lint repo ../flatpak-repo

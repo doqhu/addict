@@ -8,7 +8,7 @@ a sentence and DeepL translates the word in that sentence, and the sentence
 itself, into Russian. Text that cannot be selected, such as an image or a
 video, can be captured from the screen and read with Tesseract OCR.
 
-![The addict window with the article of an English word](docs/screenshot.png)
+![The addict window with the article of a Catalan word](docs/screenshot.png)
 
 ## Features
 
@@ -77,6 +77,12 @@ target/release/addict
 directory; the entry also starts addict at login. The entry names the program
 by its full path, so run `install` again if you move the program.
 `addict uninstall` removes what `install` wrote.
+
+Before you switch to a Flatpak of addict (from Flathub, or built from
+`packaging/flatpak`), run `addict uninstall` and quit the running addict:
+choose Exit in its top-bar menu, or run `pkill -x addict` when there is no
+icon. The entry `install` wrote hides the Flatpak's, and a running addict
+built from source answers in place of the Flatpak.
 
 On the first start, GNOME asks you to confirm the shortcut; addict suggests
 Super+Q. You can change it later in Settings, from the top-bar icon.
@@ -187,14 +193,18 @@ the maintainer. Code comments were written by AI along with the code.
 
 ### Packaging, CI and project configuration
 
-- **Flatpak manifest:** written by the maintainer, with no AI-generated or
-  AI-assisted content.
+- **Flathub manifest:** written by the maintainer, with no AI-generated or
+  AI-assisted content. It is separate from the development manifest below.
 - **Flathub submission:** the pull request, its description, commit messages
   and replies are written by the maintainer, without AI.
 - **Everything else:** the CI workflows, the secret-scan configuration, the
-  check and acceptance scripts, the AppImage recipe and the project
-  configuration files (`Cargo.toml`, `REUSE.toml`, `.gitignore`) are written
-  by AI under the maintainer's direction.
+  check and acceptance scripts, the development Flatpak manifest
+  (`packaging/flatpak`), its sources script (`scripts/flatpak-sources.sh`),
+  the crate license list's configuration (`packaging/licenses`) and script
+  (`scripts/crate-licenses.sh`), the desktop entry and the MetaInfo
+  (`data`), the AppImage recipe and the project configuration files
+  (`Cargo.toml`, `REUSE.toml`, `.gitignore`) are written by AI under the
+  maintainer's direction.
 
 ### Artwork
 

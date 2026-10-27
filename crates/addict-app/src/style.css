@@ -243,6 +243,14 @@ window.addict scrolledwindow.result .result-content {
   margin-right: 20px;
 }
 
+/* The result in a face that puts the stress mark of a Russian word on its
+ * vowel: Adwaita Sans has no anchor for a combining acute over a Cyrillic
+ * letter and draws it after the vowel. Noto Sans where the system has it,
+ * else Cantarell, which the GNOME runtime of the Flatpak always has. */
+window.addict .result-content {
+  font-family: "Noto Sans", "Cantarell", sans-serif;
+}
+
 /* The card of the word: the one raised surface of the window. */
 window.addict .article-card {
   background: var(--surface);

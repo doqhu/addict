@@ -21,14 +21,18 @@ the maintainer. Code comments were written by AI along with the code.
 
 ### Packaging, CI and project configuration
 
-- **Flatpak manifest:** written by the maintainer, with no AI-generated or
-  AI-assisted content.
+- **Flathub manifest:** written by the maintainer, with no AI-generated or
+  AI-assisted content. It is separate from the development manifest below.
 - **Flathub submission:** the pull request, its description, commit messages
   and replies are written by the maintainer, without AI.
 - **Everything else:** the CI workflows, the secret-scan configuration, the
-  check and acceptance scripts, the AppImage recipe and the project
-  configuration files (`Cargo.toml`, `REUSE.toml`, `.gitignore`) are written
-  by AI under the maintainer's direction.
+  check and acceptance scripts, the development Flatpak manifest
+  (`packaging/flatpak`), its sources script (`scripts/flatpak-sources.sh`),
+  the crate license list's configuration (`packaging/licenses`) and script
+  (`scripts/crate-licenses.sh`), the desktop entry and the MetaInfo
+  (`data`), the AppImage recipe and the project configuration files
+  (`Cargo.toml`, `REUSE.toml`, `.gitignore`) are written by AI under the
+  maintainer's direction.
 
 ### Artwork
 

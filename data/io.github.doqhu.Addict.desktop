@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Addict
+Comment=Translate the selected text or a part of the screen
+Icon=io.github.doqhu.Addict
+Exec=addict
+Terminal=false
+Categories=Utility;TextTools;Dictionary;
+Keywords=translate;translation;dictionary;OCR;
+StartupNotify=true

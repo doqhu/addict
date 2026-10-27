@@ -1,0 +1,20 @@
+Licenses of the Rust crates in addict
+=====================================
+
+The addict binary is built with these crates. Each license below is
+followed by the crates under it and its text.
+
+This file is generated from Cargo.lock by scripts/crate-licenses.sh;
+do not edit it.
+{{#each licenses}}
+
+------------------------------------------------------------------------
+{{{name}}} ({{id}})
+
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+{{/each}}
