@@ -10,8 +10,23 @@ use std::time::{Duration, Instant};
 /// Runs the test `test_name` of this test binary in a child process with the
 /// `env` pairs set, and asserts that it passed within `timeout`.
 pub fn run_child(test_name: &str, timeout: Duration, env: &[(&str, &OsStr)]) {
-    let mut child = Command::new(std::env::current_exe().expect("test binary path"))
-        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+    let mut command = Command::new(std::env::current_exe().expect("test binary path"));
+    command.args(["--exact", test_name, "--nocapture", "--test-threads=1"]);
+    run_test(command, timeout, env);
+}
+
+/// Runs one test with a private D-Bus daemon, never the user's session bus.
+pub fn run_private_bus(test_name: &str, timeout: Duration, env: &[(&str, &OsStr)]) {
+    let mut command = Command::new("dbus-run-session");
+    command
+        .arg("--")
+        .arg(std::env::current_exe().expect("test binary path"))
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"]);
+    run_test(command, timeout, env);
+}
+
+fn run_test(mut command: Command, timeout: Duration, env: &[(&str, &OsStr)]) {
+    let mut child = command
         .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

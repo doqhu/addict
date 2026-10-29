@@ -162,6 +162,7 @@ fn refuses_a_symlink_and_removes_neither() {
         let (link, other) = (&entries[link_at], &entries[1 - link_at]);
         installed(&homes);
         let own = std::fs::read_to_string(other).expect("read entry");
+        let linked = std::fs::read_to_string(link).expect("read linked entry");
         let target = temp.path().join("target.desktop");
         std::fs::rename(link, &target).expect("move entry");
         std::os::unix::fs::symlink(&target, link).expect("symlink");
@@ -171,7 +172,7 @@ fn refuses_a_symlink_and_removes_neither() {
         assert!(output.stdout.is_empty());
         let stderr = text(&output.stderr);
         assert!(stderr.contains(&shown(link)), "{stderr}");
-        assert_eq!(std::fs::read_to_string(&target).expect("read"), own);
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), linked);
         let metadata = std::fs::symlink_metadata(link).expect("metadata");
         assert!(metadata.is_symlink());
         assert_eq!(std::fs::read_to_string(other).expect("read"), own);

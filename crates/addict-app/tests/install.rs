@@ -48,10 +48,10 @@ fn writes_both_entries_and_prints_their_paths() {
             .any(|line| line == "Icon=io.github.doqhu.Addict"),
         "{written}"
     );
-    // The same text in both directories.
+    // Only the login entry starts silently.
     assert_eq!(
         std::fs::read_to_string(&autostart).expect("read entry"),
-        written
+        written.replace(&exec, &format!("{exec} --background"))
     );
     // Each icon is a square PNG of its directory's size with the marker.
     for (size, icon) in common::ICON_SIZES.into_iter().zip(homes.icons()) {
@@ -99,9 +99,15 @@ fn reinstall_overwrites_its_own_entries() {
     let output = homes.run("install");
     assert!(output.status.success(), "{}", text(&output.stderr));
     assert_eq!(lines(&output.stdout).len(), 6);
-    for entry in entries(&homes) {
-        assert_eq!(std::fs::read_to_string(&entry).expect("read entry"), first);
-    }
+    assert_eq!(
+        std::fs::read_to_string(homes.applications_entry()).expect("read entry"),
+        first
+    );
+    let exec = format!("Exec=\"{}\"", binary().display());
+    assert_eq!(
+        std::fs::read_to_string(homes.autostart_entry()).expect("read login entry"),
+        first.replace(&exec, &format!("{exec} --background"))
+    );
     for (icon, original) in homes.icons().iter().zip(&icons) {
         assert_eq!(&std::fs::read(icon).expect("read icon"), original);
     }

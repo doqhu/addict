@@ -16,8 +16,9 @@
 //! and the index of the other source is not touched. The command prints the
 //! path of the index and the counts of its headwords and exception forms.
 //!
-//! With no arguments the process is the resident application: one hidden
-//! window, shown each time the global shortcut is pressed. On each press the
+//! With no arguments the process shows the resident application's main window.
+//! `--background` starts it silently for login. Closing the window keeps the
+//! resident available for clipboard and screenshot shortcuts. On each clipboard press the
 //! window shows the source of the input and the state derived from the input
 //! contract; Esc hides it, as the title-bar close does.
 //!
@@ -157,9 +158,9 @@
 //! The application has an icon in the top bar, a StatusNotifierItem, with a
 //! menu of Show, Settings, About and Exit, which a click on the icon opens.
 //! Show shows the window as a repeated launch does, without a read. Settings
-//! shows a window with the trigger of the shortcut, the file of the DeepL key
-//! and the state it is in, never the key, and a button that asks the portal
-//! for its dialog to change the shortcut; the line there says when it cannot.
+//! is also reachable from the main window. It shows both shortcut assignments,
+//! the DeepL key file and its state, never the key, and a button that asks
+//! the portal to configure both actions, with live assignment updates.
 //! About shows a window with the icon, the name, the version and the license
 //! of the application, and a Credits page that lists every dictionary and OCR
 //! source with its credit line. Exit ends the application. A session with no
@@ -167,13 +168,15 @@
 //! the icon appears when a watcher comes, such as a shell extension that
 //! starts after the application.
 //!
-//! The application is unique: a second launch exits at once and makes the
-//! resident instance show its window as it is, without a read.
+//! The application is unique: each invocation forwards its mode to the resident.
+//! A normal launch shows the window as it is, without a read; a background
+//! launch leaves it as it is. The screenshot action opens the same interactive
+//! capture flow as Capture, using the reading language and preserving cancellation.
 //!
 //! An attempt to bind the shortcut that ends without one, for any reason or
-//! for none within `resident::BIND_LIMIT`, shows the window by itself with a
-//! line saying so and Retry. Retry starts a new attempt; a bound shortcut
-//! removes the line.
+//! for none within `resident::BIND_LIMIT`, keeps a line saying so and Retry
+//! in the window. Background login stays silent. Retry starts a new attempt;
+//! an initialized session removes the failure line even with unassigned actions.
 //!
 //! Before GTK starts, the resident lets the Vulkan loader list only the
 //! driver of the GPU that drives the display, so that the first window does
@@ -244,10 +247,18 @@ use addict_dictionary::import;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "addict", version, about = "Addict translator")]
+#[command(
+    name = "addict",
+    version,
+    about = "Addict translator",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Start silently for login; normal launches show the main window
+    #[arg(long)]
+    background: bool,
     /// Append measurement evidence of each activation to this file
     #[arg(long, hide = true, value_name = "FILE", requires = "origin")]
     evidence: Option<PathBuf>,
@@ -279,7 +290,10 @@ fn main() -> ExitCode {
         None => {
             gpu::select_vulkan_drivers();
             match open_evidence(cli.evidence.zip(cli.origin)) {
-                Ok(writer) => resident::run(writer),
+                Ok(writer) => resident::run(
+                    resident::LaunchMode::from_background(cli.background),
+                    writer,
+                ),
                 Err(message) => fail(&message),
             }
         }

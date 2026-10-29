@@ -45,9 +45,8 @@ pub fn install_entries() -> Result<Vec<PathBuf>, String> {
         .map_err(|e| format!("cannot resolve the path of this binary: {e}"))?;
     let (dirs, icons) = checked_dirs()?;
     let mut written = Vec::new();
-    for dir in &dirs {
-        written.push(desktop::install(dir, APP_ID, &exec).map_err(|e| e.to_string())?);
-    }
+    written.push(desktop::install(&dirs[0], APP_ID, &exec).map_err(|e| e.to_string())?);
+    written.push(desktop::install_background(&dirs[1], APP_ID, &exec).map_err(|e| e.to_string())?);
     for (size, png) in ICONS {
         written.push(desktop::install_icon(&icons, APP_ID, size, png).map_err(|e| e.to_string())?);
     }

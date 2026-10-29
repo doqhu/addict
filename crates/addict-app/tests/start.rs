@@ -10,6 +10,7 @@ use common::{TempDir, run_with_timeout, text};
 #[test]
 fn exits_non_zero_without_a_display() {
     assert_fails_fast("start", &[]);
+    assert_fails_fast("start-background", &["--background"]);
 }
 
 #[test]
@@ -23,6 +24,7 @@ fn help_does_not_mention_the_evidence_flags() {
     for command in ["  install", "  uninstall"] {
         assert!(help.contains(command), "{help}");
     }
+    assert!(help.contains("--background"), "{help}");
     assert!(!help.contains("evidence"), "{help}");
     assert!(!help.contains("origin"), "{help}");
 }

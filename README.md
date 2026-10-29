@@ -12,8 +12,9 @@ video, can be captured from the screen and read with Tesseract OCR.
 
 ## Features
 
-- One global shortcut reads the selected text, or the clipboard when nothing
-  is selected, the same way in every application.
+- A clipboard shortcut reads the selected text, or the clipboard when nothing
+  is selected, the same way in every application. A separate screenshot
+  shortcut opens the interactive region picker for OCR.
 - Offline dictionary lookup in English, Spanish and Catalan, by the word as
   written and by its dictionary forms. When the reading language has
   dictionaries but none of them has the word, the other two are asked.
@@ -74,8 +75,10 @@ target/release/addict
 ```
 
 `addict install` writes a desktop entry and the app icons into your home
-directory; the entry also starts addict at login. The entry names the program
-by its full path, so run `install` again if you move the program.
+directory; the login entry starts addict silently with `--background`. The
+entries name the program by its full path, so run `install` again if you move
+the program. After updating an older source build, run `install` again to
+write the silent login flag into its autostart entry.
 `addict uninstall` removes what `install` wrote.
 
 Before you switch to a Flatpak of addict (from Flathub, or built from
@@ -84,8 +87,29 @@ choose Exit in its top-bar menu, or run `pkill -x addict` when there is no
 icon. The entry `install` wrote hides the Flatpak's, and a running addict
 built from source answers in place of the Flatpak.
 
-On the first start, GNOME asks you to confirm the shortcut; addict suggests
-Super+Q. You can change it later in Settings, from the top-bar icon.
+Normal launches show the main window, including the first launch and launches
+while addict is already running. Open Settings from the window's Settings
+button or the top-bar menu; tray support is optional. Closing the window or
+pressing Esc keeps addict running for its shortcuts.
+
+On the first start, the desktop portal asks you to confirm the shortcuts.
+The clipboard action suggests Super+Q and keeps any existing assignment.
+The screenshot action has no suggested key: open Settings → Configure
+shortcuts… and assign a free key to Screen region (OCR). The portal owns both
+assignments, and Settings shows changes immediately. Its dialog configures
+both actions independently. On older portals that cannot reopen configuration,
+use the desktop's shortcut settings if available; addict keeps existing keys.
+
+With the window closed, the screenshot key opens the region picker. Choose
+an area to put editable OCR text in the window, using its reading language;
+cancelling starts no OCR or translation. The clipboard key continues to read
+selected or copied text independently.
+
+Use `addict --background` (or `flatpak run io.github.doqhu.Addict --background`)
+for a silent login launch. This mode stays silent even if shortcut setup fails,
+including when forwarded to a running instance. Launch normally to see its
+status and Retry in the main window. Flatpak login startup must be configured
+separately; this flag does not set up autostart.
 
 ### Where addict finds Tesseract
 

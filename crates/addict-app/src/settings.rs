@@ -1,4 +1,4 @@
-//! The Settings window, which the tray's Settings entry shows.
+//! The Settings window, reachable from the main window and the tray.
 //!
 //! It tells what the application is set to: the trigger of the shortcut,
 //! which the portal owns, with a button that asks the portal for its dialog
@@ -13,6 +13,7 @@
 use std::{path::Path, time::Duration};
 
 use addict_deepl::key::{self, KeyError};
+use addict_platform::shortcut::Bindings;
 use gtk::{glib, prelude::*};
 
 use crate::{cache::Footprint, view::Binding};
@@ -126,8 +127,8 @@ pub fn key_text(state: Option<KeyState>) -> &'static str {
 /// where the attempt stands.
 pub fn trigger_text(binding: &Binding, trigger: Option<&str>) -> String {
     match (binding, trigger) {
-        (Binding::Bound, Some(trigger)) => trigger.to_owned(),
-        (Binding::Bound, None) => "Bound.".to_owned(),
+        (Binding::Bound, Some(trigger)) if !trigger.trim().is_empty() => trigger.to_owned(),
+        (Binding::Bound, _) => "Unassigned. Choose a key in Configure shortcuts…".to_owned(),
         (Binding::Attempting, _) => "Binding the shortcut…".to_owned(),
         (Binding::NotBound { detail }, _) => format!("Not bound: {detail}"),
     }
@@ -136,17 +137,17 @@ pub fn trigger_text(binding: &Binding, trigger: Option<&str>) -> String {
 /// The line after the portal answered the request for its dialog.
 pub fn change_text(answer: Option<&str>) -> String {
     match answer {
-        None => "The system's dialog changes the shortcut; this line shows the new one \
-                 after the next start."
-            .to_owned(),
+        None => {
+            "The system's dialog configures both shortcuts. Assignments update here immediately."
+                .to_owned()
+        }
         Some(message) => format!("The shortcut cannot be changed from here: {message}"),
     }
 }
 
-/// The line while the stored binding is reset and the system's bind dialog
-/// is about to open, for a portal that has no dialog of its own for a change.
-pub const REBINDING: &str =
-    "The system's dialog opens to choose the new shortcut; the old one is reset.";
+/// Older portals cannot configure an existing session. Never reset stored keys.
+pub const CONFIGURE_UNSUPPORTED: &str = "This desktop portal cannot open shortcut configuration (version 2 is required). \
+     Use the desktop's shortcut settings if available. Existing assignments are kept.";
 
 /// The line after a save of the key: nothing on success, else why the key
 /// was not saved. The reason never holds the key.
@@ -175,8 +176,9 @@ pub fn saved_in_text(key_file: Option<&Path>) -> String {
     )
 }
 
-/// The line for a request made while the shortcut is not bound.
-pub const CHANGE_UNBOUND: &str = "The shortcut can be changed once it is bound.";
+/// The line for a request made before a usable session exists.
+pub const CHANGE_UNBOUND: &str =
+    "Shortcut configuration needs a portal session. Retry the connection first.";
 
 /// The keys of a trigger the portal described, one cap each: GNOME's
 /// `Press <Super>q` as an accelerator, or a label such as `Super+Q`;
@@ -233,9 +235,12 @@ fn accelerator_keys(accelerator: &str) -> Option<Vec<String>> {
 }
 
 /// The badge beside the trigger, and its class.
-pub fn badge(binding: &Binding) -> (&'static str, &'static str) {
+pub fn badge(binding: &Binding, trigger: Option<&str>) -> (&'static str, &'static str) {
     match binding {
-        Binding::Bound => ("Bound", "good"),
+        Binding::Bound if trigger.is_some_and(|trigger| !trigger.trim().is_empty()) => {
+            ("Assigned", "good")
+        }
+        Binding::Bound => ("Unassigned", "pending"),
         Binding::Attempting => ("Binding…", "pending"),
         Binding::NotBound { .. } => ("Not bound", "bad"),
     }
@@ -261,15 +266,91 @@ fn set_tone(widget: &impl IsA<gtk::Widget>, tone: &str) {
     widget.add_css_class(tone);
 }
 
-/// The window and the labels that change.
-pub struct Settings {
-    window: gtk::Window,
-    /// The caps of the bound trigger.
+/// One independently assigned action in the portal session.
+struct ShortcutRow {
+    root: gtk::Box,
     keys: gtk::Box,
-    /// The trigger when it is not shown as caps: where the attempt stands.
     trigger: gtk::Label,
     badge: gtk::Box,
     badge_text: gtk::Label,
+}
+
+impl ShortcutRow {
+    fn new(name: &str) -> Self {
+        let keys = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        let trigger = label("", &["trigger"]);
+        trigger.set_hexpand(true);
+        // The badge: a dot in the text's colour, then its word.
+        let badge_text = gtk::Label::new(None);
+        let badge = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .valign(gtk::Align::Center)
+            .halign(gtk::Align::End)
+            .hexpand(true)
+            .css_classes(["badge"])
+            .build();
+        badge.append(
+            &gtk::Box::builder()
+                .valign(gtk::Align::Center)
+                .css_classes(["dot"])
+                .build(),
+        );
+        badge.append(&badge_text);
+        let trigger_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        trigger_row.append(&keys);
+        trigger_row.append(&trigger);
+        trigger_row.append(&badge);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        root.append(&label(name, &["hint"]));
+        root.append(&trigger_row);
+        Self {
+            root,
+            keys,
+            trigger,
+            badge,
+            badge_text,
+        }
+    }
+
+    fn render(&self, binding: &Binding, trigger: Option<&str>) {
+        while let Some(cap) = self.keys.first_child() {
+            self.keys.remove(&cap);
+        }
+        let bound = matches!(binding, Binding::Bound);
+        let caps = trigger.filter(|_| bound).and_then(trigger_keys);
+        if let Some(caps) = &caps {
+            for (index, key) in caps.iter().enumerate() {
+                if index > 0 {
+                    self.keys.append(&label("+", &["hint"]));
+                }
+                self.keys.append(&label(key, &["keycap"]));
+            }
+        }
+        self.keys.set_visible(caps.is_some());
+        // Bound with no trigger to show: the badge says it alone.
+        let line = match (bound, &caps, trigger) {
+            (true, Some(_), _) => String::new(),
+            _ => trigger_text(binding, trigger),
+        };
+        say_in(&self.trigger, &line);
+        set_tone(&self.trigger, badge(binding, trigger).1);
+        let (text, tone) = badge(binding, trigger);
+        self.badge_text.set_label(text);
+        set_tone(&self.badge, tone);
+    }
+}
+
+/// The window and the labels that change.
+pub struct Settings {
+    window: gtk::Window,
+    clipboard: ShortcutRow,
+    screenshot: ShortcutRow,
     /// The block of the key's state: its icon and its line.
     key_block: gtk::Box,
     key_icon: gtk::Image,
@@ -333,37 +414,10 @@ impl Settings {
         on_save: impl Fn(String) + 'static,
         on_clear: impl Fn() + 'static,
     ) -> Self {
-        let keys = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(6)
-            .valign(gtk::Align::Center)
-            .visible(false)
-            .build();
-        let trigger = label("", &["trigger"]);
-        trigger.set_hexpand(true);
-        // The badge: a dot in the text's colour, then its word.
-        let badge_text = gtk::Label::new(None);
-        let badge = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(6)
-            .valign(gtk::Align::Center)
-            .halign(gtk::Align::End)
-            .hexpand(true)
-            .css_classes(["badge"])
-            .build();
-        badge.append(
-            &gtk::Box::builder()
-                .valign(gtk::Align::Center)
-                .css_classes(["dot"])
-                .build(),
-        );
-        badge.append(&badge_text);
-        let trigger_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        trigger_row.append(&keys);
-        trigger_row.append(&trigger);
-        trigger_row.append(&badge);
+        let clipboard = ShortcutRow::new("Selection or clipboard");
+        let screenshot = ShortcutRow::new("Screen region (OCR)");
         let change = gtk::Button::builder()
-            .label("Change shortcut…")
+            .label("Configure shortcuts…")
             .halign(gtk::Align::Start)
             .css_classes(["settings-button"])
             .build();
@@ -468,9 +522,10 @@ impl Settings {
             .margin_end(16)
             .build();
         content.append(&section(
-            "Shortcut",
+            "Shortcuts",
             &[
-                trigger_row.upcast_ref(),
+                clipboard.root.upcast_ref(),
+                screenshot.root.upcast_ref(),
                 change.upcast_ref(),
                 status.upcast_ref(),
             ],
@@ -516,10 +571,8 @@ impl Settings {
         window.add_controller(escape);
         let settings = Self {
             window,
-            keys,
-            trigger,
-            badge,
-            badge_text,
+            clipboard,
+            screenshot,
             key_block,
             key_icon,
             key_state,
@@ -530,7 +583,7 @@ impl Settings {
             cache_size,
             cache_status,
         };
-        settings.render_binding(&Binding::Attempting, None);
+        settings.render_binding(&Binding::Attempting, &Bindings::default());
         settings.render_key(None);
         settings
     }
@@ -539,34 +592,13 @@ impl Settings {
         self.window.present();
     }
 
-    /// Shows where the shortcut stands: a bound trigger as key caps, else
-    /// the line of `trigger_text`; the button works only when it is bound.
-    pub fn render_binding(&self, binding: &Binding, trigger: Option<&str>) {
-        while let Some(cap) = self.keys.first_child() {
-            self.keys.remove(&cap);
-        }
-        let bound = matches!(binding, Binding::Bound);
-        let caps = trigger.filter(|_| bound).and_then(trigger_keys);
-        if let Some(caps) = &caps {
-            for (index, key) in caps.iter().enumerate() {
-                if index > 0 {
-                    self.keys.append(&label("+", &["hint"]));
-                }
-                self.keys.append(&label(key, &["keycap"]));
-            }
-        }
-        self.keys.set_visible(caps.is_some());
-        // Bound with no trigger to show: the badge says it alone.
-        let line = match (bound, &caps, trigger) {
-            (true, Some(_), _) | (true, None, None) => String::new(),
-            _ => trigger_text(binding, trigger),
-        };
-        say_in(&self.trigger, &line);
-        set_tone(&self.trigger, badge(binding).1);
-        let (text, tone) = badge(binding);
-        self.badge_text.set_label(text);
-        set_tone(&self.badge, tone);
-        self.change.set_sensitive(bound);
+    /// A session can be configured even when neither action has a key.
+    pub fn render_binding(&self, binding: &Binding, bindings: &Bindings) {
+        self.clipboard
+            .render(binding, bindings.clipboard.as_deref());
+        self.screenshot
+            .render(binding, bindings.screenshot.as_deref());
+        self.change.set_sensitive(matches!(binding, Binding::Bound));
     }
 
     pub fn render_key(&self, state: Option<KeyState>) {
@@ -611,8 +643,9 @@ mod tests {
     use addict_deepl::key::KeyError;
 
     use super::{
-        CacheState, KeyState, NO_KEY_PLACE, REBINDING, badge, cache_text, change_text, clear_text,
-        key_text, key_tone, save_text, saved_in_text, size_text, trigger_keys, trigger_text,
+        CONFIGURE_UNSUPPORTED, CacheState, KeyState, NO_KEY_PLACE, badge, cache_text, change_text,
+        clear_text, key_text, key_tone, save_text, saved_in_text, size_text, trigger_keys,
+        trigger_text,
     };
     use crate::{cache::Footprint, view::Binding};
 
@@ -743,9 +776,11 @@ mod tests {
     }
 
     #[test]
-    fn the_rebind_line_names_the_dialog_and_the_reset() {
-        assert!(REBINDING.contains("dialog"));
-        assert!(REBINDING.contains("reset"));
+    fn unassigned_actions_and_older_portals_explain_configuration_without_resetting_keys() {
+        assert!(trigger_text(&Binding::Bound, None).starts_with("Unassigned"));
+        assert!(trigger_text(&Binding::Bound, Some("")).starts_with("Unassigned"));
+        assert!(CONFIGURE_UNSUPPORTED.contains("Existing assignments are kept"));
+        assert!(!change_text(None).contains("next start"));
     }
 
     #[test]
@@ -809,12 +844,16 @@ mod tests {
 
     #[test]
     fn the_badge_and_tones_follow_the_state() {
-        assert_eq!(badge(&Binding::Bound), ("Bound", "good"));
-        assert_eq!(badge(&Binding::Attempting).1, "pending");
+        assert_eq!(
+            badge(&Binding::Bound, Some("Super+Q")),
+            ("Assigned", "good")
+        );
+        assert_eq!(badge(&Binding::Bound, None), ("Unassigned", "pending"));
+        assert_eq!(badge(&Binding::Attempting, None).1, "pending");
         let not_bound = Binding::NotBound {
             detail: "x".to_owned(),
         };
-        assert_eq!(badge(&not_bound), ("Not bound", "bad"));
+        assert_eq!(badge(&not_bound, None), ("Not bound", "bad"));
         assert_eq!(key_tone(None), "pending");
         assert_eq!(key_tone(Some(KeyState::Pro)), "good");
         assert_eq!(key_tone(Some(KeyState::Refused(KeyError::TooOpen))), "bad");

@@ -1,7 +1,7 @@
 //! The product's desktop entry and icons. The host Registry accepts an app id
 //! only when a matching `.desktop` file is installed, so registration needs
-//! this entry; the same entry in the autostart directory starts the
-//! application at login. The entry names the app id as its icon, which the
+//! this entry; an entry with `--background` in the autostart directory starts
+//! the application silently at login. The entry names the app id as its icon, which the
 //! shell looks up in the user `hicolor` theme: one PNG per size, written by
 //! `install_icon`. Every `install` overwrites and every `uninstall` removes
 //! only a file the product wrote, and neither follows a symlink.
@@ -120,14 +120,19 @@ fn quote_exec(exec: &Path) -> String {
 
 /// The desktop entry text for `app_id`, launching `exec` with no arguments.
 pub fn entry_text(app_id: &str, exec: &Path) -> String {
+    entry_with_mode(app_id, exec, false)
+}
+
+fn entry_with_mode(app_id: &str, exec: &Path, background: bool) -> String {
     let exec = quote_exec(exec);
+    let mode = if background { " --background" } else { "" };
     format!(
         "# Desktop entry of {app_id}, written by `addict install`.\n\
          [Desktop Entry]\n\
          Type=Application\n\
          Name=Addict\n\
          Icon={app_id}\n\
-         Exec={exec}\n\
+         Exec={exec}{mode}\n\
          Terminal=false\n\
          NoDisplay=true\n\
          {MARKER}\n"
@@ -250,11 +255,20 @@ pub fn uninstall(dir: &Path, app_id: &str) -> io::Result<Option<PathBuf>> {
 /// anything else of that name, a symlink included, is refused untouched. Every
 /// error names the path.
 pub fn install(dir: &Path, app_id: &str, exec: &Path) -> io::Result<PathBuf> {
+    install_entry(dir, app_id, exec, false)
+}
+
+/// Writes the login entry with `--background`, with the same ownership checks.
+pub fn install_background(dir: &Path, app_id: &str, exec: &Path) -> io::Result<PathBuf> {
+    install_entry(dir, app_id, exec, true)
+}
+
+fn install_entry(dir: &Path, app_id: &str, exec: &Path, background: bool) -> io::Result<PathBuf> {
     check_app_id(app_id)?;
     write(
         entry_path(dir, app_id),
         entry_is_ours,
-        entry_text(app_id, exec).as_bytes(),
+        entry_with_mode(app_id, exec, background).as_bytes(),
     )
 }
 
