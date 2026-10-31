@@ -4,7 +4,7 @@
 //! [`shortcut`] binds the global shortcut; [`screenshot`] takes one
 //! interactive screen capture through the portal; [`ocr`] recognizes the
 //! text of an image in a Tesseract child with a limit; [`work`] runs slow
-//! jobs off the caller's thread; [`desktop`] writes the desktop entries;
+//! jobs off the caller's thread; [`desktop`] writes the desktop entry;
 //! [`tray`] puts the icon and its menu in the top bar; [`gpu`] names the
 //! Vulkan drivers of the GPU that drives the display.
 //!

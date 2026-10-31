@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 use std::ffi::OsStr;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,23 @@ pub fn run_child(test_name: &str, timeout: Duration, env: &[(&str, &OsStr)]) {
 pub fn run_private_bus(test_name: &str, timeout: Duration, env: &[(&str, &OsStr)]) {
     let mut command = Command::new("dbus-run-session");
     command
+        .arg("--")
+        .arg(std::env::current_exe().expect("test binary path"))
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"]);
+    run_test(command, timeout, env);
+}
+
+/// [`run_private_bus`] with the bus configuration in the file `config`.
+pub fn run_private_bus_with_config(
+    test_name: &str,
+    config: &Path,
+    timeout: Duration,
+    env: &[(&str, &OsStr)],
+) {
+    let mut command = Command::new("dbus-run-session");
+    command
+        .arg("--config-file")
+        .arg(config)
         .arg("--")
         .arg(std::env::current_exe().expect("test binary path"))
         .args(["--exact", test_name, "--nocapture", "--test-threads=1"]);

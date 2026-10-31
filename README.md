@@ -75,11 +75,17 @@ target/release/addict
 ```
 
 `addict install` writes a desktop entry and the app icons into your home
-directory; the login entry starts addict silently with `--background`. The
-entries name the program by its full path, so run `install` again if you move
-the program. After updating an older source build, run `install` again to
-write the silent login flag into its autostart entry.
+directory, so addict appears among your applications. The entry names the
+program by its full path, so run `install` again if you move the program.
 `addict uninstall` removes what `install` wrote.
+
+`install` does not set up login startup for a source build. An autostart entry
+written by an older build still starts addict at login, but `install` will not
+update it: after you move the program its path is out of date, and an entry
+from before the silent login flag opens the window at every login. In either
+case, remove it. It is in your autostart directory, usually
+`~/.config/autostart/io.github.doqhu.Addict.desktop`: delete it there, or run
+`addict uninstall`, which removes it along with the rest.
 
 Before you switch to a Flatpak of addict (from Flathub, or built from
 `packaging/flatpak`), run `addict uninstall` and quit the running addict:

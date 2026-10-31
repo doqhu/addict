@@ -1,10 +1,11 @@
 //! The product's desktop entry and icons. The host Registry accepts an app id
 //! only when a matching `.desktop` file is installed, so registration needs
-//! this entry; an entry with `--background` in the autostart directory starts
-//! the application silently at login. The entry names the app id as its icon, which the
-//! shell looks up in the user `hicolor` theme: one PNG per size, written by
-//! `install_icon`. Every `install` overwrites and every `uninstall` removes
-//! only a file the product wrote, and neither follows a symlink.
+//! this entry, and it is the launcher of a source build. It names the app id
+//! as its icon, which the shell looks up in the user `hicolor` theme: one PNG
+//! per size, written by `install_icon`. Every `install` overwrites and every
+//! `uninstall` removes only a file the product wrote, and neither follows a
+//! symlink. Nothing here writes a login entry; `uninstall` can still remove
+//! the one an older build wrote into the autostart directory.
 
 use std::{
     ffi::OsString,
@@ -52,7 +53,8 @@ fn icons_dir_from(data_home: Option<OsString>, home: Option<OsString>) -> Option
 }
 
 /// The user autostart directory: `$XDG_CONFIG_HOME/autostart` when the
-/// variable is an absolute path, else `$HOME/.config/autostart`.
+/// variable is an absolute path, else `$HOME/.config/autostart`. Only for
+/// finding the login entry of an older build, to remove it.
 pub fn autostart_dir() -> Option<PathBuf> {
     autostart_dir_from(
         std::env::var_os("XDG_CONFIG_HOME"),
@@ -120,21 +122,19 @@ fn quote_exec(exec: &Path) -> String {
 
 /// The desktop entry text for `app_id`, launching `exec` with no arguments.
 pub fn entry_text(app_id: &str, exec: &Path) -> String {
-    entry_with_mode(app_id, exec, false)
-}
-
-fn entry_with_mode(app_id: &str, exec: &Path, background: bool) -> String {
     let exec = quote_exec(exec);
-    let mode = if background { " --background" } else { "" };
     format!(
         "# Desktop entry of {app_id}, written by `addict install`.\n\
          [Desktop Entry]\n\
          Type=Application\n\
          Name=Addict\n\
+         Comment=Translate the selected text or a part of the screen\n\
          Icon={app_id}\n\
-         Exec={exec}{mode}\n\
+         Exec={exec}\n\
          Terminal=false\n\
-         NoDisplay=true\n\
+         Categories=Utility;TextTools;Dictionary;\n\
+         Keywords=translate;translation;dictionary;OCR;\n\
+         StartupNotify=true\n\
          {MARKER}\n"
     )
 }
@@ -255,20 +255,11 @@ pub fn uninstall(dir: &Path, app_id: &str) -> io::Result<Option<PathBuf>> {
 /// anything else of that name, a symlink included, is refused untouched. Every
 /// error names the path.
 pub fn install(dir: &Path, app_id: &str, exec: &Path) -> io::Result<PathBuf> {
-    install_entry(dir, app_id, exec, false)
-}
-
-/// Writes the login entry with `--background`, with the same ownership checks.
-pub fn install_background(dir: &Path, app_id: &str, exec: &Path) -> io::Result<PathBuf> {
-    install_entry(dir, app_id, exec, true)
-}
-
-fn install_entry(dir: &Path, app_id: &str, exec: &Path, background: bool) -> io::Result<PathBuf> {
     check_app_id(app_id)?;
     write(
         entry_path(dir, app_id),
         entry_is_ours,
-        entry_with_mode(app_id, exec, background).as_bytes(),
+        entry_text(app_id, exec).as_bytes(),
     )
 }
 
@@ -389,10 +380,13 @@ mod tests {
                 "[Desktop Entry]",
                 "Type=Application",
                 "Name=Addict",
+                "Comment=Translate the selected text or a part of the screen",
                 "Icon=io.github.doqhu.Test",
                 "Exec=\"/usr/bin/addict\"",
                 "Terminal=false",
-                "NoDisplay=true",
+                "Categories=Utility;TextTools;Dictionary;",
+                "Keywords=translate;translation;dictionary;OCR;",
+                "StartupNotify=true",
                 MARKER,
             ]
         );

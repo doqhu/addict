@@ -7,6 +7,10 @@
 //!
 //! The attempt, from the bus connection to the bound shortcut, has a limit
 //! given by the caller: a portal that never answers ends it as a failure.
+//!
+//! A registration and a session die with the portal process, so when the owner
+//! of the portal's bus name goes, the worker starts a new attempt on a fresh
+//! connection with the same IDs and preferences, under a new limit.
 
 use std::{cell::Cell, collections::HashMap, thread::JoinHandle, time::Duration};
 
@@ -92,6 +96,9 @@ fn session_action(expected: &str, actual: &str, id: &str) -> Option<Action> {
     (expected == actual).then(|| Action::from_id(id)).flatten()
 }
 
+/// The bus name of the portal, whose owner holds our registration and session.
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
+
 /// How long closing the session may take when the worker stops.
 const CLOSE_LIMIT: Duration = Duration::from_secs(1);
 
@@ -130,6 +137,19 @@ pub enum ShortcutEvent {
     Failed {
         message: String,
     },
+}
+
+/// Why an attempt or the session it bound ended.
+enum Ended {
+    /// The owner of the portal's name went: bind again.
+    PortalLeft,
+    Failed(ShortcutEvent),
+}
+
+impl From<ShortcutEvent> for Ended {
+    fn from(event: ShortcutEvent) -> Self {
+        Self::Failed(event)
+    }
 }
 
 /// Keeps the worker alive. Dropping it stops the worker, which closes the
@@ -171,10 +191,10 @@ impl Drop for ShortcutHandle {
 }
 
 /// Starts the worker for `app_id` with the preferred `trigger` in the XDG
-/// shortcuts syntax (for example `LOGO+q`). `limit` is how long the attempt
-/// may take up to `Bound`; when it runs out the worker reports `Failed` like
-/// for any other failure. `on_event` runs on the worker thread and must not
-/// block.
+/// shortcuts syntax (for example `LOGO+q`). `limit` is how long each attempt
+/// may take up to `Bound`, the one after a portal restart included; when it
+/// runs out the worker reports `Failed` like for any other failure. `on_event`
+/// runs on the worker thread and must not block.
 pub fn start(
     app_id: &str,
     trigger: &str,
@@ -229,42 +249,50 @@ type Callback = Box<dyn Fn(ShortcutEvent) + Send>;
 
 type ShortcutSession = Session<GlobalShortcuts>;
 
-/// Serves until a failure, the limit of the attempt or the stop signal, then
+/// Serves until a failure, the limit of an attempt or the stop signal, then
 /// closes the session if one was created. `Failed` is sent after the close,
-/// as the last act of the worker; the stop signal sends nothing.
+/// as the last act of the worker; the stop signal sends nothing. A portal that
+/// left only starts the next attempt: its session went with it, so that one
+/// is dropped unclosed.
 async fn run(
     app_id: &str,
     trigger: &str,
     limit: Duration,
     on_event: &(dyn Fn(ShortcutEvent) + Send),
-    stopped: oneshot::Receiver<()>,
+    mut stopped: oneshot::Receiver<()>,
     mut requests: mpsc::UnboundedReceiver<Command>,
 ) {
-    let mut session = None;
-    // The limit covers the attempt only: once bound, presses are awaited
-    // without one.
-    let bound = Cell::new(false);
-    let report = |event: ShortcutEvent| {
-        if matches!(event, ShortcutEvent::Bound { .. }) {
-            bound.set(true);
+    loop {
+        let mut session = None;
+        // The limit covers the attempt only: once bound, presses are awaited
+        // without one.
+        let bound = Cell::new(false);
+        let report = |event: ShortcutEvent| {
+            if matches!(event, ShortcutEvent::Bound { .. }) {
+                bound.set(true);
+            }
+            on_event(event);
+        };
+        let failure = tokio::select! {
+            // Resolves on the signal and when the handle is gone without one.
+            _ = &mut stopped => None,
+            result = serve(app_id, trigger, &report, &mut session, &mut requests) => {
+                let Err(ended) = result;
+                match ended {
+                    Ended::PortalLeft => continue,
+                    Ended::Failed(event) => Some(event),
+                }
+            }
+            () = unbound_after(limit, &bound) => Some(limit_reached(limit)),
+        };
+        if let Some(session) = session {
+            // Best effort: the portal also drops the session with the connection.
+            let _ = tokio::time::timeout(CLOSE_LIMIT, session.close()).await;
         }
-        on_event(event);
-    };
-    let failure = tokio::select! {
-        // Resolves on the signal and when the handle is gone without one.
-        _ = stopped => None,
-        result = serve(app_id, trigger, &report, &mut session, &mut requests) => {
-            let Err(event) = result;
-            Some(event)
+        if let Some(event) = failure {
+            on_event(event);
         }
-        () = unbound_after(limit, &bound) => Some(limit_reached(limit)),
-    };
-    if let Some(session) = session {
-        // Best effort: the portal also drops the session with the connection.
-        let _ = tokio::time::timeout(CLOSE_LIMIT, session.close()).await;
-    }
-    if let Some(event) = failure {
-        on_event(event);
+        return;
     }
 }
 
@@ -277,18 +305,31 @@ async fn unbound_after(limit: Duration, bound: &Cell<bool>) {
     }
 }
 
-/// Register, subscribe, create the session, bind, then forward presses. Only
-/// returns with the `Failed` event to report.
+/// Watch the portal's name, register, subscribe, create the session, bind,
+/// then forward presses. Only returns with why it ended.
 async fn serve(
     app_id: &str,
     trigger: &str,
     on_event: &dyn Fn(ShortcutEvent),
     session_slot: &mut Option<ShortcutSession>,
     requests: &mut mpsc::UnboundedReceiver<Command>,
-) -> Result<std::convert::Infallible, ShortcutEvent> {
+) -> Result<std::convert::Infallible, Ended> {
     let connection = zbus::Connection::session()
         .await
         .map_err(|e| failed("session bus", &e))?;
+
+    // Before registering, so that the owner holding the registration cannot
+    // leave unseen. The call to the bus is not a call to the portal. An owner
+    // that left before the registration arrived costs one needless attempt; a
+    // new owner appearing is no reason to act, it is the portal being started.
+    let bus = zbus::fdo::DBusProxy::new(&connection)
+        .await
+        .map_err(|e| failed("watching the portal", &e))?;
+    let owners = bus
+        .receive_name_owner_changed_with_args(&[(0, PORTAL)])
+        .await
+        .map_err(|e| failed("watching the portal", &e))?;
+    let mut owners = std::pin::pin!(owners);
 
     // Must precede any other portal call on the connection.
     let parsed: AppID = app_id
@@ -346,6 +387,13 @@ async fn serve(
 
     loop {
         tokio::select! {
+            signal = owners.next() => {
+                let Some(signal) = signal else { break };
+                let args = signal.args().map_err(|e| failed("watching the portal", &e))?;
+                if args.old_owner().is_some() {
+                    return Err(Ended::PortalLeft);
+                }
+            }
             signal = activations.next() => {
                 let Some(signal) = signal else { break };
                 if let Some(action) = session_action(
@@ -384,9 +432,9 @@ async fn serve(
             }
         }
     }
-    Err(ShortcutEvent::Failed {
+    Err(Ended::Failed(ShortcutEvent::Failed {
         message: "a shortcuts signal stream ended".to_owned(),
-    })
+    }))
 }
 
 /// The wrapper keeps the session path private; it serializes as the path.

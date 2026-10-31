@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use common::{Homes, TempDir, lines, shown, text};
 
 const FOREIGN: &str = "[Desktop Entry]\nName=Someone else\n";
+/// What an older `addict install` left in the autostart directory.
+const LEGACY: &str = "[Desktop Entry]\nExec=addict --background\nX-Addict=true\n";
 
 /// Both entry paths, applications first: the order of the output.
 fn entries(homes: &Homes) -> [PathBuf; 2] {
@@ -19,17 +21,46 @@ fn installed(homes: &Homes) {
     assert!(output.status.success(), "{}", text(&output.stderr));
 }
 
+/// An install by an older build: the same files and a login entry.
+fn installed_with_login_entry(homes: &Homes) {
+    installed(homes);
+    let autostart = homes.autostart_entry();
+    std::fs::create_dir_all(autostart.parent().expect("parent")).expect("create dir");
+    std::fs::write(autostart, LEGACY).expect("write login entry");
+}
+
 fn replace(path: &Path, content: &str) {
     std::fs::remove_file(path).expect("remove entry");
     std::fs::write(path, content).expect("write entry");
 }
 
 #[test]
-fn removes_the_entries_and_icons_and_prints_their_paths() {
+fn removes_the_entry_and_icons_and_prints_their_paths() {
     let temp = TempDir::new("uninstall");
     let homes = Homes::inside(temp.path());
-    let [applications, autostart] = entries(&homes);
+    let applications = homes.applications_entry();
     installed(&homes);
+
+    let output = homes.run("uninstall");
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let mut printed = vec![shown(&applications)];
+    printed.extend(homes.icons().iter().map(|icon| shown(icon)));
+    assert_eq!(lines(&output.stdout), printed);
+    for path in [&applications].into_iter().chain(&homes.icons()) {
+        assert!(!path.exists(), "{} is still there", path.display());
+        // The directories are not removed.
+        assert!(path.parent().expect("parent").is_dir());
+    }
+    // Removing creates nothing.
+    assert!(!homes.config_home.exists());
+}
+
+#[test]
+fn removes_a_legacy_login_entry_too_and_lists_it() {
+    let temp = TempDir::new("uninstall-legacy");
+    let homes = Homes::inside(temp.path());
+    let [applications, autostart] = entries(&homes);
+    installed_with_login_entry(&homes);
 
     let output = homes.run("uninstall");
     assert!(output.status.success(), "{}", text(&output.stderr));
@@ -41,7 +72,6 @@ fn removes_the_entries_and_icons_and_prints_their_paths() {
         .chain(&homes.icons())
     {
         assert!(!path.exists(), "{} is still there", path.display());
-        // The directories are not removed.
         assert!(path.parent().expect("parent").is_dir());
     }
 }
@@ -53,7 +83,7 @@ fn entries_without_icons_are_not_an_error() {
     let temp = TempDir::new("uninstall-no-icons");
     let homes = Homes::inside(temp.path());
     let entries = entries(&homes);
-    installed(&homes);
+    installed_with_login_entry(&homes);
     std::fs::remove_dir_all(homes.data_home.join("icons")).expect("remove icons");
 
     let output = homes.run("uninstall");
@@ -67,7 +97,7 @@ fn refuses_a_foreign_or_linked_icon_and_removes_nothing() {
     for link in [false, true] {
         let temp = TempDir::new("uninstall-icon");
         let homes = Homes::inside(temp.path());
-        installed(&homes);
+        installed_with_login_entry(&homes);
         let icon = homes.icon(256);
         let kept: Vec<PathBuf> = entries(&homes)
             .into_iter()
@@ -117,7 +147,7 @@ fn removes_the_one_entry_that_is_present() {
         let temp = TempDir::new("uninstall-one");
         let homes = Homes::inside(temp.path());
         let entries = entries(&homes);
-        installed(&homes);
+        installed_with_login_entry(&homes);
         std::fs::remove_file(&entries[1 - present_at]).expect("remove the other");
 
         let output = homes.run("uninstall");
@@ -138,7 +168,7 @@ fn refuses_a_foreign_entry_and_removes_neither() {
         let homes = Homes::inside(temp.path());
         let entries = entries(&homes);
         let (foreign, other) = (&entries[foreign_at], &entries[1 - foreign_at]);
-        installed(&homes);
+        installed_with_login_entry(&homes);
         let own = std::fs::read_to_string(other).expect("read entry");
         replace(foreign, FOREIGN);
 
@@ -160,7 +190,7 @@ fn refuses_a_symlink_and_removes_neither() {
         let homes = Homes::inside(temp.path());
         let entries = entries(&homes);
         let (link, other) = (&entries[link_at], &entries[1 - link_at]);
-        installed(&homes);
+        installed_with_login_entry(&homes);
         let own = std::fs::read_to_string(other).expect("read entry");
         let linked = std::fs::read_to_string(link).expect("read linked entry");
         let target = temp.path().join("target.desktop");
@@ -192,8 +222,8 @@ fn relative_or_empty_config_home_falls_back_to_home() {
         let autostart = temp
             .path()
             .join(".config/autostart/io.github.doqhu.Addict.desktop");
-        assert!(applications.is_file());
-        assert!(autostart.is_file());
+        std::fs::create_dir_all(autostart.parent().expect("parent")).expect("create dir");
+        std::fs::write(&autostart, LEGACY).expect("write login entry");
 
         let output = homes.run("uninstall");
         assert!(output.status.success(), "{}", text(&output.stderr));

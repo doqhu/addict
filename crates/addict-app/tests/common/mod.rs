@@ -95,6 +95,7 @@ impl Homes {
         self.data_home.join("applications").join(ENTRY)
     }
 
+    /// Where an older build wrote its login entry; `install` no longer does.
     pub fn autostart_entry(&self) -> PathBuf {
         self.config_home.join("autostart").join(ENTRY)
     }
@@ -105,7 +106,7 @@ impl Homes {
     }
 
     /// The four icons, smallest first: the order of the output after the
-    /// entries.
+    /// entry or entries.
     pub fn icons(&self) -> [PathBuf; 4] {
         ICON_SIZES.map(|size| self.icon(size))
     }
