@@ -104,8 +104,8 @@ icon. The entry `install` wrote hides the Flatpak's, and a running addict
 built from source answers in place of the Flatpak.
 
 Normal launches show the main window, including the first launch and launches
-while addict is already running. Open Settings from the window's Settings
-button or the top-bar menu; tray support is optional. Closing the window or
+while addict is already running. Open Settings from the window's main
+menu or the top-bar menu; tray support is optional. Closing the window or
 pressing Esc keeps addict running for its shortcuts.
 
 On the first start, the desktop portal asks you to confirm the shortcuts.

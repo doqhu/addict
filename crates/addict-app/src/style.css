@@ -599,6 +599,23 @@ window.addict .settings-section {
   margin: 0 4px;
 }
 
+/* A card that is a list: its rows parted by hairlines. */
+window.addict .settings-list {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0 14px;
+}
+
+window.addict .settings-row {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+window.addict .settings-row:last-child {
+  border-bottom: none;
+}
+
 window.addict .settings-card {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -608,14 +625,14 @@ window.addict .settings-card {
 
 window.addict label.keycap {
   min-width: 28px;
-  min-height: 30px;
-  padding: 0 10px;
+  min-height: 26px;
+  padding: 0 9px;
   border-radius: 8px;
   background: var(--chip);
   border: 1px solid var(--line);
   box-shadow: inset 0 -2px var(--line);
   font-weight: 600;
-  font-size: 0.93em;
+  font-size: 0.87em;
 }
 
 window.addict label.trigger.bad {
@@ -684,6 +701,14 @@ window.addict .key-block {
   border-radius: 10px;
 }
 
+/* A key that is set, or being checked, is a quiet line: only a problem is a
+ * block. */
+window.addict .key-block.good,
+window.addict .key-block.pending {
+  background: none;
+  padding: 0;
+}
+
 window.addict .key-block label,
 window.addict .key-block image {
   color: inherit;
@@ -732,19 +757,35 @@ window.addict button.save:disabled {
   background: var(--chip);
 }
 
-window.addict .key-file {
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
-}
-
 window.addict label.path {
   font-family: "Source Code Pro", monospace;
   font-size: 0.85em;
 }
 
-window.addict .settings-footer {
-  margin: 0 4px;
-  font-size: 0.85em;
+/* The switch: the accent while on, not the theme's. */
+window.addict switch {
+  border: 1px solid var(--line-strong);
+  background: var(--chip);
+  color: transparent;
+}
+
+window.addict switch:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+window.addict switch > slider {
+  background: var(--line-strong);
+  border: none;
+  box-shadow: none;
+}
+
+window.addict switch:checked > slider {
+  background: var(--on-accent);
+}
+
+window.addict switch:disabled {
+  opacity: 0.5;
 }
 
 /* The About window: the name under the icon, and the credit lines. */
@@ -753,22 +794,131 @@ window.addict label.about-name {
   font-weight: 700;
 }
 
-window.addict label.credit {
-  line-height: 1.3;
+window.addict label.credit-name {
+  font-weight: 600;
 }
 
-/* Its close button: a round chip, as in the mockup. */
-window.addict.settings headerbar windowcontrols button {
+/* The repository: a link in the accent, not the theme's blue. */
+window.addict button.repository,
+window.addict button.repository:link,
+window.addict button.repository:visited {
+  min-height: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  box-shadow: none;
+  color: var(--accent);
+}
+
+window.addict button.repository > label {
+  color: inherit;
+  text-decoration: none;
+}
+
+window.addict button.repository:hover > label {
+  text-decoration: underline;
+}
+
+/* The switch of the pages: linked as the language's, the shown one in the
+ * accent. */
+window.addict stackswitcher > button {
+  min-height: 36px;
+  min-width: 96px;
+  padding: 0 14px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--muted);
+  box-shadow: none;
+  font-weight: 500;
+  border-radius: 0;
+}
+
+window.addict stackswitcher > button:first-child {
+  border-radius: 10px 0 0 10px;
+}
+
+window.addict stackswitcher > button:last-child {
+  border-radius: 0 10px 10px 0;
+}
+
+window.addict stackswitcher > button:not(:first-child) {
+  border-left-width: 0;
+}
+
+window.addict stackswitcher > button:hover {
+  background: var(--chip);
+}
+
+window.addict stackswitcher > button:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+window.addict stackswitcher > button label {
+  color: inherit;
+}
+
+/* Settings and About open over the main window, on the same ground: an edge
+ * and a shadow of their own part them from it. The edge is an outline, drawn
+ * over the children and inside the window, so that it holds where the
+ * compositor gives the window no shadow. */
+window.addict.settings {
+  outline: 1px solid var(--line-strong);
+  outline-offset: -1px;
+  box-shadow: 0 8px 28px alpha(black, 0.35);
+}
+
+/* The close button of every window and the main menu: one round chip. */
+window.addict headerbar windowcontrols button,
+window.addict headerbar menubutton.main-menu > button {
   min-width: 32px;
   min-height: 32px;
   padding: 0;
+  border: none;
   border-radius: 999px;
   background: var(--chip);
   color: var(--fg);
   box-shadow: none;
 }
 
-window.addict.settings headerbar windowcontrols button:hover {
+window.addict headerbar windowcontrols button:hover,
+window.addict headerbar menubutton.main-menu > button:hover,
+window.addict headerbar menubutton.main-menu > button:checked {
+  background: var(--line);
+}
+
+/* The main menu: a surface of the window's own, its rows quiet. */
+window.addict popover.main-menu > contents {
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+window.addict popover.main-menu modelbutton {
+  min-height: 36px;
+  padding: 0 10px;
+  border-radius: 10px;
+}
+
+window.addict popover.main-menu modelbutton:hover,
+window.addict popover.main-menu modelbutton:focus-visible {
+  background: var(--chip);
+}
+
+/* Wide enough that a row's shortcut stands apart from its label. */
+window.addict popover.main-menu > contents {
+  min-width: 200px;
+}
+
+window.addict popover.main-menu modelbutton accelerator {
+  margin-left: 24px;
+  color: var(--muted);
+}
+
+window.addict popover.main-menu separator {
   background: var(--line);
 }
 

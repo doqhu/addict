@@ -167,7 +167,7 @@
 //! The application has an icon in the top bar, a StatusNotifierItem, with a
 //! menu of Show, Settings, About and Exit, which a click on the icon opens.
 //! Show shows the window as a repeated launch does, without a read. Settings
-//! is also reachable from the main window. It shows both shortcut assignments,
+//! and About are also in the main window's menu. Settings shows both shortcut assignments,
 //! the DeepL key file and its state, never the key, and a button that asks
 //! the portal to configure both actions, with live assignment updates.
 //! About shows a window with the icon, the name, the version and the license
