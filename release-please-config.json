@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "include-component-in-tag": false,
+  "bump-minor-pre-major": true,
+  "initial-version": "0.1.0",
+  "packages": {
+    ".": {
+      "package-name": "addict",
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value == 'addict-app' || @.name.value == 'addict-core' || @.name.value == 'addict-deepl' || @.name.value == 'addict-dictionary' || @.name.value == 'addict-platform')].version"
+        },
+        {
+          "type": "generic",
+          "path": "data/io.github.doqhu.Addict.metainfo.xml"
+        }
+      ]
+    }
+  }
+}

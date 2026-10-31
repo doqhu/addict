@@ -3,6 +3,7 @@ resolver = "3"
 members = ["crates/addict-core", "crates/addict-platform", "crates/addict-dictionary", "crates/addict-deepl", "crates/addict-app"]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 publish = false

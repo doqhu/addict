@@ -1,6 +1,6 @@
 [package]
 name = "addict-core"
-version = "0.1.0"
+version.workspace = true
 description = "Addict core: product identity and GTK-free domain types"
 edition.workspace = true
 license.workspace = true

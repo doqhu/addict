@@ -1,6 +1,6 @@
 [package]
 name = "addict-dictionary"
-version = "0.1.0"
+version.workspace = true
 description = "Addict dictionary index: the file format, its reader and the importers, GTK-free"
 edition.workspace = true
 license.workspace = true
