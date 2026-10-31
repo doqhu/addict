@@ -9,7 +9,8 @@ tool.
 
 Crops the source to its alpha box, centres it on a square with a margin and
 writes one PNG per size. Each PNG carries the tEXt chunk `X-Addict` = `true`,
-the marker `addict install` looks for before it overwrites or removes a file.
+the marker `addict install` and `addict uninstall` look for before they
+overwrite or remove a file.
 """
 import sys
 

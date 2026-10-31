@@ -1,5 +1,5 @@
-//! The resident application: one hidden window, the attempt to bind the
-//! global shortcut and the loop that shows the window for each event.
+//! The resident application: a reusable window, two global shortcut actions
+//! and the loop that shows the window or captures a region for each event.
 //!
 //! This module owns the GTK application, its uniqueness, the window with its
 //! close and Esc handling, and the order of what happens on each event of the
@@ -36,7 +36,13 @@
 //! was, starts no lookup and no online request, and says why in the source
 //! line under the status; the line stays, also when the window is shown
 //! again, until the field is edited, Capture or the shortcut is pressed or a
-//! text is recognized. Capture cannot be pressed while the area is being chosen;
+//! text is recognized. The window comes back after every such end, also after
+//! the screenshot shortcut with the window closed: GNOME gives code 2 for Esc
+//! and for a real failure alike, so the two cannot be told apart. The keyboard
+//! focus is then on Capture, or on Retry when it is offered, and a press of
+//! Capture is a new interactive request; the line of a capture that left no snapshot names
+//! it. No permission is granted anywhere on this path: the portal asks for
+//! none for an interactive screenshot. Capture cannot be pressed while the area is being chosen;
 //! once the snapshot is there it can, and it is the retry: pressing it, or
 //! editing the field, gives up the recognition that runs. Giving up is
 //! dropping the job, which kills the Tesseract child and deletes the
@@ -45,7 +51,7 @@
 //! shown, also one that could not start, is recorded with `--evidence` as it
 //! is shown; a given-up one is not. The job is [`capture`](crate::capture)'s.
 //!
-//! The shortcut reads the text selected or copied, the same for every
+//! The clipboard action reads the text selected or copied, the same for every
 //! application. The press gives up a running capture and the read of the
 //! press before, and clears the field (the lookup and the online requests
 //! of the old text are given up); the window is shown at once, in the
@@ -139,7 +145,8 @@ use addict_core::{
 use addict_deepl::{DeepL, key};
 use addict_platform::{
     ocr::OcrFailure,
-    shortcut::{self, ShortcutEvent, ShortcutHandle},
+    shortcut::{self, Action, Bindings, ShortcutEvent, ShortcutHandle},
+    startup,
     tray::{self, TrayEvent, TrayHandle},
     work::{Job, Outcome, Work},
 };
@@ -152,13 +159,13 @@ use crate::{
     cache::{self, Cached},
     capture::{self, Capture, Captured, Failure, Timing},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
-    evidence,
+    entries, evidence,
     history::History,
     language,
     manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
     online::{self, Kept, Subject},
     recording::Recording,
-    settings::{self, CacheState, KeyState, Settings},
+    settings::{self, CacheState, KeyState, Settings, StartupEnd, StartupShown},
     style,
     translate::{self, Translated},
     view::{
@@ -171,11 +178,8 @@ use crate::{
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
 const TRIGGER: &str = "LOGO+q";
 
-/// How long one attempt to bind the shortcut may take.
+/// How long one attempt to bind the shortcuts may take.
 const BIND_LIMIT: Duration = Duration::from_secs(60);
-
-/// How long the reset of the stored binding may take.
-const FORGET_LIMIT: Duration = Duration::from_secs(2);
 
 /// How long the read of the selection and the clipboard may take from the
 /// press, the wait for the window to be active included.
@@ -198,13 +202,10 @@ struct Resident {
 
 /// Everything the worker threads tell the UI thread, over one channel.
 enum Event {
-    /// With the event, the `CLOCK_MONOTONIC` time at which the worker got an
-    /// activation; taken only when evidence is recorded.
-    Shortcut(ShortcutEvent, Option<u64>),
+    /// Presentation and input actions shared by the main window and launchers.
+    Window(WindowEvent),
     /// Retry was pressed.
     Retry,
-    /// The application was launched again while this instance is resident.
-    Launched,
     /// The text of the field changed; this is the new text.
     Sentence(String),
     /// The word with this index in the shown sentence was clicked.
@@ -221,8 +222,6 @@ enum Event {
     Forward,
     /// The user explicitly requested the selected dictionary definition.
     DefinitionAction,
-    /// Add DeepL key… was pressed in the card: the Settings window is shown.
-    AddKey,
     /// The English word of a gloss was clicked: it is looked up in English.
     LookUpEnglish(String),
     /// The separate definition job ended with its individual request number;
@@ -272,11 +271,8 @@ enum Event {
     Active,
     /// A choice of the tray's menu, or its end.
     Tray(TrayEvent),
-    /// Change shortcut was pressed in the Settings window.
+    /// Configure shortcuts was pressed in the Settings window.
     ChangeShortcut,
-    /// The reset of the stored binding, which a portal without a dialog of
-    /// its own for a change needs, ended.
-    BindingForgotten(Outcome<Result<(), String>>),
     /// The state of the key file, as the runner read it for the Settings
     /// window.
     KeyFile(KeyState),
@@ -294,12 +290,18 @@ enum Event {
     /// The clear of the cache on the runner ended: why it failed, in one
     /// line.
     CacheCleared(Outcome<Result<(), String>>),
+    /// The saved startup state, as the runner read it for the Settings window.
+    StartupRead(Outcome<StartupShown>),
+    /// The user moved the Start at login switch to this state.
+    ToggleStartup(bool),
+    /// The change of the startup state on the runner ended.
+    StartupChanged(Outcome<StartupEnd>),
     /// The read of the clipboard with this number ended: the line of its
     /// text, or why there is none.
     Clipboard(u64, Result<String, Missed>),
 }
 
-/// Starts one attempt to bind the shortcut; its events go to `sender`. With
+/// Starts one attempt to bind the shortcuts; its events go to `sender`. With
 /// `timed`, an activation carries the time the worker thread received it.
 fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandle {
     let sender = sender.clone();
@@ -307,7 +309,7 @@ fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandl
         // Here, on the worker: the UI thread may be busy when it arrives.
         let receipt_ns = (timed && matches!(event, ShortcutEvent::Activated { .. }))
             .then(evidence::monotonic_ns);
-        let _ = sender.unbounded_send(Event::Shortcut(event, receipt_ns));
+        let _ = sender.unbounded_send(Event::Window(WindowEvent::Shortcut(event, receipt_ns)));
     })
 }
 
@@ -340,8 +342,36 @@ pub(crate) fn header_bar(name: &str) -> gtk::HeaderBar {
     gtk::HeaderBar::builder().title_widget(&title).build()
 }
 
+/// The button of the main menu: Settings and About, and Exit apart. These are
+/// the tray's choices, here too as a desktop may have no tray.
+fn main_menu() -> gtk::MenuButton {
+    let window_items = gio::Menu::new();
+    window_items.append(Some("Settings"), Some("app.settings"));
+    window_items.append(Some("About Addict"), Some("app.about"));
+    let exit_items = gio::Menu::new();
+    exit_items.append(Some("Exit"), Some("app.exit"));
+    let menu = gio::Menu::new();
+    menu.append_section(None, &window_items);
+    menu.append_section(None, &exit_items);
+    let popover = gtk::PopoverMenu::builder()
+        .menu_model(&menu)
+        .has_arrow(false)
+        .css_classes(["main-menu"])
+        .build();
+    gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Main menu")
+        .valign(gtk::Align::Center)
+        .primary(true)
+        .popover(&popover)
+        .css_classes(["main-menu"])
+        .build()
+}
+
 /// The hidden window around the `view`: closing it hides it, and so does Esc.
 fn build_window(application: &gtk::Application, view: &View) -> gtk::ApplicationWindow {
+    let header = header_bar("Addict");
+    header.pack_end(&main_menu());
     let window = gtk::ApplicationWindow::builder()
         .application(application)
         .title("Addict")
@@ -349,7 +379,7 @@ fn build_window(application: &gtk::Application, view: &View) -> gtk::Application
         .default_height(WINDOW_HEIGHT)
         .child(view.root())
         .css_classes(["addict"])
-        .titlebar(&header_bar("Addict"))
+        .titlebar(&header)
         .build();
     // Closing hides; the process and this window stay.
     window.connect_close_request(|window| {
@@ -371,6 +401,23 @@ fn build_window(application: &gtk::Application, view: &View) -> gtk::Application
     });
     window.add_controller(key);
     window
+}
+
+/// What takes the keyboard focus when a capture ended without text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailedEndFocus {
+    Capture,
+    Retry,
+}
+
+/// The focus after a capture without text under `binding`: Capture, for the
+/// retry, or Retry when it is offered. No wildcard arm: a new state does not
+/// compile until it is given its focus.
+fn failed_end_focus(binding: &Binding) -> FailedEndFocus {
+    match binding {
+        Binding::NotBound { .. } => FailedEndFocus::Retry,
+        Binding::Attempting | Binding::Bound => FailedEndFocus::Capture,
+    }
 }
 
 /// The state the event loop keeps between events, on the UI thread.
@@ -409,21 +456,23 @@ struct Session {
     cache_job: Option<Job>,
     /// The clear of the cache; a newer clear replaces it.
     clear_job: Option<Job>,
-    /// The Settings window, which the tray shows.
+    /// The Settings window, reached from the main window or tray.
     settings: Settings,
     /// The About window, which the tray shows.
     about: About,
-    /// The trigger the portal bound, for the Settings window.
-    trigger: Option<String>,
+    /// Independent assignments reported by the portal for this session.
+    bindings: Bindings,
+    /// The state the portal last confirmed, as the switch shows it.
+    startup_on: bool,
+    /// The read of the saved startup state; dropping it gives it up.
+    startup_read_job: Option<Job>,
+    /// The request to the portal, from the switch to its end: while it is
+    /// there the switch stays as it is.
+    startup_job: Option<Job>,
     /// The read of the key file's state; dropping it gives it up.
     key_job: Option<Job>,
     /// The write of the key file; a newer save replaces it.
     save_job: Option<Job>,
-    /// The reset of the stored binding; dropping it gives it up.
-    forget_job: Option<Job>,
-    /// The shortcut is being changed through the system's bind dialog: the
-    /// line of Settings is the one for that until the bind ends.
-    rebinding: bool,
     /// The online request of a word, in its sentence or alone, whose outcome
     /// is awaited; dropping it cancels the request.
     translating_word: Option<Job>,
@@ -473,6 +522,43 @@ struct Capturing {
     /// The language the last started capture job recognizes, which its
     /// line of missing data names.
     language: Language,
+    /// Kept through the picker until the capture's window is presented again.
+    activation_token: Option<String>,
+}
+
+/// What a press of Capture or of the screenshot shortcut does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturePress {
+    /// A capture is on its way or its area is being chosen: nothing new.
+    Ignored,
+    /// A new capture starts.
+    Start,
+    /// The recognition that runs is given up and a new capture starts.
+    Restart,
+}
+
+impl Capturing {
+    /// What a press does now; `recognizing` says that the job has its snapshot.
+    /// Dropping a job that waits for the area could leave an open picker whose
+    /// snapshot nobody deletes, so that one is left alone.
+    fn press(&self, recognizing: bool) -> CapturePress {
+        match (self.hiding, self.job.is_some(), recognizing) {
+            (true, _, _) | (false, true, false) => CapturePress::Ignored,
+            (false, true, true) => CapturePress::Restart,
+            (false, false, _) => CapturePress::Start,
+        }
+    }
+
+    /// The number of the job that starts now.
+    fn next_number(&mut self) -> u64 {
+        self.number += 1;
+        self.number
+    }
+
+    /// Whether the job with `number` is the one that runs.
+    fn is_running(&self, number: u64) -> bool {
+        self.job.is_some() && number == self.number
+    }
 }
 
 /// Where the lookup of the word chosen in a [`Session`] stands; at first
@@ -544,22 +630,8 @@ impl Copying {
 impl Session {
     fn handle(&mut self, event: Event) {
         match event {
-            Event::Shortcut(ShortcutEvent::Bound { trigger }, _) => self.bound(&trigger),
-            Event::Shortcut(
-                ShortcutEvent::Activated {
-                    activation_token,
-                    timestamp_ms,
-                },
-                receipt_ns,
-            ) => self.activated(activation_token.as_deref(), timestamp_ms, receipt_ns),
-            Event::Shortcut(ShortcutEvent::Failed { message }, _) => self.failed(message),
-            Event::Shortcut(ShortcutEvent::ConfigureEnded { message }, _) => {
-                self.settings
-                    .say(&settings::change_text(message.as_deref()));
-            }
+            Event::Window(event) => dispatch_window(self, event),
             Event::Tray(event) => self.tray(event),
-            Event::Shortcut(ShortcutEvent::ConfigureUnsupported, _) => self.rebind(),
-            Event::BindingForgotten(outcome) => self.binding_forgotten(outcome),
             Event::ChangeShortcut => self.change_shortcut(),
             Event::KeyFile(state) => self.settings.render_key(Some(state)),
             Event::SaveKey(text) => self.save_key(text),
@@ -567,7 +639,9 @@ impl Session {
             Event::CacheSize(state) => self.settings.render_cache(state),
             Event::ClearCache => self.clear_cache(),
             Event::CacheCleared(outcome) => self.cache_cleared(outcome),
-            Event::Launched => self.launched(),
+            Event::StartupRead(outcome) => self.startup_read(outcome),
+            Event::ToggleStartup(enable) => self.toggle_startup(enable),
+            Event::StartupChanged(outcome) => self.startup_changed(outcome),
             Event::Retry => self.retry(),
             Event::Sentence(text) => self.sentence_changed(text),
             Event::Word(index) => self.word_chosen(index),
@@ -577,7 +651,6 @@ impl Session {
             Event::Back => self.back(),
             Event::Forward => self.forward(),
             Event::DefinitionAction => self.definition_action(),
-            Event::AddKey => self.show_settings(),
             Event::LookUpEnglish(word) => self.look_up_english(&word),
             Event::DefinitionTranslated {
                 number,
@@ -610,7 +683,7 @@ impl Session {
                 self.indexes = Some(indexes);
                 self.view.render_indexes(indexes);
             }
-            Event::Capture => self.capture(),
+            Event::Capture => self.capture(None),
             Event::Hidden => self.start_capture(),
             Event::Captured(number) => self.snapshot_taken(number),
             Event::Recognized(number, outcome) => self.recognized(number, outcome),
@@ -625,20 +698,25 @@ impl Session {
     /// snapshot is being recognized gives that recognition up and starts a
     /// new capture; a press queued behind one whose area is being chosen
     /// starts nothing. The source line goes.
-    fn capture(&mut self) {
-        if self.capturing.hiding {
-            return;
-        }
-        if self.capturing.job.is_some() {
-            if self.manual.reading() != Some(Source::Ocr) {
-                return;
-            }
-            self.give_up_capture();
+    fn capture(&mut self, activation_token: Option<&str>) {
+        match self
+            .capturing
+            .press(self.manual.reading() == Some(Source::Ocr))
+        {
+            CapturePress::Ignored => return,
+            CapturePress::Restart => self.give_up_capture(),
+            CapturePress::Start => {}
         }
         // The capture's text is the one to come: a read that runs is given up.
         self.give_up_read();
         self.view.clear_source_failure();
         self.capturing.hiding = true;
+        self.capturing.activation_token = activation_token.map(str::to_owned);
+        let settle = if self.window.is_visible() {
+            HIDE_SETTLE
+        } else {
+            Duration::ZERO
+        };
         // Hidden, so on Wayland the compositor places the window anew when it
         // comes back. The opacity of a GTK 4 toplevel is ignored, and making
         // its children transparent left the window in GNOME's capture.
@@ -647,8 +725,9 @@ impl Session {
         let hidden = self.sender.clone();
         // GNOME's capture interface freezes the screen as it opens, and the
         // shell animates a window that goes away: started at once, the
-        // capture shows the window still there.
-        glib::timeout_add_local_once(HIDE_SETTLE, move || {
+        // capture shows the window still there. A window that was closed
+        // already has nothing to wait for.
+        glib::timeout_add_local_once(settle, move || {
             let _ = hidden.unbounded_send(Event::Hidden);
         });
     }
@@ -659,9 +738,8 @@ impl Session {
             return;
         }
         self.capturing.hiding = false;
-        self.capturing.number += 1;
+        let number = self.capturing.next_number();
         self.capturing.language = self.language;
-        let number = self.capturing.number;
         let captured = self.sender.clone();
         let ended = self.sender.clone();
         let started = capture::start(
@@ -683,13 +761,14 @@ impl Session {
 
     /// Whether the capture job with `number` is the one that runs.
     fn is_capturing(&self, number: u64) -> bool {
-        self.capturing.job.is_some() && number == self.capturing.number
+        self.capturing.is_running(number)
     }
 
     /// Gives up the capture job: dropping it kills its Tesseract child and
     /// deletes its snapshot; it shows nothing.
     fn give_up_capture(&mut self) {
         self.capturing.job = None;
+        self.capturing.activation_token = None;
         self.manual.set_reading(None);
     }
 
@@ -702,6 +781,13 @@ impl Session {
         }
         self.manual.set_reading(Some(Source::Ocr));
         self.view.set_capture_sensitive(true);
+        self.reveal_capture();
+    }
+
+    fn reveal_capture(&mut self) {
+        if let Some(token) = self.capturing.activation_token.take() {
+            self.window.set_startup_id(&token);
+        }
         self.reveal();
     }
 
@@ -722,8 +808,10 @@ impl Session {
     /// text replaces the field as a new text from the capture and the
     /// source line goes; anything else, a text without a word among it,
     /// leaves the field as it was, starts nothing and says why in the
-    /// source line. The window is shown either way, the field focused. With
-    /// `--evidence` the end is recorded as shown, with `timing`.
+    /// source line. The window is shown either way, with the field focused
+    /// after a text and, after anything else, Capture for the retry, or Retry
+    /// when it is offered. With `--evidence` the end is recorded as shown,
+    /// with `timing`.
     fn capture_ended(&mut self, captured: Captured, timing: &Timing) {
         self.capturing.job = None;
         self.view.set_capture_sensitive(true);
@@ -745,16 +833,20 @@ impl Session {
             Ok(line) => line,
             Err(failure) => {
                 eprintln!("addict: no text from the capture: {failure:?}");
-                self.reveal();
+                self.reveal_capture();
                 self.view
                     .render_source_failure(&failure_text(&failure, self.capturing.language));
+                match failed_end_focus(&self.binding) {
+                    FailedEndFocus::Capture => self.view.focus_capture(),
+                    FailedEndFocus::Retry => self.view.focus_retry(),
+                }
                 return;
             }
         };
         self.view.clear_source_failure();
         let edit = self.manual.recognized(line);
         self.replace_field(edit);
-        self.reveal();
+        self.reveal_capture();
     }
 
     /// Gives up the read of the selection and the clipboard: it is
@@ -883,11 +975,16 @@ impl Session {
         }
     }
 
-    /// Shows the window with the state as it is now, the field focused,
-    /// without an activation token.
+    /// Shows the window with the state as it is now, the field focused, with
+    /// no press of the clipboard shortcut behind it. No `set_startup_id` here:
+    /// the caller gave a token if it has one, and for a launch GTK has already
+    /// applied the launcher's.
     fn reveal(&self) {
         self.view.render(self.manual.state(), self.manual.source());
         self.focus();
+        if let Some(recording) = &self.recording {
+            recording.shown_without_press();
+        }
         self.window.present();
     }
 
@@ -1517,24 +1614,6 @@ impl Session {
         );
     }
 
-    fn bound(&mut self, trigger: &str) {
-        eprintln!("addict: shortcut bound to {trigger}");
-        self.binding = Binding::Bound;
-        self.trigger = Some(trigger.to_owned());
-        self.view.render_binding(&self.binding);
-        self.settings
-            .render_binding(&self.binding, self.trigger.as_deref());
-        self.end_rebinding();
-    }
-
-    /// The bind ended, one way or the other: the line for the change through
-    /// the system's dialog goes. A line about a failed reset stays.
-    fn end_rebinding(&mut self) {
-        if std::mem::take(&mut self.rebinding) {
-            self.settings.say("");
-        }
-    }
-
     /// The shortcut was pressed: a running capture and read are given up,
     /// the field is cleared, the read of the selection and the clipboard
     /// starts and the window is shown at once in the waiting state with the
@@ -1576,38 +1655,13 @@ impl Session {
     /// also one that is still hiding the window, and the previous read.
     fn give_up_press(&mut self) {
         self.capturing.job = None;
+        self.capturing.activation_token = None;
         if self.capturing.hiding {
             // The hide of the window ends in an event that starts nothing.
             self.capturing.hiding = false;
         }
         self.view.set_capture_sensitive(true);
         self.give_up_read();
-    }
-
-    /// The attempt ended without a shortcut: the window shows itself to say so.
-    fn failed(&mut self, message: String) {
-        eprintln!("addict: shortcut unavailable: {message}");
-        self.binding = Binding::NotBound { detail: message };
-        self.trigger = None;
-        self.view.render_binding(&self.binding);
-        self.settings.render_binding(&self.binding, None);
-        self.end_rebinding();
-        // No press stands behind this, so there is no token.
-        if let Some(recording) = &self.recording {
-            recording.shown_without_press();
-        }
-        self.window.present();
-    }
-
-    fn launched(&mut self) {
-        self.view.render(self.manual.state(), self.manual.source());
-        self.focus();
-        // No `set_startup_id`: GTK has already applied the
-        // token of the launcher, when there was one.
-        if let Some(recording) = &self.recording {
-            recording.shown_without_press();
-        }
-        self.window.present();
     }
 
     /// A choice of the tray. Show is a repeated launch: the window as it is,
@@ -1617,7 +1671,7 @@ impl Session {
     /// said once and changes nothing.
     fn tray(&mut self, event: TrayEvent) {
         match event {
-            TrayEvent::Show => self.launched(),
+            TrayEvent::Show => self.reveal(),
             TrayEvent::Settings => self.show_settings(),
             TrayEvent::About => self.about.present(),
             TrayEvent::Exit => {
@@ -1632,15 +1686,109 @@ impl Session {
     }
 
     fn show_settings(&mut self) {
-        self.settings
-            .render_binding(&self.binding, self.trigger.as_deref());
+        self.settings.render_binding(&self.binding, &self.bindings);
         self.settings.say("");
         self.settings.clear_key_entry();
         self.settings.say_key("");
         self.settings.say_cache("");
         self.check_key();
         self.check_cache();
+        self.check_startup();
         self.settings.present();
+    }
+
+    /// Reads the saved startup state on the runner, for the Settings window,
+    /// and recognises an older login entry. No portal is called, and nothing
+    /// is touched while a change runs: its end shows the state.
+    fn check_startup(&mut self) {
+        if self.startup_job.is_some() {
+            return;
+        }
+        self.settings.say_startup("");
+        self.settings.set_startup_sensitive(false);
+        let Some(work) = self.work.upgrade() else {
+            self.settings.say_startup(settings::STARTUP_NO_RUNNER);
+            return;
+        };
+        let sender = self.sender.clone();
+        self.startup_read_job = Some(work.run(
+            settings::STARTUP_READ_LIMIT,
+            async move {
+                let saved = entries::startup_file()
+                    .as_deref()
+                    .and_then(startup::read_saved);
+                // The sandbox cannot see the entry; a foreign one is no state.
+                let entry = (!startup::is_sandboxed())
+                    .then(entries::login_entry)
+                    .and_then(Result::ok);
+                settings::startup_shown(saved, entry)
+            },
+            move |outcome| {
+                let _ = sender.unbounded_send(Event::StartupRead(outcome));
+            },
+        ));
+    }
+
+    /// The saved state was read: the switch shows it and can be moved.
+    fn startup_read(&mut self, outcome: Outcome<StartupShown>) {
+        // Queued before a change started: the change's end shows the state.
+        if self.startup_job.is_some() {
+            return;
+        }
+        match outcome {
+            Outcome::Finished(shown) => {
+                self.startup_on = shown.on;
+                self.settings.render_startup(shown.on);
+                self.settings.say_startup(if shown.legacy {
+                    settings::STARTUP_LEGACY
+                } else {
+                    ""
+                });
+            }
+            Outcome::TimedOut | Outcome::Panicked => {
+                self.settings.render_startup(self.startup_on);
+                self.settings.say_startup(settings::STARTUP_UNREAD);
+            }
+            // Replaced by the next press of Settings.
+            Outcome::Cancelled => return,
+        }
+        self.settings.set_startup_sensitive(true);
+    }
+
+    /// The user moved the switch: the portal is asked on the runner, the state
+    /// saved when it confirms, and the switch waits for the end.
+    fn toggle_startup(&mut self, enable: bool) {
+        if self.startup_job.is_some() {
+            return;
+        }
+        let Some(work) = self.work.upgrade() else {
+            self.settings.render_startup(self.startup_on);
+            self.settings.say_startup(settings::STARTUP_NO_RUNNER);
+            return;
+        };
+        self.startup_read_job = None;
+        self.settings.set_startup_sensitive(false);
+        self.settings.say_startup("Asking the desktop…");
+        let sender = self.sender.clone();
+        self.startup_job = Some(work.run(
+            entries::STARTUP_LIMIT,
+            request_startup_change(enable),
+            move |outcome| {
+                let _ = sender.unbounded_send(Event::StartupChanged(outcome));
+            },
+        ));
+    }
+
+    /// The change ended: the switch shows what is confirmed and the line why.
+    fn startup_changed(&mut self, outcome: Outcome<StartupEnd>) {
+        let Some((on, line)) = settings::startup_outcome(&outcome, self.startup_on) else {
+            return;
+        };
+        self.startup_job = None;
+        self.startup_on = on;
+        self.settings.render_startup(on);
+        self.settings.say_startup(&line);
+        self.settings.set_startup_sensitive(true);
     }
 
     /// Reads the size of the cache on the runner, for the Settings window; a
@@ -1783,7 +1931,7 @@ impl Session {
         self.check_key();
     }
 
-    /// Change shortcut was pressed: the portal is asked for its dialog
+    /// Configure shortcuts was pressed: the portal is asked for its dialog
     /// through the worker that holds the session.
     fn change_shortcut(&mut self) {
         if !matches!(self.binding, Binding::Bound) {
@@ -1797,52 +1945,6 @@ impl Session {
         }
     }
 
-    /// The portal has no dialog for a change: the session is closed, then
-    /// the stored binding is reset, so that the bind that follows shows the
-    /// system's dialog. The session is closed first, or the old binding is
-    /// held.
-    fn rebind(&mut self) {
-        if !matches!(self.binding, Binding::Bound) {
-            return;
-        }
-        let (Some(current), Some(work)) = (self.current.upgrade(), self.work.upgrade()) else {
-            self.settings
-                .say(&settings::change_text(Some("the runner is not available")));
-            return;
-        };
-        current.borrow_mut().take();
-        self.binding = Binding::Attempting;
-        self.trigger = None;
-        self.view.render_binding(&self.binding);
-        self.settings.render_binding(&self.binding, None);
-        self.settings.say(settings::REBINDING);
-        self.rebinding = true;
-        let sender = self.sender.clone();
-        self.forget_job = Some(work.run(
-            FORGET_LIMIT,
-            async { shortcut::forget_binding(APP_ID) },
-            move |outcome| {
-                let _ = sender.unbounded_send(Event::BindingForgotten(outcome));
-            },
-        ));
-    }
-
-    /// The reset ended: the bind starts again. When the reset failed, the
-    /// binding is still stored, so the bind gives it back without a dialog,
-    /// and the line says why nothing changed.
-    fn binding_forgotten(&mut self, outcome: Outcome<Result<(), String>>) {
-        self.forget_job = None;
-        if let Some(failure) = reset_failure(outcome) {
-            self.rebinding = false;
-            self.settings.say(&settings::change_text(Some(&failure)));
-        }
-        let Some(current) = self.current.upgrade() else {
-            return;
-        };
-        current.borrow_mut().take();
-        *current.borrow_mut() = Some(start_shortcut(&self.sender, self.timed));
-    }
-
     fn retry(&mut self) {
         // One attempt at a time: a press that was queued
         // behind another one starts nothing.
@@ -1854,23 +1956,12 @@ impl Session {
         };
         self.binding = Binding::Attempting;
         self.view.render_binding(&self.binding);
-        self.settings.render_binding(&self.binding, None);
+        self.settings.render_binding(&self.binding, &self.bindings);
         // `Failed` is the last act of the old worker, sent
         // after its session was closed: joining it does not
         // wait.
         current.borrow_mut().take();
         *current.borrow_mut() = Some(start_shortcut(&self.sender, self.timed));
-    }
-}
-
-/// Why the reset of the stored binding did not happen, in one line; `None`
-/// when it did.
-fn reset_failure(outcome: Outcome<Result<(), String>>) -> Option<String> {
-    match outcome {
-        Outcome::Finished(Ok(())) => None,
-        Outcome::Finished(Err(message)) => Some(message),
-        Outcome::TimedOut => Some(format!("no reset within {FORGET_LIMIT:?}")),
-        Outcome::Cancelled | Outcome::Panicked => Some("the reset did not run".to_owned()),
     }
 }
 
@@ -1985,7 +2076,7 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     });
     let add_key = sender.clone();
     view.connect_add_key(move || {
-        let _ = add_key.unbounded_send(Event::AddKey);
+        let _ = add_key.unbounded_send(Event::Window(WindowEvent::Settings));
     });
     let sense = sender.clone();
     view.connect_sense_chosen(move |index| {
@@ -2025,8 +2116,58 @@ fn build_ui(
     (view, window)
 }
 
+/// One change of the switch: the checks before the portal, then the flow of
+/// [`settings::change_startup`] with the real portal and the state file.
+async fn request_startup_change(enable: bool) -> StartupEnd {
+    let state = entries::startup_file();
+    // Only an enable needs it: a disable must work with this binary's path gone.
+    let command = if enable {
+        startup::relaunch_command()
+    } else {
+        Ok(Vec::new())
+    };
+    let checked = {
+        let state = state.is_some();
+        let command = command.as_ref().err().cloned();
+        move || {
+            if !state {
+                return Err(
+                    "there is no place to save it: set an absolute XDG_CONFIG_HOME or HOME"
+                        .to_owned(),
+                );
+            }
+            if let Some(reason) = command {
+                return Err(reason);
+            }
+            // A foreign file or a symlink stays refused; the sandbox cannot see one.
+            if !startup::is_sandboxed() {
+                entries::login_entry()?;
+                entries::check_launcher_installed()?;
+            }
+            Ok(())
+        }
+    };
+    let command = command.unwrap_or_default();
+    let command = &command;
+    settings::change_startup(
+        enable,
+        checked,
+        |asked| async move {
+            let answered = startup::request(APP_ID, asked, command).await?;
+            startup::confirmed(asked, answered)
+        },
+        |saved| {
+            let Some(path) = &state else {
+                return Err("no place to save it".to_owned());
+            };
+            startup::save(path, saved).map_err(|e| e.to_string())
+        },
+    )
+    .await
+}
+
 /// The Settings window above `window`, hidden, naming `key_file`; Change
-/// shortcut and Save key go to `sender` as events.
+/// shortcut, Save key and the Start at login switch go to `sender` as events.
 fn start_settings(
     window: &gtk::ApplicationWindow,
     key_file: Option<&std::path::Path>,
@@ -2035,6 +2176,7 @@ fn start_settings(
     let change = sender.clone();
     let save = sender.clone();
     let clear = sender.clone();
+    let startup = sender.clone();
     Settings::new(
         window,
         key_file,
@@ -2046,6 +2188,9 @@ fn start_settings(
         },
         move || {
             let _ = clear.unbounded_send(Event::ClearCache);
+        },
+        move |enable| {
+            let _ = startup.unbounded_send(Event::ToggleStartup(enable));
         },
     )
 }
@@ -2135,7 +2280,7 @@ fn serve(mut session: Session, mut receiver: UnboundedReceiver<Event>) {
     });
 }
 
-/// Builds the hidden window, starts the first attempt to bind the shortcut
+/// Builds the hidden window, starts the first attempt to bind the shortcuts
 /// and the event loop. Runs once, in the primary instance.
 fn start(
     application: &gtk::Application,
@@ -2146,6 +2291,9 @@ fn start(
 
     // The first attempt starts below, with the window still hidden.
     let binding = Binding::Attempting;
+    connect_settings_action(application, &sender);
+    connect_menu_actions(application, &sender);
+    application.set_accels_for_action("app.settings", &["<Control>comma"]);
     let (view, window) = build_ui(application, &binding, &sender);
 
     // Only the primary instance gets here, so a second launch records no
@@ -2187,11 +2335,12 @@ fn start(
         clear_job: None,
         settings,
         about,
-        trigger: None,
+        bindings: Bindings::default(),
+        startup_on: false,
+        startup_read_job: None,
+        startup_job: None,
         key_job: None,
         save_job: None,
-        forget_job: None,
-        rebinding: false,
         translating_word: None,
         translating_sentence: None,
         translating_definition: None,
@@ -2217,19 +2366,150 @@ fn start(
     }
 }
 
-/// `activate` fires for the launch of this instance and for every later
-/// launch, which exits and leaves its activation to this one. The first is
-/// the launch at login and shows nothing; a later one shows the window.
-fn connect_launches(application: &gtk::Application, resident: Rc<RefCell<Option<Resident>>>) {
-    let launched = Cell::new(false);
-    application.connect_activate(move |_| {
-        if !launched.replace(true) {
-            return;
+/// The mode travels with each invocation, including launches forwarded over D-Bus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchMode {
+    Normal,
+    Background,
+}
+
+impl LaunchMode {
+    pub fn from_background(background: bool) -> Self {
+        if background {
+            Self::Background
+        } else {
+            Self::Normal
         }
-        if let Some(resident) = resident.borrow().as_ref() {
-            let _ = resident.events.unbounded_send(Event::Launched);
+    }
+}
+
+/// These events own presentation policy; binding failures only update state.
+/// Keeping their dispatcher independent of GTK lets tests observe the same
+/// callbacks used by the resident, including silent initialization failures.
+enum WindowEvent {
+    Shortcut(ShortcutEvent, Option<u64>),
+    Launched(LaunchMode),
+    Settings,
+}
+
+trait WindowActions {
+    fn set_bindings(&mut self, binding: Binding, assignments: Bindings);
+    fn present_main(&mut self);
+    fn present_settings(&mut self);
+    fn clipboard(&mut self, token: Option<&str>, timestamp: u64, receipt: Option<u64>);
+    fn capture(&mut self, token: Option<&str>);
+    fn shortcut_status(&mut self, message: &str);
+}
+
+fn dispatch_window(ui: &mut impl WindowActions, event: WindowEvent) {
+    match event {
+        WindowEvent::Launched(LaunchMode::Normal) => ui.present_main(),
+        WindowEvent::Launched(LaunchMode::Background) => {}
+        WindowEvent::Settings => ui.present_settings(),
+        WindowEvent::Shortcut(
+            ShortcutEvent::Bound { bindings } | ShortcutEvent::Changed { bindings },
+            _,
+        ) => ui.set_bindings(Binding::Bound, bindings),
+        WindowEvent::Shortcut(ShortcutEvent::Failed { message }, _) => {
+            eprintln!("addict: shortcut unavailable: {message}");
+            ui.set_bindings(Binding::NotBound { detail: message }, Bindings::default());
         }
+        WindowEvent::Shortcut(
+            ShortcutEvent::Activated {
+                action,
+                activation_token,
+                timestamp_ms,
+            },
+            receipt,
+        ) => match action {
+            Action::Clipboard => ui.clipboard(activation_token.as_deref(), timestamp_ms, receipt),
+            Action::Screenshot => ui.capture(activation_token.as_deref()),
+        },
+        WindowEvent::Shortcut(ShortcutEvent::ConfigureEnded { message }, _) => {
+            ui.shortcut_status(&settings::change_text(message.as_deref()))
+        }
+        WindowEvent::Shortcut(ShortcutEvent::ConfigureUnsupported, _) => {
+            ui.shortcut_status(settings::CONFIGURE_UNSUPPORTED)
+        }
+    }
+}
+
+impl WindowActions for Session {
+    fn set_bindings(&mut self, binding: Binding, assignments: Bindings) {
+        self.binding = binding;
+        self.bindings = assignments;
+        self.view.render_binding(&self.binding);
+        self.settings.render_binding(&self.binding, &self.bindings);
+    }
+
+    fn present_main(&mut self) {
+        self.reveal();
+    }
+    fn present_settings(&mut self) {
+        self.show_settings();
+    }
+    fn clipboard(&mut self, token: Option<&str>, timestamp: u64, receipt: Option<u64>) {
+        self.activated(token, timestamp, receipt);
+    }
+    fn capture(&mut self, token: Option<&str>) {
+        Session::capture(self, token);
+    }
+    fn shortcut_status(&mut self, message: &str) {
+        self.settings.say(message);
+    }
+}
+
+/// The main menu's Settings activates this same named application action.
+fn connect_settings_action(
+    application: &impl IsA<gio::ActionMap>,
+    sender: &UnboundedSender<Event>,
+) {
+    let settings = gio::SimpleAction::new("settings", None);
+    let sender = sender.clone();
+    settings.connect_activate(move |_, _| {
+        let _ = sender.unbounded_send(Event::Window(WindowEvent::Settings));
     });
+    application.add_action(&settings);
+}
+
+/// The main menu's About and Exit are the tray's own events.
+fn connect_menu_actions(application: &impl IsA<gio::ActionMap>, sender: &UnboundedSender<Event>) {
+    for (name, event) in [("about", TrayEvent::About), ("exit", TrayEvent::Exit)] {
+        let action = gio::SimpleAction::new(name, None);
+        let sender = sender.clone();
+        action.connect_activate(move |_, _| {
+            let _ = sender.unbounded_send(Event::Tray(event.clone()));
+        });
+        application.add_action(&action);
+    }
+}
+
+fn connect_launches(
+    application: &impl IsA<gio::Application>,
+    on_launch: impl Fn(LaunchMode) + 'static,
+) {
+    let on_launch = Rc::new(on_launch);
+    let activation = on_launch.clone();
+    // Direct D-Bus activation and desktop launchers without a command line are normal launches.
+    application.connect_activate(move |_| activation(LaunchMode::Normal));
+    application.connect_command_line(move |_, command| {
+        let background = command
+            .options_dict()
+            .lookup::<bool>("background")
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        on_launch(LaunchMode::from_background(background));
+        glib::ExitCode::SUCCESS
+    });
+    application.add_main_option(
+        "background",
+        glib::Char::from(0),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::None,
+        "Start silently for login",
+        None,
+    );
 }
 
 /// Registers the application and gives it back when this launch is the
@@ -2251,14 +2531,17 @@ fn primary(application: gtk::Application) -> Result<gtk::Application, ExitCode> 
 
 /// Runs the resident application until it quits. With `evidence`, each
 /// activation is recorded to it.
-pub fn run(evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
+pub fn run(mode: LaunchMode, evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
     // Without a display there is nothing to be resident for: leave before the
     // application or the portal worker exist.
     if let Err(e) = gtk::init() {
         eprintln!("addict: {e}");
         return ExitCode::FAILURE;
     }
-    let mut application = gtk::Application::builder().application_id(APP_ID).build();
+    let mut application = gtk::Application::builder()
+        .application_id(APP_ID)
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
     let resident: Rc<RefCell<Option<Resident>>> = Rc::default();
     let recording = evidence.is_some();
 
@@ -2267,7 +2550,14 @@ pub fn run(evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
         let resident = start(application, evidence.clone());
         *slot.borrow_mut() = Some(resident);
     });
-    connect_launches(&application, resident.clone());
+    let launches = resident.clone();
+    connect_launches(&application, move |mode| {
+        if let Some(resident) = launches.borrow().as_ref() {
+            let _ = resident
+                .events
+                .unbounded_send(Event::Window(WindowEvent::Launched(mode)));
+        }
+    });
     application.connect_shutdown(move |_| {
         // Stops the workers; the shortcut one closes the portal session.
         resident.borrow_mut().take();
@@ -2281,7 +2571,11 @@ pub fn run(evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
             Err(code) => return code,
         };
     }
-    let status = application.run_with_args::<&str>(&[]);
+    let args = match mode {
+        LaunchMode::Normal => vec!["addict"],
+        LaunchMode::Background => vec!["addict", "--background"],
+    };
+    let status = application.run_with_args(&args);
     if status == glib::ExitCode::SUCCESS {
         ExitCode::SUCCESS
     } else {
@@ -2294,24 +2588,344 @@ mod tests {
     use gtk::{gio, prelude::*};
 
     use super::{
-        CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, Copying, is_offered_command, missed_line,
-        reset_failure,
+        CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, CapturePress, Capturing, Copying, Event,
+        FailedEndFocus, LaunchMode, WindowActions, WindowEvent, connect_launches,
+        connect_menu_actions, connect_settings_action, dispatch_window, failed_end_focus,
+        is_offered_command, missed_line,
     };
     use crate::view::{
         Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
     };
     use addict_core::translation::Source as Language;
 
+    #[derive(Default)]
+    struct ObservedWindow {
+        binding: Option<crate::view::Binding>,
+        assignments: addict_platform::shortcut::Bindings,
+        presentations: usize,
+        settings: usize,
+        clipboard: Vec<(Option<String>, u64, Option<u64>)>,
+        captures: Vec<Option<String>>,
+        status: String,
+    }
+
+    impl WindowActions for ObservedWindow {
+        fn set_bindings(
+            &mut self,
+            binding: crate::view::Binding,
+            assignments: addict_platform::shortcut::Bindings,
+        ) {
+            self.binding = Some(binding);
+            self.assignments = assignments;
+        }
+        fn present_main(&mut self) {
+            self.presentations += 1;
+        }
+        fn present_settings(&mut self) {
+            self.settings += 1;
+        }
+        fn clipboard(&mut self, token: Option<&str>, timestamp: u64, receipt: Option<u64>) {
+            self.clipboard
+                .push((token.map(str::to_owned), timestamp, receipt));
+        }
+        fn capture(&mut self, token: Option<&str>) {
+            self.captures.push(token.map(str::to_owned));
+        }
+        fn shortcut_status(&mut self, message: &str) {
+            self.status = message.to_owned();
+        }
+    }
+
     #[test]
-    fn a_reset_that_did_not_happen_says_so_in_a_line() {
-        use addict_platform::work::Outcome;
-        assert_eq!(reset_failure(Outcome::Finished(Ok(()))), None);
+    fn a_failed_capture_focuses_capture_or_retry_when_offered() {
+        use crate::view::Binding;
         assert_eq!(
-            reset_failure(Outcome::Finished(Err("dconf reset: x".to_owned()))).as_deref(),
-            Some("dconf reset: x")
+            failed_end_focus(&Binding::Attempting),
+            FailedEndFocus::Capture
         );
-        for outcome in [Outcome::TimedOut, Outcome::Cancelled, Outcome::Panicked] {
-            assert!(reset_failure(outcome).is_some());
+        assert_eq!(failed_end_focus(&Binding::Bound), FailedEndFocus::Capture);
+        assert_eq!(
+            failed_end_focus(&Binding::NotBound {
+                detail: "portal unavailable".to_owned(),
+            }),
+            FailedEndFocus::Retry
+        );
+    }
+
+    /// A job that stands for the one of a capture.
+    fn capture_job(work: &addict_platform::work::Work) -> addict_platform::work::Job {
+        work.run(std::time::Duration::from_secs(5), async {}, |_| {})
+    }
+
+    #[test]
+    fn a_press_while_a_picker_waits_starts_nothing() {
+        let work = addict_platform::work::Work::start().expect("runner");
+        let mut capturing = Capturing::default();
+        assert_eq!(capturing.press(false), CapturePress::Start);
+        capturing.hiding = true;
+        assert_eq!(capturing.press(false), CapturePress::Ignored);
+        capturing.hiding = false;
+        capturing.job = Some(capture_job(&work));
+        assert_eq!(capturing.press(false), CapturePress::Ignored);
+        assert_eq!(capturing.press(true), CapturePress::Restart);
+    }
+
+    #[test]
+    fn a_retry_has_a_new_number_and_an_old_job_is_ignored() {
+        let work = addict_platform::work::Work::start().expect("runner");
+        let mut capturing = Capturing::default();
+        let old = capturing.next_number();
+        capturing.job = Some(capture_job(&work));
+        assert!(capturing.is_running(old));
+        // The capture ended: even its own late event is ignored.
+        capturing.job = None;
+        assert!(!capturing.is_running(old));
+        assert_eq!(capturing.press(false), CapturePress::Start);
+        let new = capturing.next_number();
+        assert_ne!(new, old);
+        capturing.job = Some(capture_job(&work));
+        assert!(capturing.is_running(new));
+        assert!(!capturing.is_running(old));
+    }
+
+    #[test]
+    fn failed_initialization_stays_silent_until_a_normal_launch_and_retains_the_error() {
+        use addict_platform::shortcut::ShortcutEvent;
+        let mut window = ObservedWindow::default();
+        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Background));
+        dispatch_window(
+            &mut window,
+            WindowEvent::Shortcut(
+                ShortcutEvent::Failed {
+                    message: "portal unavailable".to_owned(),
+                },
+                None,
+            ),
+        );
+        assert!(
+            matches!(&window.binding, Some(crate::view::Binding::NotBound { detail }) if detail == "portal unavailable")
+        );
+        assert_eq!(window.presentations, 0);
+        assert_eq!(window.settings, 0);
+        // A later login invocation must not accidentally reveal the retained failure either.
+        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Background));
+        assert_eq!(window.presentations, 0);
+        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Normal));
+        assert_eq!(window.presentations, 1);
+        assert!(matches!(
+            window.binding,
+            Some(crate::view::Binding::NotBound { .. })
+        ));
+    }
+
+    #[test]
+    fn main_window_settings_action_opens_settings_after_portal_failure() {
+        use addict_platform::shortcut::ShortcutEvent;
+        let actions = gio::SimpleActionGroup::new();
+        let (sender, mut events) = futures_channel::mpsc::unbounded();
+        connect_settings_action(&actions, &sender);
+        let mut window = ObservedWindow::default();
+        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Normal));
+        dispatch_window(
+            &mut window,
+            WindowEvent::Shortcut(
+                ShortcutEvent::Failed {
+                    message: "portal unavailable".to_owned(),
+                },
+                None,
+            ),
+        );
+        actions.activate_action("settings", None);
+        let Event::Window(event) = events.try_recv().expect("Settings action event") else {
+            panic!("wrong Settings event")
+        };
+        dispatch_window(&mut window, event);
+        assert_eq!(window.presentations, 1);
+        assert_eq!(window.settings, 1);
+    }
+
+    #[test]
+    fn the_main_menu_sends_the_events_of_the_tray() {
+        use addict_platform::tray::TrayEvent;
+        let actions = gio::SimpleActionGroup::new();
+        let (sender, mut events) = futures_channel::mpsc::unbounded();
+        connect_menu_actions(&actions, &sender);
+        for (name, expected) in [("about", TrayEvent::About), ("exit", TrayEvent::Exit)] {
+            actions.activate_action(name, None);
+            let Event::Tray(event) = events.try_recv().expect("a menu event") else {
+                panic!("wrong event for {name}")
+            };
+            assert_eq!(event, expected);
+        }
+    }
+
+    #[test]
+    fn shortcut_events_dispatch_clipboard_and_capture_independently_with_their_tokens() {
+        use addict_platform::shortcut::{Action, ShortcutEvent};
+        let mut window = ObservedWindow::default();
+        for (action, token, time) in [
+            (Action::Screenshot, "screen-token", 10),
+            (Action::Clipboard, "clip-token", 20),
+        ] {
+            dispatch_window(
+                &mut window,
+                WindowEvent::Shortcut(
+                    ShortcutEvent::Activated {
+                        action,
+                        activation_token: Some(token.to_owned()),
+                        timestamp_ms: time,
+                    },
+                    Some(100),
+                ),
+            );
+        }
+        assert_eq!(window.captures, vec![Some("screen-token".to_owned())]);
+        assert_eq!(
+            window.clipboard,
+            vec![(Some("clip-token".to_owned()), 20, Some(100))]
+        );
+    }
+
+    #[test]
+    fn launch_modes_are_per_invocation_and_direct_activation_is_visible() {
+        use std::{cell::RefCell, rc::Rc};
+        let launches = Rc::new(RefCell::new(Vec::new()));
+        // GIO exercises the real option parser and command-line signal without GTK/display.
+        for (args, expected) in [
+            (vec!["addict", "--background"], LaunchMode::Background),
+            (vec!["addict"], LaunchMode::Normal),
+        ] {
+            let application = gio::Application::new(
+                None,
+                gio::ApplicationFlags::HANDLES_COMMAND_LINE | gio::ApplicationFlags::NON_UNIQUE,
+            );
+            let seen = launches.clone();
+            connect_launches(&application, move |mode| seen.borrow_mut().push(mode));
+            assert_eq!(
+                application.run_with_args(&args),
+                gtk::glib::ExitCode::SUCCESS
+            );
+            assert_eq!(launches.borrow().last(), Some(&expected));
+            application.emit_by_name::<()>("activate", &[]);
+            assert_eq!(launches.borrow().last(), Some(&LaunchMode::Normal));
+        }
+        assert_eq!(
+            *launches.borrow(),
+            vec![
+                LaunchMode::Background,
+                LaunchMode::Normal,
+                LaunchMode::Normal,
+                LaunchMode::Normal
+            ]
+        );
+    }
+
+    #[test]
+    fn forwarded_launches_retain_each_invocations_mode() {
+        use std::{
+            cell::RefCell,
+            process::Command,
+            rc::Rc,
+            time::{Duration, Instant},
+        };
+        const TEST: &str = "resident::tests::forwarded_launches_retain_each_invocations_mode";
+        const ROLE: &str = "ADDICT_TEST_LAUNCH_ROLE";
+        if let Ok(role) = std::env::var(ROLE) {
+            let primary = role.starts_with("primary-");
+            let background = role.ends_with("background");
+            let application = gio::Application::new(
+                Some("io.github.doqhu.AddictLaunchTest"),
+                gio::ApplicationFlags::HANDLES_COMMAND_LINE,
+            );
+            let hold = Rc::new(RefCell::new(None));
+            application
+                .connect_startup(move |application| *hold.borrow_mut() = Some(application.hold()));
+            let seen = Rc::new(RefCell::new(Vec::new()));
+            let reported = seen.clone();
+            let remotes = Rc::new(RefCell::new(None));
+            let results = remotes.clone();
+            let resident = application.clone();
+            connect_launches(&application, move |mode| {
+                reported.borrow_mut().push(mode);
+                if primary && reported.borrow().len() == 1 {
+                    *results.borrow_mut() = Some(std::thread::spawn(|| {
+                        // Every remote uses the same public mode arguments, over our private bus.
+                        for role in ["normal", "background", "normal"] {
+                            let output = Command::new(std::env::current_exe().unwrap())
+                                .args(["--exact", TEST, "--nocapture"])
+                                .env(ROLE, role)
+                                .output()
+                                .expect("forwarded child");
+                            assert!(output.status.success(), "{output:?}");
+                        }
+                    }));
+                }
+                if primary && reported.borrow().len() == 4 {
+                    resident.quit();
+                }
+            });
+            let quit = application.clone();
+            let deadline =
+                gtk::glib::timeout_add_local_once(Duration::from_secs(10), move || quit.quit());
+            let args = if background {
+                vec!["addict", "--background"]
+            } else {
+                vec!["addict"]
+            };
+            assert_eq!(
+                application.run_with_args(&args),
+                gtk::glib::ExitCode::SUCCESS
+            );
+            deadline.remove();
+            if primary {
+                remotes
+                    .borrow_mut()
+                    .take()
+                    .expect("remote launcher")
+                    .join()
+                    .unwrap();
+                assert_eq!(
+                    *seen.borrow(),
+                    vec![
+                        LaunchMode::from_background(background),
+                        LaunchMode::Normal,
+                        LaunchMode::Background,
+                        LaunchMode::Normal
+                    ]
+                );
+            } else {
+                assert!(
+                    seen.borrow().is_empty(),
+                    "a forwarded launch must reach the primary"
+                );
+            }
+            return;
+        }
+        for role in ["primary-normal", "primary-background"] {
+            let mut child = Command::new("dbus-run-session")
+                .args([
+                    "--",
+                    std::env::current_exe().unwrap().to_str().unwrap(),
+                    "--exact",
+                    TEST,
+                    "--nocapture",
+                ])
+                .env(ROLE, role)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("private session bus");
+            let started = Instant::now();
+            while child.try_wait().unwrap().is_none() {
+                if started.elapsed() > Duration::from_secs(15) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("forwarded launch test timed out");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{role}: {output:?}");
         }
     }
 
@@ -2385,5 +2999,275 @@ mod tests {
     fn the_clipboard_limit_is_finite_and_short() {
         assert!(!CLIPBOARD_LIMIT.is_zero());
         assert!(CLIPBOARD_LIMIT.as_secs() <= 1);
+    }
+
+    /// The switch's whole job against a mock Background portal, which alone
+    /// touches the autostart file.
+    mod startup_portal {
+        use std::{
+            collections::{HashMap, HashSet},
+            path::{Path, PathBuf},
+            process::{Command, Stdio},
+            sync::{Arc, Mutex},
+            time::{Duration, Instant},
+        };
+
+        use addict_core::APP_ID;
+        use addict_platform::{desktop, startup::StartupFailure};
+        use zbus::{
+            Connection,
+            message::Header,
+            zvariant::{OwnedObjectPath, OwnedValue},
+        };
+
+        use super::super::request_startup_change;
+        use crate::settings::StartupEnd;
+
+        const TEST: &str =
+            "resident::tests::startup_portal::the_switch_changes_startup_only_through_the_portal";
+        const CHILD: &str = "ADDICT_TEST_RESIDENT_STARTUP_CHILD";
+        const DESKTOP: &str = "/org/freedesktop/portal/desktop";
+        const WRITTEN: &str = "[Desktop Entry]\nX-XDP-Autostart=io.github.doqhu.Addict\n";
+        type Options = HashMap<String, OwnedValue>;
+
+        /// What the mock saw and how it answers.
+        struct Mock {
+            entry: PathBuf,
+            state_file: PathBuf,
+            /// Code 0 doing what was asked, or else code 1.
+            obeys: Mutex<bool>,
+            registered: Mutex<HashSet<String>>,
+            /// For each request: the state asked for and whether the state
+            /// file existed when it came.
+            asked: Mutex<Vec<(bool, bool)>>,
+        }
+
+        struct Registry(Arc<Mock>);
+
+        #[zbus::interface(name = "org.freedesktop.host.portal.Registry")]
+        impl Registry {
+            fn register(
+                &self,
+                _app_id: String,
+                _options: Options,
+                #[zbus(header)] header: Header<'_>,
+            ) {
+                let sender = header.sender().unwrap().to_string();
+                self.0.registered.lock().unwrap().insert(sender);
+            }
+        }
+
+        struct Background(Arc<Mock>);
+
+        #[zbus::interface(name = "org.freedesktop.portal.Background")]
+        impl Background {
+            #[zbus(property, name = "version")]
+            fn version(&self) -> u32 {
+                2
+            }
+
+            async fn request_background(
+                &self,
+                _parent: String,
+                options: Options,
+                #[zbus(header)] header: Header<'_>,
+                #[zbus(connection)] connection: &Connection,
+            ) -> zbus::fdo::Result<OwnedObjectPath> {
+                let sender = header.sender().unwrap().to_string();
+                if !self.0.registered.lock().unwrap().contains(&sender) {
+                    return Err(zbus::fdo::Error::AccessDenied("not registered".to_owned()));
+                }
+                let autostart = bool::try_from(&options["autostart"]).unwrap();
+                self.0
+                    .asked
+                    .lock()
+                    .unwrap()
+                    .push((autostart, self.0.state_file.exists()));
+                let obeys = *self.0.obeys.lock().unwrap();
+                if obeys && autostart {
+                    std::fs::create_dir_all(self.0.entry.parent().unwrap()).unwrap();
+                    std::fs::write(&self.0.entry, WRITTEN).unwrap();
+                } else if obeys {
+                    std::fs::remove_file(&self.0.entry).unwrap();
+                }
+                let token = <&str>::try_from(&options["handle_token"]).unwrap();
+                let sender = sender.trim_start_matches(':').replace('.', "_");
+                let request: OwnedObjectPath = format!("{DESKTOP}/request/{sender}/{token}")
+                    .try_into()
+                    .unwrap();
+                let (code, results) = if obeys {
+                    let results = HashMap::from([
+                        ("background".to_owned(), OwnedValue::from(true)),
+                        ("autostart".to_owned(), OwnedValue::from(autostart)),
+                    ]);
+                    (0u32, results)
+                } else {
+                    (1u32, Options::new())
+                };
+                connection
+                    .emit_signal(
+                        None::<&str>,
+                        &request,
+                        "org.freedesktop.portal.Request",
+                        "Response",
+                        &(code, results),
+                    )
+                    .await?;
+                Ok(request)
+            }
+        }
+
+        fn start_mock(mock: Arc<Mock>) {
+            let (ready, started) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let _connection = zbus::connection::Builder::session()
+                        .unwrap()
+                        .name("org.freedesktop.portal.Desktop")
+                        .unwrap()
+                        .serve_at(DESKTOP, Registry(mock.clone()))
+                        .unwrap()
+                        .serve_at(DESKTOP, Background(mock))
+                        .unwrap()
+                        .build()
+                        .await
+                        .unwrap();
+                    ready.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                });
+            });
+            started.recv().expect("the mock portal started");
+        }
+
+        fn change(enable: bool) -> StartupEnd {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(request_startup_change(enable))
+        }
+
+        /// Runs this test again on a private bus with no service directory, so
+        /// that nothing can activate the real portal, and with a private `HOME`
+        /// and `XDG_CONFIG_HOME` and `XDG_DATA_HOME`, given at spawn.
+        fn run_isolated(root: &Path) {
+            let config = root.join("bus.conf");
+            std::fs::write(
+                &config,
+                "<busconfig><type>session</type>\
+                 <listen>unix:tmpdir=/tmp</listen><auth>EXTERNAL</auth>\
+                 <policy context=\"default\"><allow send_destination=\"*\"/>\
+                 <allow receive_sender=\"*\"/><allow own=\"*\"/></policy></busconfig>\n",
+            )
+            .unwrap();
+            let mut child = Command::new("dbus-run-session")
+                .arg("--config-file")
+                .arg(&config)
+                .arg("--")
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .env("HOME", root)
+                .env("XDG_CONFIG_HOME", root.join("config"))
+                .env("XDG_DATA_HOME", root.join("data"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn the test binary");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("the child did not exit in time");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "stdout: {stdout}\nstderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[test]
+        fn the_switch_changes_startup_only_through_the_portal() {
+            if std::env::var_os(CHILD).is_none() {
+                let root = std::env::temp_dir()
+                    .join(format!("addict-resident-startup-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&root);
+                std::fs::create_dir(&root).unwrap();
+                run_isolated(&root);
+                std::fs::remove_dir_all(&root).unwrap();
+                return;
+            }
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            assert!(home.starts_with(std::env::temp_dir()), "not isolated");
+            let config = home.join("config");
+            let entry = desktop::entry_path(&config.join("autostart"), APP_ID);
+            let state_file = config.join("addict/login-startup");
+            let mock = Arc::new(Mock {
+                entry: entry.clone(),
+                state_file: state_file.clone(),
+                obeys: Mutex::new(true),
+                registered: Mutex::default(),
+                asked: Mutex::default(),
+            });
+            start_mock(mock.clone());
+            let asked = || mock.asked.lock().unwrap().clone();
+
+            // No launcher: the portal would not register a host app.
+            let StartupEnd::NotAsked(reason) = change(true) else {
+                panic!("asked without a launcher");
+            };
+            assert!(reason.contains("run `addict install` first"), "{reason}");
+            assert!(asked().is_empty());
+            assert!(!state_file.exists() && !entry.exists());
+
+            desktop::install(
+                &home.join("data/applications"),
+                APP_ID,
+                Path::new("/usr/bin/addict"),
+            )
+            .unwrap();
+
+            // A refusal: nothing saved, nothing written.
+            *mock.obeys.lock().unwrap() = false;
+            assert_eq!(change(true), StartupEnd::Failed(StartupFailure::Refused));
+            assert_eq!(asked(), [(true, false)]);
+            assert!(!state_file.exists() && !entry.exists());
+
+            // Confirmed: saved only after the answer, which found no state.
+            *mock.obeys.lock().unwrap() = true;
+            assert_eq!(change(true), StartupEnd::Done(true));
+            assert_eq!(asked()[1], (true, false));
+            assert_eq!(std::fs::read_to_string(&state_file).unwrap(), "enabled\n");
+            assert_eq!(std::fs::read_to_string(&entry).unwrap(), WRITTEN);
+
+            assert_eq!(change(false), StartupEnd::Done(false));
+            assert_eq!(asked()[2], (false, true));
+            assert_eq!(std::fs::read_to_string(&state_file).unwrap(), "disabled\n");
+            assert!(!entry.exists());
+
+            // A foreign entry never reaches the portal, either way.
+            let foreign = "[Desktop Entry]\nName=Someone else\n";
+            std::fs::write(&entry, foreign).unwrap();
+            for enable in [true, false] {
+                let StartupEnd::NotAsked(reason) = change(enable) else {
+                    panic!("asked with a foreign entry");
+                };
+                assert!(reason.contains(&entry.display().to_string()), "{reason}");
+            }
+            assert_eq!(asked().len(), 3);
+            assert_eq!(std::fs::read_to_string(&entry).unwrap(), foreign);
+            assert_eq!(std::fs::read_to_string(&state_file).unwrap(), "disabled\n");
+        }
     }
 }

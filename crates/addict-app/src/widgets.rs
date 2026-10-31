@@ -2137,6 +2137,17 @@ impl View {
     pub fn focus_field(&self) {
         self.field.grab_focus_without_selecting();
     }
+
+    /// Puts the keyboard focus on Retry; the shortcut's row must be offering it.
+    pub fn focus_retry(&self) {
+        self.retry.grab_focus();
+    }
+
+    /// Puts the keyboard focus on Capture, so Enter or Space opens the region
+    /// picker again. Capture must be sensitive by now.
+    pub fn focus_capture(&self) {
+        self.capture.grab_focus();
+    }
 }
 
 #[cfg(test)]
@@ -2653,5 +2664,35 @@ mod tests {
         view.clear_source_failure();
         assert!(!view.source_failure.row.is_visible());
         assert!(!copy.is_visible());
+    }
+
+    /// After a failed capture the focus is on Capture, sensitive again, also
+    /// while its window is still hidden, as it is before its presentation. Run
+    /// alone: GTK starts once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_keyboard_can_retry_from_capture() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let window = gtk::Window::builder().child(view.root()).build();
+        view.focus_field();
+        view.set_capture_sensitive(false);
+        view.set_capture_sensitive(true);
+        view.focus_capture();
+        assert!(view.capture.is_sensitive());
+        assert_eq!(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            Some(view.capture.upcast_ref::<gtk::Widget>())
+        );
+
+        view.render_binding(&Binding::NotBound {
+            detail: String::new(),
+        });
+        view.focus_capture();
+        view.focus_retry();
+        assert_eq!(
+            gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+            Some(view.retry.upcast_ref::<gtk::Widget>())
+        );
     }
 }

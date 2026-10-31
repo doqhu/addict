@@ -1,12 +1,16 @@
-//! The global shortcut of the resident application.
+//! The global shortcuts of the resident application.
 //!
 //! [`start`] spawns one worker thread that owns a session-bus connection,
-//! registers the host app id, holds a GlobalShortcuts session and binds one
-//! shortcut. Everything it learns is handed to a plain `Send` callback, so the
-//! caller decides how to wake its own thread; nothing here polls.
+//! registers the host app id and holds a GlobalShortcuts session with separate
+//! clipboard and screenshot actions. Everything it learns goes to a plain
+//! `Send` callback, so the caller decides how to wake its own thread; nothing here polls.
 //!
-//! The attempt, from the bus connection to the bound shortcut, has a limit
+//! The attempt, from the bus connection to the bound shortcuts, has a limit
 //! given by the caller: a portal that never answers ends it as a failure.
+//!
+//! A registration and a session die with the portal process, so when the owner
+//! of the portal's bus name goes, the worker starts a new attempt on a fresh
+//! connection with the same IDs and preferences, under a new limit.
 
 use std::{cell::Cell, collections::HashMap, thread::JoinHandle, time::Duration};
 
@@ -24,10 +28,76 @@ use ashpd::{
 use futures_util::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
-/// The id of the single shortcut bound inside the session.
+/// The existing clipboard action's portal identity; keep stored assignments.
 pub const SHORTCUT_ID: &str = "invoke";
+/// The screenshot action has its own stable identity and no preferred key.
+pub const SCREENSHOT_ID: &str = "screenshot";
 
-const SHORTCUT_DESCRIPTION: &str = "Show Addict";
+/// The action requested by an activation from our session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Clipboard,
+    Screenshot,
+}
+
+impl Action {
+    fn from_id(id: &str) -> Option<Self> {
+        match id {
+            SHORTCUT_ID => Some(Self::Clipboard),
+            SCREENSHOT_ID => Some(Self::Screenshot),
+            _ => None,
+        }
+    }
+}
+
+/// The portal owns both assignments. Missing and empty triggers are unassigned.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Bindings {
+    pub clipboard: Option<String>,
+    pub screenshot: Option<String>,
+}
+
+impl Bindings {
+    fn changed<'a>(
+        &mut self,
+        expected_session: &str,
+        actual_session: &str,
+        entries: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> bool {
+        if expected_session != actual_session {
+            return false;
+        }
+        self.update(entries);
+        true
+    }
+
+    /// Changed signals may contain only a subset: preserve every other ID.
+    fn update<'a>(&mut self, entries: impl IntoIterator<Item = (&'a str, &'a str)>) {
+        for (id, trigger) in entries {
+            let target = match Action::from_id(id) {
+                Some(Action::Clipboard) => &mut self.clipboard,
+                Some(Action::Screenshot) => &mut self.screenshot,
+                None => continue,
+            };
+            *target = (!trigger.trim().is_empty()).then(|| trigger.to_owned());
+        }
+    }
+}
+
+fn shortcuts(trigger: &str) -> [NewShortcut; 2] {
+    [
+        NewShortcut::new(SHORTCUT_ID, "Translate selection or clipboard")
+            .preferred_trigger(Some(trigger)),
+        NewShortcut::new(SCREENSHOT_ID, "Capture a screen region (OCR)"),
+    ]
+}
+
+fn session_action(expected: &str, actual: &str, id: &str) -> Option<Action> {
+    (expected == actual).then(|| Action::from_id(id)).flatten()
+}
+
+/// The bus name of the portal, whose owner holds our registration and session.
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
 
 /// How long closing the session may take when the worker stops.
 const CLOSE_LIMIT: Duration = Duration::from_secs(1);
@@ -36,33 +106,50 @@ const CLOSE_LIMIT: Duration = Duration::from_secs(1);
 /// wait for it.
 const CONFIGURE_LIMIT: Duration = Duration::from_secs(5);
 
-/// What the worker reports, in order: at most one `Bound` followed by any
-/// number of `Activated`, of `ConfigureEnded` and of `ConfigureUnsupported`;
-/// `Failed` is always the last event.
+/// An initialized session can have either, both or neither action assigned.
+/// Assignment updates and activations follow it until the final `Failed`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShortcutEvent {
-    /// The portal bound the shortcut; `trigger` is its own description of the
-    /// keys, which the user may have changed from the preferred ones.
-    Bound { trigger: String },
-    /// The shortcut was pressed. `activation_token` is fresh for this press
-    /// and absent when the portal sent none.
+    Bound {
+        bindings: Bindings,
+    },
+    Changed {
+        bindings: Bindings,
+    },
+    /// A fresh activation token belongs to this press and this action.
     Activated {
+        action: Action,
         activation_token: Option<String>,
         timestamp_ms: u64,
     },
     /// The portal answered a [`ShortcutHandle::configure`]: `message` is one
-    /// line saying why the dialog for the shortcut could not be asked for,
+    /// line saying why the dialog for the shortcuts could not be asked for,
     /// and `None` when it was.
-    ConfigureEnded { message: Option<String> },
+    ConfigureEnded {
+        message: Option<String>,
+    },
     /// The portal is too old for its dialog: `ConfigureShortcuts` is from
-    /// version 2 of the interface. The shortcut stays bound; the owner may
-    /// bind again through the system's bind dialog, after
-    /// [`forget_binding`].
+    /// version 2 of the interface. Keep the session and every assignment.
     ConfigureUnsupported,
-    /// The shortcut is not available. `message` is one line: either the step
+    /// The shortcuts are not available. `message` is one line: either the step
     /// that failed with the portal's own error text, or, when the attempt ran
     /// out of time, the limit alone with no portal text. It does not say why.
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
+}
+
+/// Why an attempt or the session it bound ended.
+enum Ended {
+    /// The owner of the portal's name went: bind again.
+    PortalLeft,
+    Failed(ShortcutEvent),
+}
+
+impl From<ShortcutEvent> for Ended {
+    fn from(event: ShortcutEvent) -> Self {
+        Self::Failed(event)
+    }
 }
 
 /// Keeps the worker alive. Dropping it stops the worker, which closes the
@@ -80,11 +167,11 @@ enum Command {
 }
 
 impl ShortcutHandle {
-    /// Asks the portal for its dialog to change the shortcut. The answer is
-    /// a [`ShortcutEvent::ConfigureEnded`], or a
+    /// Asks the portal for its dialog to change the shortcuts of both actions.
+    /// The answer is a [`ShortcutEvent::ConfigureEnded`], or a
     /// [`ShortcutEvent::ConfigureUnsupported`] from a portal too old for the
     /// dialog. A request made before the
-    /// shortcut is bound waits for it, and one made after the worker has
+    /// shortcuts are bound waits for them, and one made after the worker has
     /// failed is not answered.
     pub fn configure(&self) {
         let _ = self.commands.send(Command::Configure);
@@ -104,10 +191,10 @@ impl Drop for ShortcutHandle {
 }
 
 /// Starts the worker for `app_id` with the preferred `trigger` in the XDG
-/// shortcuts syntax (for example `LOGO+q`). `limit` is how long the attempt
-/// may take up to `Bound`; when it runs out the worker reports `Failed` like
-/// for any other failure. `on_event` runs on the worker thread and must not
-/// block.
+/// shortcuts syntax (for example `LOGO+q`). `limit` is how long each attempt
+/// may take up to `Bound`, the one after a portal restart included; when it
+/// runs out the worker reports `Failed` like for any other failure. `on_event`
+/// runs on the worker thread and must not block.
 pub fn start(
     app_id: &str,
     trigger: &str,
@@ -162,46 +249,54 @@ type Callback = Box<dyn Fn(ShortcutEvent) + Send>;
 
 type ShortcutSession = Session<GlobalShortcuts>;
 
-/// Serves until a failure, the limit of the attempt or the stop signal, then
+/// Serves until a failure, the limit of an attempt or the stop signal, then
 /// closes the session if one was created. `Failed` is sent after the close,
-/// as the last act of the worker; the stop signal sends nothing.
+/// as the last act of the worker; the stop signal sends nothing. A portal that
+/// left only starts the next attempt: its session went with it, so that one
+/// is dropped unclosed.
 async fn run(
     app_id: &str,
     trigger: &str,
     limit: Duration,
     on_event: &(dyn Fn(ShortcutEvent) + Send),
-    stopped: oneshot::Receiver<()>,
+    mut stopped: oneshot::Receiver<()>,
     mut requests: mpsc::UnboundedReceiver<Command>,
 ) {
-    let mut session = None;
-    // The limit covers the attempt only: once bound, presses are awaited
-    // without one.
-    let bound = Cell::new(false);
-    let report = |event: ShortcutEvent| {
-        if matches!(event, ShortcutEvent::Bound { .. }) {
-            bound.set(true);
+    loop {
+        let mut session = None;
+        // The limit covers the attempt only: once bound, presses are awaited
+        // without one.
+        let bound = Cell::new(false);
+        let report = |event: ShortcutEvent| {
+            if matches!(event, ShortcutEvent::Bound { .. }) {
+                bound.set(true);
+            }
+            on_event(event);
+        };
+        let failure = tokio::select! {
+            // Resolves on the signal and when the handle is gone without one.
+            _ = &mut stopped => None,
+            result = serve(app_id, trigger, &report, &mut session, &mut requests) => {
+                let Err(ended) = result;
+                match ended {
+                    Ended::PortalLeft => continue,
+                    Ended::Failed(event) => Some(event),
+                }
+            }
+            () = unbound_after(limit, &bound) => Some(limit_reached(limit)),
+        };
+        if let Some(session) = session {
+            // Best effort: the portal also drops the session with the connection.
+            let _ = tokio::time::timeout(CLOSE_LIMIT, session.close()).await;
         }
-        on_event(event);
-    };
-    let failure = tokio::select! {
-        // Resolves on the signal and when the handle is gone without one.
-        _ = stopped => None,
-        result = serve(app_id, trigger, &report, &mut session, &mut requests) => {
-            let Err(event) = result;
-            Some(event)
+        if let Some(event) = failure {
+            on_event(event);
         }
-        () = unbound_after(limit, &bound) => Some(limit_reached(limit)),
-    };
-    if let Some(session) = session {
-        // Best effort: the portal also drops the session with the connection.
-        let _ = tokio::time::timeout(CLOSE_LIMIT, session.close()).await;
-    }
-    if let Some(event) = failure {
-        on_event(event);
+        return;
     }
 }
 
-/// Resolves after `limit` if the shortcut is still not bound, and never
+/// Resolves after `limit` if the shortcuts are still not bound, and never
 /// otherwise.
 async fn unbound_after(limit: Duration, bound: &Cell<bool>) {
     tokio::time::sleep(limit).await;
@@ -210,18 +305,31 @@ async fn unbound_after(limit: Duration, bound: &Cell<bool>) {
     }
 }
 
-/// Register, subscribe, create the session, bind, then forward presses. Only
-/// returns with the `Failed` event to report.
+/// Watch the portal's name, register, subscribe, create the session, bind,
+/// then forward presses. Only returns with why it ended.
 async fn serve(
     app_id: &str,
     trigger: &str,
     on_event: &dyn Fn(ShortcutEvent),
     session_slot: &mut Option<ShortcutSession>,
     requests: &mut mpsc::UnboundedReceiver<Command>,
-) -> Result<std::convert::Infallible, ShortcutEvent> {
+) -> Result<std::convert::Infallible, Ended> {
     let connection = zbus::Connection::session()
         .await
         .map_err(|e| failed("session bus", &e))?;
+
+    // Before registering, so that the owner holding the registration cannot
+    // leave unseen. The call to the bus is not a call to the portal. An owner
+    // that left before the registration arrived costs one needless attempt; a
+    // new owner appearing is no reason to act, it is the portal being started.
+    let bus = zbus::fdo::DBusProxy::new(&connection)
+        .await
+        .map_err(|e| failed("watching the portal", &e))?;
+    let owners = bus
+        .receive_name_owner_changed_with_args(&[(0, PORTAL)])
+        .await
+        .map_err(|e| failed("watching the portal", &e))?;
+    let mut owners = std::pin::pin!(owners);
 
     // Must precede any other portal call on the connection.
     let parsed: AppID = app_id
@@ -235,12 +343,18 @@ async fn serve(
         .await
         .map_err(|e| failed("GlobalShortcuts portal", &e))?;
 
-    // Subscribe before binding so no activation can slip between the two.
+    // Subscribe before binding so neither presses nor assignment changes slip past.
     let activations = portal
         .receive_activated()
         .await
         .map_err(|e| failed("subscribing to Activated", &e))?;
     let mut activations = std::pin::pin!(activations);
+
+    let changes = portal
+        .receive_shortcuts_changed()
+        .await
+        .map_err(|e| failed("subscribing to ShortcutsChanged", &e))?;
+    let mut changes = std::pin::pin!(changes);
 
     let session: &ShortcutSession = session_slot.insert(
         portal
@@ -250,37 +364,56 @@ async fn serve(
     );
     let session_path = session_path(session).map_err(|e| failed("session handle", &e))?;
 
-    let shortcut =
-        NewShortcut::new(SHORTCUT_ID, SHORTCUT_DESCRIPTION).preferred_trigger(Some(trigger));
     let bound = portal
-        .bind_shortcuts(session, &[shortcut], None, BindShortcutsOptions::default())
+        .bind_shortcuts(
+            session,
+            &shortcuts(trigger),
+            None,
+            BindShortcutsOptions::default(),
+        )
         .await
         .and_then(|request| request.response())
-        .map_err(|e| failed("binding the shortcut", &e))?;
-    let Some(own) = bound.shortcuts().iter().find(|s| s.id() == SHORTCUT_ID) else {
-        return Err(ShortcutEvent::Failed {
-            message: format!(
-                "binding the shortcut: the portal bound {} shortcuts, none with id {SHORTCUT_ID:?}",
-                bound.shortcuts().len()
-            ),
-        });
-    };
+        .map_err(|e| failed("binding the shortcuts", &e))?;
+    let mut bindings = Bindings::default();
+    bindings.update(
+        bound
+            .shortcuts()
+            .iter()
+            .map(|s| (s.id(), s.trigger_description())),
+    );
     on_event(ShortcutEvent::Bound {
-        trigger: own.trigger_description().to_owned(),
+        bindings: bindings.clone(),
     });
 
     loop {
         tokio::select! {
+            signal = owners.next() => {
+                let Some(signal) = signal else { break };
+                let args = signal.args().map_err(|e| failed("watching the portal", &e))?;
+                if args.old_owner().is_some() {
+                    return Err(Ended::PortalLeft);
+                }
+            }
             signal = activations.next() => {
                 let Some(signal) = signal else { break };
-                if signal.session_handle().as_str() == session_path.as_str()
-                    && signal.shortcut_id() == SHORTCUT_ID
-                {
+                if let Some(action) = session_action(
+                    session_path.as_str(), signal.session_handle().as_str(), signal.shortcut_id(),
+                ) {
                     on_event(ShortcutEvent::Activated {
+                        action,
                         activation_token: activation_token(signal.options()),
                         timestamp_ms: u64::try_from(signal.timestamp().as_millis())
                             .unwrap_or(u64::MAX),
                     });
+                }
+            }
+            signal = changes.next() => {
+                let Some(signal) = signal else { break };
+                if bindings.changed(
+                    session_path.as_str(), signal.session_handle().as_str(),
+                    signal.shortcuts().iter().map(|s| (s.id(), s.trigger_description())),
+                ) {
+                    on_event(ShortcutEvent::Changed { bindings: bindings.clone() });
                 }
             }
             // Disabled once the handle is gone; the stop signal ends the
@@ -299,9 +432,9 @@ async fn serve(
             }
         }
     }
-    Err(ShortcutEvent::Failed {
-        message: "the Activated signal stream ended".to_owned(),
-    })
+    Err(Ended::Failed(ShortcutEvent::Failed {
+        message: "a shortcuts signal stream ended".to_owned(),
+    }))
 }
 
 /// The wrapper keeps the session path private; it serializes as the path.
@@ -355,62 +488,6 @@ fn configure_ended(answer: Option<Result<(), impl std::fmt::Display>>) -> Shortc
         )),
     };
     ShortcutEvent::ConfigureEnded { message }
-}
-
-/// Where GNOME keeps the binding of `app_id`.
-fn binding_path(app_id: &str) -> String {
-    format!("/org/gnome/settings-daemon/global-shortcuts/{app_id}/")
-}
-
-/// How long `dconf` may take to reset a binding.
-const RESET_LIMIT: Duration = Duration::from_secs(2);
-
-/// Resets the binding that GNOME keeps for `app_id`, so that the next bind
-/// shows the system's dialog again. Only that app id is touched. Blocks for
-/// the run of `dconf`, at most [`RESET_LIMIT`]. The session of the app must be
-/// closed first, or GNOME holds the old binding. The error is one line.
-pub fn forget_binding(app_id: &str) -> Result<(), String> {
-    reset_with("dconf", &binding_path(app_id), RESET_LIMIT)
-}
-
-fn reset_with(program: &str, path: &str, limit: Duration) -> Result<(), String> {
-    use std::{io::Read, process::Stdio, time::Instant};
-
-    let mut child = std::process::Command::new(program)
-        .args(["reset", "-f", path])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| one_line(&format!("running {program}"), &e))?;
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < limit => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("{program} reset: no result within {limit:?}"));
-            }
-            Err(e) => return Err(one_line(&format!("waiting for {program}"), &e)),
-        }
-    };
-    if status.success() {
-        return Ok(());
-    }
-    let mut stderr = String::new();
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_string(&mut stderr);
-    }
-    let detail = if stderr.trim().is_empty() {
-        status.to_string()
-    } else {
-        stderr
-    };
-    Err(one_line(&format!("{program} reset"), &detail))
 }
 
 /// The failure of an attempt that ran out of time: it names the limit and
@@ -558,43 +635,58 @@ mod tests {
     }
 
     #[test]
-    fn the_binding_path_is_that_of_the_app_id_alone() {
+    fn action_identity_and_preference_preserve_existing_clipboard_assignment() {
+        let definitions = shortcuts("LOGO+q");
+        let context = zvariant::serialized::Context::new_dbus(zvariant::LE, 0);
+        let bytes =
+            zvariant::to_bytes(context, &definitions.as_slice()).expect("serialize shortcuts");
+        let (definitions, _) = bytes
+            .deserialize::<Vec<(String, HashMap<String, OwnedValue>)>>()
+            .expect("shortcut properties");
+        assert_eq!(definitions[0].0, "invoke");
         assert_eq!(
-            binding_path("io.github.doqhu.Addict"),
-            "/org/gnome/settings-daemon/global-shortcuts/io.github.doqhu.Addict/"
+            <&str>::try_from(&definitions[0].1["preferred_trigger"]).unwrap(),
+            "LOGO+q"
         );
+        assert_eq!(definitions[1].0, "screenshot");
+        assert!(!definitions[1].1.contains_key("preferred_trigger"));
     }
 
     #[test]
-    fn a_reset_is_ok_only_when_the_program_succeeds() {
-        let limit = Duration::from_secs(5);
-        assert_eq!(reset_with("true", "/x/", limit), Ok(()));
-        let failed = reset_with("false", "/x/", limit).unwrap_err();
-        assert!(failed.starts_with("false reset: "), "{failed}");
-        assert!(!failed.contains('\n'));
-        let missing = reset_with("addict-no-such-program", "/x/", limit).unwrap_err();
-        assert!(
-            missing.starts_with("running addict-no-such-program: "),
-            "{missing}"
-        );
+    fn partial_bindings_and_changed_ids_keep_independent_assignments() {
+        let mut bindings = Bindings::default();
+        bindings.update([("invoke", "Super+Q")]);
+        assert_eq!(bindings.clipboard.as_deref(), Some("Super+Q"));
+        assert_eq!(bindings.screenshot, None);
+        assert!(!bindings.changed("/ours", "/other", [("invoke", "F1"), ("screenshot", "F2")]));
+        assert_eq!(bindings.clipboard.as_deref(), Some("Super+Q"));
+        assert_eq!(bindings.screenshot, None);
+        assert!(bindings.changed(
+            "/ours",
+            "/ours",
+            [("screenshot", "Super+S"), ("other", "F1")]
+        ));
+        assert_eq!(bindings.clipboard.as_deref(), Some("Super+Q"));
+        assert_eq!(bindings.screenshot.as_deref(), Some("Super+S"));
+        bindings.update([("screenshot", " ")]);
+        assert_eq!(bindings.screenshot, None);
+        assert_eq!(bindings.clipboard.as_deref(), Some("Super+Q"));
+        bindings.update([("invoke", "")]);
+        assert_eq!(bindings, Bindings::default());
     }
 
     #[test]
-    fn a_reset_that_hangs_is_killed_at_the_limit() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("addict-reset-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("directory");
-        let script = dir.join("hang");
-        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").expect("script");
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("mode");
-        let started = std::time::Instant::now();
-        let result = reset_with(
-            script.to_str().expect("utf-8 path"),
-            "/x/",
-            Duration::from_millis(100),
+    fn only_known_actions_in_our_session_activate() {
+        assert_eq!(
+            session_action("/ours", "/ours", "invoke"),
+            Some(Action::Clipboard)
         );
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(started.elapsed() < Duration::from_secs(5));
-        assert!(result.unwrap_err().contains("no result within 100ms"));
+        assert_eq!(
+            session_action("/ours", "/ours", "screenshot"),
+            Some(Action::Screenshot)
+        );
+        assert_eq!(session_action("/ours", "/other", "invoke"), None);
+        assert_eq!(session_action("/ours", "/other", "screenshot"), None);
+        assert_eq!(session_action("/ours", "/ours", "unknown"), None);
     }
 }

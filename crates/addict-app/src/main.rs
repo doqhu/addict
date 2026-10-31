@@ -1,10 +1,12 @@
 //! Addict application entry point.
 //!
-//! `addict install` writes the desktop entry twice: into the applications
-//! directory, where the portal needs it, and into the autostart directory,
-//! which starts the application at login. It also writes the app icon, four
-//! sizes, into the user icon theme, where the entry's `Icon` finds it.
-//! `addict uninstall` removes all of them.
+//! `addict install` writes the desktop entry into the applications directory,
+//! where the portal needs it and the shell lists it as a launcher, and the app
+//! icon, four sizes, into the user icon theme, where the entry's `Icon` finds
+//! it. It sets up no login startup. `addict uninstall` asks the Background
+//! portal to remove a login entry of ours, whichever build wrote it, and then
+//! removes those files and the saved startup state; when the portal does not
+//! confirm, it removes nothing and names the entry.
 //!
 //! `addict import <FILE>` turns a dictionary file the user has downloaded
 //! into an index in the data directory, `$XDG_DATA_HOME/addict` or
@@ -16,8 +18,10 @@
 //! and the index of the other source is not touched. The command prints the
 //! path of the index and the counts of its headwords and exception forms.
 //!
-//! With no arguments the process is the resident application: one hidden
-//! window, shown each time the global shortcut is pressed. On each press the
+//! With no arguments the process shows the resident application's main window.
+//! `--background` starts it silently for login; the Start at login switch in
+//! Settings is what asks the Background portal to run it so. Closing the window keeps the
+//! resident available for clipboard and screenshot shortcuts. On each clipboard press the
 //! window shows the source of the input and the state derived from the input
 //! contract; Esc hides it, as the title-bar close does.
 //!
@@ -122,8 +126,8 @@
 //! whole field with the clipboard text as one line, and with it the input and
 //! the result; the pasted text is then submitted, as by Enter. The clipboard
 //! is read once per paste, without blocking the window, and otherwise only at
-//! a press of the shortcut (below). A clipboard that holds no text changes
-//! nothing.
+//! a press of the clipboard action's shortcut (below). A clipboard that holds
+//! no text changes nothing.
 //!
 //! Capture, beside the field, hides the window and asks the desktop for an
 //! interactive screenshot: the user chooses an area, or cancels. Once the
@@ -140,11 +144,17 @@
 //! as the sentence. It is not submitted:
 //! a lone word is looked up and not sent online. An edit keeps the source;
 //! a field without a word is manual input again. A capture that gives no text,
-//! for any reason, leaves the field as it was and says "No text was
-//! recognized." until the next state is shown. Capture cannot be pressed
-//! while a capture runs.
+//! for any reason, starts no recognition it has no snapshot for, leaves the
+//! field as it was, shows the window and says why until the next state is
+//! shown; one that left no snapshot also says to press Capture to try again.
+//! The keyboard focus is on Capture then, unless Retry is offered, and a press
+//! opens a new interactive picker. The window comes back also after Esc,
+//! because GNOME answers Esc and a real failure with the same code. Nothing
+//! is granted on this path: the portal asks for no permission for an
+//! interactive screenshot. Capture cannot be pressed while the area is being
+//! chosen.
 //!
-//! The shortcut reads the text selected or copied, the same for every
+//! The clipboard action reads the text selected or copied, the same for every
 //! application: the window shows at once, empty and saying that the source,
 //! "selection or clipboard", is being read; once the window is active, the
 //! primary selection is read, then the clipboard when the selection gave no
@@ -157,9 +167,9 @@
 //! The application has an icon in the top bar, a StatusNotifierItem, with a
 //! menu of Show, Settings, About and Exit, which a click on the icon opens.
 //! Show shows the window as a repeated launch does, without a read. Settings
-//! shows a window with the trigger of the shortcut, the file of the DeepL key
-//! and the state it is in, never the key, and a button that asks the portal
-//! for its dialog to change the shortcut; the line there says when it cannot.
+//! and About are also in the main window's menu. Settings shows both shortcut assignments,
+//! the DeepL key file and its state, never the key, and a button that asks
+//! the portal to configure both actions, with live assignment updates.
 //! About shows a window with the icon, the name, the version and the license
 //! of the application, and a Credits page that lists every dictionary and OCR
 //! source with its credit line. Exit ends the application. A session with no
@@ -167,13 +177,17 @@
 //! the icon appears when a watcher comes, such as a shell extension that
 //! starts after the application.
 //!
-//! The application is unique: a second launch exits at once and makes the
-//! resident instance show its window as it is, without a read.
+//! The application is unique: each invocation forwards its mode to the resident.
+//! A normal launch shows the window as it is, without a read; a background
+//! launch leaves it as it is. The screenshot action opens the same interactive
+//! capture flow as Capture, using the reading language, and every end of it
+//! without text shows the window with the same way to try again.
 //!
-//! An attempt to bind the shortcut that ends without one, for any reason or
-//! for none within `resident::BIND_LIMIT`, shows the window by itself with a
-//! line saying so and Retry. Retry starts a new attempt; a bound shortcut
-//! removes the line.
+//! An attempt to bind the shortcuts of both actions that ends without them,
+//! for any reason or for none within `resident::BIND_LIMIT`, keeps a line
+//! saying so and Retry in the window. Background login stays silent. Retry
+//! starts a new attempt; an initialized session removes the failure line even
+//! with unassigned actions.
 //!
 //! Before GTK starts, the resident lets the Vulkan loader list only the
 //! driver of the GPU that drives the display, so that the first window does
@@ -244,10 +258,18 @@ use addict_dictionary::import;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "addict", version, about = "Addict translator")]
+#[command(
+    name = "addict",
+    version,
+    about = "Addict translator",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Start silently for login; normal launches show the main window
+    #[arg(long)]
+    background: bool,
     /// Append measurement evidence of each activation to this file
     #[arg(long, hide = true, value_name = "FILE", requires = "origin")]
     evidence: Option<PathBuf>,
@@ -258,10 +280,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Write the desktop entries and the app icons: the portal recognises the
-    /// application, the session starts it at login and the shell shows its icon
+    /// Write the desktop entry and the app icons: the portal recognises the
+    /// application and the shell lists it with its icon
     Install,
-    /// Remove the desktop entries and the icons that install wrote
+    /// Turn off login startup through the Background portal, then remove the
+    /// desktop entry and the icons that install wrote
     Uninstall,
     /// Build the dictionary index from a downloaded dictionary file
     Import {
@@ -279,7 +302,10 @@ fn main() -> ExitCode {
         None => {
             gpu::select_vulkan_drivers();
             match open_evidence(cli.evidence.zip(cli.origin)) {
-                Ok(writer) => resident::run(writer),
+                Ok(writer) => resident::run(
+                    resident::LaunchMode::from_background(cli.background),
+                    writer,
+                ),
                 Err(message) => fail(&message),
             }
         }

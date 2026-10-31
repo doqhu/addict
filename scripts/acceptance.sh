@@ -200,7 +200,8 @@ sample() { # <phase>: 60 s idle, then PSS, RSS and CPU of the process over one s
     || { echo 'A press, a lookup, an online request or a capture arrived during the idle wait; repeat the session' >&2; exit 1; }
 }
 
-"$app" --evidence "$file" --origin "$origin" &
+# Silent, as at login: a window shown by the launch would make the first press warm.
+"$app" --background --evidence "$file" --origin "$origin" &
 pid=$!
 echo "== $action (addict $pid, boot $boot) =="
 echo 'If a system dialog asks for the shortcut, confirm it.'
@@ -221,7 +222,7 @@ commit=$(git -C "$root" rev-parse HEAD)
 "$harness" data-sets --results "$results" --roots "$pid" --commit "$commit" --files "${indexes[@]}"
 
 echo "1. Focus $name, press Super+Q once (cold start), check the window, close it with Esc."
-echo '   If the bind dialog was dismissed or the window appeared by itself, stop with Ctrl+C and start again.'
+echo '   If the bind dialog was dismissed or the window does not appear, stop with Ctrl+C and start again.'
 wait_for 'cold activation' 1 1
 sample before-invocation
 echo "2. From $name: Super+Q, wait for the window, Esc. Exactly 30 times, no extra presses."

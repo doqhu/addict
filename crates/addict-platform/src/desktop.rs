@@ -1,10 +1,11 @@
 //! The product's desktop entry and icons. The host Registry accepts an app id
 //! only when a matching `.desktop` file is installed, so registration needs
-//! this entry; the same entry in the autostart directory starts the
-//! application at login. The entry names the app id as its icon, which the
-//! shell looks up in the user `hicolor` theme: one PNG per size, written by
-//! `install_icon`. Every `install` overwrites and every `uninstall` removes
-//! only a file the product wrote, and neither follows a symlink.
+//! this entry, and it is the launcher of a source build. It names the app id
+//! as its icon, which the shell looks up in the user `hicolor` theme: one PNG
+//! per size, written by `install_icon`. Every `install` overwrites and every
+//! `uninstall` removes only a file the product wrote, and neither follows a
+//! symlink. Nothing here writes or removes a login entry: the Background
+//! portal owns the autostart directory, and [`login_entry`] only reads it.
 
 use std::{
     ffi::OsString,
@@ -16,6 +17,10 @@ use std::{
 
 /// The line that marks a desktop entry as written by Addict.
 pub const MARKER: &str = "X-Addict=true";
+
+/// The key the Background portal writes into a login entry, with the app id as
+/// its value.
+const PORTAL_KEY: &str = "X-XDP-Autostart";
 
 /// The line of a PNG icon that marks it as written by Addict: the text chunk
 /// `X-Addict` = `true`, from its chunk type to its value.
@@ -52,7 +57,8 @@ fn icons_dir_from(data_home: Option<OsString>, home: Option<OsString>) -> Option
 }
 
 /// The user autostart directory: `$XDG_CONFIG_HOME/autostart` when the
-/// variable is an absolute path, else `$HOME/.config/autostart`.
+/// variable is an absolute path, else `$HOME/.config/autostart`. Only for
+/// reading the login entry outside the sandbox, with [`login_entry`].
 pub fn autostart_dir() -> Option<PathBuf> {
     autostart_dir_from(
         std::env::var_os("XDG_CONFIG_HOME"),
@@ -126,10 +132,13 @@ pub fn entry_text(app_id: &str, exec: &Path) -> String {
          [Desktop Entry]\n\
          Type=Application\n\
          Name=Addict\n\
+         Comment=Translate the selected text or a part of the screen\n\
          Icon={app_id}\n\
          Exec={exec}\n\
          Terminal=false\n\
-         NoDisplay=true\n\
+         Categories=Utility;TextTools;Dictionary;\n\
+         Keywords=translate;translation;dictionary;OCR;\n\
+         StartupNotify=true\n\
          {MARKER}\n"
     )
 }
@@ -178,9 +187,15 @@ fn icon_is_ours(bytes: &[u8]) -> bool {
         .any(|window| window == ICON_MARKER)
 }
 
+/// A login entry the Background portal wrote for `app_id`.
+fn entry_is_from_portal(bytes: &[u8], app_id: &str) -> bool {
+    let line = format!("{PORTAL_KEY}={app_id}");
+    std::str::from_utf8(bytes).is_ok_and(|text| text.lines().any(|l| l.trim() == line))
+}
+
 /// Classifies `path` without changing anything: anything there that is not a
 /// regular file `is_ours` accepts, a symlink included, is the refusal.
-fn classify(path: &Path, is_ours: fn(&[u8]) -> bool) -> io::Result<Target> {
+fn classify(path: &Path, is_ours: impl Fn(&[u8]) -> bool) -> io::Result<Target> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.is_file() => {
             Err(refusal(path, "exists and is not a regular file"))
@@ -225,15 +240,56 @@ fn write(path: PathBuf, is_ours: fn(&[u8]) -> bool, content: &[u8]) -> io::Resul
 }
 
 /// Classifies the entry for `app_id` in `dir` without changing anything.
-/// Anything of that name that is not a regular file carrying [`MARKER`], a
-/// symlink included, is an error: the refusal. Every error names the path.
+/// Anything of that name that is not a regular file carrying [`MARKER`] or the
+/// portal's `X-XDP-Autostart=<app id>`, a symlink included, is an error: the
+/// refusal. Every error names the path.
 ///
-/// `install` and `uninstall` run this themselves; a caller with several
-/// targets runs it on all of them first, so that a refusal leaves all as they
-/// were.
+/// A caller with several targets runs it on all of them first, so that a
+/// refusal leaves all as they were. [`install`] and [`uninstall`] touch only a
+/// file carrying [`MARKER`]; see [`check_launcher`].
 pub fn check(dir: &Path, app_id: &str) -> io::Result<Target> {
     check_app_id(app_id)?;
+    classify(&entry_path(dir, app_id), |bytes| {
+        entry_is_ours(bytes) || entry_is_from_portal(bytes, app_id)
+    })
+}
+
+/// [`check`] for what [`uninstall`] would remove: only a file carrying
+/// [`MARKER`] is accepted.
+pub fn check_launcher(dir: &Path, app_id: &str) -> io::Result<Target> {
+    check_app_id(app_id)?;
     classify(&entry_path(dir, app_id), entry_is_ours)
+}
+
+/// The login entry for `app_id` in the autostart directory `dir`, when it is
+/// one of ours.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginEntry {
+    /// Nothing of that name.
+    None,
+    /// Written by the Background portal.
+    Portal,
+    /// Written by an older `addict install`, carrying [`MARKER`].
+    Legacy,
+}
+
+/// Reads what stands at the login entry for `app_id` in `dir`, and changes
+/// nothing. A foreign file or a symlink is an error that names the path, as in
+/// [`check`]. Only for use outside the sandbox.
+pub fn login_entry(dir: &Path, app_id: &str) -> io::Result<LoginEntry> {
+    let path = entry_path(dir, app_id);
+    if check(dir, app_id)? == Target::Absent {
+        return Ok(LoginEntry::None);
+    }
+    let bytes = std::fs::read(&path).map_err(|e| with_path(&path, e))?;
+    // The portal's key wins: it replaces the whole file when it writes.
+    if entry_is_from_portal(&bytes, app_id) {
+        Ok(LoginEntry::Portal)
+    } else if entry_is_ours(&bytes) {
+        Ok(LoginEntry::Legacy)
+    } else {
+        Err(refusal(&path, "exists and was not written by addict"))
+    }
 }
 
 /// Removes the entry for `app_id` from `dir` and returns its path, or `None`
@@ -375,10 +431,13 @@ mod tests {
                 "[Desktop Entry]",
                 "Type=Application",
                 "Name=Addict",
+                "Comment=Translate the selected text or a part of the screen",
                 "Icon=io.github.doqhu.Test",
                 "Exec=\"/usr/bin/addict\"",
                 "Terminal=false",
-                "NoDisplay=true",
+                "Categories=Utility;TextTools;Dictionary;",
+                "Keywords=translate;translation;dictionary;OCR;",
+                "StartupNotify=true",
                 MARKER,
             ]
         );
@@ -549,6 +608,71 @@ mod tests {
         let temp = TempDir::new("remove-id");
         let error = uninstall(&temp.0, "../evil").expect_err("rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn a_login_entry_is_absent_from_the_portal_or_legacy() {
+        let temp = TempDir::new("login");
+        assert_eq!(
+            login_entry(&temp.0, APP_ID).expect("none"),
+            LoginEntry::None
+        );
+        let path = entry_path(&temp.0, APP_ID);
+        std::fs::write(
+            &path,
+            format!("[Desktop Entry]\nX-XDP-Autostart={APP_ID}\n"),
+        )
+        .expect("w");
+        assert_eq!(
+            login_entry(&temp.0, APP_ID).expect("portal"),
+            LoginEntry::Portal
+        );
+        assert_eq!(check(&temp.0, APP_ID).expect("accepted"), Target::Ours);
+        std::fs::write(&path, format!("[Desktop Entry]\n{MARKER}\n")).expect("w");
+        assert_eq!(
+            login_entry(&temp.0, APP_ID).expect("legacy"),
+            LoginEntry::Legacy
+        );
+        assert_eq!(std::fs::read_dir(&temp.0).expect("list").count(), 1);
+    }
+
+    #[test]
+    fn the_portal_key_of_another_app_is_foreign() {
+        let temp = TempDir::new("login-other");
+        let path = entry_path(&temp.0, APP_ID);
+        std::fs::write(
+            &path,
+            "[Desktop Entry]\nX-XDP-Autostart=org.example.Other\n",
+        )
+        .expect("w");
+        let error = login_entry(&temp.0, APP_ID).expect_err("refused");
+        assert!(error.to_string().contains(&path.display().to_string()));
+        check(&temp.0, APP_ID).expect_err("refused");
+    }
+
+    #[test]
+    fn a_linked_or_foreign_login_entry_is_refused_and_kept() {
+        let temp = TempDir::new("login-foreign");
+        let path = entry_path(&temp.0, APP_ID);
+        std::fs::write(&path, "[Desktop Entry]\nName=Someone else\n").expect("w");
+        login_entry(&temp.0, APP_ID).expect_err("foreign");
+        std::fs::remove_file(&path).expect("remove");
+        let target = temp.0.join("target.desktop");
+        std::fs::write(&target, format!("{PORTAL_KEY}={APP_ID}\n")).expect("w");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink");
+        login_entry(&temp.0, APP_ID).expect_err("symlink");
+        assert!(std::fs::symlink_metadata(&path).expect("meta").is_symlink());
+    }
+
+    #[test]
+    fn a_portal_entry_is_no_launcher() {
+        let temp = TempDir::new("launcher");
+        let path = entry_path(&temp.0, APP_ID);
+        std::fs::write(&path, format!("{PORTAL_KEY}={APP_ID}\n")).expect("w");
+        check_launcher(&temp.0, APP_ID).expect_err("refused");
+        uninstall(&temp.0, APP_ID).expect_err("refused");
+        install(&temp.0, APP_ID, Path::new("/usr/bin/addict")).expect_err("refused");
+        assert!(path.is_file());
     }
 
     /// A stand-in PNG: only the marker matters to the file rules.

@@ -44,3 +44,6 @@ addict-deepl = { path = "../addict-deepl", features = ["stub"] }
 # the evidence tests include.
 serde = { version = "=1.0.229", features = ["derive"] }
 tokio = { version = "=1.53.2", features = ["macros", "process", "rt", "time"] }
+# The mock Background portal of the uninstall tests; already in the product
+# through addict-platform.
+zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }

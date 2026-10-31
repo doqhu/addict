@@ -21,10 +21,11 @@
       translations.
     </p>
     <ul>
-      <li>One global shortcut reads the selected text, or the clipboard when nothing is selected, the same way in every application</li>
+      <li>A clipboard shortcut reads the selected text, or the clipboard when nothing is selected, the same way in every application</li>
       <li>Offline dictionary lookup in English, Spanish and Catalan, by the word as written and by its dictionary forms</li>
       <li>Russian translations from the dictionaries and, online with a DeepL API key, of the clicked word in the context of its sentence and of the sentence itself</li>
-      <li>Capture: text that cannot be selected, such as text in an image or a video, is read from an area of the screen with Tesseract OCR</li>
+      <li>A separate screenshot shortcut opens a region picker to read text in an image or a video with Tesseract OCR; assign its key in Settings</li>
+      <li>Normal launches show the main window, with Settings available directly; use --background for a silent login launch</li>
       <li>A Russian word is looked up the other way: its translations into the reading language</li>
     </ul>
   </description>

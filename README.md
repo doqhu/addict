@@ -12,8 +12,9 @@ video, can be captured from the screen and read with Tesseract OCR.
 
 ## Features
 
-- One global shortcut reads the selected text, or the clipboard when nothing
-  is selected, the same way in every application.
+- A clipboard shortcut reads the selected text, or the clipboard when nothing
+  is selected, the same way in every application. A separate screenshot
+  shortcut opens the interactive region picker for OCR.
 - Offline dictionary lookup in English, Spanish and Catalan, by the word as
   written and by its dictionary forms. When the reading language has
   dictionaries but none of them has the word, the other two are asked.
@@ -74,9 +75,27 @@ target/release/addict
 ```
 
 `addict install` writes a desktop entry and the app icons into your home
-directory; the entry also starts addict at login. The entry names the program
-by its full path, so run `install` again if you move the program.
-`addict uninstall` removes what `install` wrote.
+directory, so addict appears among your applications. The entry names the
+program by its full path, so run `install` again if you move the program.
+`addict uninstall` removes what `install` wrote, and turns off login startup
+first (see below).
+
+To start addict at login, turn on Settings → Start at login. addict asks the
+desktop's Background portal to do it, in the Flatpak and in a source build, and
+then starts silently at each login. `install` does not set it up, but a source
+build needs it first: the portal knows addict by the entry it writes. The switch
+shows what the portal last confirmed, as the portal cannot be asked what is
+set. If the two have drifted apart, for instance after you move the program or
+delete the entry by hand, turn the switch off and on again to repair it.
+
+An older build wrote its own login entry, which keeps starting addict and may
+open the window at each login. A source build then shows the switch on, with a
+line saying so; turning it off and on replaces that entry with the portal's.
+
+`addict uninstall` asks the portal to remove a login entry of ours before it
+removes anything else. If the portal is unavailable or refuses, it removes
+nothing and names the file. A file of that name that addict did not write, or a
+symlink, is refused and left alone, and the portal is not asked.
 
 Before you switch to a Flatpak of addict (from Flathub, or built from
 `packaging/flatpak`), run `addict uninstall` and quit the running addict:
@@ -84,8 +103,37 @@ choose Exit in its top-bar menu, or run `pkill -x addict` when there is no
 icon. The entry `install` wrote hides the Flatpak's, and a running addict
 built from source answers in place of the Flatpak.
 
-On the first start, GNOME asks you to confirm the shortcut; addict suggests
-Super+Q. You can change it later in Settings, from the top-bar icon.
+Normal launches show the main window, including the first launch and launches
+while addict is already running. Open Settings from the window's main
+menu or the top-bar menu; tray support is optional. Closing the window or
+pressing Esc keeps addict running for its shortcuts.
+
+On the first start, the desktop portal asks you to confirm the shortcuts.
+The clipboard action suggests Super+Q and keeps any existing assignment.
+The screenshot action has no suggested key: open Settings → Configure
+shortcuts… and assign a free key to Screen region (OCR). The portal owns both
+assignments, and Settings shows changes immediately. Its dialog configures
+both actions independently. On older portals that cannot reopen configuration,
+use the desktop's shortcut settings if available; addict keeps existing keys.
+
+With the window closed, the screenshot key opens the region picker. Choose
+an area to put editable OCR text in the window, using its reading language;
+cancelling starts no OCR or translation. The clipboard key continues to read
+selected or copied text independently.
+
+A capture that ends without a snapshot opens the window, with a line saying
+what happened and Capture focused: press Enter to open the picker again. If
+the shortcut is not bound, Retry has the focus instead, and Capture is one click
+away. The window also opens after Esc, because GNOME reports Esc and a real
+failure the same way, so addict cannot tell them apart. No permission is
+involved on GNOME: an interactive screenshot asks for none, and there is nothing
+to grant.
+
+Use `addict --background` (or `flatpak run io.github.doqhu.Addict --background`)
+for a silent login launch. This mode stays silent even if shortcut setup fails,
+including when forwarded to a running instance. Launch normally to see its
+status and Retry in the main window. This flag does not set up autostart; the
+Start at login switch in Settings does.
 
 ### Where addict finds Tesseract
 

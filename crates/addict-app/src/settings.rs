@@ -1,27 +1,175 @@
-//! The Settings window, which the tray's Settings entry shows.
+//! The Settings window, reachable from the main window and the tray.
 //!
-//! It tells what the application is set to: the trigger of the shortcut,
+//! It tells what the application is set to: the triggers of both shortcuts,
 //! which the portal owns, with a button that asks the portal for its dialog
-//! to change it, and the DeepL key, with a masked field to enter one, the
+//! to change them, and the DeepL key, with a masked field to enter one, the
 //! file it is saved in and the state that file is in. The window writes the
 //! key, on the runner, and never reads it back: the field starts empty and
-//! is cleared once the key is saved. Below the key, a line says how much the
-//! on-disk cache of the answers holds, with a button that clears it; the
-//! cache is read and cleared on the runner. The texts are plain functions of
-//! the state, so that they can be tested without a display.
+//! is cleared once the key is saved. In the General section, a line says how
+//! much the on-disk cache of the answers holds, with a button that clears it;
+//! the cache is read and cleared on the runner. The Start at login switch asks the
+//! Background portal, on the runner, and shows only what the portal last
+//! confirmed: the portal cannot be asked, so that state is saved by addict, and
+//! showing the window calls no portal. The texts are plain functions of the
+//! state, so that they can be tested without a display.
 
-use std::{path::Path, time::Duration};
+use std::{cell::Cell, future::Future, path::Path, rc::Rc, time::Duration};
 
 use addict_deepl::key::{self, KeyError};
+use addict_platform::{
+    desktop::LoginEntry, shortcut::Bindings, startup::StartupFailure, work::Outcome,
+};
 use gtk::{glib, prelude::*};
 
-use crate::{cache::Footprint, view::Binding};
+use crate::{cache::Footprint, entries, view::Binding};
 
 /// How long reading the state of the key file may take.
 pub const KEY_CHECK_LIMIT: Duration = Duration::from_secs(2);
 
 /// How long reading the size of the cache, or clearing it, may take.
 pub const CACHE_LIMIT: Duration = Duration::from_secs(5);
+
+/// How long reading the saved startup state may take.
+pub const STARTUP_READ_LIMIT: Duration = Duration::from_secs(2);
+
+/// What the Startup section shows when the window opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupShown {
+    /// Whether the switch is on.
+    pub on: bool,
+    /// Whether an older build's login entry is what makes it on.
+    pub legacy: bool,
+}
+
+/// What to show for the `saved` state and the login entry: the saved state
+/// when there is one. With none, only a legacy entry makes the switch on: it is
+/// active, and nothing changes until the user acts. `None` for `entry` means it
+/// could not be read, as in a sandbox or for a foreign file.
+pub fn startup_shown(saved: Option<bool>, entry: Option<LoginEntry>) -> StartupShown {
+    match saved {
+        Some(on) => StartupShown { on, legacy: false },
+        None => {
+            let legacy = entry == Some(LoginEntry::Legacy);
+            StartupShown { on: legacy, legacy }
+        }
+    }
+}
+
+/// The line under a switch that a legacy entry keeps on.
+pub const STARTUP_LEGACY: &str = "An older login entry is active and may open the window at \
+     login. Turn this off and on again to replace it.";
+
+/// The line when a change passed its limit, which covers the whole job: the
+/// portal may have acted already, or may still.
+pub const STARTUP_TIMED_OUT: &str = "The Background portal did not answer in time, and the \
+     change may still take effect. Turn this off and on again to repair it.";
+
+/// The line when the state could not be read in time.
+pub const STARTUP_UNREAD: &str = "The saved startup state could not be read.";
+
+/// The line when the runner of the startup jobs is gone.
+pub const STARTUP_NO_RUNNER: &str = "Startup cannot be changed: the runner is not available.";
+
+/// How a change of the switch ended. It says what the switch then shows; a
+/// state saved or not is part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupEnd {
+    /// The portal confirmed it and it is saved.
+    Done(bool),
+    /// The portal was not asked: why, naming a path if there is one.
+    NotAsked(String),
+    /// The portal did not do it; nothing is saved.
+    Failed(StartupFailure),
+    /// Enabled, the save failed, and the portal took it back.
+    Revoked { save: String },
+    /// Enabled, the save failed, and the portal did not take it back.
+    NotRevoked {
+        save: String,
+        revoke: StartupFailure,
+    },
+    /// Disabled, but the save failed.
+    DisabledUnsaved { save: String },
+}
+
+/// One change of the switch, on the runner. `check` runs first, and `ask` and
+/// `save` only after it passed; with `enable`, a failed save has the portal
+/// asked to disable again, as an unsaved state would not be shown as on.
+pub async fn change_startup<A, F>(
+    enable: bool,
+    check: impl FnOnce() -> Result<(), String>,
+    ask: A,
+    save: impl FnOnce(bool) -> Result<(), String>,
+) -> StartupEnd
+where
+    A: Fn(bool) -> F,
+    F: Future<Output = Result<(), StartupFailure>>,
+{
+    if let Err(reason) = check() {
+        return StartupEnd::NotAsked(reason);
+    }
+    if let Err(failure) = ask(enable).await {
+        return StartupEnd::Failed(failure);
+    }
+    match (save(enable), enable) {
+        (Ok(()), _) => StartupEnd::Done(enable),
+        (Err(save), false) => StartupEnd::DisabledUnsaved { save },
+        (Err(save), true) => match ask(false).await {
+            Ok(()) => StartupEnd::Revoked { save },
+            Err(revoke) => StartupEnd::NotRevoked { save, revoke },
+        },
+    }
+}
+
+/// The line for a failure of the portal.
+fn startup_failure_text(failure: &StartupFailure) -> String {
+    format!(
+        "Startup was not changed: {}.",
+        entries::failure_reason(failure)
+    )
+}
+
+/// What the switch shows, and the line under it, after a change that started
+/// from the confirmed state `last`. Never on without a confirmation.
+pub fn startup_end_text(end: &StartupEnd, last: bool) -> (bool, String) {
+    match end {
+        StartupEnd::Done(on) => (*on, String::new()),
+        StartupEnd::NotAsked(reason) => (last, format!("Startup was not changed: {reason}.")),
+        StartupEnd::Failed(failure) => (last, startup_failure_text(failure)),
+        StartupEnd::Revoked { save } => (
+            false,
+            format!("Startup was turned back off, as its state could not be saved: {save}."),
+        ),
+        StartupEnd::NotRevoked { save, revoke } => (
+            false,
+            format!(
+                "Startup could not be saved ({save}) and could not be turned back off ({}): \
+                 addict may still start at login. Turn this on and off again to repair it.",
+                entries::failure_reason(revoke)
+            ),
+        ),
+        StartupEnd::DisabledUnsaved { save } => (
+            false,
+            format!(
+                "Startup is off, but this could not be saved: {save}. This switch may show on \
+                 next time."
+            ),
+        ),
+    }
+}
+
+/// [`startup_end_text`] for a job's outcome. `None` for a job given up, which
+/// says nothing. A limit that passed is no confirmation either way.
+pub fn startup_outcome(outcome: &Outcome<StartupEnd>, last: bool) -> Option<(bool, String)> {
+    match outcome {
+        Outcome::Finished(end) => Some(startup_end_text(end, last)),
+        Outcome::TimedOut => Some((last, STARTUP_TIMED_OUT.to_owned())),
+        Outcome::Panicked => Some((
+            last,
+            "Startup was not changed: the request did not run.".to_owned(),
+        )),
+        Outcome::Cancelled => None,
+    }
+}
 
 /// Where the size of the cache stands, as the window says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,8 +274,8 @@ pub fn key_text(state: Option<KeyState>) -> &'static str {
 /// where the attempt stands.
 pub fn trigger_text(binding: &Binding, trigger: Option<&str>) -> String {
     match (binding, trigger) {
-        (Binding::Bound, Some(trigger)) => trigger.to_owned(),
-        (Binding::Bound, None) => "Bound.".to_owned(),
+        (Binding::Bound, Some(trigger)) if !trigger.trim().is_empty() => trigger.to_owned(),
+        (Binding::Bound, _) => "Unassigned. Choose a key in Configure shortcuts…".to_owned(),
         (Binding::Attempting, _) => "Binding the shortcut…".to_owned(),
         (Binding::NotBound { detail }, _) => format!("Not bound: {detail}"),
     }
@@ -136,17 +284,17 @@ pub fn trigger_text(binding: &Binding, trigger: Option<&str>) -> String {
 /// The line after the portal answered the request for its dialog.
 pub fn change_text(answer: Option<&str>) -> String {
     match answer {
-        None => "The system's dialog changes the shortcut; this line shows the new one \
-                 after the next start."
-            .to_owned(),
+        None => {
+            "The system's dialog configures both shortcuts. Assignments update here immediately."
+                .to_owned()
+        }
         Some(message) => format!("The shortcut cannot be changed from here: {message}"),
     }
 }
 
-/// The line while the stored binding is reset and the system's bind dialog
-/// is about to open, for a portal that has no dialog of its own for a change.
-pub const REBINDING: &str =
-    "The system's dialog opens to choose the new shortcut; the old one is reset.";
+/// Older portals cannot configure an existing session. Never reset stored keys.
+pub const CONFIGURE_UNSUPPORTED: &str = "This desktop portal cannot open shortcut configuration (version 2 is required). \
+     Use the desktop's shortcut settings if available. Existing assignments are kept.";
 
 /// The line after a save of the key: nothing on success, else why the key
 /// was not saved. The reason never holds the key.
@@ -175,8 +323,12 @@ pub fn saved_in_text(key_file: Option<&Path>) -> String {
     )
 }
 
-/// The line for a request made while the shortcut is not bound.
-pub const CHANGE_UNBOUND: &str = "The shortcut can be changed once it is bound.";
+/// The line for a request made before a usable session exists.
+pub const CHANGE_UNBOUND: &str =
+    "Shortcut configuration needs a portal session. Retry the connection first.";
+
+/// The line beside Configure shortcuts.
+const CONFIGURE_HINT: &str = "The desktop\u{2019}s dialog sets both.";
 
 /// The keys of a trigger the portal described, one cap each: GNOME's
 /// `Press <Super>q` as an accelerator, or a label such as `Super+Q`;
@@ -233,9 +385,12 @@ fn accelerator_keys(accelerator: &str) -> Option<Vec<String>> {
 }
 
 /// The badge beside the trigger, and its class.
-pub fn badge(binding: &Binding) -> (&'static str, &'static str) {
+pub fn badge(binding: &Binding, trigger: Option<&str>) -> (&'static str, &'static str) {
     match binding {
-        Binding::Bound => ("Bound", "good"),
+        Binding::Bound if trigger.is_some_and(|trigger| !trigger.trim().is_empty()) => {
+            ("Assigned", "good")
+        }
+        Binding::Bound => ("Unassigned", "pending"),
         Binding::Attempting => ("Binding…", "pending"),
         Binding::NotBound { .. } => ("Not bound", "bad"),
     }
@@ -251,6 +406,14 @@ pub fn key_tone(state: Option<KeyState>) -> &'static str {
     }
 }
 
+/// What the empty key field asks for: a set key is replaced, not entered.
+pub fn key_placeholder(state: Option<KeyState>) -> &'static str {
+    match key_tone(state) {
+        "good" => "Paste a new key to replace it",
+        _ => "Paste a DeepL key",
+    }
+}
+
 /// The classes a tone replaces on a widget.
 const TONES: [&str; 3] = ["good", "pending", "bad"];
 
@@ -261,15 +424,92 @@ fn set_tone(widget: &impl IsA<gtk::Widget>, tone: &str) {
     widget.add_css_class(tone);
 }
 
-/// The window and the labels that change.
-pub struct Settings {
-    window: gtk::Window,
-    /// The caps of the bound trigger.
+/// One independently assigned action in the portal session.
+struct ShortcutRow {
+    root: gtk::Box,
     keys: gtk::Box,
-    /// The trigger when it is not shown as caps: where the attempt stands.
     trigger: gtk::Label,
     badge: gtk::Box,
     badge_text: gtk::Label,
+}
+
+impl ShortcutRow {
+    fn new(name: &str) -> Self {
+        let keys = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        // Without key caps, the line of what stands in their way, below.
+        let trigger = label("", &["trigger", "hint"]);
+        // The badge: a dot in the text's colour, then its word. Shown only
+        // when something is wrong: the key caps say the rest.
+        let badge_text = gtk::Label::new(None);
+        let badge = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .valign(gtk::Align::Center)
+            .css_classes(["badge"])
+            .build();
+        badge.append(
+            &gtk::Box::builder()
+                .valign(gtk::Align::Center)
+                .css_classes(["dot"])
+                .build(),
+        );
+        badge.append(&badge_text);
+        let name = label(name, &[]);
+        name.set_hexpand(true);
+        name.set_valign(gtk::Align::Center);
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        line.append(&name);
+        line.append(&keys);
+        line.append(&badge);
+        let root = row(&[line.upcast_ref(), trigger.upcast_ref()]);
+        Self {
+            root,
+            keys,
+            trigger,
+            badge,
+            badge_text,
+        }
+    }
+
+    fn render(&self, binding: &Binding, trigger: Option<&str>) {
+        while let Some(cap) = self.keys.first_child() {
+            self.keys.remove(&cap);
+        }
+        let bound = matches!(binding, Binding::Bound);
+        let caps = trigger.filter(|_| bound).and_then(trigger_keys);
+        if let Some(caps) = &caps {
+            for (index, key) in caps.iter().enumerate() {
+                if index > 0 {
+                    self.keys.append(&label("+", &["hint"]));
+                }
+                self.keys.append(&label(key, &["keycap"]));
+            }
+        }
+        self.keys.set_visible(caps.is_some());
+        let line = if caps.is_some() {
+            String::new()
+        } else {
+            trigger_text(binding, trigger)
+        };
+        say_in(&self.trigger, &line);
+        let (text, tone) = badge(binding, trigger);
+        set_tone(&self.trigger, tone);
+        self.badge_text.set_label(text);
+        self.badge.set_visible(tone != "good");
+        set_tone(&self.badge, tone);
+    }
+}
+
+/// The window and the labels that change.
+pub struct Settings {
+    window: gtk::Window,
+    clipboard: ShortcutRow,
+    screenshot: ShortcutRow,
     /// The block of the key's state: its icon and its line.
     key_block: gtk::Box,
     key_icon: gtk::Image,
@@ -283,6 +523,12 @@ pub struct Settings {
     cache_size: gtk::Label,
     /// The line of the clears of the cache.
     cache_status: gtk::Label,
+    /// The Start at login switch.
+    startup: gtk::Switch,
+    /// Set while the code, not the user, moves the switch.
+    startup_rendering: Rc<Cell<bool>>,
+    /// The line of the startup state.
+    startup_status: gtk::Label,
 }
 
 pub(crate) fn label(text: &str, classes: &[&str]) -> gtk::Label {
@@ -296,7 +542,7 @@ pub(crate) fn label(text: &str, classes: &[&str]) -> gtk::Label {
 }
 
 /// A section: its label above a card holding `rows`.
-pub(crate) fn section(name: &str, rows: &[&gtk::Widget]) -> gtk::Box {
+fn section(name: &str, rows: &[&gtk::Widget]) -> gtk::Box {
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
@@ -305,13 +551,43 @@ pub(crate) fn section(name: &str, rows: &[&gtk::Widget]) -> gtk::Box {
     for row in rows {
         card.append(*row);
     }
+    titled(name, &card)
+}
+
+/// A section whose card is a list of [`row`]s, parted by hairlines.
+pub(crate) fn list_section(name: &str, rows: &[&gtk::Box]) -> gtk::Box {
+    let card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .css_classes(["settings-list"])
+        .build();
+    for row in rows {
+        card.append(*row);
+    }
+    titled(name, &card)
+}
+
+/// One row of a list: its `lines`, one under the other.
+pub(crate) fn row(lines: &[&gtk::Widget]) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .css_classes(["settings-row"])
+        .build();
+    for line in lines {
+        row.append(*line);
+    }
+    row
+}
+
+/// `card` under its label `name`.
+fn titled(name: &str, card: &gtk::Box) -> gtk::Box {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
     // Not wrapped: the label is measured before it is set in capitals,
     // and a wrapped one breaks where the capitals do not fit.
     let name = label(name, &["section-label", "settings-section"]);
     name.set_wrap(false);
     section.append(&name);
-    section.append(&card);
+    section.append(card);
     section
 }
 
@@ -323,51 +599,32 @@ fn say_in(line: &gtk::Label, text: &str) {
 
 impl Settings {
     /// Builds the window, hidden, above `parent`. `on_change` runs when
-    /// Change shortcut is pressed; `on_save` runs with the text of the key
+    /// Configure shortcuts is pressed; `on_save` runs with the text of the key
     /// field, trimmed and not empty, when Save key or Enter in the field is
-    /// pressed; `on_clear` runs when Clear cache is pressed.
+    /// pressed; `on_clear` runs when Clear cache is pressed; `on_startup` runs
+    /// with the state asked for when the user moves the Start at login switch.
     pub fn new(
         parent: &impl IsA<gtk::Window>,
         key_file: Option<&Path>,
         on_change: impl Fn() + 'static,
         on_save: impl Fn(String) + 'static,
         on_clear: impl Fn() + 'static,
+        on_startup: impl Fn(bool) + 'static,
     ) -> Self {
-        let keys = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(6)
-            .valign(gtk::Align::Center)
-            .visible(false)
-            .build();
-        let trigger = label("", &["trigger"]);
-        trigger.set_hexpand(true);
-        // The badge: a dot in the text's colour, then its word.
-        let badge_text = gtk::Label::new(None);
-        let badge = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(6)
-            .valign(gtk::Align::Center)
-            .halign(gtk::Align::End)
-            .hexpand(true)
-            .css_classes(["badge"])
-            .build();
-        badge.append(
-            &gtk::Box::builder()
-                .valign(gtk::Align::Center)
-                .css_classes(["dot"])
-                .build(),
-        );
-        badge.append(&badge_text);
-        let trigger_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        trigger_row.append(&keys);
-        trigger_row.append(&trigger);
-        trigger_row.append(&badge);
+        let clipboard = ShortcutRow::new("Selection or clipboard");
+        let screenshot = ShortcutRow::new("Screen region (OCR)");
         let change = gtk::Button::builder()
-            .label("Change shortcut…")
-            .halign(gtk::Align::Start)
+            .label("Configure shortcuts…")
+            .valign(gtk::Align::Center)
             .css_classes(["settings-button"])
             .build();
         change.connect_clicked(move |_| on_change());
+        let configure_hint = label(CONFIGURE_HINT, &["hint"]);
+        configure_hint.set_hexpand(true);
+        configure_hint.set_valign(gtk::Align::Center);
+        let configure_line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        configure_line.append(&configure_hint);
+        configure_line.append(&change);
         let status = label("", &["hint"]);
         status.set_visible(false);
 
@@ -384,7 +641,7 @@ impl Settings {
         key_block.append(&key_state);
         let key_entry = gtk::PasswordEntry::builder()
             .show_peek_icon(true)
-            .placeholder_text("Paste a DeepL key")
+            .placeholder_text(key_placeholder(None))
             .hexpand(true)
             .css_classes(["key"])
             .build();
@@ -422,12 +679,11 @@ impl Settings {
         key_entry.connect_activate(move |entry| on_save(entry));
         let key_status = label("", &["hint"]);
         key_status.set_visible(false);
-        // The place of the file below a hairline: the path in monospace, and
-        // selectable, so that it can be copied.
+        // The place of the file: the path in monospace, and selectable, so
+        // that it can be copied.
         let key_file_row = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(6)
-            .css_classes(["key-file"])
             .build();
         match key_file {
             Some(path) => {
@@ -459,6 +715,34 @@ impl Settings {
         let cache_status = label("", &["hint"]);
         cache_status.set_visible(false);
 
+        // Stopping `state-set` keeps the state off until the portal confirms.
+        let startup = gtk::Switch::builder()
+            .valign(gtk::Align::Center)
+            .sensitive(false)
+            .build();
+        startup.update_property(&[gtk::accessible::Property::Label("Start at login")]);
+        let startup_rendering = Rc::new(Cell::new(false));
+        let rendering = startup_rendering.clone();
+        startup.connect_state_set(move |_, wanted| {
+            if !rendering.get() {
+                on_startup(wanted);
+            }
+            glib::Propagation::Stop
+        });
+        let startup_name = label("Start at login", &[]);
+        startup_name.set_hexpand(true);
+        startup_name.set_valign(gtk::Align::Center);
+        let startup_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        startup_row.append(&startup_name);
+        startup_row.append(&startup);
+        let startup_status = label("", &["hint"]);
+        startup_status.set_visible(false);
+
+        let key_note = label("The key is never shown back here.", &["hint"]);
+
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(16)
@@ -467,12 +751,12 @@ impl Settings {
             .margin_start(16)
             .margin_end(16)
             .build();
-        content.append(&section(
-            "Shortcut",
+        content.append(&list_section(
+            "Shortcuts",
             &[
-                trigger_row.upcast_ref(),
-                change.upcast_ref(),
-                status.upcast_ref(),
+                &clipboard.root,
+                &screenshot.root,
+                &row(&[configure_line.upcast_ref(), status.upcast_ref()]),
             ],
         ));
         content.append(&section(
@@ -482,20 +766,21 @@ impl Settings {
                 key_row.upcast_ref(),
                 key_status.upcast_ref(),
                 key_file_row.upcast_ref(),
-                cache_row.upcast_ref(),
-                cache_status.upcast_ref(),
+                key_note.upcast_ref(),
             ],
         ));
-        let footer = label(
-            "Esc closes the window. The key is never shown back here.",
-            &["hint", "settings-footer"],
-        );
-        content.append(&footer);
+        content.append(&list_section(
+            "General",
+            &[
+                &row(&[cache_row.upcast_ref(), cache_status.upcast_ref()]),
+                &row(&[startup_row.upcast_ref(), startup_status.upcast_ref()]),
+            ],
+        ));
 
         let window = gtk::Window::builder()
             .title("Addict settings")
             .transient_for(parent)
-            .default_width(440)
+            .default_width(520)
             .hide_on_close(true)
             .titlebar(&crate::resident::header_bar("Addict settings"))
             .child(&content)
@@ -516,10 +801,8 @@ impl Settings {
         window.add_controller(escape);
         let settings = Self {
             window,
-            keys,
-            trigger,
-            badge,
-            badge_text,
+            clipboard,
+            screenshot,
             key_block,
             key_icon,
             key_state,
@@ -529,8 +812,11 @@ impl Settings {
             key_status,
             cache_size,
             cache_status,
+            startup,
+            startup_rendering,
+            startup_status,
         };
-        settings.render_binding(&Binding::Attempting, None);
+        settings.render_binding(&Binding::Attempting, &Bindings::default());
         settings.render_key(None);
         settings
     }
@@ -539,38 +825,19 @@ impl Settings {
         self.window.present();
     }
 
-    /// Shows where the shortcut stands: a bound trigger as key caps, else
-    /// the line of `trigger_text`; the button works only when it is bound.
-    pub fn render_binding(&self, binding: &Binding, trigger: Option<&str>) {
-        while let Some(cap) = self.keys.first_child() {
-            self.keys.remove(&cap);
-        }
-        let bound = matches!(binding, Binding::Bound);
-        let caps = trigger.filter(|_| bound).and_then(trigger_keys);
-        if let Some(caps) = &caps {
-            for (index, key) in caps.iter().enumerate() {
-                if index > 0 {
-                    self.keys.append(&label("+", &["hint"]));
-                }
-                self.keys.append(&label(key, &["keycap"]));
-            }
-        }
-        self.keys.set_visible(caps.is_some());
-        // Bound with no trigger to show: the badge says it alone.
-        let line = match (bound, &caps, trigger) {
-            (true, Some(_), _) | (true, None, None) => String::new(),
-            _ => trigger_text(binding, trigger),
-        };
-        say_in(&self.trigger, &line);
-        set_tone(&self.trigger, badge(binding).1);
-        let (text, tone) = badge(binding);
-        self.badge_text.set_label(text);
-        set_tone(&self.badge, tone);
-        self.change.set_sensitive(bound);
+    /// A session can be configured even when neither action has a key.
+    pub fn render_binding(&self, binding: &Binding, bindings: &Bindings) {
+        self.clipboard
+            .render(binding, bindings.clipboard.as_deref());
+        self.screenshot
+            .render(binding, bindings.screenshot.as_deref());
+        self.change.set_sensitive(matches!(binding, Binding::Bound));
     }
 
     pub fn render_key(&self, state: Option<KeyState>) {
         self.key_state.set_label(key_text(state));
+        self.key_entry
+            .set_property("placeholder-text", key_placeholder(state));
         let tone = key_tone(state);
         set_tone(&self.key_block, tone);
         self.key_icon.set_icon_name(Some(match tone {
@@ -604,17 +871,237 @@ impl Settings {
     pub fn say_cache(&self, text: &str) {
         say_in(&self.cache_status, text);
     }
+
+    /// Moves the switch to `on`, as confirmed, without asking anything.
+    pub fn render_startup(&self, on: bool) {
+        self.startup_rendering.set(true);
+        self.startup.set_active(on);
+        self.startup.set_state(on);
+        self.startup_rendering.set(false);
+    }
+
+    /// Whether the switch can be moved: not while a request or a read runs.
+    pub fn set_startup_sensitive(&self, sensitive: bool) {
+        self.startup.set_sensitive(sensitive);
+    }
+
+    /// Sets the line of the startup state.
+    pub fn say_startup(&self, text: &str) {
+        say_in(&self.startup_status, text);
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, future::ready};
+
     use addict_deepl::key::KeyError;
+    use addict_platform::{desktop::LoginEntry, startup::StartupFailure, work::Outcome};
 
     use super::{
-        CacheState, KeyState, NO_KEY_PLACE, REBINDING, badge, cache_text, change_text, clear_text,
-        key_text, key_tone, save_text, saved_in_text, size_text, trigger_keys, trigger_text,
+        CONFIGURE_UNSUPPORTED, CacheState, KeyState, NO_KEY_PLACE, StartupEnd, StartupShown, badge,
+        cache_text, change_startup, change_text, clear_text, key_placeholder, key_text, key_tone,
+        save_text, saved_in_text, size_text, startup_end_text, startup_outcome, startup_shown,
+        trigger_keys, trigger_text,
     };
     use crate::{cache::Footprint, view::Binding};
+
+    /// Polls a job whose fakes never wait.
+    fn finish<F: std::future::Future>(job: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(job)
+    }
+
+    /// One change with a portal that gives `answers` in turn and a save that
+    /// gives `saved`; what happened comes with its end.
+    fn change(
+        enable: bool,
+        checked: Result<(), String>,
+        answers: Vec<Result<(), StartupFailure>>,
+        saved: Result<(), String>,
+    ) -> (StartupEnd, Vec<String>) {
+        let log = RefCell::new(Vec::new());
+        let answers = RefCell::new(answers.into_iter());
+        let end = finish(change_startup(
+            enable,
+            || {
+                log.borrow_mut().push("check".to_owned());
+                checked
+            },
+            |asked| {
+                log.borrow_mut().push(format!("ask {asked}"));
+                ready(answers.borrow_mut().next().expect("an answer"))
+            },
+            |state| {
+                log.borrow_mut().push(format!("save {state}"));
+                saved
+            },
+        ));
+        (end, log.into_inner())
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_switch_asks_and_stays_off_until_it_is_told() {
+        use gtk::prelude::*;
+        gtk::init().expect("a display");
+        let parent = gtk::Window::new();
+        let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let told = asked.clone();
+        let settings = super::Settings::new(
+            &parent,
+            None,
+            || {},
+            |_| {},
+            || {},
+            move |wanted| told.borrow_mut().push(wanted),
+        );
+        assert!(!settings.startup.is_sensitive());
+        settings.set_startup_sensitive(true);
+
+        settings.startup.set_active(true);
+        assert_eq!(*asked.borrow(), [true]);
+        assert!(!settings.startup.state(), "not on before a confirmation");
+
+        // A refusal: back off, and the code asks nothing.
+        settings.render_startup(false);
+        assert_eq!(*asked.borrow(), [true]);
+        assert!(!settings.startup.is_active() && !settings.startup.state());
+
+        // A confirmation, and the state of a window that opens.
+        settings.render_startup(true);
+        assert_eq!(*asked.borrow(), [true]);
+        assert!(settings.startup.is_active() && settings.startup.state());
+
+        settings.startup.set_active(false);
+        assert_eq!(*asked.borrow(), [true, false]);
+        assert!(settings.startup.state(), "on until the portal confirms");
+    }
+
+    #[test]
+    fn a_confirmed_change_is_saved_and_shown() {
+        let (end, log) = change(true, Ok(()), vec![Ok(())], Ok(()));
+        assert_eq!(end, StartupEnd::Done(true));
+        assert_eq!(log, ["check", "ask true", "save true"]);
+        assert_eq!(startup_end_text(&end, false), (true, String::new()));
+        let (end, log) = change(false, Ok(()), vec![Ok(())], Ok(()));
+        assert_eq!(end, StartupEnd::Done(false));
+        assert_eq!(log, ["check", "ask false", "save false"]);
+        assert_eq!(startup_end_text(&end, true), (false, String::new()));
+    }
+
+    #[test]
+    fn a_refusal_saves_nothing_and_never_shows_on() {
+        let (end, log) = change(true, Ok(()), vec![Err(StartupFailure::Refused)], Ok(()));
+        assert_eq!(log, ["check", "ask true"]);
+        let (on, line) = startup_end_text(&end, false);
+        assert!(!on);
+        assert!(line.contains("refused"), "{line}");
+    }
+
+    #[test]
+    fn no_portal_returns_to_the_last_confirmed_state_and_says_why() {
+        for (failure, word) in [
+            (StartupFailure::Unavailable, "not available"),
+            (StartupFailure::NoAnswer, "in time"),
+            (StartupFailure::Failed("step: broke".to_owned()), "broke"),
+        ] {
+            for last in [false, true] {
+                let (end, log) = change(!last, Ok(()), vec![Err(failure.clone())], Ok(()));
+                assert_eq!(log.len(), 2, "nothing saved");
+                let (on, line) = startup_end_text(&end, last);
+                assert_eq!(on, last);
+                assert!(line.contains(word), "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_check_asks_nothing() {
+        let (end, log) = change(false, Err("/x is foreign".to_owned()), vec![], Ok(()));
+        assert_eq!(log, ["check"]);
+        let (on, line) = startup_end_text(&end, true);
+        assert!(on);
+        assert!(line.contains("/x is foreign"), "{line}");
+    }
+
+    #[test]
+    fn a_failed_save_after_enable_revokes_and_says_why() {
+        let (end, log) = change(true, Ok(()), vec![Ok(()), Ok(())], Err("disk".to_owned()));
+        assert_eq!(log, ["check", "ask true", "save true", "ask false"]);
+        let (on, line) = startup_end_text(&end, false);
+        assert!(!on);
+        assert!(line.contains("disk"), "{line}");
+    }
+
+    #[test]
+    fn a_failed_revoke_is_stated_too() {
+        let (end, _) = change(
+            true,
+            Ok(()),
+            vec![Ok(()), Err(StartupFailure::Refused)],
+            Err("disk".to_owned()),
+        );
+        let (on, line) = startup_end_text(&end, false);
+        assert!(!on);
+        assert!(line.contains("disk") && line.contains("refused"), "{line}");
+        assert!(line.contains("may still start"), "{line}");
+    }
+
+    #[test]
+    fn a_failed_save_after_disable_stays_off_and_says_so() {
+        let (end, log) = change(false, Ok(()), vec![Ok(())], Err("disk".to_owned()));
+        assert_eq!(log.len(), 3, "no second request");
+        let (on, line) = startup_end_text(&end, true);
+        assert!(!on);
+        assert!(line.contains("disk"), "{line}");
+    }
+
+    #[test]
+    fn only_a_finished_confirmation_moves_the_switch() {
+        for outcome in [Outcome::TimedOut, Outcome::Panicked] {
+            for last in [false, true] {
+                let (on, line) = startup_outcome(&outcome, last).expect("shown");
+                assert_eq!(on, last);
+                assert!(!line.is_empty());
+            }
+        }
+        let (_, line) = startup_outcome(&Outcome::TimedOut, false).expect("shown");
+        assert!(!line.contains("not changed"), "{line}");
+        assert!(line.contains("did not answer in time"), "{line}");
+        assert!(line.contains("may still take effect"), "{line}");
+        assert!(line.contains("off and on"), "{line}");
+        assert_eq!(startup_outcome(&Outcome::Cancelled, true), None);
+        assert_eq!(
+            startup_outcome(&Outcome::Finished(StartupEnd::Done(true)), false),
+            Some((true, String::new()))
+        );
+    }
+
+    #[test]
+    fn the_saved_state_wins_and_only_a_legacy_entry_shows_on_without_one() {
+        let shown = |on, legacy| StartupShown { on, legacy };
+        assert_eq!(startup_shown(Some(true), None), shown(true, false));
+        assert_eq!(
+            startup_shown(Some(false), Some(LoginEntry::Legacy)),
+            shown(false, false)
+        );
+        assert_eq!(
+            startup_shown(None, Some(LoginEntry::Legacy)),
+            shown(true, true)
+        );
+        assert_eq!(
+            startup_shown(None, Some(LoginEntry::Portal)),
+            shown(false, false)
+        );
+        assert_eq!(
+            startup_shown(None, Some(LoginEntry::None)),
+            shown(false, false)
+        );
+        assert_eq!(startup_shown(None, None), shown(false, false));
+    }
 
     #[test]
     fn the_cache_line_says_its_size_or_that_it_is_empty() {
@@ -677,6 +1164,14 @@ mod tests {
         ];
         let lines: std::collections::HashSet<_> = states.into_iter().map(key_text).collect();
         assert_eq!(lines.len(), states.len());
+    }
+
+    #[test]
+    fn the_field_asks_to_replace_only_a_key_that_is_set() {
+        assert!(key_placeholder(Some(KeyState::Pro)).contains("replace"));
+        assert!(key_placeholder(Some(KeyState::Free)).contains("replace"));
+        assert!(!key_placeholder(None).contains("replace"));
+        assert!(!key_placeholder(Some(KeyState::Refused(KeyError::Missing))).contains("replace"));
     }
 
     #[test]
@@ -743,9 +1238,11 @@ mod tests {
     }
 
     #[test]
-    fn the_rebind_line_names_the_dialog_and_the_reset() {
-        assert!(REBINDING.contains("dialog"));
-        assert!(REBINDING.contains("reset"));
+    fn unassigned_actions_and_older_portals_explain_configuration_without_resetting_keys() {
+        assert!(trigger_text(&Binding::Bound, None).starts_with("Unassigned"));
+        assert!(trigger_text(&Binding::Bound, Some("")).starts_with("Unassigned"));
+        assert!(CONFIGURE_UNSUPPORTED.contains("Existing assignments are kept"));
+        assert!(!change_text(None).contains("next start"));
     }
 
     #[test]
@@ -809,12 +1306,16 @@ mod tests {
 
     #[test]
     fn the_badge_and_tones_follow_the_state() {
-        assert_eq!(badge(&Binding::Bound), ("Bound", "good"));
-        assert_eq!(badge(&Binding::Attempting).1, "pending");
+        assert_eq!(
+            badge(&Binding::Bound, Some("Super+Q")),
+            ("Assigned", "good")
+        );
+        assert_eq!(badge(&Binding::Bound, None), ("Unassigned", "pending"));
+        assert_eq!(badge(&Binding::Attempting, None).1, "pending");
         let not_bound = Binding::NotBound {
             detail: "x".to_owned(),
         };
-        assert_eq!(badge(&not_bound), ("Not bound", "bad"));
+        assert_eq!(badge(&not_bound, None), ("Not bound", "bad"));
         assert_eq!(key_tone(None), "pending");
         assert_eq!(key_tone(Some(KeyState::Pro)), "good");
         assert_eq!(key_tone(Some(KeyState::Refused(KeyError::TooOpen))), "bad");
