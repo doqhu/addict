@@ -248,24 +248,37 @@ pub(crate) fn install_language(language: Language) -> String {
 /// the capture or the recognition found it missing.
 const NO_SNAPSHOT_FILE: &str = "The snapshot file was not found.";
 
+/// What ends the line of a capture that left no snapshot: the way back to the
+/// region picker, on the button that has the keyboard focus then.
+const CAPTURE_RETRY: &str = "Press Capture to try again.";
+
+/// `line`, what happened to a capture that left no snapshot, and the way back.
+fn with_retry(line: &str) -> Cow<'static, str> {
+    format!("{line} {CAPTURE_RETRY}").into()
+}
+
 /// What the source line says for `failure`, a capture recognized in
-/// `language` that gave no text. The portal's code 2, which GNOME also gives
-/// for Esc, claims no cause; a missing Tesseract or missing data of the
-/// language names the command that installs it with the package of that
+/// `language` that gave no text. A capture that left no snapshot names the
+/// retry; a recognition has its own line. The portal's code 2, which GNOME
+/// also gives for Esc, claims no cause; a missing Tesseract or missing data of
+/// the language names the command that installs it with the package of that
 /// language. No wildcard arm: a new failure does not compile until it is
 /// given its line.
 pub fn failure_text(failure: &Failure, language: Language) -> Cow<'static, str> {
     match failure {
         Failure::Capture(failure) => match failure {
-            CaptureFailure::Cancelled => "The capture was cancelled.".into(),
-            CaptureFailure::Ended => "No snapshot was taken.".into(),
-            CaptureFailure::Unavailable => "Screen capture is not available here.".into(),
-            CaptureFailure::Failed(detail) => format!("The screen capture failed: {detail}").into(),
-            CaptureFailure::NoImage => NO_SNAPSHOT_FILE.into(),
+            CaptureFailure::Cancelled => with_retry("The capture was cancelled."),
+            CaptureFailure::Ended => with_retry("No snapshot was taken."),
+            CaptureFailure::Unavailable => with_retry("Screen capture is not available here."),
+            CaptureFailure::Failed(detail) => {
+                let detail = detail.trim_end_matches('.');
+                with_retry(&format!("The screen capture failed: {detail}."))
+            }
+            CaptureFailure::NoImage => with_retry(NO_SNAPSHOT_FILE),
         },
-        Failure::CaptureTimedOut => "No area was chosen in time.".into(),
+        Failure::CaptureTimedOut => with_retry("No area was chosen in time."),
         Failure::Ocr(failure) => match failure {
-            OcrFailure::NoImage => NO_SNAPSHOT_FILE.into(),
+            OcrFailure::NoImage => with_retry(NO_SNAPSHOT_FILE),
             OcrFailure::TesseractMissing => format!(
                 "Tesseract is not installed. Install it with: {}",
                 install_tesseract(language)
@@ -281,7 +294,7 @@ pub fn failure_text(failure: &Failure, language: Language) -> Cow<'static, str> 
             OcrFailure::Empty => "No text was recognized.".into(),
             OcrFailure::TimedOut => "Text recognition took too long.".into(),
         },
-        Failure::Unfinished => "The capture did not finish.".into(),
+        Failure::Unfinished => with_retry("The capture did not finish."),
     }
 }
 
@@ -2875,21 +2888,43 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "The capture was cancelled.",
-                "No snapshot was taken.",
-                "Screen capture is not available here.",
-                "The screen capture failed: no portal answer",
-                "The snapshot file was not found.",
-                "No area was chosen in time.",
-                "The snapshot file was not found.",
+                "The capture was cancelled. Press Capture to try again.",
+                "No snapshot was taken. Press Capture to try again.",
+                "Screen capture is not available here. Press Capture to try again.",
+                "The screen capture failed: no portal answer. Press Capture to try again.",
+                "The snapshot file was not found. Press Capture to try again.",
+                "No area was chosen in time. Press Capture to try again.",
+                "The snapshot file was not found. Press Capture to try again.",
                 "Tesseract is not installed. Install it with: sudo dnf install tesseract tesseract-langpack-eng",
                 "English OCR data is not installed. Install it with: sudo dnf install tesseract-langpack-eng",
                 "Text recognition failed: tesseract exit status 1: bad",
                 "No text was recognized.",
                 "Text recognition took too long.",
-                "The capture did not finish.",
+                "The capture did not finish. Press Capture to try again.",
             ]
         );
+    }
+
+    #[test]
+    fn only_a_capture_without_a_snapshot_names_the_retry() {
+        for failure in every_failure() {
+            let left_no_snapshot = !matches!(
+                failure,
+                Failure::Ocr(
+                    OcrFailure::TesseractMissing
+                        | OcrFailure::LanguageMissing
+                        | OcrFailure::Failed(_)
+                        | OcrFailure::Empty
+                        | OcrFailure::TimedOut
+                )
+            );
+            let text = failure_text(&failure, Language::En);
+            assert_eq!(
+                text.ends_with(super::CAPTURE_RETRY),
+                left_no_snapshot,
+                "{text}"
+            );
+        }
     }
 
     #[test]

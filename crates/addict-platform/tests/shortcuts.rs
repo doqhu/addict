@@ -4,7 +4,7 @@
 mod common;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsStr,
     path::PathBuf,
     sync::{
@@ -16,7 +16,7 @@ use std::{
 };
 
 use addict_platform::{
-    screenshot,
+    screenshot::{self, CaptureFailure},
     shortcut::{self, Action, Bindings, ShortcutEvent},
 };
 use zbus::{
@@ -43,6 +43,16 @@ struct Definition {
     preferred: Option<String>,
 }
 
+/// How the mock Screenshot portal answers one request.
+enum Shot {
+    /// The portal's response has this code and no results.
+    Code(u32),
+    /// A success with this URI.
+    Uri(String),
+    /// The call itself fails.
+    Refused,
+}
+
 /// One portal process: what it was asked, and how it answers.
 #[derive(Default)]
 struct State {
@@ -52,6 +62,11 @@ struct State {
     registered_senders: Mutex<HashSet<String>>,
     refuse_register: bool,
     silent_bind: bool,
+    /// The answers of the next Screenshot calls; after them, success with
+    /// [`shot_path`].
+    shots: Mutex<VecDeque<Shot>>,
+    /// The `interactive` option of each Screenshot call.
+    interactive: Mutex<Vec<Option<bool>>>,
     definitions: Mutex<Vec<Definition>>,
     session: Mutex<Option<OwnedObjectPath>>,
     configured: Mutex<Vec<OwnedObjectPath>>,
@@ -112,8 +127,24 @@ impl Screenshot {
     ) -> zbus::fdo::Result<OwnedObjectPath> {
         self.0.check_registered(&header)?;
         self.0.log.lock().unwrap().push("Screenshot");
+        self.0.interactive.lock().unwrap().push(
+            options
+                .get("interactive")
+                .map(|value| bool::try_from(value).unwrap()),
+        );
         let request = path("request", "handle_token", &options, &header);
-        let uri = format!("file://{}", shot_path().display());
+        let shot = self.0.shots.lock().unwrap().pop_front();
+        let uri = match shot {
+            Some(Shot::Code(code)) => {
+                coded_response(connection, &request, code, Options::new()).await?;
+                return Ok(request);
+            }
+            Some(Shot::Refused) => {
+                return Err(zbus::fdo::Error::Failed("screenshot refused".to_owned()));
+            }
+            Some(Shot::Uri(uri)) => uri,
+            None => format!("file://{}", shot_path().display()),
+        };
         response(
             connection,
             &request,
@@ -249,13 +280,22 @@ async fn response(
     path: &OwnedObjectPath,
     results: Options,
 ) -> zbus::Result<()> {
+    coded_response(connection, path, 0, results).await
+}
+
+async fn coded_response(
+    connection: &Connection,
+    path: &OwnedObjectPath,
+    code: u32,
+    results: Options,
+) -> zbus::Result<()> {
     connection
         .emit_signal(
             None::<&str>,
             path,
             "org.freedesktop.portal.Request",
             "Response",
-            &(0u32, results),
+            &(code, results),
         )
         .await
 }
@@ -912,5 +952,70 @@ fn a_capture_registers_before_its_screenshot_also_after_a_restart() {
         Ok(shot.clone())
     );
     assert_eq!(portal.log(), ["Register", "Screenshot"]);
+    std::fs::remove_file(&shot).unwrap();
+}
+
+/// Each way a capture ends without a snapshot, on the wire, and the capture
+/// after it: every request is a new interactive one, and the next one works.
+#[test]
+fn every_failed_capture_can_be_retried_with_a_new_interactive_request() {
+    if !private("every_failed_capture_can_be_retried_with_a_new_interactive_request") {
+        return;
+    }
+    let shot = shot_path();
+    std::fs::write(&shot, b"image").unwrap();
+    let portal = Mock::without_worker(vec![], 2, false);
+    let capture = || portal.runtime.block_on(screenshot::capture(APP_ID));
+    let missing = format!("file://{}.absent", shot.display());
+    let answers = [
+        (Shot::Code(1), CaptureFailure::Cancelled),
+        (Shot::Code(2), CaptureFailure::Ended),
+        (Shot::Uri(missing), CaptureFailure::NoImage),
+        (
+            Shot::Uri("https://example.org/a.png".to_owned()),
+            CaptureFailure::NoImage,
+        ),
+    ];
+    let mut requests = 0;
+    for (answer, failure) in answers {
+        portal.state.shots.lock().unwrap().push_back(answer);
+        assert_eq!(capture(), Err(failure));
+        requests += 1;
+        assert_eq!(capture(), Ok(shot.clone()));
+        requests += 1;
+    }
+
+    portal.state.shots.lock().unwrap().push_back(Shot::Refused);
+    let Err(CaptureFailure::Failed(detail)) = capture() else {
+        panic!("a refused call must fail");
+    };
+    assert!(detail.starts_with("screenshot: "), "{detail}");
+    assert!(detail.contains("screenshot refused"), "{detail}");
+    requests += 1;
+    assert_eq!(capture(), Ok(shot.clone()));
+    requests += 1;
+
+    // The interface goes: the request never reaches the portal.
+    let server = portal.connection.object_server();
+    assert!(
+        !portal
+            .runtime
+            .block_on(server.remove::<Screenshot, _>(DESKTOP))
+            .unwrap()
+    );
+    assert_eq!(capture(), Err(CaptureFailure::Unavailable));
+    assert!(
+        portal
+            .runtime
+            .block_on(server.at(DESKTOP, Screenshot(portal.state.clone())))
+            .unwrap()
+    );
+    assert_eq!(capture(), Ok(shot.clone()));
+    requests += 1;
+
+    assert_eq!(
+        *portal.state.interactive.lock().unwrap(),
+        vec![Some(true); requests]
+    );
     std::fs::remove_file(&shot).unwrap();
 }

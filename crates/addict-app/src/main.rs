@@ -144,9 +144,15 @@
 //! as the sentence. It is not submitted:
 //! a lone word is looked up and not sent online. An edit keeps the source;
 //! a field without a word is manual input again. A capture that gives no text,
-//! for any reason, leaves the field as it was and says "No text was
-//! recognized." until the next state is shown. Capture cannot be pressed
-//! while a capture runs.
+//! for any reason, starts no recognition it has no snapshot for, leaves the
+//! field as it was, shows the window and says why until the next state is
+//! shown; one that left no snapshot also says to press Capture to try again.
+//! The keyboard focus is on Capture then, unless Retry is offered, and a press
+//! opens a new interactive picker. The window comes back also after Esc,
+//! because GNOME answers Esc and a real failure with the same code. Nothing
+//! is granted on this path: the portal asks for no permission for an
+//! interactive screenshot. Capture cannot be pressed while the area is being
+//! chosen.
 //!
 //! The shortcut reads the text selected or copied, the same for every
 //! application: the window shows at once, empty and saying that the source,
@@ -174,7 +180,8 @@
 //! The application is unique: each invocation forwards its mode to the resident.
 //! A normal launch shows the window as it is, without a read; a background
 //! launch leaves it as it is. The screenshot action opens the same interactive
-//! capture flow as Capture, using the reading language and preserving cancellation.
+//! capture flow as Capture, using the reading language, and every end of it
+//! without text shows the window with the same way to try again.
 //!
 //! An attempt to bind the shortcut that ends without one, for any reason or
 //! for none within `resident::BIND_LIMIT`, keeps a line saying so and Retry

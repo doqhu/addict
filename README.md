@@ -121,6 +121,14 @@ an area to put editable OCR text in the window, using its reading language;
 cancelling starts no OCR or translation. The clipboard key continues to read
 selected or copied text independently.
 
+A capture that ends without a snapshot opens the window, with a line saying
+what happened and Capture focused: press Enter to open the picker again. If
+the shortcut is not bound, Retry has the focus instead, and Capture is one click
+away. The window also opens after Esc, because GNOME reports Esc and a real
+failure the same way, so addict cannot tell them apart. No permission is
+involved on GNOME: an interactive screenshot asks for none, and there is nothing
+to grant.
+
 Use `addict --background` (or `flatpak run io.github.doqhu.Addict --background`)
 for a silent login launch. This mode stays silent even if shortcut setup fails,
 including when forwarded to a running instance. Launch normally to see its

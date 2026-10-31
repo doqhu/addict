@@ -36,7 +36,13 @@
 //! was, starts no lookup and no online request, and says why in the source
 //! line under the status; the line stays, also when the window is shown
 //! again, until the field is edited, Capture or the shortcut is pressed or a
-//! text is recognized. Capture cannot be pressed while the area is being chosen;
+//! text is recognized. The window comes back after every such end, also after
+//! the screenshot shortcut with the window closed: GNOME gives code 2 for Esc
+//! and for a real failure alike, so the two cannot be told apart. The keyboard
+//! focus is then on Capture, or on Retry when it is offered, and a press of
+//! Capture is a new interactive request; the line of a capture that left no snapshot names
+//! it. No permission is granted anywhere on this path: the portal asks for
+//! none for an interactive screenshot. Capture cannot be pressed while the area is being chosen;
 //! once the snapshot is there it can, and it is the retry: pressing it, or
 //! editing the field, gives up the recognition that runs. Giving up is
 //! dropping the job, which kills the Tesseract child and deletes the
@@ -376,6 +382,23 @@ fn build_window(application: &gtk::Application, view: &View) -> gtk::Application
     window
 }
 
+/// What takes the keyboard focus when a capture ended without text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailedEndFocus {
+    Capture,
+    Retry,
+}
+
+/// The focus after a capture without text under `binding`: Capture, for the
+/// retry, or Retry when it is offered. No wildcard arm: a new state does not
+/// compile until it is given its focus.
+fn failed_end_focus(binding: &Binding) -> FailedEndFocus {
+    match binding {
+        Binding::NotBound { .. } => FailedEndFocus::Retry,
+        Binding::Attempting | Binding::Bound => FailedEndFocus::Capture,
+    }
+}
+
 /// The state the event loop keeps between events, on the UI thread.
 struct Session {
     binding: Binding,
@@ -480,6 +503,41 @@ struct Capturing {
     language: Language,
     /// Kept through the picker until the capture's window is presented again.
     activation_token: Option<String>,
+}
+
+/// What a press of Capture or of the screenshot shortcut does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapturePress {
+    /// A capture is on its way or its area is being chosen: nothing new.
+    Ignored,
+    /// A new capture starts.
+    Start,
+    /// The recognition that runs is given up and a new capture starts.
+    Restart,
+}
+
+impl Capturing {
+    /// What a press does now; `recognizing` says that the job has its snapshot.
+    /// Dropping a job that waits for the area could leave an open picker whose
+    /// snapshot nobody deletes, so that one is left alone.
+    fn press(&self, recognizing: bool) -> CapturePress {
+        match (self.hiding, self.job.is_some(), recognizing) {
+            (true, _, _) | (false, true, false) => CapturePress::Ignored,
+            (false, true, true) => CapturePress::Restart,
+            (false, false, _) => CapturePress::Start,
+        }
+    }
+
+    /// The number of the job that starts now.
+    fn next_number(&mut self) -> u64 {
+        self.number += 1;
+        self.number
+    }
+
+    /// Whether the job with `number` is the one that runs.
+    fn is_running(&self, number: u64) -> bool {
+        self.job.is_some() && number == self.number
+    }
 }
 
 /// Where the lookup of the word chosen in a [`Session`] stands; at first
@@ -620,14 +678,13 @@ impl Session {
     /// new capture; a press queued behind one whose area is being chosen
     /// starts nothing. The source line goes.
     fn capture(&mut self, activation_token: Option<&str>) {
-        if self.capturing.hiding {
-            return;
-        }
-        if self.capturing.job.is_some() {
-            if self.manual.reading() != Some(Source::Ocr) {
-                return;
-            }
-            self.give_up_capture();
+        match self
+            .capturing
+            .press(self.manual.reading() == Some(Source::Ocr))
+        {
+            CapturePress::Ignored => return,
+            CapturePress::Restart => self.give_up_capture(),
+            CapturePress::Start => {}
         }
         // The capture's text is the one to come: a read that runs is given up.
         self.give_up_read();
@@ -660,9 +717,8 @@ impl Session {
             return;
         }
         self.capturing.hiding = false;
-        self.capturing.number += 1;
+        let number = self.capturing.next_number();
         self.capturing.language = self.language;
-        let number = self.capturing.number;
         let captured = self.sender.clone();
         let ended = self.sender.clone();
         let started = capture::start(
@@ -684,7 +740,7 @@ impl Session {
 
     /// Whether the capture job with `number` is the one that runs.
     fn is_capturing(&self, number: u64) -> bool {
-        self.capturing.job.is_some() && number == self.capturing.number
+        self.capturing.is_running(number)
     }
 
     /// Gives up the capture job: dropping it kills its Tesseract child and
@@ -731,8 +787,10 @@ impl Session {
     /// text replaces the field as a new text from the capture and the
     /// source line goes; anything else, a text without a word among it,
     /// leaves the field as it was, starts nothing and says why in the
-    /// source line. The window is shown either way, the field focused. With
-    /// `--evidence` the end is recorded as shown, with `timing`.
+    /// source line. The window is shown either way, with the field focused
+    /// after a text and, after anything else, Capture for the retry, or Retry
+    /// when it is offered. With `--evidence` the end is recorded as shown,
+    /// with `timing`.
     fn capture_ended(&mut self, captured: Captured, timing: &Timing) {
         self.capturing.job = None;
         self.view.set_capture_sensitive(true);
@@ -757,6 +815,10 @@ impl Session {
                 self.reveal_capture();
                 self.view
                     .render_source_failure(&failure_text(&failure, self.capturing.language));
+                match failed_end_focus(&self.binding) {
+                    FailedEndFocus::Capture => self.view.focus_capture(),
+                    FailedEndFocus::Retry => self.view.focus_retry(),
+                }
                 return;
             }
         };
@@ -2493,9 +2555,10 @@ mod tests {
     use gtk::{gio, prelude::*};
 
     use super::{
-        CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, Copying, Event, LaunchMode, WindowActions,
-        WindowEvent, connect_launches, connect_settings_action, dispatch_window,
-        is_offered_command, missed_line,
+        CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, CapturePress, Capturing, Copying, Event,
+        FailedEndFocus, LaunchMode, WindowActions, WindowEvent, connect_launches,
+        connect_settings_action, dispatch_window, failed_end_focus, is_offered_command,
+        missed_line,
     };
     use crate::view::{
         Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
@@ -2538,6 +2601,58 @@ mod tests {
         fn shortcut_status(&mut self, message: &str) {
             self.status = message.to_owned();
         }
+    }
+
+    #[test]
+    fn a_failed_capture_focuses_capture_or_retry_when_offered() {
+        use crate::view::Binding;
+        assert_eq!(
+            failed_end_focus(&Binding::Attempting),
+            FailedEndFocus::Capture
+        );
+        assert_eq!(failed_end_focus(&Binding::Bound), FailedEndFocus::Capture);
+        assert_eq!(
+            failed_end_focus(&Binding::NotBound {
+                detail: "portal unavailable".to_owned(),
+            }),
+            FailedEndFocus::Retry
+        );
+    }
+
+    /// A job that stands for the one of a capture.
+    fn capture_job(work: &addict_platform::work::Work) -> addict_platform::work::Job {
+        work.run(std::time::Duration::from_secs(5), async {}, |_| {})
+    }
+
+    #[test]
+    fn a_press_while_a_picker_waits_starts_nothing() {
+        let work = addict_platform::work::Work::start().expect("runner");
+        let mut capturing = Capturing::default();
+        assert_eq!(capturing.press(false), CapturePress::Start);
+        capturing.hiding = true;
+        assert_eq!(capturing.press(false), CapturePress::Ignored);
+        capturing.hiding = false;
+        capturing.job = Some(capture_job(&work));
+        assert_eq!(capturing.press(false), CapturePress::Ignored);
+        assert_eq!(capturing.press(true), CapturePress::Restart);
+    }
+
+    #[test]
+    fn a_retry_has_a_new_number_and_an_old_job_is_ignored() {
+        let work = addict_platform::work::Work::start().expect("runner");
+        let mut capturing = Capturing::default();
+        let old = capturing.next_number();
+        capturing.job = Some(capture_job(&work));
+        assert!(capturing.is_running(old));
+        // The capture ended: even its own late event is ignored.
+        capturing.job = None;
+        assert!(!capturing.is_running(old));
+        assert_eq!(capturing.press(false), CapturePress::Start);
+        let new = capturing.next_number();
+        assert_ne!(new, old);
+        capturing.job = Some(capture_job(&work));
+        assert!(capturing.is_running(new));
+        assert!(!capturing.is_running(old));
     }
 
     #[test]

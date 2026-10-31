@@ -3,7 +3,8 @@
 //!
 //! [`start`] starts the job; it tells when the snapshot was taken and ends
 //! with one [`Capture`]: what was [`Captured`] and its [`Timing`], measured
-//! on the worker. [`captured_result`] says what an outcome of the job is for
+//! on the worker. A portal answer without a snapshot ends the job there, with
+//! no recognition. [`captured_result`] says what an outcome of the job is for
 //! the window. The snapshot is deleted after every capture that
 //! produced a file, whatever the recognition gave, and also when the job is
 //! cancelled, stopped at its deadline or dropped: the guard that deletes it
@@ -175,27 +176,50 @@ pub fn start(
     let work = work.ok_or_else(Capture::unfinished)?;
     let job = async move {
         let started = Instant::now();
-        let shot = tokio::time::timeout(CAPTURE_LIMIT, screenshot::capture(APP_ID)).await;
+        let answer = portal_answer(CAPTURE_LIMIT, screenshot::capture(APP_ID)).await;
         let capture_ms = Some(millis(started.elapsed()));
-        let failed = |failure| Capture {
-            captured: Captured::Failed(failure),
-            timing: Timing {
-                capture_ms,
-                ..Timing::default()
-            },
-        };
-        let path = match shot {
-            Ok(Ok(path)) => path,
-            Ok(Err(failure)) => return failed(Failure::Capture(failure)),
-            Err(_) => return failed(Failure::CaptureTimedOut),
-        };
-        let params = Params::in_language(ocr_language(language));
-        let tesseract = tesseract();
-        let mut capture = recognize_snapshot(&tesseract, path, &params, on_captured).await;
-        capture.timing.capture_ms = capture_ms;
-        capture
+        after_answer(answer, capture_ms, language, tesseract, on_captured).await
     };
     Ok(work.run(JOB_LIMIT, job, on_outcome))
+}
+
+/// What the portal's `shot` answered within `limit`.
+async fn portal_answer(
+    limit: Duration,
+    shot: impl Future<Output = Result<PathBuf, CaptureFailure>>,
+) -> Result<PathBuf, Failure> {
+    match tokio::time::timeout(limit, shot).await {
+        Ok(answer) => answer.map_err(Failure::Capture),
+        Err(_) => Err(Failure::CaptureTimedOut),
+    }
+}
+
+/// The rest of the job once the portal's `answer` is there, `capture_ms` after
+/// its start. A failed answer is reported as it is: no Tesseract is looked for
+/// and nothing is recognized. `locate` gives the Tesseract of a snapshot.
+async fn after_answer(
+    answer: Result<PathBuf, Failure>,
+    capture_ms: Option<u64>,
+    language: Language,
+    locate: impl FnOnce() -> Tesseract,
+    on_captured: impl FnOnce(),
+) -> Capture {
+    let path = match answer {
+        Ok(path) => path,
+        Err(failure) => {
+            return Capture {
+                captured: Captured::Failed(failure),
+                timing: Timing {
+                    capture_ms,
+                    ..Timing::default()
+                },
+            };
+        }
+    };
+    let params = Params::in_language(ocr_language(language));
+    let mut capture = recognize_snapshot(&locate(), path, &params, on_captured).await;
+    capture.timing.capture_ms = capture_ms;
+    capture
 }
 
 /// Recognizes the snapshot at `path` with `tesseract` and `params` and
@@ -266,6 +290,7 @@ pub(crate) mod tests {
             atomic::{AtomicBool, Ordering},
             mpsc,
         },
+        time::Duration,
     };
 
     use addict_core::translation::Source as Language;
@@ -276,8 +301,9 @@ pub(crate) mod tests {
     };
 
     use super::{
-        CAPTURE_LIMIT, Capture, Captured, Failure, JOB_LIMIT, OCR_LIMIT, Timing, captured_result,
-        ocr_language, recognize_snapshot, setting, start, tesseract,
+        CAPTURE_LIMIT, Capture, Captured, Failure, JOB_LIMIT, OCR_LIMIT, Timing, after_answer,
+        captured_result, ocr_language, portal_answer, recognize_snapshot, setting, start,
+        tesseract,
     };
     use crate::manual::tests::WAIT;
 
@@ -371,6 +397,96 @@ pub(crate) mod tests {
         assert_eq!(outcome, Outcome::Cancelled);
         assert_eq!(captured_result(outcome), None);
         assert!(!path.exists());
+    }
+
+    /// What `job` ends with on a runner of its own.
+    fn run_job<T: Send + 'static>(job: impl Future<Output = T> + Send + 'static) -> Outcome<T> {
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = mpsc::channel();
+        let _job = work.run(JOB_LIMIT, job, move |outcome| {
+            let _ = sender.send(outcome);
+        });
+        receiver.recv_timeout(WAIT).expect("outcome")
+    }
+
+    #[test]
+    fn a_failed_answer_is_reported_and_never_recognized() {
+        for failure in [
+            Failure::Capture(CaptureFailure::Cancelled),
+            Failure::Capture(CaptureFailure::Ended),
+            Failure::Capture(CaptureFailure::Unavailable),
+            Failure::Capture(CaptureFailure::Failed("screenshot: refused".to_owned())),
+            Failure::Capture(CaptureFailure::NoImage),
+            Failure::CaptureTimedOut,
+        ] {
+            let answer = Err(failure.clone());
+            // A panic here would end the job as unfinished, not as `failure`.
+            let outcome = run_job(after_answer(
+                answer,
+                Some(1200),
+                Language::En,
+                || panic!("Tesseract was looked for"),
+                || panic!("the snapshot was announced"),
+            ));
+            assert_eq!(
+                captured_result(outcome),
+                Some((
+                    Captured::Failed(failure),
+                    Timing {
+                        capture_ms: Some(1200),
+                        ..Timing::default()
+                    }
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn a_good_answer_recognizes_only_its_snapshot_and_deletes_it() {
+        let _children = children();
+        let path = snapshot("answered");
+        let other = snapshot("answered-other");
+        let told = Arc::new(AtomicBool::new(false));
+        let announced = told.clone();
+        let outcome = run_job(after_answer(
+            Ok(path.clone()),
+            Some(1200),
+            Language::En,
+            tesseract,
+            move || announced.store(true, Ordering::SeqCst),
+        ));
+        let (captured, timing) = captured_result(outcome).expect("shown");
+        assert_eq!(
+            captured,
+            Captured::Text("The bank is beside the river.".to_owned())
+        );
+        assert_eq!(timing.capture_ms, Some(1200));
+        assert!(told.load(Ordering::SeqCst));
+        assert!(!path.exists());
+        assert!(other.exists());
+        std::fs::remove_file(other).expect("remove");
+    }
+
+    #[test]
+    fn a_portal_that_stays_silent_is_out_of_time() {
+        let answer = run_job(portal_answer(
+            Duration::from_millis(10),
+            std::future::pending(),
+        ));
+        assert_eq!(answer, Outcome::Finished(Err(Failure::CaptureTimedOut)));
+    }
+
+    #[test]
+    fn a_portal_answer_in_time_is_kept() {
+        let failed = run_job(portal_answer(WAIT, async { Err(CaptureFailure::Ended) }));
+        assert_eq!(
+            failed,
+            Outcome::Finished(Err(Failure::Capture(CaptureFailure::Ended)))
+        );
+        let path = PathBuf::from("/shot.png");
+        let shot = path.clone();
+        let taken = run_job(portal_answer(WAIT, async move { Ok(shot) }));
+        assert_eq!(taken, Outcome::Finished(Ok(path)));
     }
 
     #[test]
