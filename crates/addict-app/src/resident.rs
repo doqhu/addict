@@ -264,7 +264,7 @@ enum Event {
     Active,
     /// A choice of the tray's menu, or its end.
     Tray(TrayEvent),
-    /// Change shortcut was pressed in the Settings window.
+    /// Configure shortcuts was pressed in the Settings window.
     ChangeShortcut,
     /// The state of the key file, as the runner read it for the Settings
     /// window.
@@ -617,6 +617,11 @@ impl Session {
         self.view.clear_source_failure();
         self.capturing.hiding = true;
         self.capturing.activation_token = activation_token.map(str::to_owned);
+        let settle = if self.window.is_visible() {
+            HIDE_SETTLE
+        } else {
+            Duration::ZERO
+        };
         // Hidden, so on Wayland the compositor places the window anew when it
         // comes back. The opacity of a GTK 4 toplevel is ignored, and making
         // its children transparent left the window in GNOME's capture.
@@ -625,8 +630,9 @@ impl Session {
         let hidden = self.sender.clone();
         // GNOME's capture interface freezes the screen as it opens, and the
         // shell animates a window that goes away: started at once, the
-        // capture shows the window still there.
-        glib::timeout_add_local_once(HIDE_SETTLE, move || {
+        // capture shows the window still there. A window that was closed
+        // already has nothing to wait for.
+        glib::timeout_add_local_once(settle, move || {
             let _ = hidden.unbounded_send(Event::Hidden);
         });
     }
@@ -869,11 +875,16 @@ impl Session {
         }
     }
 
-    /// Shows the window with the state as it is now, the field focused,
-    /// without an activation token.
+    /// Shows the window with the state as it is now, the field focused, with
+    /// no press of the clipboard shortcut behind it. No `set_startup_id` here:
+    /// the caller gave a token if it has one, and for a launch GTK has already
+    /// applied the launcher's.
     fn reveal(&self) {
         self.view.render(self.manual.state(), self.manual.source());
         self.focus();
+        if let Some(recording) = &self.recording {
+            recording.shown_without_press();
+        }
         self.window.present();
     }
 
@@ -1553,17 +1564,6 @@ impl Session {
         self.give_up_read();
     }
 
-    fn launched(&mut self) {
-        self.view.render(self.manual.state(), self.manual.source());
-        self.focus();
-        // No `set_startup_id`: GTK has already applied the
-        // token of the launcher, when there was one.
-        if let Some(recording) = &self.recording {
-            recording.shown_without_press();
-        }
-        self.window.present();
-    }
-
     /// A choice of the tray. Show is a repeated launch: the window as it is,
     /// no read. Settings reads the state of the key file on the runner and
     /// shows the window; About shows its window on its About page; Exit ends
@@ -1571,7 +1571,7 @@ impl Session {
     /// said once and changes nothing.
     fn tray(&mut self, event: TrayEvent) {
         match event {
-            TrayEvent::Show => self.launched(),
+            TrayEvent::Show => self.reveal(),
             TrayEvent::Settings => self.show_settings(),
             TrayEvent::About => self.about.present(),
             TrayEvent::Exit => {
@@ -1736,7 +1736,7 @@ impl Session {
         self.check_key();
     }
 
-    /// Change shortcut was pressed: the portal is asked for its dialog
+    /// Configure shortcuts was pressed: the portal is asked for its dialog
     /// through the worker that holds the session.
     fn change_shortcut(&mut self) {
         if !matches!(self.binding, Binding::Bound) {
@@ -2189,7 +2189,7 @@ impl WindowActions for Session {
     }
 
     fn present_main(&mut self) {
-        self.launched();
+        self.reveal();
     }
     fn present_settings(&mut self) {
         self.show_settings();

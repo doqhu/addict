@@ -1,8 +1,8 @@
 //! The Settings window, reachable from the main window and the tray.
 //!
-//! It tells what the application is set to: the trigger of the shortcut,
+//! It tells what the application is set to: the triggers of both shortcuts,
 //! which the portal owns, with a button that asks the portal for its dialog
-//! to change it, and the DeepL key, with a masked field to enter one, the
+//! to change them, and the DeepL key, with a masked field to enter one, the
 //! file it is saved in and the state that file is in. The window writes the
 //! key, on the runner, and never reads it back: the field starts empty and
 //! is cleared once the key is saved. Below the key, a line says how much the
@@ -333,14 +333,14 @@ impl ShortcutRow {
             }
         }
         self.keys.set_visible(caps.is_some());
-        // Bound with no trigger to show: the badge says it alone.
-        let line = match (bound, &caps, trigger) {
-            (true, Some(_), _) => String::new(),
-            _ => trigger_text(binding, trigger),
+        let line = if caps.is_some() {
+            String::new()
+        } else {
+            trigger_text(binding, trigger)
         };
         say_in(&self.trigger, &line);
-        set_tone(&self.trigger, badge(binding, trigger).1);
         let (text, tone) = badge(binding, trigger);
+        set_tone(&self.trigger, tone);
         self.badge_text.set_label(text);
         set_tone(&self.badge, tone);
     }
@@ -404,7 +404,7 @@ fn say_in(line: &gtk::Label, text: &str) {
 
 impl Settings {
     /// Builds the window, hidden, above `parent`. `on_change` runs when
-    /// Change shortcut is pressed; `on_save` runs with the text of the key
+    /// Configure shortcuts is pressed; `on_save` runs with the text of the key
     /// field, trimmed and not empty, when Save key or Enter in the field is
     /// pressed; `on_clear` runs when Clear cache is pressed.
     pub fn new(
