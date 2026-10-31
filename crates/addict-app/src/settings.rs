@@ -7,22 +7,166 @@
 //! key, on the runner, and never reads it back: the field starts empty and
 //! is cleared once the key is saved. Below the key, a line says how much the
 //! on-disk cache of the answers holds, with a button that clears it; the
-//! cache is read and cleared on the runner. The texts are plain functions of
-//! the state, so that they can be tested without a display.
+//! cache is read and cleared on the runner. The Start at login switch asks the
+//! Background portal, on the runner, and shows only what the portal last
+//! confirmed: the portal cannot be asked, so that state is saved by addict, and
+//! showing the window calls no portal. The texts are plain functions of the
+//! state, so that they can be tested without a display.
 
-use std::{path::Path, time::Duration};
+use std::{cell::Cell, future::Future, path::Path, rc::Rc, time::Duration};
 
 use addict_deepl::key::{self, KeyError};
-use addict_platform::shortcut::Bindings;
+use addict_platform::{
+    desktop::LoginEntry, shortcut::Bindings, startup::StartupFailure, work::Outcome,
+};
 use gtk::{glib, prelude::*};
 
-use crate::{cache::Footprint, view::Binding};
+use crate::{cache::Footprint, entries, view::Binding};
 
 /// How long reading the state of the key file may take.
 pub const KEY_CHECK_LIMIT: Duration = Duration::from_secs(2);
 
 /// How long reading the size of the cache, or clearing it, may take.
 pub const CACHE_LIMIT: Duration = Duration::from_secs(5);
+
+/// How long reading the saved startup state may take.
+pub const STARTUP_READ_LIMIT: Duration = Duration::from_secs(2);
+
+/// What the Startup section shows when the window opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartupShown {
+    /// Whether the switch is on.
+    pub on: bool,
+    /// Whether an older build's login entry is what makes it on.
+    pub legacy: bool,
+}
+
+/// What to show for the `saved` state and the login entry: the saved state
+/// when there is one. With none, only a legacy entry makes the switch on: it is
+/// active, and nothing changes until the user acts. `None` for `entry` means it
+/// could not be read, as in a sandbox or for a foreign file.
+pub fn startup_shown(saved: Option<bool>, entry: Option<LoginEntry>) -> StartupShown {
+    match saved {
+        Some(on) => StartupShown { on, legacy: false },
+        None => {
+            let legacy = entry == Some(LoginEntry::Legacy);
+            StartupShown { on: legacy, legacy }
+        }
+    }
+}
+
+/// The line under a switch that a legacy entry keeps on.
+pub const STARTUP_LEGACY: &str = "An older login entry is active and may open the window at \
+     login. Turn this off and on again to replace it.";
+
+/// The line when a change passed its limit, which covers the whole job: the
+/// portal may have acted already, or may still.
+pub const STARTUP_TIMED_OUT: &str = "The Background portal did not answer in time, and the \
+     change may still take effect. Turn this off and on again to repair it.";
+
+/// The line when the state could not be read in time.
+pub const STARTUP_UNREAD: &str = "The saved startup state could not be read.";
+
+/// How a change of the switch ended. It says what the switch then shows; a
+/// state saved or not is part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupEnd {
+    /// The portal confirmed it and it is saved.
+    Done(bool),
+    /// The portal was not asked: why, naming a path if there is one.
+    NotAsked(String),
+    /// The portal did not do it; nothing is saved.
+    Failed(StartupFailure),
+    /// Enabled, the save failed, and the portal took it back.
+    Revoked { save: String },
+    /// Enabled, the save failed, and the portal did not take it back.
+    NotRevoked {
+        save: String,
+        revoke: StartupFailure,
+    },
+    /// Disabled, but the save failed.
+    DisabledUnsaved { save: String },
+}
+
+/// One change of the switch, on the runner. `check` runs first, and `ask` and
+/// `save` only after it passed; with `enable`, a failed save has the portal
+/// asked to disable again, as an unsaved state would not be shown as on.
+pub async fn change_startup<A, F>(
+    enable: bool,
+    check: impl FnOnce() -> Result<(), String>,
+    ask: A,
+    save: impl FnOnce(bool) -> Result<(), String>,
+) -> StartupEnd
+where
+    A: Fn(bool) -> F,
+    F: Future<Output = Result<(), StartupFailure>>,
+{
+    if let Err(reason) = check() {
+        return StartupEnd::NotAsked(reason);
+    }
+    if let Err(failure) = ask(enable).await {
+        return StartupEnd::Failed(failure);
+    }
+    match (save(enable), enable) {
+        (Ok(()), _) => StartupEnd::Done(enable),
+        (Err(save), false) => StartupEnd::DisabledUnsaved { save },
+        (Err(save), true) => match ask(false).await {
+            Ok(()) => StartupEnd::Revoked { save },
+            Err(revoke) => StartupEnd::NotRevoked { save, revoke },
+        },
+    }
+}
+
+/// The line for a failure of the portal.
+fn startup_failure_text(failure: &StartupFailure) -> String {
+    format!(
+        "Startup was not changed: {}.",
+        entries::failure_reason(failure)
+    )
+}
+
+/// What the switch shows, and the line under it, after a change that started
+/// from the confirmed state `last`. Never on without a confirmation.
+pub fn startup_end_text(end: &StartupEnd, last: bool) -> (bool, String) {
+    match end {
+        StartupEnd::Done(on) => (*on, String::new()),
+        StartupEnd::NotAsked(reason) => (last, format!("Startup was not changed: {reason}.")),
+        StartupEnd::Failed(failure) => (last, startup_failure_text(failure)),
+        StartupEnd::Revoked { save } => (
+            false,
+            format!("Startup was turned back off, as its state could not be saved: {save}."),
+        ),
+        StartupEnd::NotRevoked { save, revoke } => (
+            false,
+            format!(
+                "Startup could not be saved ({save}) and could not be turned back off ({}): \
+                 addict may still start at login. Turn this on and off again to repair it.",
+                entries::failure_reason(revoke)
+            ),
+        ),
+        StartupEnd::DisabledUnsaved { save } => (
+            false,
+            format!(
+                "Startup is off, but this could not be saved: {save}. This switch may show on \
+                 next time."
+            ),
+        ),
+    }
+}
+
+/// [`startup_end_text`] for a job's outcome. `None` for a job given up, which
+/// says nothing. A limit that passed is no confirmation either way.
+pub fn startup_outcome(outcome: &Outcome<StartupEnd>, last: bool) -> Option<(bool, String)> {
+    match outcome {
+        Outcome::Finished(end) => Some(startup_end_text(end, last)),
+        Outcome::TimedOut => Some((last, STARTUP_TIMED_OUT.to_owned())),
+        Outcome::Panicked => Some((
+            last,
+            "Startup was not changed: the request did not run.".to_owned(),
+        )),
+        Outcome::Cancelled => None,
+    }
+}
 
 /// Where the size of the cache stands, as the window says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,6 +508,12 @@ pub struct Settings {
     cache_size: gtk::Label,
     /// The line of the clears of the cache.
     cache_status: gtk::Label,
+    /// The Start at login switch.
+    startup: gtk::Switch,
+    /// Set while the code, not the user, moves the switch.
+    startup_rendering: Rc<Cell<bool>>,
+    /// The line of the startup state.
+    startup_status: gtk::Label,
 }
 
 pub(crate) fn label(text: &str, classes: &[&str]) -> gtk::Label {
@@ -406,13 +556,15 @@ impl Settings {
     /// Builds the window, hidden, above `parent`. `on_change` runs when
     /// Configure shortcuts is pressed; `on_save` runs with the text of the key
     /// field, trimmed and not empty, when Save key or Enter in the field is
-    /// pressed; `on_clear` runs when Clear cache is pressed.
+    /// pressed; `on_clear` runs when Clear cache is pressed; `on_startup` runs
+    /// with the state asked for when the user moves the Start at login switch.
     pub fn new(
         parent: &impl IsA<gtk::Window>,
         key_file: Option<&Path>,
         on_change: impl Fn() + 'static,
         on_save: impl Fn(String) + 'static,
         on_clear: impl Fn() + 'static,
+        on_startup: impl Fn(bool) + 'static,
     ) -> Self {
         let clipboard = ShortcutRow::new("Selection or clipboard");
         let screenshot = ShortcutRow::new("Screen region (OCR)");
@@ -513,6 +665,32 @@ impl Settings {
         let cache_status = label("", &["hint"]);
         cache_status.set_visible(false);
 
+        // Stopping `state-set` keeps the state off until the portal confirms.
+        let startup = gtk::Switch::builder()
+            .valign(gtk::Align::Center)
+            .sensitive(false)
+            .build();
+        startup.update_property(&[gtk::accessible::Property::Label("Start at login")]);
+        let startup_rendering = Rc::new(Cell::new(false));
+        let rendering = startup_rendering.clone();
+        startup.connect_state_set(move |_, wanted| {
+            if !rendering.get() {
+                on_startup(wanted);
+            }
+            glib::Propagation::Stop
+        });
+        let startup_name = label("Start at login", &[]);
+        startup_name.set_hexpand(true);
+        startup_name.set_valign(gtk::Align::Center);
+        let startup_row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        startup_row.append(&startup_name);
+        startup_row.append(&startup);
+        let startup_status = label("", &["hint"]);
+        startup_status.set_visible(false);
+
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(16)
@@ -540,6 +718,10 @@ impl Settings {
                 cache_row.upcast_ref(),
                 cache_status.upcast_ref(),
             ],
+        ));
+        content.append(&section(
+            "Startup",
+            &[startup_row.upcast_ref(), startup_status.upcast_ref()],
         ));
         let footer = label(
             "Esc closes the window. The key is never shown back here.",
@@ -582,6 +764,9 @@ impl Settings {
             key_status,
             cache_size,
             cache_status,
+            startup,
+            startup_rendering,
+            startup_status,
         };
         settings.render_binding(&Binding::Attempting, &Bindings::default());
         settings.render_key(None);
@@ -636,18 +821,237 @@ impl Settings {
     pub fn say_cache(&self, text: &str) {
         say_in(&self.cache_status, text);
     }
+
+    /// Moves the switch to `on`, as confirmed, without asking anything.
+    pub fn render_startup(&self, on: bool) {
+        self.startup_rendering.set(true);
+        self.startup.set_active(on);
+        self.startup.set_state(on);
+        self.startup_rendering.set(false);
+    }
+
+    /// Whether the switch can be moved: not while a request or a read runs.
+    pub fn set_startup_sensitive(&self, sensitive: bool) {
+        self.startup.set_sensitive(sensitive);
+    }
+
+    /// Sets the line of the startup state.
+    pub fn say_startup(&self, text: &str) {
+        say_in(&self.startup_status, text);
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, future::ready};
+
     use addict_deepl::key::KeyError;
+    use addict_platform::{desktop::LoginEntry, startup::StartupFailure, work::Outcome};
 
     use super::{
-        CONFIGURE_UNSUPPORTED, CacheState, KeyState, NO_KEY_PLACE, badge, cache_text, change_text,
-        clear_text, key_text, key_tone, save_text, saved_in_text, size_text, trigger_keys,
+        CONFIGURE_UNSUPPORTED, CacheState, KeyState, NO_KEY_PLACE, StartupEnd, StartupShown, badge,
+        cache_text, change_startup, change_text, clear_text, key_text, key_tone, save_text,
+        saved_in_text, size_text, startup_end_text, startup_outcome, startup_shown, trigger_keys,
         trigger_text,
     };
     use crate::{cache::Footprint, view::Binding};
+
+    /// Polls a job whose fakes never wait.
+    fn finish<F: std::future::Future>(job: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime")
+            .block_on(job)
+    }
+
+    /// One change with a portal that gives `answers` in turn and a save that
+    /// gives `saved`; what happened comes with its end.
+    fn change(
+        enable: bool,
+        checked: Result<(), String>,
+        answers: Vec<Result<(), StartupFailure>>,
+        saved: Result<(), String>,
+    ) -> (StartupEnd, Vec<String>) {
+        let log = RefCell::new(Vec::new());
+        let answers = RefCell::new(answers.into_iter());
+        let end = finish(change_startup(
+            enable,
+            || {
+                log.borrow_mut().push("check".to_owned());
+                checked
+            },
+            |asked| {
+                log.borrow_mut().push(format!("ask {asked}"));
+                ready(answers.borrow_mut().next().expect("an answer"))
+            },
+            |state| {
+                log.borrow_mut().push(format!("save {state}"));
+                saved
+            },
+        ));
+        (end, log.into_inner())
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_switch_asks_and_stays_off_until_it_is_told() {
+        use gtk::prelude::*;
+        gtk::init().expect("a display");
+        let parent = gtk::Window::new();
+        let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let told = asked.clone();
+        let settings = super::Settings::new(
+            &parent,
+            None,
+            || {},
+            |_| {},
+            || {},
+            move |wanted| told.borrow_mut().push(wanted),
+        );
+        assert!(!settings.startup.is_sensitive());
+        settings.set_startup_sensitive(true);
+
+        settings.startup.set_active(true);
+        assert_eq!(*asked.borrow(), [true]);
+        assert!(!settings.startup.state(), "not on before a confirmation");
+
+        // A refusal: back off, and the code asks nothing.
+        settings.render_startup(false);
+        assert_eq!(*asked.borrow(), [true]);
+        assert!(!settings.startup.is_active() && !settings.startup.state());
+
+        // A confirmation, and the state of a window that opens.
+        settings.render_startup(true);
+        assert_eq!(*asked.borrow(), [true]);
+        assert!(settings.startup.is_active() && settings.startup.state());
+
+        settings.startup.set_active(false);
+        assert_eq!(*asked.borrow(), [true, false]);
+        assert!(settings.startup.state(), "on until the portal confirms");
+    }
+
+    #[test]
+    fn a_confirmed_change_is_saved_and_shown() {
+        let (end, log) = change(true, Ok(()), vec![Ok(())], Ok(()));
+        assert_eq!(end, StartupEnd::Done(true));
+        assert_eq!(log, ["check", "ask true", "save true"]);
+        assert_eq!(startup_end_text(&end, false), (true, String::new()));
+        let (end, log) = change(false, Ok(()), vec![Ok(())], Ok(()));
+        assert_eq!(end, StartupEnd::Done(false));
+        assert_eq!(log, ["check", "ask false", "save false"]);
+        assert_eq!(startup_end_text(&end, true), (false, String::new()));
+    }
+
+    #[test]
+    fn a_refusal_saves_nothing_and_never_shows_on() {
+        let (end, log) = change(true, Ok(()), vec![Err(StartupFailure::Refused)], Ok(()));
+        assert_eq!(log, ["check", "ask true"]);
+        let (on, line) = startup_end_text(&end, false);
+        assert!(!on);
+        assert!(line.contains("refused"), "{line}");
+    }
+
+    #[test]
+    fn no_portal_returns_to_the_last_confirmed_state_and_says_why() {
+        for (failure, word) in [
+            (StartupFailure::Unavailable, "not available"),
+            (StartupFailure::NoAnswer, "in time"),
+            (StartupFailure::Failed("step: broke".to_owned()), "broke"),
+        ] {
+            for last in [false, true] {
+                let (end, log) = change(!last, Ok(()), vec![Err(failure.clone())], Ok(()));
+                assert_eq!(log.len(), 2, "nothing saved");
+                let (on, line) = startup_end_text(&end, last);
+                assert_eq!(on, last);
+                assert!(line.contains(word), "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_check_asks_nothing() {
+        let (end, log) = change(false, Err("/x is foreign".to_owned()), vec![], Ok(()));
+        assert_eq!(log, ["check"]);
+        let (on, line) = startup_end_text(&end, true);
+        assert!(on);
+        assert!(line.contains("/x is foreign"), "{line}");
+    }
+
+    #[test]
+    fn a_failed_save_after_enable_revokes_and_says_why() {
+        let (end, log) = change(true, Ok(()), vec![Ok(()), Ok(())], Err("disk".to_owned()));
+        assert_eq!(log, ["check", "ask true", "save true", "ask false"]);
+        let (on, line) = startup_end_text(&end, false);
+        assert!(!on);
+        assert!(line.contains("disk"), "{line}");
+    }
+
+    #[test]
+    fn a_failed_revoke_is_stated_too() {
+        let (end, _) = change(
+            true,
+            Ok(()),
+            vec![Ok(()), Err(StartupFailure::Refused)],
+            Err("disk".to_owned()),
+        );
+        let (on, line) = startup_end_text(&end, false);
+        assert!(!on);
+        assert!(line.contains("disk") && line.contains("refused"), "{line}");
+        assert!(line.contains("may still start"), "{line}");
+    }
+
+    #[test]
+    fn a_failed_save_after_disable_stays_off_and_says_so() {
+        let (end, log) = change(false, Ok(()), vec![Ok(())], Err("disk".to_owned()));
+        assert_eq!(log.len(), 3, "no second request");
+        let (on, line) = startup_end_text(&end, true);
+        assert!(!on);
+        assert!(line.contains("disk"), "{line}");
+    }
+
+    #[test]
+    fn only_a_finished_confirmation_moves_the_switch() {
+        for outcome in [Outcome::TimedOut, Outcome::Panicked] {
+            for last in [false, true] {
+                let (on, line) = startup_outcome(&outcome, last).expect("shown");
+                assert_eq!(on, last);
+                assert!(!line.is_empty());
+            }
+        }
+        let (_, line) = startup_outcome(&Outcome::TimedOut, false).expect("shown");
+        assert!(!line.contains("not changed"), "{line}");
+        assert!(line.contains("did not answer in time"), "{line}");
+        assert!(line.contains("may still take effect"), "{line}");
+        assert!(line.contains("off and on"), "{line}");
+        assert_eq!(startup_outcome(&Outcome::Cancelled, true), None);
+        assert_eq!(
+            startup_outcome(&Outcome::Finished(StartupEnd::Done(true)), false),
+            Some((true, String::new()))
+        );
+    }
+
+    #[test]
+    fn the_saved_state_wins_and_only_a_legacy_entry_shows_on_without_one() {
+        let shown = |on, legacy| StartupShown { on, legacy };
+        assert_eq!(startup_shown(Some(true), None), shown(true, false));
+        assert_eq!(
+            startup_shown(Some(false), Some(LoginEntry::Legacy)),
+            shown(false, false)
+        );
+        assert_eq!(
+            startup_shown(None, Some(LoginEntry::Legacy)),
+            shown(true, true)
+        );
+        assert_eq!(
+            startup_shown(None, Some(LoginEntry::Portal)),
+            shown(false, false)
+        );
+        assert_eq!(
+            startup_shown(None, Some(LoginEntry::None)),
+            shown(false, false)
+        );
+        assert_eq!(startup_shown(None, None), shown(false, false));
+    }
 
     #[test]
     fn the_cache_line_says_its_size_or_that_it_is_empty() {

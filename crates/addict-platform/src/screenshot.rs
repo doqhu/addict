@@ -9,14 +9,9 @@
 
 use std::path::PathBuf;
 
-use ashpd::{
-    AppID, PortalError,
-    desktop::{
-        ResponseError,
-        screenshot::{ScreenshotOptions, ScreenshotProxy},
-    },
-    zbus,
-};
+use ashpd::desktop::screenshot::{ScreenshotOptions, ScreenshotProxy};
+
+use crate::portal::{self, PortalFailure};
 
 /// Why a capture gave no snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,87 +29,37 @@ pub enum CaptureFailure {
     NoImage,
 }
 
-/// D-Bus error names that mean "nobody implements this here".
-const ABSENT: &[&str] = &[
-    "org.freedesktop.DBus.Error.ServiceUnknown",
-    "org.freedesktop.DBus.Error.NameHasNoOwner",
-    "org.freedesktop.DBus.Error.UnknownMethod",
-    "org.freedesktop.DBus.Error.UnknownInterface",
-    "org.freedesktop.DBus.Error.UnknownObject",
-    "org.freedesktop.DBus.Error.UnknownProperty",
-    "org.freedesktop.DBus.Error.Spawn.ServiceNotFound",
-];
+impl From<PortalFailure> for CaptureFailure {
+    fn from(failure: PortalFailure) -> Self {
+        match failure {
+            PortalFailure::Cancelled => Self::Cancelled,
+            PortalFailure::Ended => Self::Ended,
+            PortalFailure::Unavailable => Self::Unavailable,
+            PortalFailure::Failed(text) => Self::Failed(text),
+        }
+    }
+}
 
 /// Asks the portal, as `app_id`, for one interactive screenshot and gives
 /// the local path of the image it made.
 pub async fn capture(app_id: &str) -> Result<PathBuf, CaptureFailure> {
-    let connection = zbus::Connection::session()
-        .await
-        .map_err(|e| from_zbus("session bus", &e))?;
-
-    // Must precede any other portal call on the connection.
-    let parsed: AppID = app_id
-        .parse()
-        .map_err(|e: ashpd::Error| CaptureFailure::Failed(format!("app id {app_id:?}: {e}")))?;
-    ashpd::register_host_app_with_connection(connection.clone(), parsed)
-        .await
-        .map_err(|e| classify(&format!("host registration of {app_id:?}"), &e))?;
+    let connection = portal::registered_connection(app_id).await?;
 
     let proxy = ScreenshotProxy::with_connection(connection)
         .await
-        .map_err(|e| classify("Screenshot portal", &e))?;
+        .map_err(|e| portal::classify("Screenshot portal", &e))?;
     let options = ScreenshotOptions::default().set_interactive(true);
     let shot = proxy
         .screenshot(None, options)
         .await
         .and_then(|request| request.response())
-        .map_err(|e| classify("screenshot", &e))?;
+        .map_err(|e| portal::classify("screenshot", &e))?;
 
     let path = file_path_from_uri(shot.uri().as_str()).ok_or(CaptureFailure::NoImage)?;
     if path.is_file() {
         Ok(path)
     } else {
         Err(CaptureFailure::NoImage)
-    }
-}
-
-/// The failure for a portal `error` met at `step`.
-fn classify(step: &str, error: &ashpd::Error) -> CaptureFailure {
-    match error {
-        ashpd::Error::Response(ResponseError::Cancelled) => CaptureFailure::Cancelled,
-        ashpd::Error::Response(ResponseError::Other) => CaptureFailure::Ended,
-        ashpd::Error::PortalNotFound(_) | ashpd::Error::RequiresVersion(..) => {
-            CaptureFailure::Unavailable
-        }
-        ashpd::Error::Zbus(e) | ashpd::Error::Portal(PortalError::ZBus(e)) => from_zbus(step, e),
-        _ => CaptureFailure::Failed(format!("{step}: {error}")),
-    }
-}
-
-/// The failure for a bus `error` met at `step`.
-fn from_zbus(step: &str, error: &zbus::Error) -> CaptureFailure {
-    let absent = match error {
-        zbus::Error::MethodError(name, ..) => ABSENT.contains(&name.as_str()),
-        zbus::Error::FDO(e) => matches!(
-            **e,
-            zbus::fdo::Error::ServiceUnknown(_)
-                | zbus::fdo::Error::NameHasNoOwner(_)
-                | zbus::fdo::Error::UnknownMethod(_)
-                | zbus::fdo::Error::UnknownInterface(_)
-                | zbus::fdo::Error::UnknownObject(_)
-                | zbus::fdo::Error::UnknownProperty(_)
-        ),
-        zbus::Error::Address(_)
-        | zbus::Error::InputOutput(_)
-        | zbus::Error::Handshake(_)
-        | zbus::Error::InterfaceNotFound
-        | zbus::Error::Unsupported => true,
-        _ => false,
-    };
-    if absent {
-        CaptureFailure::Unavailable
-    } else {
-        CaptureFailure::Failed(format!("{step}: {error}"))
     }
 }
 
@@ -152,7 +97,16 @@ mod tests {
 
     use ashpd::desktop::ResponseError;
 
-    use super::{CaptureFailure, classify, file_path_from_uri, from_zbus};
+    use super::{CaptureFailure, file_path_from_uri};
+    use crate::portal;
+
+    fn classify(step: &str, error: &ashpd::Error) -> CaptureFailure {
+        portal::classify(step, error).into()
+    }
+
+    fn from_zbus(step: &str, error: &ashpd::zbus::Error) -> CaptureFailure {
+        portal::from_zbus(step, error).into()
+    }
 
     #[test]
     fn a_plain_file_uri_is_its_path() {

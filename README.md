@@ -77,15 +77,25 @@ target/release/addict
 `addict install` writes a desktop entry and the app icons into your home
 directory, so addict appears among your applications. The entry names the
 program by its full path, so run `install` again if you move the program.
-`addict uninstall` removes what `install` wrote.
+`addict uninstall` removes what `install` wrote, and turns off login startup
+first (see below).
 
-`install` does not set up login startup for a source build. An autostart entry
-written by an older build still starts addict at login, but `install` will not
-update it: after you move the program its path is out of date, and an entry
-from before the silent login flag opens the window at every login. In either
-case, remove it. It is in your autostart directory, usually
-`~/.config/autostart/io.github.doqhu.Addict.desktop`: delete it there, or run
-`addict uninstall`, which removes it along with the rest.
+To start addict at login, turn on Settings → Start at login. addict asks the
+desktop's Background portal to do it, in the Flatpak and in a source build, and
+then starts silently at each login. `install` does not set it up, but a source
+build needs it first: the portal knows addict by the entry it writes. The switch
+shows what the portal last confirmed, as the portal cannot be asked what is
+set. If the two have drifted apart, for instance after you move the program or
+delete the entry by hand, turn the switch off and on again to repair it.
+
+An older build wrote its own login entry, which keeps starting addict and may
+open the window at each login. A source build then shows the switch on, with a
+line saying so; turning it off and on replaces that entry with the portal's.
+
+`addict uninstall` asks the portal to remove a login entry of ours before it
+removes anything else. If the portal is unavailable or refuses, it removes
+nothing and names the file. A file of that name that addict did not write, or a
+symlink, is refused and left alone, and the portal is not asked.
 
 Before you switch to a Flatpak of addict (from Flathub, or built from
 `packaging/flatpak`), run `addict uninstall` and quit the running addict:
@@ -114,8 +124,8 @@ selected or copied text independently.
 Use `addict --background` (or `flatpak run io.github.doqhu.Addict --background`)
 for a silent login launch. This mode stays silent even if shortcut setup fails,
 including when forwarded to a running instance. Launch normally to see its
-status and Retry in the main window. Flatpak login startup must be configured
-separately; this flag does not set up autostart.
+status and Retry in the main window. This flag does not set up autostart; the
+Start at login switch in Settings does.
 
 ### Where addict finds Tesseract
 

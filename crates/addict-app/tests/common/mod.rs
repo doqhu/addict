@@ -111,8 +111,13 @@ impl Homes {
         ICON_SIZES.map(|size| self.icon(size))
     }
 
-    /// Runs `addict <subcommand>` with no display and no session bus.
-    pub fn run(&self, subcommand: &str) -> Output {
+    /// Where the state of login startup is saved.
+    pub fn startup_file(&self) -> PathBuf {
+        self.config_home.join("addict/login-startup")
+    }
+
+    /// `addict <subcommand>` with no display.
+    fn command(&self, subcommand: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_addict"));
         command
             .arg(subcommand)
@@ -120,10 +125,68 @@ impl Homes {
             .env("XDG_DATA_HOME", &self.data_home)
             .env("XDG_CONFIG_HOME", &self.config_home)
             .env_remove("WAYLAND_DISPLAY")
-            .env_remove("DISPLAY")
-            .env_remove("DBUS_SESSION_BUS_ADDRESS");
+            .env_remove("DISPLAY");
+        command
+    }
+
+    /// Runs `addict <subcommand>` with no session bus. The address is set to
+    /// nothing rather than removed: without it the program would find the
+    /// user's real bus in `XDG_RUNTIME_DIR`, and their real portal there.
+    pub fn run(&self, subcommand: &str) -> Output {
+        let mut command = self.command(subcommand);
+        command.env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent/addict-test-bus",
+        );
         run_with_timeout(command).expect("addict did not exit within the timeout")
     }
+
+    /// Runs `addict <subcommand>` on the session bus of this process, which
+    /// must be a private one.
+    pub fn run_on_bus(&self, subcommand: &str) -> Output {
+        assert!(std::env::var_os(PRIVATE_BUS).is_some(), "not a private bus");
+        run_with_timeout(self.command(subcommand)).expect("addict did not exit within the timeout")
+    }
+}
+
+/// Set in a child that runs on a private bus.
+const PRIVATE_BUS: &str = "ADDICT_TEST_PRIVATE_BUS";
+
+/// Whether this test is the child on a private D-Bus daemon. When not, runs
+/// itself as one and asserts that it passed. The bus has no service directory:
+/// nothing can activate the desktop's real portal on it.
+pub fn on_private_bus(test: &str) -> bool {
+    if std::env::var_os(PRIVATE_BUS).is_some() {
+        return true;
+    }
+    let dir = TempDir::new("private-bus");
+    let config = dir.path().join("bus.conf");
+    std::fs::write(
+        &config,
+        "<busconfig><type>session</type>\
+         <listen>unix:tmpdir=/tmp</listen><auth>EXTERNAL</auth>\
+         <policy context=\"default\"><allow send_destination=\"*\"/>\
+         <allow receive_sender=\"*\"/><allow own=\"*\"/></policy></busconfig>\n",
+    )
+    .expect("write the bus configuration");
+    let mut command = Command::new("dbus-run-session");
+    command
+        .arg("--config-file")
+        .arg(&config)
+        .arg("--")
+        .arg(std::env::current_exe().expect("test binary path"))
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .env(PRIVATE_BUS, "1");
+    let output = run_with_timeout(command).expect("the child did not exit within the timeout");
+    let stdout = text(&output.stdout);
+    assert!(
+        output.status.success(),
+        "child failed with {}\nstdout: {stdout}\nstderr: {}",
+        output.status,
+        text(&output.stderr)
+    );
+    assert!(stdout.contains("1 passed"), "child ran no test: {stdout}");
+    false
 }
 
 /// The lines of a captured stdout.

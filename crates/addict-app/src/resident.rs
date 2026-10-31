@@ -140,6 +140,7 @@ use addict_deepl::{DeepL, key};
 use addict_platform::{
     ocr::OcrFailure,
     shortcut::{self, Action, Bindings, ShortcutEvent, ShortcutHandle},
+    startup,
     tray::{self, TrayEvent, TrayHandle},
     work::{Job, Outcome, Work},
 };
@@ -152,13 +153,13 @@ use crate::{
     cache::{self, Cached},
     capture::{self, Capture, Captured, Failure, Timing},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
-    evidence,
+    entries, evidence,
     history::History,
     language,
     manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
     online::{self, Kept, Subject},
     recording::Recording,
-    settings::{self, CacheState, KeyState, Settings},
+    settings::{self, CacheState, KeyState, Settings, StartupEnd, StartupShown},
     style,
     translate::{self, Translated},
     view::{
@@ -283,6 +284,12 @@ enum Event {
     /// The clear of the cache on the runner ended: why it failed, in one
     /// line.
     CacheCleared(Outcome<Result<(), String>>),
+    /// The saved startup state, as the runner read it for the Settings window.
+    StartupRead(Outcome<StartupShown>),
+    /// The user moved the Start at login switch to this state.
+    ToggleStartup(bool),
+    /// The change of the startup state on the runner ended.
+    StartupChanged(Outcome<StartupEnd>),
     /// The read of the clipboard with this number ended: the line of its
     /// text, or why there is none.
     Clipboard(u64, Result<String, Missed>),
@@ -411,6 +418,13 @@ struct Session {
     about: About,
     /// Independent assignments reported by the portal for this session.
     bindings: Bindings,
+    /// The state the portal last confirmed, as the switch shows it.
+    startup_on: bool,
+    /// The read of the saved startup state; dropping it gives it up.
+    startup_read_job: Option<Job>,
+    /// The request to the portal, from the switch to its end: while it is
+    /// there the switch stays as it is.
+    startup_job: Option<Job>,
     /// The read of the key file's state; dropping it gives it up.
     key_job: Option<Job>,
     /// The write of the key file; a newer save replaces it.
@@ -546,6 +560,9 @@ impl Session {
             Event::CacheSize(state) => self.settings.render_cache(state),
             Event::ClearCache => self.clear_cache(),
             Event::CacheCleared(outcome) => self.cache_cleared(outcome),
+            Event::StartupRead(outcome) => self.startup_read(outcome),
+            Event::ToggleStartup(enable) => self.toggle_startup(enable),
+            Event::StartupChanged(outcome) => self.startup_changed(outcome),
             Event::Retry => self.retry(),
             Event::Sentence(text) => self.sentence_changed(text),
             Event::Word(index) => self.word_chosen(index),
@@ -1593,7 +1610,104 @@ impl Session {
         self.settings.say_cache("");
         self.check_key();
         self.check_cache();
+        self.check_startup();
         self.settings.present();
+    }
+
+    /// Reads the saved startup state on the runner, for the Settings window,
+    /// and recognises an older login entry. No portal is called, and nothing
+    /// is touched while a change runs: its end shows the state.
+    fn check_startup(&mut self) {
+        if self.startup_job.is_some() {
+            return;
+        }
+        self.settings.say_startup("");
+        self.settings.set_startup_sensitive(false);
+        let Some(work) = self.work.upgrade() else {
+            self.settings
+                .say_startup("Startup cannot be changed: the runner is not available.");
+            return;
+        };
+        let sender = self.sender.clone();
+        self.startup_read_job = Some(work.run(
+            settings::STARTUP_READ_LIMIT,
+            async move {
+                let saved = entries::startup_file()
+                    .as_deref()
+                    .and_then(startup::read_saved);
+                // The sandbox cannot see the entry; a foreign one is no state.
+                let entry = (!startup::is_sandboxed())
+                    .then(entries::login_entry)
+                    .and_then(Result::ok);
+                settings::startup_shown(saved, entry)
+            },
+            move |outcome| {
+                let _ = sender.unbounded_send(Event::StartupRead(outcome));
+            },
+        ));
+    }
+
+    /// The saved state was read: the switch shows it and can be moved.
+    fn startup_read(&mut self, outcome: Outcome<StartupShown>) {
+        // Queued before a change started: the change's end shows the state.
+        if self.startup_job.is_some() {
+            return;
+        }
+        match outcome {
+            Outcome::Finished(shown) => {
+                self.startup_on = shown.on;
+                self.settings.render_startup(shown.on);
+                self.settings.say_startup(if shown.legacy {
+                    settings::STARTUP_LEGACY
+                } else {
+                    ""
+                });
+            }
+            Outcome::TimedOut | Outcome::Panicked => {
+                self.settings.render_startup(self.startup_on);
+                self.settings.say_startup(settings::STARTUP_UNREAD);
+            }
+            // Replaced by the next press of Settings.
+            Outcome::Cancelled => return,
+        }
+        self.settings.set_startup_sensitive(true);
+    }
+
+    /// The user moved the switch: the portal is asked on the runner, the state
+    /// saved when it confirms, and the switch waits for the end.
+    fn toggle_startup(&mut self, enable: bool) {
+        if self.startup_job.is_some() {
+            return;
+        }
+        let Some(work) = self.work.upgrade() else {
+            self.settings.render_startup(self.startup_on);
+            self.settings
+                .say_startup("Startup cannot be changed: the runner is not available.");
+            return;
+        };
+        self.startup_read_job = None;
+        self.settings.set_startup_sensitive(false);
+        self.settings.say_startup("Asking the desktop…");
+        let sender = self.sender.clone();
+        self.startup_job = Some(work.run(
+            entries::STARTUP_LIMIT,
+            request_startup_change(enable),
+            move |outcome| {
+                let _ = sender.unbounded_send(Event::StartupChanged(outcome));
+            },
+        ));
+    }
+
+    /// The change ended: the switch shows what is confirmed and the line why.
+    fn startup_changed(&mut self, outcome: Outcome<StartupEnd>) {
+        let Some((on, line)) = settings::startup_outcome(&outcome, self.startup_on) else {
+            return;
+        };
+        self.startup_job = None;
+        self.startup_on = on;
+        self.settings.render_startup(on);
+        self.settings.say_startup(&line);
+        self.settings.set_startup_sensitive(true);
     }
 
     /// Reads the size of the cache on the runner, for the Settings window; a
@@ -1921,8 +2035,58 @@ fn build_ui(
     (view, window)
 }
 
+/// One change of the switch: the checks before the portal, then the flow of
+/// [`settings::change_startup`] with the real portal and the state file.
+async fn request_startup_change(enable: bool) -> StartupEnd {
+    let state = entries::startup_file();
+    // Only an enable needs it: a disable must work with this binary's path gone.
+    let command = if enable {
+        startup::relaunch_command()
+    } else {
+        Ok(Vec::new())
+    };
+    let checked = {
+        let state = state.is_some();
+        let command = command.as_ref().err().cloned();
+        move || {
+            if !state {
+                return Err(
+                    "there is no place to save it: set an absolute XDG_CONFIG_HOME or HOME"
+                        .to_owned(),
+                );
+            }
+            if let Some(reason) = command {
+                return Err(reason);
+            }
+            // A foreign file or a symlink stays refused; the sandbox cannot see one.
+            if !startup::is_sandboxed() {
+                entries::login_entry()?;
+                entries::check_launcher_installed()?;
+            }
+            Ok(())
+        }
+    };
+    let command = command.unwrap_or_default();
+    let command = &command;
+    settings::change_startup(
+        enable,
+        checked,
+        |asked| async move {
+            let answered = startup::request(APP_ID, asked, command).await?;
+            startup::confirmed(asked, answered)
+        },
+        |saved| {
+            let Some(path) = &state else {
+                return Err("no place to save it".to_owned());
+            };
+            startup::save(path, saved).map_err(|e| e.to_string())
+        },
+    )
+    .await
+}
+
 /// The Settings window above `window`, hidden, naming `key_file`; Change
-/// shortcut and Save key go to `sender` as events.
+/// shortcut, Save key and the Start at login switch go to `sender` as events.
 fn start_settings(
     window: &gtk::ApplicationWindow,
     key_file: Option<&std::path::Path>,
@@ -1931,6 +2095,7 @@ fn start_settings(
     let change = sender.clone();
     let save = sender.clone();
     let clear = sender.clone();
+    let startup = sender.clone();
     Settings::new(
         window,
         key_file,
@@ -1942,6 +2107,9 @@ fn start_settings(
         },
         move || {
             let _ = clear.unbounded_send(Event::ClearCache);
+        },
+        move |enable| {
+            let _ = startup.unbounded_send(Event::ToggleStartup(enable));
         },
     )
 }
@@ -2085,6 +2253,9 @@ fn start(
         settings,
         about,
         bindings: Bindings::default(),
+        startup_on: false,
+        startup_read_job: None,
+        startup_job: None,
         key_job: None,
         save_job: None,
         translating_word: None,
@@ -2665,5 +2836,275 @@ mod tests {
     fn the_clipboard_limit_is_finite_and_short() {
         assert!(!CLIPBOARD_LIMIT.is_zero());
         assert!(CLIPBOARD_LIMIT.as_secs() <= 1);
+    }
+
+    /// The switch's whole job against a mock Background portal, which alone
+    /// touches the autostart file.
+    mod startup_portal {
+        use std::{
+            collections::{HashMap, HashSet},
+            path::{Path, PathBuf},
+            process::{Command, Stdio},
+            sync::{Arc, Mutex},
+            time::{Duration, Instant},
+        };
+
+        use addict_core::APP_ID;
+        use addict_platform::{desktop, startup::StartupFailure};
+        use zbus::{
+            Connection,
+            message::Header,
+            zvariant::{OwnedObjectPath, OwnedValue},
+        };
+
+        use super::super::request_startup_change;
+        use crate::settings::StartupEnd;
+
+        const TEST: &str =
+            "resident::tests::startup_portal::the_switch_changes_startup_only_through_the_portal";
+        const CHILD: &str = "ADDICT_TEST_RESIDENT_STARTUP_CHILD";
+        const DESKTOP: &str = "/org/freedesktop/portal/desktop";
+        const WRITTEN: &str = "[Desktop Entry]\nX-XDP-Autostart=io.github.doqhu.Addict\n";
+        type Options = HashMap<String, OwnedValue>;
+
+        /// What the mock saw and how it answers.
+        struct Mock {
+            entry: PathBuf,
+            state_file: PathBuf,
+            /// Code 0 doing what was asked, or else code 1.
+            obeys: Mutex<bool>,
+            registered: Mutex<HashSet<String>>,
+            /// For each request: the state asked for and whether the state
+            /// file existed when it came.
+            asked: Mutex<Vec<(bool, bool)>>,
+        }
+
+        struct Registry(Arc<Mock>);
+
+        #[zbus::interface(name = "org.freedesktop.host.portal.Registry")]
+        impl Registry {
+            fn register(
+                &self,
+                _app_id: String,
+                _options: Options,
+                #[zbus(header)] header: Header<'_>,
+            ) {
+                let sender = header.sender().unwrap().to_string();
+                self.0.registered.lock().unwrap().insert(sender);
+            }
+        }
+
+        struct Background(Arc<Mock>);
+
+        #[zbus::interface(name = "org.freedesktop.portal.Background")]
+        impl Background {
+            #[zbus(property, name = "version")]
+            fn version(&self) -> u32 {
+                2
+            }
+
+            async fn request_background(
+                &self,
+                _parent: String,
+                options: Options,
+                #[zbus(header)] header: Header<'_>,
+                #[zbus(connection)] connection: &Connection,
+            ) -> zbus::fdo::Result<OwnedObjectPath> {
+                let sender = header.sender().unwrap().to_string();
+                if !self.0.registered.lock().unwrap().contains(&sender) {
+                    return Err(zbus::fdo::Error::AccessDenied("not registered".to_owned()));
+                }
+                let autostart = bool::try_from(&options["autostart"]).unwrap();
+                self.0
+                    .asked
+                    .lock()
+                    .unwrap()
+                    .push((autostart, self.0.state_file.exists()));
+                let obeys = *self.0.obeys.lock().unwrap();
+                if obeys && autostart {
+                    std::fs::create_dir_all(self.0.entry.parent().unwrap()).unwrap();
+                    std::fs::write(&self.0.entry, WRITTEN).unwrap();
+                } else if obeys {
+                    std::fs::remove_file(&self.0.entry).unwrap();
+                }
+                let token = <&str>::try_from(&options["handle_token"]).unwrap();
+                let sender = sender.trim_start_matches(':').replace('.', "_");
+                let request: OwnedObjectPath = format!("{DESKTOP}/request/{sender}/{token}")
+                    .try_into()
+                    .unwrap();
+                let (code, results) = if obeys {
+                    let results = HashMap::from([
+                        ("background".to_owned(), OwnedValue::from(true)),
+                        ("autostart".to_owned(), OwnedValue::from(autostart)),
+                    ]);
+                    (0u32, results)
+                } else {
+                    (1u32, Options::new())
+                };
+                connection
+                    .emit_signal(
+                        None::<&str>,
+                        &request,
+                        "org.freedesktop.portal.Request",
+                        "Response",
+                        &(code, results),
+                    )
+                    .await?;
+                Ok(request)
+            }
+        }
+
+        fn start_mock(mock: Arc<Mock>) {
+            let (ready, started) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async move {
+                    let _connection = zbus::connection::Builder::session()
+                        .unwrap()
+                        .name("org.freedesktop.portal.Desktop")
+                        .unwrap()
+                        .serve_at(DESKTOP, Registry(mock.clone()))
+                        .unwrap()
+                        .serve_at(DESKTOP, Background(mock))
+                        .unwrap()
+                        .build()
+                        .await
+                        .unwrap();
+                    ready.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                });
+            });
+            started.recv().expect("the mock portal started");
+        }
+
+        fn change(enable: bool) -> StartupEnd {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(request_startup_change(enable))
+        }
+
+        /// Runs this test again on a private bus with no service directory, so
+        /// that nothing can activate the real portal, and with a private `HOME`
+        /// and `XDG_CONFIG_HOME` and `XDG_DATA_HOME`, given at spawn.
+        fn run_isolated(root: &Path) {
+            let config = root.join("bus.conf");
+            std::fs::write(
+                &config,
+                "<busconfig><type>session</type>\
+                 <listen>unix:tmpdir=/tmp</listen><auth>EXTERNAL</auth>\
+                 <policy context=\"default\"><allow send_destination=\"*\"/>\
+                 <allow receive_sender=\"*\"/><allow own=\"*\"/></policy></busconfig>\n",
+            )
+            .unwrap();
+            let mut child = Command::new("dbus-run-session")
+                .arg("--config-file")
+                .arg(&config)
+                .arg("--")
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .env("HOME", root)
+                .env("XDG_CONFIG_HOME", root.join("config"))
+                .env("XDG_DATA_HOME", root.join("data"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn the test binary");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("the child did not exit in time");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "stdout: {stdout}\nstderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[test]
+        fn the_switch_changes_startup_only_through_the_portal() {
+            if std::env::var_os(CHILD).is_none() {
+                let root = std::env::temp_dir()
+                    .join(format!("addict-resident-startup-{}", std::process::id()));
+                let _ = std::fs::remove_dir_all(&root);
+                std::fs::create_dir(&root).unwrap();
+                run_isolated(&root);
+                std::fs::remove_dir_all(&root).unwrap();
+                return;
+            }
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            assert!(home.starts_with(std::env::temp_dir()), "not isolated");
+            let config = home.join("config");
+            let entry = desktop::entry_path(&config.join("autostart"), APP_ID);
+            let state_file = config.join("addict/login-startup");
+            let mock = Arc::new(Mock {
+                entry: entry.clone(),
+                state_file: state_file.clone(),
+                obeys: Mutex::new(true),
+                registered: Mutex::default(),
+                asked: Mutex::default(),
+            });
+            start_mock(mock.clone());
+            let asked = || mock.asked.lock().unwrap().clone();
+
+            // No launcher: the portal would not register a host app.
+            let StartupEnd::NotAsked(reason) = change(true) else {
+                panic!("asked without a launcher");
+            };
+            assert!(reason.contains("run `addict install` first"), "{reason}");
+            assert!(asked().is_empty());
+            assert!(!state_file.exists() && !entry.exists());
+
+            desktop::install(
+                &home.join("data/applications"),
+                APP_ID,
+                Path::new("/usr/bin/addict"),
+            )
+            .unwrap();
+
+            // A refusal: nothing saved, nothing written.
+            *mock.obeys.lock().unwrap() = false;
+            assert_eq!(change(true), StartupEnd::Failed(StartupFailure::Refused));
+            assert_eq!(asked(), [(true, false)]);
+            assert!(!state_file.exists() && !entry.exists());
+
+            // Confirmed: saved only after the answer, which found no state.
+            *mock.obeys.lock().unwrap() = true;
+            assert_eq!(change(true), StartupEnd::Done(true));
+            assert_eq!(asked()[1], (true, false));
+            assert_eq!(std::fs::read_to_string(&state_file).unwrap(), "enabled\n");
+            assert_eq!(std::fs::read_to_string(&entry).unwrap(), WRITTEN);
+
+            assert_eq!(change(false), StartupEnd::Done(false));
+            assert_eq!(asked()[2], (false, true));
+            assert_eq!(std::fs::read_to_string(&state_file).unwrap(), "disabled\n");
+            assert!(!entry.exists());
+
+            // A foreign entry never reaches the portal, either way.
+            let foreign = "[Desktop Entry]\nName=Someone else\n";
+            std::fs::write(&entry, foreign).unwrap();
+            for enable in [true, false] {
+                let StartupEnd::NotAsked(reason) = change(enable) else {
+                    panic!("asked with a foreign entry");
+                };
+                assert!(reason.contains(&entry.display().to_string()), "{reason}");
+            }
+            assert_eq!(asked().len(), 3);
+            assert_eq!(std::fs::read_to_string(&entry).unwrap(), foreign);
+            assert_eq!(std::fs::read_to_string(&state_file).unwrap(), "disabled\n");
+        }
     }
 }

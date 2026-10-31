@@ -1,10 +1,12 @@
-//! Platform adapters for Addict: XDG portals (GlobalShortcuts, Screenshot),
-//! text recognition with Tesseract, and the runner of slow work.
+//! Platform adapters for Addict: XDG portals (GlobalShortcuts, Screenshot,
+//! Background), text recognition with Tesseract, and the runner of slow work.
 //!
 //! [`shortcut`] binds the global shortcut; [`screenshot`] takes one
-//! interactive screen capture through the portal; [`ocr`] recognizes the
+//! interactive screen capture through the portal; [`startup`] asks the
+//! Background portal to turn login startup on or off; [`ocr`] recognizes the
 //! text of an image in a Tesseract child with a limit; [`work`] runs slow
-//! jobs off the caller's thread; [`desktop`] writes the desktop entry;
+//! jobs off the caller's thread; [`desktop`] writes the desktop entry and
+//! recognises a login entry;
 //! [`tray`] puts the icon and its menu in the top bar; [`gpu`] names the
 //! Vulkan drivers of the GPU that drives the display.
 //!
@@ -14,7 +16,9 @@
 pub mod desktop;
 pub mod gpu;
 pub mod ocr;
+mod portal;
 pub mod screenshot;
 pub mod shortcut;
+pub mod startup;
 pub mod tray;
 pub mod work;

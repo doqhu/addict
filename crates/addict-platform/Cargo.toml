@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [dependencies]
 addict-core = { path = "../addict-core" }
-ashpd = { version = "=0.13.13", default-features = false, features = ["tokio", "global_shortcuts", "screenshot"] }
+ashpd = { version = "=0.13.13", default-features = false, features = ["tokio", "background", "global_shortcuts", "screenshot"] }
 futures-util = "=0.3.34"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 ksni = "=0.3.6"

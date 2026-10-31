@@ -23,6 +23,7 @@ dependencies = [
  "tokio",
  "wayland-client",
  "wayland-protocols",
+ "zbus",
 ]
 
 [[package]]

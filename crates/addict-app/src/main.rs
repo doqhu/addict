@@ -3,8 +3,10 @@
 //! `addict install` writes the desktop entry into the applications directory,
 //! where the portal needs it and the shell lists it as a launcher, and the app
 //! icon, four sizes, into the user icon theme, where the entry's `Icon` finds
-//! it. It sets up no login startup. `addict uninstall` removes them, and the
-//! entry an older build wrote into the autostart directory.
+//! it. It sets up no login startup. `addict uninstall` asks the Background
+//! portal to remove a login entry of ours, whichever build wrote it, and then
+//! removes those files and the saved startup state; when the portal does not
+//! confirm, it removes nothing and names the entry.
 //!
 //! `addict import <FILE>` turns a dictionary file the user has downloaded
 //! into an index in the data directory, `$XDG_DATA_HOME/addict` or
@@ -17,7 +19,8 @@
 //! path of the index and the counts of its headwords and exception forms.
 //!
 //! With no arguments the process shows the resident application's main window.
-//! `--background` starts it silently for login. Closing the window keeps the
+//! `--background` starts it silently for login; the Start at login switch in
+//! Settings is what asks the Background portal to run it so. Closing the window keeps the
 //! resident available for clipboard and screenshot shortcuts. On each clipboard press the
 //! window shows the source of the input and the state derived from the input
 //! contract; Esc hides it, as the title-bar close does.
@@ -272,8 +275,8 @@ enum Command {
     /// Write the desktop entry and the app icons: the portal recognises the
     /// application and the shell lists it with its icon
     Install,
-    /// Remove the desktop entry and the icons that install wrote, and a login
-    /// entry that an older install wrote
+    /// Turn off login startup through the Background portal, then remove the
+    /// desktop entry and the icons that install wrote
     Uninstall,
     /// Build the dictionary index from a downloaded dictionary file
     Import {
