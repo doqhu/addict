@@ -30,6 +30,14 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 `feat(window): …`, `fix(ocr): …`, `docs: …`, `ci: …`, with a short subject
 in the imperative.
 
+The messages also drive the releases. On every push to `master`,
+[release-please](https://github.com/googleapis/release-please) keeps a release
+pull request open: `fix` raises the patch version, `feat` the minor version,
+and, before 1.0, a breaking change (`feat!:`) the minor version too. The pull
+request sets the version in `Cargo.toml`, `Cargo.lock` and the MetaInfo, and
+writes `CHANGELOG.md`, so do not edit those by hand. Merging it tags the release
+and publishes it on GitHub.
+
 ### AI-assisted contributions
 
 Code, docs or other content written with an AI tool are welcome, if you

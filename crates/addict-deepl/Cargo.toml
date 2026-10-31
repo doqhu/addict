@@ -1,6 +1,6 @@
 [package]
 name = "addict-deepl"
-version = "0.1.0"
+version.workspace = true
 description = "Addict online translator: the DeepL client and its key file, GTK-free"
 edition.workspace = true
 license.workspace = true
