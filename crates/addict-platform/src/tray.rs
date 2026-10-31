@@ -190,7 +190,9 @@ pub fn start(app_id: &str, on_event: impl Fn(TrayEvent) + Send + Sync + 'static)
 /// gone. A missing watcher does not fail the registration: the item waits
 /// for one (`assume_sni_available`). Registration and removal each have
 /// [`BUS_LIMIT`]; the stop signal also ends a registration that is still
-/// waiting.
+/// waiting. The item registers under the connection's unique name: the
+/// sandbox lets the application talk to the watcher but not own the
+/// well-known `org.kde.StatusNotifierItem-*` name.
 async fn run(app_id: String, on_event: Callback, mut stopped: oneshot::Receiver<()>) {
     let item = Item {
         app_id,
@@ -201,7 +203,7 @@ async fn run(app_id: String, on_event: Callback, mut stopped: oneshot::Receiver<
         _ = &mut stopped => return,
         registered = tokio::time::timeout(
             BUS_LIMIT,
-            item.assume_sni_available(true).spawn(),
+            item.disable_dbus_name(true).assume_sni_available(true).spawn(),
         ) => registered,
     };
     match registered {
