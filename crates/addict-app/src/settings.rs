@@ -5,9 +5,9 @@
 //! to change them, and the DeepL key, with a masked field to enter one, the
 //! file it is saved in and the state that file is in. The window writes the
 //! key, on the runner, and never reads it back: the field starts empty and
-//! is cleared once the key is saved. Below the key, a line says how much the
-//! on-disk cache of the answers holds, with a button that clears it; the
-//! cache is read and cleared on the runner. The Start at login switch asks the
+//! is cleared once the key is saved. In the General section, a line says how
+//! much the on-disk cache of the answers holds, with a button that clears it;
+//! the cache is read and cleared on the runner. The Start at login switch asks the
 //! Background portal, on the runner, and shows only what the portal last
 //! confirmed: the portal cannot be asked, so that state is saved by addict, and
 //! showing the window calls no portal. The texts are plain functions of the
@@ -327,6 +327,9 @@ pub fn saved_in_text(key_file: Option<&Path>) -> String {
 pub const CHANGE_UNBOUND: &str =
     "Shortcut configuration needs a portal session. Retry the connection first.";
 
+/// The line beside Configure shortcuts.
+const CONFIGURE_HINT: &str = "The desktop\u{2019}s dialog sets both.";
+
 /// The keys of a trigger the portal described, one cap each: GNOME's
 /// `Press <Super>q` as an accelerator, or a label such as `Super+Q`;
 /// nothing when the description is neither (another sentence, an empty
@@ -403,6 +406,14 @@ pub fn key_tone(state: Option<KeyState>) -> &'static str {
     }
 }
 
+/// What the empty key field asks for: a set key is replaced, not entered.
+pub fn key_placeholder(state: Option<KeyState>) -> &'static str {
+    match key_tone(state) {
+        "good" => "Paste a new key to replace it",
+        _ => "Paste a DeepL key",
+    }
+}
+
 /// The classes a tone replaces on a widget.
 const TONES: [&str; 3] = ["good", "pending", "bad"];
 
@@ -430,16 +441,15 @@ impl ShortcutRow {
             .valign(gtk::Align::Center)
             .visible(false)
             .build();
-        let trigger = label("", &["trigger"]);
-        trigger.set_hexpand(true);
-        // The badge: a dot in the text's colour, then its word.
+        // Without key caps, the line of what stands in their way, below.
+        let trigger = label("", &["trigger", "hint"]);
+        // The badge: a dot in the text's colour, then its word. Shown only
+        // when something is wrong: the key caps say the rest.
         let badge_text = gtk::Label::new(None);
         let badge = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(6)
             .valign(gtk::Align::Center)
-            .halign(gtk::Align::End)
-            .hexpand(true)
             .css_classes(["badge"])
             .build();
         badge.append(
@@ -449,13 +459,14 @@ impl ShortcutRow {
                 .build(),
         );
         badge.append(&badge_text);
-        let trigger_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        trigger_row.append(&keys);
-        trigger_row.append(&trigger);
-        trigger_row.append(&badge);
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        root.append(&label(name, &["hint"]));
-        root.append(&trigger_row);
+        let name = label(name, &[]);
+        name.set_hexpand(true);
+        name.set_valign(gtk::Align::Center);
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        line.append(&name);
+        line.append(&keys);
+        line.append(&badge);
+        let root = row(&[line.upcast_ref(), trigger.upcast_ref()]);
         Self {
             root,
             keys,
@@ -489,6 +500,7 @@ impl ShortcutRow {
         let (text, tone) = badge(binding, trigger);
         set_tone(&self.trigger, tone);
         self.badge_text.set_label(text);
+        self.badge.set_visible(tone != "good");
         set_tone(&self.badge, tone);
     }
 }
@@ -530,7 +542,7 @@ pub(crate) fn label(text: &str, classes: &[&str]) -> gtk::Label {
 }
 
 /// A section: its label above a card holding `rows`.
-pub(crate) fn section(name: &str, rows: &[&gtk::Widget]) -> gtk::Box {
+fn section(name: &str, rows: &[&gtk::Widget]) -> gtk::Box {
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
@@ -539,13 +551,43 @@ pub(crate) fn section(name: &str, rows: &[&gtk::Widget]) -> gtk::Box {
     for row in rows {
         card.append(*row);
     }
+    titled(name, &card)
+}
+
+/// A section whose card is a list of [`row`]s, parted by hairlines.
+pub(crate) fn list_section(name: &str, rows: &[&gtk::Box]) -> gtk::Box {
+    let card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .css_classes(["settings-list"])
+        .build();
+    for row in rows {
+        card.append(*row);
+    }
+    titled(name, &card)
+}
+
+/// One row of a list: its `lines`, one under the other.
+pub(crate) fn row(lines: &[&gtk::Widget]) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(6)
+        .css_classes(["settings-row"])
+        .build();
+    for line in lines {
+        row.append(*line);
+    }
+    row
+}
+
+/// `card` under its label `name`.
+fn titled(name: &str, card: &gtk::Box) -> gtk::Box {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
     // Not wrapped: the label is measured before it is set in capitals,
     // and a wrapped one breaks where the capitals do not fit.
     let name = label(name, &["section-label", "settings-section"]);
     name.set_wrap(false);
     section.append(&name);
-    section.append(&card);
+    section.append(card);
     section
 }
 
@@ -573,10 +615,16 @@ impl Settings {
         let screenshot = ShortcutRow::new("Screen region (OCR)");
         let change = gtk::Button::builder()
             .label("Configure shortcuts…")
-            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Center)
             .css_classes(["settings-button"])
             .build();
         change.connect_clicked(move |_| on_change());
+        let configure_hint = label(CONFIGURE_HINT, &["hint"]);
+        configure_hint.set_hexpand(true);
+        configure_hint.set_valign(gtk::Align::Center);
+        let configure_line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        configure_line.append(&configure_hint);
+        configure_line.append(&change);
         let status = label("", &["hint"]);
         status.set_visible(false);
 
@@ -593,7 +641,7 @@ impl Settings {
         key_block.append(&key_state);
         let key_entry = gtk::PasswordEntry::builder()
             .show_peek_icon(true)
-            .placeholder_text("Paste a DeepL key")
+            .placeholder_text(key_placeholder(None))
             .hexpand(true)
             .css_classes(["key"])
             .build();
@@ -631,12 +679,11 @@ impl Settings {
         key_entry.connect_activate(move |entry| on_save(entry));
         let key_status = label("", &["hint"]);
         key_status.set_visible(false);
-        // The place of the file below a hairline: the path in monospace, and
-        // selectable, so that it can be copied.
+        // The place of the file: the path in monospace, and selectable, so
+        // that it can be copied.
         let key_file_row = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(6)
-            .css_classes(["key-file"])
             .build();
         match key_file {
             Some(path) => {
@@ -694,6 +741,8 @@ impl Settings {
         let startup_status = label("", &["hint"]);
         startup_status.set_visible(false);
 
+        let key_note = label("The key is never shown back here.", &["hint"]);
+
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(16)
@@ -702,13 +751,12 @@ impl Settings {
             .margin_start(16)
             .margin_end(16)
             .build();
-        content.append(&section(
+        content.append(&list_section(
             "Shortcuts",
             &[
-                clipboard.root.upcast_ref(),
-                screenshot.root.upcast_ref(),
-                change.upcast_ref(),
-                status.upcast_ref(),
+                &clipboard.root,
+                &screenshot.root,
+                &row(&[configure_line.upcast_ref(), status.upcast_ref()]),
             ],
         ));
         content.append(&section(
@@ -718,24 +766,21 @@ impl Settings {
                 key_row.upcast_ref(),
                 key_status.upcast_ref(),
                 key_file_row.upcast_ref(),
-                cache_row.upcast_ref(),
-                cache_status.upcast_ref(),
+                key_note.upcast_ref(),
             ],
         ));
-        content.append(&section(
-            "Startup",
-            &[startup_row.upcast_ref(), startup_status.upcast_ref()],
+        content.append(&list_section(
+            "General",
+            &[
+                &row(&[cache_row.upcast_ref(), cache_status.upcast_ref()]),
+                &row(&[startup_row.upcast_ref(), startup_status.upcast_ref()]),
+            ],
         ));
-        let footer = label(
-            "Esc closes the window. The key is never shown back here.",
-            &["hint", "settings-footer"],
-        );
-        content.append(&footer);
 
         let window = gtk::Window::builder()
             .title("Addict settings")
             .transient_for(parent)
-            .default_width(440)
+            .default_width(520)
             .hide_on_close(true)
             .titlebar(&crate::resident::header_bar("Addict settings"))
             .child(&content)
@@ -791,6 +836,8 @@ impl Settings {
 
     pub fn render_key(&self, state: Option<KeyState>) {
         self.key_state.set_label(key_text(state));
+        self.key_entry
+            .set_property("placeholder-text", key_placeholder(state));
         let tone = key_tone(state);
         set_tone(&self.key_block, tone);
         self.key_icon.set_icon_name(Some(match tone {
@@ -853,9 +900,9 @@ mod tests {
 
     use super::{
         CONFIGURE_UNSUPPORTED, CacheState, KeyState, NO_KEY_PLACE, StartupEnd, StartupShown, badge,
-        cache_text, change_startup, change_text, clear_text, key_text, key_tone, save_text,
-        saved_in_text, size_text, startup_end_text, startup_outcome, startup_shown, trigger_keys,
-        trigger_text,
+        cache_text, change_startup, change_text, clear_text, key_placeholder, key_text, key_tone,
+        save_text, saved_in_text, size_text, startup_end_text, startup_outcome, startup_shown,
+        trigger_keys, trigger_text,
     };
     use crate::{cache::Footprint, view::Binding};
 
@@ -1117,6 +1164,14 @@ mod tests {
         ];
         let lines: std::collections::HashSet<_> = states.into_iter().map(key_text).collect();
         assert_eq!(lines.len(), states.len());
+    }
+
+    #[test]
+    fn the_field_asks_to_replace_only_a_key_that_is_set() {
+        assert!(key_placeholder(Some(KeyState::Pro)).contains("replace"));
+        assert!(key_placeholder(Some(KeyState::Free)).contains("replace"));
+        assert!(!key_placeholder(None).contains("replace"));
+        assert!(!key_placeholder(Some(KeyState::Refused(KeyError::Missing))).contains("replace"));
     }
 
     #[test]

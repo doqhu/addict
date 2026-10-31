@@ -1,20 +1,20 @@
-//! The About window, which the tray's About entry shows.
+//! The About window, which the main menu and the tray's About entry show.
 //!
 //! Two pages under a switcher: About, with the application's icon, looked up
-//! in the icon theme by the app id, its name, its version, its license and
-//! the address of its repository; and Credits, with every row of the table
-//! of sources, the dictionary indexes first and then OCR, each with its
-//! credit line and license. The credits are read from
-//! `addict_dictionary::sources` and never typed here. A credit is escaped
-//! before it is set in markup, and an address in it stays text: a label
-//! makes no links of its own. The texts are plain functions, so that they
-//! can be tested without a display.
+//! in the icon theme by the app id, its name, what it is, and a card of its
+//! version, its license and its repository; and Credits, with every row of
+//! the table of sources, the dictionary indexes first and then OCR, each with
+//! its credit line and license. The credits are read from
+//! `addict_dictionary::sources` and never typed here. A credit is plain text,
+//! never markup, and an address in it stays text: a label makes no links of
+//! its own. The texts are plain functions, so that they can be tested without
+//! a display.
 
 use addict_core::APP_ID;
 use addict_dictionary::sources::{self, Row};
 use gtk::{glib, prelude::*};
 
-use crate::settings::{label, section};
+use crate::settings::{label, list_section, row};
 
 /// The name of the application, as the window shows it.
 pub const NAME: &str = "Addict";
@@ -22,31 +22,28 @@ pub const NAME: &str = "Addict";
 /// The address of the repository.
 pub const REPOSITORY: &str = "https://github.com/doqhu/addict";
 
+/// What the application is, under its name.
+const SUMMARY: &str = "A contextual dictionary for the Linux desktop.";
+
 /// The name of the About page in the stack.
 const ABOUT_PAGE: &str = "about";
 
 /// The name of the Credits page in the stack.
 const CREDITS_PAGE: &str = "credits";
 
-/// The line of the version of this build.
-pub fn version_text() -> String {
-    format!("Version {}", env!("CARGO_PKG_VERSION"))
+/// The version of this build.
+pub fn version_text() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
 
-/// The line of the license, as the crate declares it.
-pub fn license_text() -> String {
-    format!("Licensed under {}.", env!("CARGO_PKG_LICENSE"))
+/// The license, as the crate declares it.
+pub fn license_text() -> &'static str {
+    env!("CARGO_PKG_LICENSE")
 }
 
-/// The markup of one row: its index in bold, its credit line, its license.
-/// Every text is escaped before the markup is put around it.
-pub fn credit_markup(row: &Row) -> String {
-    format!(
-        "<b>{}</b>\n{}\n<small>{}</small>",
-        glib::markup_escape_text(row.index),
-        glib::markup_escape_text(row.credit),
-        glib::markup_escape_text(row.license),
-    )
+/// The address of the repository as the window shows it: without the scheme.
+pub fn repository_text() -> &'static str {
+    REPOSITORY.trim_start_matches("https://")
 }
 
 /// The window and its pages.
@@ -67,7 +64,7 @@ impl About {
         let switcher = gtk::StackSwitcher::builder()
             .stack(&stack)
             .halign(gtk::Align::Center)
-            .margin_top(12)
+            .margin_top(16)
             .build();
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
         content.append(&switcher);
@@ -76,8 +73,8 @@ impl About {
         let window = gtk::Window::builder()
             .title("About Addict")
             .transient_for(parent)
-            .default_width(480)
-            .default_height(600)
+            .default_width(520)
+            .default_height(560)
             .hide_on_close(true)
             .titlebar(&crate::resident::header_bar("About Addict"))
             .child(&content)
@@ -112,42 +109,66 @@ impl About {
     }
 }
 
-/// The About page: the icon, the name, the version, the license and the
-/// repository. An icon that is not installed shows as the theme's missing
-/// icon.
+/// The About page: the icon, the name and what it is, over a card of the
+/// version, the license and the repository. An icon that is not installed
+/// shows as the theme's missing icon.
 fn about_page() -> gtk::Box {
     let page = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(8)
+        .spacing(6)
         .valign(gtk::Align::Center)
-        .halign(gtk::Align::Center)
-        .margin_top(24)
-        .margin_bottom(24)
+        .margin_top(16)
+        .margin_bottom(16)
         .margin_start(16)
         .margin_end(16)
         .build();
     let logo = gtk::Image::from_icon_name(APP_ID);
-    logo.set_pixel_size(128);
-    logo.set_margin_bottom(8);
+    logo.set_pixel_size(96);
+    logo.set_margin_bottom(6);
     page.append(&logo);
     let name = label(NAME, &["about-name"]);
     name.set_halign(gtk::Align::Center);
     page.append(&name);
-    for text in [version_text(), license_text()] {
-        let line = label(&text, &["hint"]);
-        line.set_halign(gtk::Align::Center);
-        page.append(&line);
-    }
+    let summary = label(SUMMARY, &["hint"]);
+    summary.set_halign(gtk::Align::Center);
+    page.append(&summary);
     let link = gtk::LinkButton::builder()
         .uri(REPOSITORY)
-        .label(REPOSITORY)
-        .halign(gtk::Align::Center)
+        .label(repository_text())
+        .css_classes(["repository"])
         .build();
-    page.append(&link);
+    let card = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .margin_top(16)
+        .css_classes(["settings-list"])
+        .build();
+    card.append(&fact("Version", label(version_text(), &[]).upcast_ref()));
+    card.append(&fact("License", label(license_text(), &[]).upcast_ref()));
+    card.append(&fact("Source", link.upcast_ref()));
+    page.append(&card);
     page
 }
 
-/// The Credits page: a section per table, a line per row, in a scrolled
+/// A row of the card: what it says, and `value` at its end.
+fn fact(name: &str, value: &gtk::Widget) -> gtk::Box {
+    let name = label(name, &["hint"]);
+    name.set_hexpand(true);
+    name.set_valign(gtk::Align::Center);
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    line.append(&name);
+    line.append(value);
+    row(&[line.upcast_ref()])
+}
+
+/// The row of one source: its index, its credit line, its license.
+fn credit(source: &Row) -> gtk::Box {
+    let name = label(source.index, &["credit-name"]);
+    let line = label(source.credit, &[]);
+    let license = label(source.license, &["hint"]);
+    row(&[name.upcast_ref(), line.upcast_ref(), license.upcast_ref()])
+}
+
+/// The Credits page: a section per table, a row per source, in a scrolled
 /// window.
 fn credits_page() -> gtk::ScrolledWindow {
     let content = gtk::Box::builder()
@@ -159,16 +180,9 @@ fn credits_page() -> gtk::ScrolledWindow {
         .margin_end(16)
         .build();
     for (heading, rows) in sources::SECTIONS {
-        let lines: Vec<gtk::Widget> = rows
-            .iter()
-            .map(|row| {
-                let line = label("", &["credit"]);
-                line.set_markup(&credit_markup(row));
-                line.upcast()
-            })
-            .collect();
-        let lines: Vec<&gtk::Widget> = lines.iter().collect();
-        content.append(&section(heading, &lines));
+        let rows: Vec<gtk::Box> = rows.iter().map(credit).collect();
+        let rows: Vec<&gtk::Box> = rows.iter().collect();
+        content.append(&list_section(heading, &rows));
     }
     gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -179,69 +193,25 @@ fn credits_page() -> gtk::ScrolledWindow {
 
 #[cfg(test)]
 mod tests {
-    use addict_dictionary::sources::{OCR, ROWS, Row};
     use gtk::{glib, prelude::*};
 
-    use super::{About, credit_markup, license_text, version_text};
+    use super::{About, license_text, repository_text, version_text};
     use crate::style;
 
     #[test]
-    fn each_line_holds_its_index_and_its_credit() {
-        for row in ROWS.iter().chain(OCR) {
-            let markup = credit_markup(row);
-            let index = glib::markup_escape_text(row.index);
-            let credit = glib::markup_escape_text(row.credit);
-            assert!(markup.contains(index.as_str()), "{}", row.index);
-            assert!(markup.contains(credit.as_str()), "{}", row.index);
-            gtk::pango::parse_markup(&markup, '\0').expect("valid markup");
-        }
-    }
-
-    #[test]
-    fn an_address_in_a_credit_stays_text_and_whole() {
-        let kaikki = ROWS
-            .iter()
-            .find(|row| row.index == "kaikki-es-Espanol")
-            .expect("the Kaikki row");
-        let markup = credit_markup(kaikki);
-        assert!(!markup.contains("<a"), "{markup}");
-        assert!(
-            markup.contains("(https://www.wiktionary.org/);"),
-            "{markup}"
-        );
-    }
-
-    #[test]
-    fn a_credit_is_escaped_before_markup() {
-        let row = Row {
-            index: "x<y",
-            upstream: "",
-            license: "A & B",
-            credit: "<a href=\"https://example.org/\">here</a>",
-        };
-        let markup = credit_markup(&row);
-        assert!(!markup.contains("<a "), "{markup}");
-        assert!(markup.contains("x&lt;y"), "{markup}");
-        assert!(markup.contains("A &amp; B"), "{markup}");
-        let (_, text, _) = gtk::pango::parse_markup(&markup, '\0').expect("valid markup");
-        assert!(text.contains(row.credit), "{text}");
-    }
-
-    #[test]
     fn the_version_is_the_crate_version() {
-        assert_eq!(
-            version_text(),
-            format!("Version {}", env!("CARGO_PKG_VERSION"))
-        );
+        assert_eq!(version_text(), env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
     fn the_license_is_the_crate_license() {
-        assert_eq!(
-            license_text(),
-            format!("Licensed under {}.", env!("CARGO_PKG_LICENSE"))
-        );
-        assert!(!env!("CARGO_PKG_LICENSE").is_empty());
+        assert_eq!(license_text(), env!("CARGO_PKG_LICENSE"));
+        assert!(!license_text().is_empty());
+    }
+
+    #[test]
+    fn the_repository_is_shown_without_its_scheme() {
+        assert_eq!(repository_text(), "github.com/doqhu/addict");
     }
 
     /// Draws the About window on its Credits page into the PNG file

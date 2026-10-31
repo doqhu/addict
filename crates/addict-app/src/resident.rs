@@ -342,15 +342,36 @@ pub(crate) fn header_bar(name: &str) -> gtk::HeaderBar {
     gtk::HeaderBar::builder().title_widget(&title).build()
 }
 
+/// The button of the main menu: Settings and About, and Exit apart. These are
+/// the tray's choices, here too as a desktop may have no tray.
+fn main_menu() -> gtk::MenuButton {
+    let window_items = gio::Menu::new();
+    window_items.append(Some("Settings"), Some("app.settings"));
+    window_items.append(Some("About Addict"), Some("app.about"));
+    let exit_items = gio::Menu::new();
+    exit_items.append(Some("Exit"), Some("app.exit"));
+    let menu = gio::Menu::new();
+    menu.append_section(None, &window_items);
+    menu.append_section(None, &exit_items);
+    let popover = gtk::PopoverMenu::builder()
+        .menu_model(&menu)
+        .has_arrow(false)
+        .css_classes(["main-menu"])
+        .build();
+    gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Main menu")
+        .valign(gtk::Align::Center)
+        .primary(true)
+        .popover(&popover)
+        .css_classes(["main-menu"])
+        .build()
+}
+
 /// The hidden window around the `view`: closing it hides it, and so does Esc.
 fn build_window(application: &gtk::Application, view: &View) -> gtk::ApplicationWindow {
     let header = header_bar("Addict");
-    let settings = gtk::Button::builder()
-        .label("Settings")
-        .tooltip_text("Open Addict settings")
-        .action_name("app.settings")
-        .build();
-    header.pack_end(&settings);
+    header.pack_end(&main_menu());
     let window = gtk::ApplicationWindow::builder()
         .application(application)
         .title("Addict")
@@ -2271,6 +2292,8 @@ fn start(
     // The first attempt starts below, with the window still hidden.
     let binding = Binding::Attempting;
     connect_settings_action(application, &sender);
+    connect_menu_actions(application, &sender);
+    application.set_accels_for_action("app.settings", &["<Control>comma"]);
     let (view, window) = build_ui(application, &binding, &sender);
 
     // Only the primary instance gets here, so a second launch records no
@@ -2436,7 +2459,7 @@ impl WindowActions for Session {
     }
 }
 
-/// The main window's Settings button activates this same named application action.
+/// The main menu's Settings activates this same named application action.
 fn connect_settings_action(
     application: &impl IsA<gio::ActionMap>,
     sender: &UnboundedSender<Event>,
@@ -2447,6 +2470,18 @@ fn connect_settings_action(
         let _ = sender.unbounded_send(Event::Window(WindowEvent::Settings));
     });
     application.add_action(&settings);
+}
+
+/// The main menu's About and Exit are the tray's own events.
+fn connect_menu_actions(application: &impl IsA<gio::ActionMap>, sender: &UnboundedSender<Event>) {
+    for (name, event) in [("about", TrayEvent::About), ("exit", TrayEvent::Exit)] {
+        let action = gio::SimpleAction::new(name, None);
+        let sender = sender.clone();
+        action.connect_activate(move |_, _| {
+            let _ = sender.unbounded_send(Event::Tray(event.clone()));
+        });
+        application.add_action(&action);
+    }
 }
 
 fn connect_launches(
@@ -2555,8 +2590,8 @@ mod tests {
     use super::{
         CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, CapturePress, Capturing, Copying, Event,
         FailedEndFocus, LaunchMode, WindowActions, WindowEvent, connect_launches,
-        connect_settings_action, dispatch_window, failed_end_focus, is_offered_command,
-        missed_line,
+        connect_menu_actions, connect_settings_action, dispatch_window, failed_end_focus,
+        is_offered_command, missed_line,
     };
     use crate::view::{
         Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
@@ -2707,6 +2742,21 @@ mod tests {
         dispatch_window(&mut window, event);
         assert_eq!(window.presentations, 1);
         assert_eq!(window.settings, 1);
+    }
+
+    #[test]
+    fn the_main_menu_sends_the_events_of_the_tray() {
+        use addict_platform::tray::TrayEvent;
+        let actions = gio::SimpleActionGroup::new();
+        let (sender, mut events) = futures_channel::mpsc::unbounded();
+        connect_menu_actions(&actions, &sender);
+        for (name, expected) in [("about", TrayEvent::About), ("exit", TrayEvent::Exit)] {
+            actions.activate_action(name, None);
+            let Event::Tray(event) = events.try_recv().expect("a menu event") else {
+                panic!("wrong event for {name}")
+            };
+            assert_eq!(event, expected);
+        }
     }
 
     #[test]
