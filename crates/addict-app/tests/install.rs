@@ -5,20 +5,14 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{ENTRY, Homes, TempDir, icon_in, lines, shown, text};
+use common::{ENTRY, Homes, LEGACY, TempDir, icon_in, lines, place, shown, text};
 
 const FOREIGN: &str = "[Desktop Entry]\nName=Someone else\n";
-const LEGACY: &str = "[Desktop Entry]\nExec=addict --background\nX-Addict=true\n";
 
 fn binary() -> PathBuf {
     Path::new(env!("CARGO_BIN_EXE_addict"))
         .canonicalize()
         .expect("canonical binary path")
-}
-
-fn place(path: &Path, content: &str) {
-    std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
-    std::fs::write(path, content).expect("write entry");
 }
 
 #[test]

@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use common::{Homes, TempDir, lines, on_private_bus, shown, text};
+use common::{Homes, LEGACY, TempDir, lines, on_private_bus, place, shown, text};
 use zbus::{
     Connection,
     message::Header,
@@ -19,8 +19,6 @@ use zbus::{
 };
 
 const FOREIGN: &str = "[Desktop Entry]\nName=Someone else\n";
-/// What an older `addict install` left in the autostart directory.
-const LEGACY: &str = "[Desktop Entry]\nExec=addict --background\nX-Addict=true\n";
 /// What the Background portal leaves there.
 const FROM_PORTAL: &str =
     "[Desktop Entry]\nExec=addict --background\nX-XDP-Autostart=io.github.doqhu.Addict\n";
@@ -188,11 +186,6 @@ fn entries(homes: &Homes) -> [PathBuf; 2] {
 fn installed(homes: &Homes) {
     let output = homes.run("install");
     assert!(output.status.success(), "{}", text(&output.stderr));
-}
-
-fn place(path: &Path, content: &str) {
-    std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
-    std::fs::write(path, content).expect("write");
 }
 
 /// An install with a login entry of this content.

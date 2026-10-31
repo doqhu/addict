@@ -37,9 +37,7 @@ pub fn startup_file() -> Option<PathBuf> {
 /// What stands at the login entry, outside the sandbox. A foreign file or a
 /// symlink is the refusal, naming the path.
 pub fn login_entry() -> Result<LoginEntry, String> {
-    let dir =
-        desktop::autostart_dir().ok_or("cannot find the autostart directory: HOME is not set")?;
-    desktop::login_entry(&dir, APP_ID).map_err(|e| e.to_string())
+    desktop::login_entry(&autostart_dir()?, APP_ID).map_err(|e| e.to_string())
 }
 
 /// Refuses, outside the sandbox, when the launcher is not installed: the
@@ -78,6 +76,11 @@ fn applications_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "cannot find the applications directory: HOME is not set".to_owned())
 }
 
+fn autostart_dir() -> Result<PathBuf, String> {
+    desktop::autostart_dir()
+        .ok_or_else(|| "cannot find the autostart directory: HOME is not set".to_owned())
+}
+
 /// Checks the entry in `dir`. The error text names the path.
 fn check_entry(dir: &Path) -> Result<(), String> {
     desktop::check(dir, APP_ID)
@@ -100,9 +103,7 @@ fn checked_icons() -> Result<PathBuf, String> {
 /// autostart directory is not a target: only the Background portal may manage
 /// it.
 pub fn install_entries() -> Result<Vec<PathBuf>, String> {
-    let exec = std::env::current_exe()
-        .and_then(|path| path.canonicalize())
-        .map_err(|e| format!("cannot resolve the path of this binary: {e}"))?;
+    let exec = startup::canonical_exe()?;
     let applications = applications_dir()?;
     check_entry(&applications)?;
     let icons = checked_icons()?;
@@ -182,9 +183,7 @@ pub fn uninstall_entries() -> Result<Vec<PathBuf>, String> {
         if sandboxed {
             disable_startup(&format!("~/.config/autostart/{APP_ID}.desktop"))?;
         } else {
-            let dir = desktop::autostart_dir()
-                .ok_or("cannot find the autostart directory: HOME is not set")?;
-            let path = desktop::entry_path(&dir, APP_ID);
+            let path = desktop::entry_path(&autostart_dir()?, APP_ID);
             if launcher == Target::Absent {
                 return Err(format!(
                     "the Background portal needs the launcher, which is not installed; nothing \

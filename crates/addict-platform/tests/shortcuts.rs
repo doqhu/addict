@@ -784,19 +784,7 @@ fn a_portal_that_vanishes_and_cannot_be_activated_reports_one_failure() {
         let services = dir.join("services");
         std::fs::create_dir_all(&services).unwrap();
         let config = dir.join("bus.conf");
-        std::fs::write(
-            &config,
-            format!(
-                "<busconfig><type>session</type>\
-                 <listen>unix:tmpdir=/tmp</listen><auth>EXTERNAL</auth>\
-                 <servicedir>{}</servicedir>\
-                 <policy context=\"default\"><allow send_destination=\"*\"/>\
-                 <allow receive_sender=\"*\"/>\
-                 <allow own=\"*\"/></policy></busconfig>\n",
-                services.display()
-            ),
-        )
-        .unwrap();
+        common::write_bus_config(&config, Some(&services));
         common::run_private_bus_with_config(
             "a_portal_that_vanishes_and_cannot_be_activated_reports_one_failure",
             &config,

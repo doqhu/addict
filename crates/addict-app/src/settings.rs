@@ -67,6 +67,9 @@ pub const STARTUP_TIMED_OUT: &str = "The Background portal did not answer in tim
 /// The line when the state could not be read in time.
 pub const STARTUP_UNREAD: &str = "The saved startup state could not be read.";
 
+/// The line when the runner of the startup jobs is gone.
+pub const STARTUP_NO_RUNNER: &str = "Startup cannot be changed: the runner is not available.";
+
 /// How a change of the switch ended. It says what the switch then shows; a
 /// state saved or not is part of it.
 #[derive(Debug, Clone, PartialEq, Eq)]

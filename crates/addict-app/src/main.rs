@@ -126,8 +126,8 @@
 //! whole field with the clipboard text as one line, and with it the input and
 //! the result; the pasted text is then submitted, as by Enter. The clipboard
 //! is read once per paste, without blocking the window, and otherwise only at
-//! a press of the shortcut (below). A clipboard that holds no text changes
-//! nothing.
+//! a press of the clipboard action's shortcut (below). A clipboard that holds
+//! no text changes nothing.
 //!
 //! Capture, beside the field, hides the window and asks the desktop for an
 //! interactive screenshot: the user chooses an area, or cancels. Once the
@@ -154,7 +154,7 @@
 //! interactive screenshot. Capture cannot be pressed while the area is being
 //! chosen.
 //!
-//! The shortcut reads the text selected or copied, the same for every
+//! The clipboard action reads the text selected or copied, the same for every
 //! application: the window shows at once, empty and saying that the source,
 //! "selection or clipboard", is being read; once the window is active, the
 //! primary selection is read, then the clipboard when the selection gave no
@@ -183,10 +183,11 @@
 //! capture flow as Capture, using the reading language, and every end of it
 //! without text shows the window with the same way to try again.
 //!
-//! An attempt to bind the shortcut that ends without one, for any reason or
-//! for none within `resident::BIND_LIMIT`, keeps a line saying so and Retry
-//! in the window. Background login stays silent. Retry starts a new attempt;
-//! an initialized session removes the failure line even with unassigned actions.
+//! An attempt to bind the shortcuts of both actions that ends without them,
+//! for any reason or for none within `resident::BIND_LIMIT`, keeps a line
+//! saying so and Retry in the window. Background login stays silent. Retry
+//! starts a new attempt; an initialized session removes the failure line even
+//! with unassigned actions.
 //!
 //! Before GTK starts, the resident lets the Vulkan loader list only the
 //! driver of the GPU that drives the display, so that the first window does

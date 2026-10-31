@@ -7,7 +7,6 @@ mod common;
 use std::{
     collections::HashMap,
     ffi::OsStr,
-    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -190,32 +189,7 @@ impl Mock {
 
 /// Whether this is the child on a private bus; when not, runs it.
 fn private(test: &str) -> bool {
-    if std::env::var_os(CHILD).is_some() {
-        return true;
-    }
-    let dir = std::env::temp_dir().join(format!(
-        "addict-startup-bus-{}-{}",
-        std::process::id(),
-        test
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    let config: PathBuf = dir.join("bus.conf");
-    std::fs::write(
-        &config,
-        "<busconfig><type>session</type>\
-         <listen>unix:tmpdir=/tmp</listen><auth>EXTERNAL</auth>\
-         <policy context=\"default\"><allow send_destination=\"*\"/>\
-         <allow receive_sender=\"*\"/><allow own=\"*\"/></policy></busconfig>\n",
-    )
-    .unwrap();
-    common::run_private_bus_with_config(
-        test,
-        &config,
-        Duration::from_secs(20),
-        &[(CHILD, OsStr::new("1"))],
-    );
-    std::fs::remove_dir_all(&dir).unwrap();
-    false
+    common::on_private_bus(CHILD, "startup", test)
 }
 
 fn command() -> Vec<String> {

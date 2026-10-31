@@ -118,10 +118,14 @@ pub fn relaunch_command() -> Result<Vec<String>, String> {
     if is_sandboxed() {
         return Ok(relaunch_in_sandbox());
     }
-    let exe = std::env::current_exe()
+    relaunch_of(&canonical_exe()?)
+}
+
+/// The canonical path of this binary.
+pub fn canonical_exe() -> Result<PathBuf, String> {
+    std::env::current_exe()
         .and_then(|path| path.canonicalize())
-        .map_err(|e| format!("cannot resolve the path of this binary: {e}"))?;
-    relaunch_of(&exe)
+        .map_err(|e| format!("cannot resolve the path of this binary: {e}"))
 }
 
 fn relaunch_in_sandbox() -> Vec<String> {

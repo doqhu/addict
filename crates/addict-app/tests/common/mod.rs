@@ -63,6 +63,9 @@ pub fn text(bytes: &[u8]) -> String {
 
 pub const ENTRY: &str = "io.github.doqhu.Addict.desktop";
 
+/// What an older `addict install` left in the autostart directory.
+pub const LEGACY: &str = "[Desktop Entry]\nExec=addict --background\nX-Addict=true\n";
+
 pub const ICON_SIZES: [u32; 4] = [64, 128, 256, 512];
 
 /// The icon of `size` pixels in the data directory `data`.
@@ -187,6 +190,12 @@ pub fn on_private_bus(test: &str) -> bool {
     );
     assert!(stdout.contains("1 passed"), "child ran no test: {stdout}");
     false
+}
+
+/// Writes `content` to `path`, with the directories it needs.
+pub fn place(path: &Path, content: &str) {
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+    std::fs::write(path, content).expect("write");
 }
 
 /// The lines of a captured stdout.

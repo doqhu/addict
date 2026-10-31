@@ -51,7 +51,7 @@
 //! shown, also one that could not start, is recorded with `--evidence` as it
 //! is shown; a given-up one is not. The job is [`capture`](crate::capture)'s.
 //!
-//! The shortcut reads the text selected or copied, the same for every
+//! The clipboard action reads the text selected or copied, the same for every
 //! application. The press gives up a running capture and the read of the
 //! press before, and clears the field (the lookup and the online requests
 //! of the old text are given up); the window is shown at once, in the
@@ -178,7 +178,7 @@ use crate::{
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
 const TRIGGER: &str = "LOGO+q";
 
-/// How long one attempt to bind the shortcut may take.
+/// How long one attempt to bind the shortcuts may take.
 const BIND_LIMIT: Duration = Duration::from_secs(60);
 
 /// How long the read of the selection and the clipboard may take from the
@@ -301,7 +301,7 @@ enum Event {
     Clipboard(u64, Result<String, Missed>),
 }
 
-/// Starts one attempt to bind the shortcut; its events go to `sender`. With
+/// Starts one attempt to bind the shortcuts; its events go to `sender`. With
 /// `timed`, an activation carries the time the worker thread received it.
 fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandle {
     let sender = sender.clone();
@@ -1686,8 +1686,7 @@ impl Session {
         self.settings.say_startup("");
         self.settings.set_startup_sensitive(false);
         let Some(work) = self.work.upgrade() else {
-            self.settings
-                .say_startup("Startup cannot be changed: the runner is not available.");
+            self.settings.say_startup(settings::STARTUP_NO_RUNNER);
             return;
         };
         let sender = self.sender.clone();
@@ -1743,8 +1742,7 @@ impl Session {
         }
         let Some(work) = self.work.upgrade() else {
             self.settings.render_startup(self.startup_on);
-            self.settings
-                .say_startup("Startup cannot be changed: the runner is not available.");
+            self.settings.say_startup(settings::STARTUP_NO_RUNNER);
             return;
         };
         self.startup_read_job = None;
@@ -2261,7 +2259,7 @@ fn serve(mut session: Session, mut receiver: UnboundedReceiver<Event>) {
     });
 }
 
-/// Builds the hidden window, starts the first attempt to bind the shortcut
+/// Builds the hidden window, starts the first attempt to bind the shortcuts
 /// and the event loop. Runs once, in the primary instance.
 fn start(
     application: &gtk::Application,

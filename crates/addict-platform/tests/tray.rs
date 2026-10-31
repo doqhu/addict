@@ -4,7 +4,6 @@
 mod common;
 
 use std::{
-    ffi::OsStr,
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -31,29 +30,8 @@ impl Watcher {
 
 /// Runs the test in a child with a private bus; true inside that child.
 fn private(test: &str) -> bool {
-    if std::env::var_os(CHILD).is_some() {
-        return true;
-    }
     // No service directory: nothing can activate a watcher on this bus.
-    let dir = std::env::temp_dir().join(format!("addict-tray-bus-{}-{test}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("the config directory");
-    let config = dir.join("bus.conf");
-    std::fs::write(
-        &config,
-        "<busconfig><type>session</type>\
-         <listen>unix:tmpdir=/tmp</listen><auth>EXTERNAL</auth>\
-         <policy context=\"default\"><allow send_destination=\"*\"/>\
-         <allow receive_sender=\"*\"/><allow own=\"*\"/></policy></busconfig>\n",
-    )
-    .expect("the bus config");
-    common::run_private_bus_with_config(
-        test,
-        &config,
-        Duration::from_secs(20),
-        &[(CHILD, OsStr::new("1"))],
-    );
-    std::fs::remove_dir_all(&dir).expect("remove the config directory");
-    false
+    common::on_private_bus(CHILD, "tray", test)
 }
 
 fn runtime() -> tokio::runtime::Runtime {

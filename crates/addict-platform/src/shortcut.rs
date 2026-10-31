@@ -1,11 +1,11 @@
-//! The global shortcut of the resident application.
+//! The global shortcuts of the resident application.
 //!
 //! [`start`] spawns one worker thread that owns a session-bus connection,
 //! registers the host app id and holds a GlobalShortcuts session with separate
 //! clipboard and screenshot actions. Everything it learns goes to a plain
 //! `Send` callback, so the caller decides how to wake its own thread; nothing here polls.
 //!
-//! The attempt, from the bus connection to the bound shortcut, has a limit
+//! The attempt, from the bus connection to the bound shortcuts, has a limit
 //! given by the caller: a portal that never answers ends it as a failure.
 //!
 //! A registration and a session die with the portal process, so when the owner
@@ -123,7 +123,7 @@ pub enum ShortcutEvent {
         timestamp_ms: u64,
     },
     /// The portal answered a [`ShortcutHandle::configure`]: `message` is one
-    /// line saying why the dialog for the shortcut could not be asked for,
+    /// line saying why the dialog for the shortcuts could not be asked for,
     /// and `None` when it was.
     ConfigureEnded {
         message: Option<String>,
@@ -131,7 +131,7 @@ pub enum ShortcutEvent {
     /// The portal is too old for its dialog: `ConfigureShortcuts` is from
     /// version 2 of the interface. Keep the session and every assignment.
     ConfigureUnsupported,
-    /// The shortcut is not available. `message` is one line: either the step
+    /// The shortcuts are not available. `message` is one line: either the step
     /// that failed with the portal's own error text, or, when the attempt ran
     /// out of time, the limit alone with no portal text. It does not say why.
     Failed {
@@ -167,11 +167,11 @@ enum Command {
 }
 
 impl ShortcutHandle {
-    /// Asks the portal for its dialog to change the shortcut. The answer is
-    /// a [`ShortcutEvent::ConfigureEnded`], or a
+    /// Asks the portal for its dialog to change the shortcuts of both actions.
+    /// The answer is a [`ShortcutEvent::ConfigureEnded`], or a
     /// [`ShortcutEvent::ConfigureUnsupported`] from a portal too old for the
     /// dialog. A request made before the
-    /// shortcut is bound waits for it, and one made after the worker has
+    /// shortcuts are bound waits for them, and one made after the worker has
     /// failed is not answered.
     pub fn configure(&self) {
         let _ = self.commands.send(Command::Configure);
@@ -296,7 +296,7 @@ async fn run(
     }
 }
 
-/// Resolves after `limit` if the shortcut is still not bound, and never
+/// Resolves after `limit` if the shortcuts are still not bound, and never
 /// otherwise.
 async fn unbound_after(limit: Duration, bound: &Cell<bool>) {
     tokio::time::sleep(limit).await;
