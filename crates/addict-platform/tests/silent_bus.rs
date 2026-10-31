@@ -79,9 +79,15 @@ fn child_body(socket: &Path) {
 
     let (sender, receiver) = mpsc::channel();
     let started = Instant::now();
-    let handle = shortcut::start("io.github.doqhu.Test", "LOGO+q", BIND_LIMIT, move |event| {
-        let _ = sender.send(event);
-    });
+    let handle = shortcut::start(
+        "io.github.doqhu.Test",
+        "LOGO+q",
+        BIND_LIMIT,
+        None,
+        move |event| {
+            let _ = sender.send(event);
+        },
+    );
 
     match receiver
         .recv_timeout(EVENT_TIMEOUT)

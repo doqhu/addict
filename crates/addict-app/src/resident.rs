@@ -305,7 +305,8 @@ enum Event {
 /// `timed`, an activation carries the time the worker thread received it.
 fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandle {
     let sender = sender.clone();
-    shortcut::start(APP_ID, TRIGGER, BIND_LIMIT, move |event| {
+    let file = entries::shortcut_file();
+    shortcut::start(APP_ID, TRIGGER, BIND_LIMIT, file, move |event| {
         // Here, on the worker: the UI thread may be busy when it arrives.
         let receipt_ns = (timed && matches!(event, ShortcutEvent::Activated { .. }))
             .then(evidence::monotonic_ns);
@@ -1687,7 +1688,7 @@ impl Session {
 
     fn show_settings(&mut self) {
         self.settings.render_binding(&self.binding, &self.bindings);
-        self.settings.say("");
+        self.settings.reset_status();
         self.settings.clear_key_entry();
         self.settings.say_key("");
         self.settings.say_cache("");
@@ -2399,6 +2400,7 @@ trait WindowActions {
     fn clipboard(&mut self, token: Option<&str>, timestamp: u64, receipt: Option<u64>);
     fn capture(&mut self, token: Option<&str>);
     fn shortcut_status(&mut self, message: &str);
+    fn set_rebinding(&mut self, rebinding: bool);
 }
 
 fn dispatch_window(ui: &mut impl WindowActions, event: WindowEvent) {
@@ -2412,6 +2414,10 @@ fn dispatch_window(ui: &mut impl WindowActions, event: WindowEvent) {
         ) => ui.set_bindings(Binding::Bound, bindings),
         WindowEvent::Shortcut(ShortcutEvent::Failed { message }, _) => {
             eprintln!("addict: shortcut unavailable: {message}");
+            // A rebind that failed twice ends here, and Retry starts over; the
+            // rows now say why, so no line about the dialog stays beside them.
+            ui.set_rebinding(false);
+            ui.shortcut_status("");
             ui.set_bindings(Binding::NotBound { detail: message }, Bindings::default());
         }
         WindowEvent::Shortcut(
@@ -2428,8 +2434,14 @@ fn dispatch_window(ui: &mut impl WindowActions, event: WindowEvent) {
         WindowEvent::Shortcut(ShortcutEvent::ConfigureEnded { message }, _) => {
             ui.shortcut_status(&settings::change_text(message.as_deref()))
         }
-        WindowEvent::Shortcut(ShortcutEvent::ConfigureUnsupported, _) => {
-            ui.shortcut_status(settings::CONFIGURE_UNSUPPORTED)
+        WindowEvent::Shortcut(ShortcutEvent::Rebinding { bindings }, _) => {
+            ui.set_bindings(Binding::Bound, bindings);
+            ui.set_rebinding(true);
+            ui.shortcut_status(settings::REBINDING);
+        }
+        WindowEvent::Shortcut(ShortcutEvent::RebindEnded { message }, _) => {
+            ui.set_rebinding(false);
+            ui.shortcut_status(&settings::rebind_text(message.as_deref()));
         }
     }
 }
@@ -2456,6 +2468,9 @@ impl WindowActions for Session {
     }
     fn shortcut_status(&mut self, message: &str) {
         self.settings.say(message);
+    }
+    fn set_rebinding(&mut self, rebinding: bool) {
+        self.settings.set_rebinding(rebinding);
     }
 }
 
@@ -2607,6 +2622,7 @@ mod tests {
         clipboard: Vec<(Option<String>, u64, Option<u64>)>,
         captures: Vec<Option<String>>,
         status: String,
+        rebinding: bool,
     }
 
     impl WindowActions for ObservedWindow {
@@ -2633,6 +2649,9 @@ mod tests {
         }
         fn shortcut_status(&mut self, message: &str) {
             self.status = message.to_owned();
+        }
+        fn set_rebinding(&mut self, rebinding: bool) {
+            self.rebinding = rebinding;
         }
     }
 
@@ -2716,6 +2735,77 @@ mod tests {
             window.binding,
             Some(crate::view::Binding::NotBound { .. })
         ));
+    }
+
+    #[test]
+    fn a_rebind_shows_the_old_keys_and_holds_the_button_until_it_ends() {
+        use crate::view::Binding;
+        use addict_platform::shortcut::{Bindings, ShortcutEvent};
+        let old = Bindings {
+            clipboard: Some("F8".to_owned()),
+            screenshot: None,
+        };
+        let new = Bindings {
+            clipboard: Some("F7".to_owned()),
+            screenshot: Some("F6".to_owned()),
+        };
+        let shortcut = |event| WindowEvent::Shortcut(event, None);
+        let mut window = ObservedWindow::default();
+        dispatch_window(
+            &mut window,
+            shortcut(ShortcutEvent::Rebinding {
+                bindings: old.clone(),
+            }),
+        );
+        assert!(window.rebinding);
+        assert_eq!(window.assignments, old);
+        assert!(matches!(window.binding, Some(Binding::Bound)));
+        assert_eq!(window.status, crate::settings::REBINDING);
+
+        // Settings updates first; the button stays held until the end.
+        dispatch_window(
+            &mut window,
+            shortcut(ShortcutEvent::Bound {
+                bindings: new.clone(),
+            }),
+        );
+        assert_eq!(window.assignments, new);
+        assert!(window.rebinding);
+        dispatch_window(
+            &mut window,
+            shortcut(ShortcutEvent::RebindEnded { message: None }),
+        );
+        assert!(!window.rebinding);
+        assert_eq!(window.status, crate::settings::rebind_text(None));
+
+        // Each way a rebind ends without new keys says so.
+        dispatch_window(
+            &mut window,
+            shortcut(ShortcutEvent::Rebinding { bindings: old }),
+        );
+        dispatch_window(
+            &mut window,
+            shortcut(ShortcutEvent::RebindEnded {
+                message: Some("The keys are unchanged.".to_owned()),
+            }),
+        );
+        assert!(!window.rebinding);
+        assert_eq!(window.status, "The keys are unchanged.");
+
+        // A second failure ends it too, and leaves Retry.
+        dispatch_window(
+            &mut window,
+            shortcut(ShortcutEvent::Rebinding { bindings: new }),
+        );
+        dispatch_window(
+            &mut window,
+            shortcut(ShortcutEvent::Failed {
+                message: "broke".to_owned(),
+            }),
+        );
+        assert!(!window.rebinding);
+        assert!(window.status.is_empty());
+        assert!(matches!(window.binding, Some(Binding::NotBound { .. })));
     }
 
     #[test]
