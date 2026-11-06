@@ -669,6 +669,12 @@ fn fill_pronunciations(
             rest.append(&row);
         }
     }
+    // GTK forgets the size of a box when a child comes or goes only while
+    // the box is visible, and showing it again asks only its parent. Hidden
+    // by the toggle, `rest` keeps the height of the rows it had then, and
+    // the rows of this result, shown, would spill out under the next
+    // widget.
+    rest.queue_resize();
     let hidden = pronunciations.len().saturating_sub(PRONUNCIATION_PREVIEW);
     if hidden > 0 {
         let extra = vec![rest.upcast_ref::<gtk::Widget>().downgrade()];
@@ -2420,6 +2426,72 @@ mod tests {
         toggle.set_active(true);
         assert!(rest.is_visible());
         assert_eq!(toggle_text(&toggle), SHOW_LESS);
+    }
+
+    /// The pronunciations of a new result, shown after those of the last
+    /// one were shown and hidden again, get the height of their own rows,
+    /// not of the old ones. Run alone: it opens a window on the display,
+    /// and GTK starts once per process, on one thread.
+    #[test]
+    #[ignore = "opens a window; run alone"]
+    fn pronunciations_shown_again_take_the_height_of_their_rows() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let window = gtk::Window::builder()
+            .default_width(600)
+            .default_height(800)
+            .child(view.root())
+            .build();
+        window.present();
+        let context = glib::MainContext::default();
+        let settle = || {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(200);
+            while std::time::Instant::now() < until {
+                context.iteration(false);
+            }
+        };
+        let toggle = || {
+            children(&view.result.lead)
+                .pop()
+                .and_downcast::<gtk::ToggleButton>()
+                .expect("the toggle")
+        };
+        let show = |shown: &mut Shown, count: usize| {
+            let mut article = pronounced_bank();
+            article.entries[0].pronunciations = (1..=count)
+                .map(|n| Pronunciation {
+                    text: Some(format!("v{n}")),
+                    ..Pronunciation::default()
+                })
+                .collect();
+            shown.show(Some(Lookup::Article(article)));
+            view.render_result(shown, None);
+        };
+        let mut shown = Shown::default();
+        settle();
+        show(&mut shown, 3);
+        toggle().set_active(true);
+        settle();
+        toggle().set_active(false);
+        settle();
+        show(&mut shown, 6);
+        toggle().set_active(true);
+        settle();
+        let rest = &view.result.pronunciations;
+        let rows = children(rest);
+        assert_eq!(rows.len(), 5);
+        let last = rows.last().expect("a row");
+        let bottom = last
+            .compute_bounds(rest)
+            .expect("the bounds of the last row")
+            .bottom_right()
+            .y();
+        assert!(
+            bottom <= rest.height() as f32,
+            "the last row ends at {bottom}, the box at {}",
+            rest.height()
+        );
+        window.destroy();
     }
 
     #[test]
