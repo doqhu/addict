@@ -178,8 +178,13 @@ use crate::{
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
 const TRIGGER: &str = "LOGO+q";
 
-/// How long one attempt to bind the shortcuts may take.
-const BIND_LIMIT: Duration = Duration::from_secs(60);
+/// How long one attempt to bind the shortcuts may take: a minute until the
+/// bind is asked for, and ten minutes for its answer, which on GNOME is a
+/// person's in a dialog that the window may cover on a first launch.
+const BIND_LIMITS: shortcut::Limits = shortcut::Limits {
+    start: Duration::from_secs(60),
+    answer: Duration::from_secs(600),
+};
 
 /// How long the read of the selection and the clipboard may take from the
 /// press, the wait for the window to be active included.
@@ -306,7 +311,7 @@ enum Event {
 fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandle {
     let sender = sender.clone();
     let file = entries::shortcut_file();
-    shortcut::start(APP_ID, TRIGGER, BIND_LIMIT, file, move |event| {
+    shortcut::start(APP_ID, TRIGGER, BIND_LIMITS, file, move |event| {
         // Here, on the worker: the UI thread may be busy when it arrives.
         let receipt_ns = (timed && matches!(event, ShortcutEvent::Activated { .. }))
             .then(evidence::monotonic_ns);

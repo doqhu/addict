@@ -5,12 +5,15 @@
 //! clipboard and screenshot actions. Everything it learns goes to a plain
 //! `Send` callback, so the caller decides how to wake its own thread; nothing here polls.
 //!
-//! The attempt, from the bus connection to the bound shortcuts, has a limit
-//! given by the caller: a portal that never answers ends it as a failure.
+//! The attempt, from the bus connection to the bound shortcuts, has two
+//! limits given by the caller ([`Limits`]): a short one up to asking for the
+//! bind, which the portal answers by itself, and a long one for the answer to
+//! the bind, which on GNOME is a person's in a dialog. A portal that never
+//! answers ends the attempt as a failure at the limit of the step it is on.
 //!
 //! A registration and a session die with the portal process, so when the owner
 //! of the portal's bus name goes, the worker starts a new attempt on a fresh
-//! connection with the same IDs and preferences, under a new limit.
+//! connection with the same IDs and preferences, its limits counted again.
 //!
 //! A version 1 portal has no dialog to ask for, nor has a version 2 frontend
 //! whose backend lacks `ConfigureShortcuts`, and GNOME opens one only for an
@@ -250,9 +253,6 @@ const CLOSE_LIMIT: Duration = Duration::from_secs(1);
 /// wait for it.
 const CONFIGURE_LIMIT: Duration = Duration::from_secs(5);
 
-/// How long the attempt under new IDs may take: a person is answering a dialog.
-const REBIND_LIMIT: Duration = Duration::from_secs(600);
-
 /// What Settings says when the portal answered without new keys: GNOME's
 /// response to a cancelled dialog is the same as to a failure of its backend,
 /// so this can't claim that a dialog was there.
@@ -338,6 +338,26 @@ enum Stage {
     Returning { message: String },
 }
 
+/// How long an attempt may take until its shortcuts are bound, each limit
+/// counted from the start of the attempt; `answer` is meant to be the longer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Until the bind is asked for: the bus, the registration and the session,
+    /// which the portal answers by itself.
+    pub start: Duration,
+    /// Until the bind is answered: on GNOME a dialog opens for IDs it has not
+    /// stored, and a person answers it.
+    pub answer: Duration,
+}
+
+/// How far an attempt has come, for its limits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Starting,
+    Asked,
+    Bound,
+}
+
 /// What the attempts have in common, and what changes between them.
 struct Plan<'a> {
     app_id: &'a str,
@@ -348,14 +368,6 @@ struct Plan<'a> {
 }
 
 impl Plan<'_> {
-    /// The limit of the next attempt.
-    fn limit(&self, normal: Duration) -> Duration {
-        match self.stage {
-            Stage::Rebinding => REBIND_LIMIT,
-            Stage::Current | Stage::Returning { .. } => normal,
-        }
-    }
-
     /// The generation the next attempt binds.
     fn bound_generation(&self) -> u64 {
         match self.stage {
@@ -460,8 +472,8 @@ impl Drop for ShortcutHandle {
 }
 
 /// Starts the worker for `app_id` with the preferred `trigger` in the XDG
-/// shortcuts syntax (for example `LOGO+q`). `limit` is how long each attempt
-/// may take up to `Bound`, the one after a portal restart included; when it
+/// shortcuts syntax (for example `LOGO+q`). `limits` are how long each attempt
+/// may take up to `Bound`, the one after a portal restart included; when one
 /// runs out the worker reports `Failed` like for any other failure.
 /// `generation_file` is where the worker keeps which shortcut IDs are current;
 /// with `None`, or with a file it can't read, they are the first ones. `on_event`
@@ -469,7 +481,7 @@ impl Drop for ShortcutHandle {
 pub fn start(
     app_id: &str,
     trigger: &str,
-    limit: Duration,
+    limits: Limits,
     generation_file: Option<PathBuf>,
     on_event: impl Fn(ShortcutEvent) + Send + 'static,
 ) -> ShortcutHandle {
@@ -492,7 +504,7 @@ pub fn start(
                 Ok(runtime) => runtime.block_on(run(
                     &app_id,
                     &trigger,
-                    limit,
+                    limits,
                     generation_file.as_deref(),
                     &*on_event,
                     stopped,
@@ -536,7 +548,7 @@ type ShortcutSession = Session<GlobalShortcuts>;
 async fn run(
     app_id: &str,
     trigger: &str,
-    limit: Duration,
+    limits: Limits,
     generation_file: Option<&Path>,
     on_event: &(dyn Fn(ShortcutEvent) + Send),
     mut stopped: oneshot::Receiver<()>,
@@ -554,25 +566,24 @@ async fn run(
     };
     loop {
         let mut session = None;
-        // The limit covers the attempt only: once bound, presses are awaited
+        // The limits cover the attempt only: once bound, presses are awaited
         // without one.
-        let bound = Cell::new(false);
+        let phase = Cell::new(Phase::Starting);
         let report = |event: ShortcutEvent| {
             if matches!(event, ShortcutEvent::Bound { .. }) {
-                bound.set(true);
+                phase.set(Phase::Bound);
             }
             on_event(event);
         };
-        let attempt_limit = plan.limit(limit);
         let ended = tokio::select! {
             // Resolves on the signal and when the handle is gone without one.
             _ = &mut stopped => None,
-            result = serve(&mut plan, &report, &mut session, &mut requests) => {
+            result = serve(&mut plan, &report, &phase, &mut session, &mut requests) => {
                 let Err(ended) = result;
                 Some(ended)
             }
-            () = unbound_after(attempt_limit, &bound) => {
-                Some(Ended::Failed(limit_reached(attempt_limit)))
+            limit = unbound_after(limits, &phase) => {
+                Some(Ended::Failed(limit_reached(limit)))
             }
         };
         let step = ended.map(|ended| {
@@ -601,13 +612,23 @@ async fn run(
     }
 }
 
-/// Resolves after `limit` if the shortcuts are still not bound, and never
-/// otherwise.
-async fn unbound_after(limit: Duration, bound: &Cell<bool>) {
-    tokio::time::sleep(limit).await;
-    if bound.get() {
+/// Resolves with the limit that ran out: `start` if the bind was not asked
+/// for by then, `answer` if it was and is still unanswered. Never resolves
+/// once the shortcuts are bound. An `answer` shorter than `start` counts as
+/// `start`, so the limit named is the time that passed.
+async fn unbound_after(limits: Limits, phase: &Cell<Phase>) -> Duration {
+    let answer = limits.answer.max(limits.start);
+    tokio::time::sleep(limits.start).await;
+    match phase.get() {
+        Phase::Starting => return limits.start,
+        Phase::Asked => {}
+        Phase::Bound => std::future::pending::<()>().await,
+    }
+    tokio::time::sleep(answer - limits.start).await;
+    if phase.get() == Phase::Bound {
         std::future::pending::<()>().await;
     }
+    answer
 }
 
 /// Watch the portal's name, register, subscribe, create the session, bind,
@@ -615,6 +636,7 @@ async fn unbound_after(limit: Duration, bound: &Cell<bool>) {
 async fn serve(
     plan: &mut Plan<'_>,
     on_event: &dyn Fn(ShortcutEvent),
+    phase: &Cell<Phase>,
     session_slot: &mut Option<ShortcutSession>,
     requests: &mut mpsc::UnboundedReceiver<Command>,
 ) -> Result<std::convert::Infallible, Ended> {
@@ -670,9 +692,11 @@ async fn serve(
     let session_path = session_path(session).map_err(|e| failed("session handle", &e))?;
 
     let ids = Ids::of(plan.bound_generation());
-    // The answer can be a person's, so a portal that leaves meanwhile is seen
-    // now and not at the limit.
     let preferred = shortcuts(&ids, &plan.preferences);
+    // The portal has answered every step so far; from here the answer can be
+    // a person's, so the long limit holds, and a portal that leaves meanwhile
+    // is seen now and not at that limit.
+    phase.set(Phase::Asked);
     let answer = tokio::select! {
         answer = portal.bind_shortcuts(
             session,
@@ -909,23 +933,50 @@ mod tests {
     }
 
     #[test]
-    fn limit_fires_only_while_unbound() {
-        let limit = Duration::from_millis(20);
+    fn each_limit_fires_only_in_its_phase() {
+        let limits = Limits {
+            start: Duration::from_millis(20),
+            answer: Duration::from_millis(200),
+        };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let bound = Cell::new(false);
             let far = Duration::from_secs(10);
+            let phase = Cell::new(Phase::Starting);
+            let started = tokio::time::Instant::now();
+            let fired = tokio::time::timeout(far, unbound_after(limits, &phase)).await;
+            assert_eq!(fired, Ok(limits.start));
+            assert!(started.elapsed() < limits.answer);
+
+            // Asked: the start limit passes, the answer limit fires.
+            phase.set(Phase::Asked);
+            let started = tokio::time::Instant::now();
+            let fired = tokio::time::timeout(far, unbound_after(limits, &phase)).await;
+            assert_eq!(fired, Ok(limits.answer));
+            assert!(started.elapsed() >= limits.answer);
+
+            // Answered in time: neither fires.
+            let answered = async {
+                tokio::time::sleep(limits.start * 2).await;
+                phase.set(Phase::Bound);
+                std::future::pending::<Duration>().await
+            };
+            let raced = async {
+                tokio::select! {
+                    limit = unbound_after(limits, &phase) => limit,
+                    limit = answered => limit,
+                }
+            };
+            phase.set(Phase::Asked);
             assert!(
-                tokio::time::timeout(far, unbound_after(limit, &bound))
+                tokio::time::timeout(limits.answer * 3, raced)
                     .await
-                    .is_ok()
+                    .is_err()
             );
-            bound.set(true);
             assert!(
-                tokio::time::timeout(limit * 10, unbound_after(limit, &bound))
+                tokio::time::timeout(limits.answer * 2, unbound_after(limits, &phase))
                     .await
                     .is_err()
             );
@@ -1080,7 +1131,10 @@ mod tests {
         );
         // The limit of the attempt is a failure like any other.
         assert_eq!(
-            next_step(Stage::Rebinding, Ended::Failed(limit_reached(REBIND_LIMIT))),
+            next_step(
+                Stage::Rebinding,
+                Ended::Failed(limit_reached(Duration::from_secs(600)))
+            ),
             unchanged("The keys are unchanged: binding the shortcut: no result within 600s")
         );
         assert_eq!(
@@ -1129,8 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_rebind_has_the_long_limit() {
-        let normal = Duration::from_secs(60);
+    fn only_a_rebind_binds_the_next_generation() {
         let plan = |stage| Plan {
             app_id: "x",
             file: None,
@@ -1141,12 +1194,10 @@ mod tests {
             },
             stage,
         };
-        assert_eq!(plan(Stage::Current).limit(normal), normal);
-        assert_eq!(plan(Stage::Rebinding).limit(normal), REBIND_LIMIT);
         let returning = Stage::Returning {
             message: String::new(),
         };
-        assert_eq!(plan(returning).limit(normal), normal);
+        assert_eq!(plan(returning).bound_generation(), 4);
         assert_eq!(plan(Stage::Current).bound_generation(), 4);
         assert_eq!(plan(Stage::Rebinding).bound_generation(), 5);
     }

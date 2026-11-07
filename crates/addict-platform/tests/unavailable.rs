@@ -50,7 +50,10 @@ fn child_body() {
     let handle = shortcut::start(
         "io.github.doqhu.Test",
         "LOGO+q",
-        BIND_LIMIT,
+        shortcut::Limits {
+            start: BIND_LIMIT,
+            answer: BIND_LIMIT * 10,
+        },
         None,
         move |event| {
             let _ = sender.send(event);

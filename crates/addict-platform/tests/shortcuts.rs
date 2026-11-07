@@ -17,7 +17,7 @@ use std::{
 
 use addict_platform::{
     screenshot::{self, CaptureFailure},
-    shortcut::{self, Action, Bindings, ShortcutEvent},
+    shortcut::{self, Action, Bindings, Limits, ShortcutEvent},
 };
 use zbus::{
     Connection,
@@ -602,14 +602,25 @@ impl Mock {
         mock
     }
 
-    /// A worker on this portal, as a start of addict is.
+    /// A worker on this portal, as a start of addict is, with `limit` for both
+    /// steps of an attempt.
     fn start_worker(&mut self, limit: Duration, file: Option<PathBuf>) {
+        self.start_worker_with(
+            Limits {
+                start: limit,
+                answer: limit,
+            },
+            file,
+        );
+    }
+
+    fn start_worker_with(&mut self, limits: Limits, file: Option<PathBuf>) {
         let (sender, events) = mpsc::channel();
         self.events = events;
         self.worker = Some(shortcut::start(
             APP_ID,
             "LOGO+q",
-            limit,
+            limits,
             file,
             move |event| {
                 sender.send(event).unwrap();
@@ -1586,6 +1597,62 @@ fn a_portal_that_vanishes_and_cannot_be_activated_reports_one_failure() {
     };
     assert!(message.starts_with("host registration of"), "{message}");
     assert!(message.contains("ServiceUnknown"), "{message}");
+    assert_eq!(
+        portal.events.recv_timeout(WAIT),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    );
+}
+
+/// On a first launch GNOME opens its dialog for the first bind, and the
+/// window may cover it: an answer after the start limit still binds.
+#[test]
+fn a_first_bind_answered_after_the_start_limit_is_bound() {
+    if !private("a_first_bind_answered_after_the_start_limit_is_bound") {
+        return;
+    }
+    let dir = GenerationDir::new("first");
+    let mut portal = Mock::gnome(&[]);
+    let start = Duration::from_millis(500);
+    portal.start_worker_with(
+        Limits {
+            start,
+            answer: WAIT,
+        },
+        Some(dir.file()),
+    );
+    portal.wait_for_dialog();
+    std::thread::sleep(start * 3);
+    portal.answer(Dialog::Accept(vec![(0, SUPER_Q)]));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: bindings(Some(SUPER_Q), None)
+        }
+    );
+    assert_eq!(portal.dialogs().len(), 1);
+    portal.close();
+}
+
+/// A dialog nobody answers ends at the answer limit, named in the failure.
+#[test]
+fn an_unanswered_first_bind_fails_at_the_answer_limit() {
+    if !private("an_unanswered_first_bind_fails_at_the_answer_limit") {
+        return;
+    }
+    let mut portal = Mock::gnome(&[]);
+    let limits = Limits {
+        start: Duration::from_millis(300),
+        answer: Duration::from_millis(1500),
+    };
+    let started = Instant::now();
+    portal.start_worker_with(limits, None);
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Failed {
+            message: "binding the shortcut: no result within 1.5s".to_owned()
+        }
+    );
+    assert!(started.elapsed() >= limits.answer);
     assert_eq!(
         portal.events.recv_timeout(WAIT),
         Err(mpsc::RecvTimeoutError::Disconnected)

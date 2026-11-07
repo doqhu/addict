@@ -184,7 +184,7 @@
 //! without text shows the window with the same way to try again.
 //!
 //! An attempt to bind the shortcuts of both actions that ends without them,
-//! for any reason or for none within `resident::BIND_LIMIT`, keeps a line
+//! for any reason or for none within `resident::BIND_LIMITS`, keeps a line
 //! saying so and Retry in the window. Background login stays silent. Retry
 //! starts a new attempt; an initialized session removes the failure line even
 //! with unassigned actions.
