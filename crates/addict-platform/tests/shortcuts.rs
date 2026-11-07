@@ -53,7 +53,7 @@ enum Shot {
     Refused,
 }
 
-/// How the person answers the dialog of a version 1 portal.
+/// How the person answers the dialog of GNOME's backend, opened by a bind.
 #[derive(Clone)]
 enum Dialog {
     /// Accepted, with these rows edited (0 is the clipboard, 1 the screenshot);
@@ -74,8 +74,9 @@ struct OpenDialog {
 /// One portal process: what it was asked, and how it answers.
 #[derive(Default)]
 struct State {
-    /// With a value, binding works like GNOME's version 1 portal: the answer
-    /// comes from this map, and a dialog opens only for an ID not in it.
+    /// With a value, the backend works like GNOME's: a bind is answered from
+    /// this map, a dialog opens only for an ID not in it, and
+    /// `ConfigureShortcuts`, if the frontend lets it through, is not implemented.
     stored: Mutex<Option<HashMap<String, String>>>,
     /// The answers to the next dialogs.
     answers: Mutex<VecDeque<Dialog>>,
@@ -299,9 +300,19 @@ impl Portal {
         _parent: String,
         _options: Options,
         #[zbus(connection)] connection: &Connection,
-    ) {
+    ) -> zbus::fdo::Result<()> {
         self.state.configured.lock().unwrap().push(session.clone());
+        if self.state.stored.lock().unwrap().is_some() {
+            // GNOME's backend has no such method; a version 2 frontend before
+            // xdg-desktop-portal 1.22 passes on gdbus-codegen's answer.
+            return Err(zbus::fdo::Error::UnknownMethod(
+                "Method ConfigureShortcuts is not implemented on interface \
+                 org.freedesktop.impl.portal.GlobalShortcuts"
+                    .to_owned(),
+            ));
+        }
         changed(connection, &session, &[("screenshot", "Super+S")]).await;
+        Ok(())
     }
 }
 
@@ -575,7 +586,13 @@ impl Mock {
 
     /// A version 1 portal that holds `stored`, like GNOME's, with no worker.
     fn gnome(stored: &[(&str, &str)]) -> Self {
-        let mock = Self::without_worker(vec![], 1, false);
+        Self::gnome_behind(1, stored)
+    }
+
+    /// GNOME's backend behind a frontend of `version`: of version 2, it lets
+    /// `ConfigureShortcuts` through, and the backend lacks it.
+    fn gnome_behind(version: u32, stored: &[(&str, &str)]) -> Self {
+        let mock = Self::without_worker(vec![], version, false);
         *mock.state.stored.lock().unwrap() = Some(
             stored
                 .iter()
@@ -950,10 +967,11 @@ fn ids(generation: &[&str]) -> Vec<String> {
     generation.iter().map(|id| (*id).to_owned()).collect()
 }
 
-/// A person changes both keys, then changes one again.
-fn change_keys_through_the_dialog() {
+/// A person changes both keys, then changes one again, on GNOME's backend
+/// behind a frontend of `version`.
+fn change_keys_through_the_dialog(version: u32) {
     let dir = GenerationDir::new("change");
-    let mut portal = Mock::gnome(&[("invoke", SUPER_Q), ("screenshot", "")]);
+    let mut portal = Mock::gnome_behind(version, &[("invoke", SUPER_Q), ("screenshot", "")]);
     portal.start_worker(WAIT, Some(dir.file()));
     let old = bindings(Some(SUPER_Q), None);
     assert_eq!(
@@ -978,7 +996,9 @@ fn change_keys_through_the_dialog() {
         }
     );
     assert_eq!(portal.event(), ShortcutEvent::RebindEnded { message: None });
-    assert!(portal.state.configured.lock().unwrap().is_empty());
+    // A version 1 frontend refuses the dialog itself; version 2 asks the backend.
+    let asked = |presses| if version == 1 { 0 } else { presses };
+    assert_eq!(portal.state.configured.lock().unwrap().len(), asked(1));
     assert_eq!(
         portal.binds(),
         [
@@ -1020,6 +1040,7 @@ fn change_keys_through_the_dialog() {
     assert_eq!(portal.event(), ShortcutEvent::RebindEnded { message: None });
     assert_eq!(portal.binds()[2], ids(&["invoke-2", "screenshot-2"]));
     assert_eq!(dir.saved().as_deref(), Some("2\n"));
+    assert_eq!(portal.state.configured.lock().unwrap().len(), asked(2));
     portal.stop_worker();
 }
 
@@ -1028,14 +1049,22 @@ fn a_version_1_portal_changes_keys_through_its_dialog_under_new_ids() {
     if !private("a_version_1_portal_changes_keys_through_its_dialog_under_new_ids") {
         return;
     }
-    change_keys_through_the_dialog();
+    change_keys_through_the_dialog(1);
+}
+
+#[test]
+fn a_version_2_frontend_without_the_backend_method_changes_keys_under_new_ids() {
+    if !private("a_version_2_frontend_without_the_backend_method_changes_keys_under_new_ids") {
+        return;
+    }
+    change_keys_through_the_dialog(2);
 }
 
 /// A stand-in `dconf` first on the `PATH` leaves a mark if anything runs it.
 #[test]
 fn the_rebind_never_runs_dconf() {
     if std::env::var_os(CHILD).is_some() {
-        change_keys_through_the_dialog();
+        change_keys_through_the_dialog(1);
         return;
     }
     let dir = std::env::temp_dir().join(format!("addict-test-dconf-{}", std::process::id()));

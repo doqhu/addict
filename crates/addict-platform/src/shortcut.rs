@@ -12,7 +12,8 @@
 //! of the portal's bus name goes, the worker starts a new attempt on a fresh
 //! connection with the same IDs and preferences, under a new limit.
 //!
-//! A version 1 portal has no dialog to ask for, and GNOME opens one only for an
+//! A version 1 portal has no dialog to ask for, nor has a version 2 frontend
+//! whose backend lacks `ConfigureShortcuts`, and GNOME opens one only for an
 //! ID it has not stored. So on such a portal, a request for the dialog closes
 //! the session and binds under IDs of the next generation, offering each
 //! current key as the preferred one. If the person accepts, that generation is
@@ -306,9 +307,10 @@ pub enum ShortcutEvent {
 enum Ended {
     /// The owner of the portal's name went: bind again.
     PortalLeft,
-    /// The portal is too old for its dialog (`ConfigureShortcuts` is from
-    /// version 2 of the interface): bind again under new IDs. `bindings` are the
-    /// keys of the session that ended.
+    /// The portal has no dialog to ask for (`ConfigureShortcuts` is from
+    /// version 2 of the interface, and some backends lack it behind a version 2
+    /// frontend): bind again under new IDs. `bindings` are the keys of the
+    /// session that ended.
     Rebind {
         bindings: Bindings,
     },
@@ -741,7 +743,7 @@ async fn serve(
                 )
                 .await
                 .ok();
-                if refused_for_version(&asked) {
+                if configure_is_missing(&asked) {
                     return Err(Ended::Rebind { bindings });
                 }
                 on_event(configure_ended(asked));
@@ -805,10 +807,30 @@ fn one_line_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Whether the answer to a request for the portal's dialog is the refusal for
-/// the version of the interface. No other answer starts a rebind.
-fn refused_for_version(answer: &Option<Result<(), ashpd::Error>>) -> bool {
-    matches!(answer, Some(Err(ashpd::Error::RequiresVersion(..))))
+/// Whether the answer to a request for the portal's dialog says there is none:
+/// the refusal for the version of the interface, or a frontend of version 2
+/// passing on its backend's lack of the method (xdg-desktop-portal before 1.22
+/// with GNOME's backend). No other answer starts a rebind.
+fn configure_is_missing(answer: &Option<Result<(), ashpd::Error>>) -> bool {
+    match answer {
+        Some(Err(ashpd::Error::RequiresVersion(..))) => true,
+        Some(Err(ashpd::Error::Portal(ashpd::PortalError::ZBus(e)) | ashpd::Error::Zbus(e))) => {
+            is_unknown_method(e)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a D-Bus error is `org.freedesktop.DBus.Error.UnknownMethod`, in
+/// either of the shapes zbus gives it.
+fn is_unknown_method(error: &zbus::Error) -> bool {
+    match error {
+        zbus::Error::MethodError(name, ..) => {
+            name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod"
+        }
+        zbus::Error::FDO(e) => matches!(**e, zbus::fdo::Error::UnknownMethod(_)),
+        _ => false,
+    }
 }
 
 /// The answer to a request for the portal's dialog: its result, or `None`
@@ -942,13 +964,33 @@ mod tests {
     }
 
     #[test]
-    fn the_version_refusal_rebinds_and_no_other_answer_does() {
-        assert!(refused_for_version(&Some(Err(
+    fn a_missing_dialog_rebinds_and_no_other_answer_does() {
+        let fdo = |e| zbus::Error::FDO(Box::new(e));
+        let unknown = || {
+            fdo(zbus::fdo::Error::UnknownMethod(
+                "Method ConfigureShortcuts is not implemented".into(),
+            ))
+        };
+        assert!(configure_is_missing(&Some(Err(
             ashpd::Error::RequiresVersion(2, 1)
         ))));
-        assert!(!refused_for_version(&Some(Err(ashpd::Error::InvalidAppID))));
-        assert!(!refused_for_version(&Some(Ok(()))));
-        assert!(!refused_for_version(&None));
+        assert!(configure_is_missing(&Some(Err(ashpd::Error::Portal(
+            ashpd::PortalError::ZBus(unknown())
+        )))));
+        assert!(configure_is_missing(&Some(Err(ashpd::Error::Zbus(
+            unknown()
+        )))));
+        assert!(!configure_is_missing(&Some(Err(ashpd::Error::Portal(
+            ashpd::PortalError::Failed("no".into())
+        )))));
+        assert!(!configure_is_missing(&Some(Err(ashpd::Error::Portal(
+            ashpd::PortalError::ZBus(fdo(zbus::fdo::Error::Failed("no".into())))
+        )))));
+        assert!(!configure_is_missing(&Some(Err(
+            ashpd::Error::InvalidAppID
+        ))));
+        assert!(!configure_is_missing(&Some(Ok(()))));
+        assert!(!configure_is_missing(&None));
     }
 
     #[test]
