@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "addict-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "addict-core",
  "addict-deepl",
@@ -28,11 +28,11 @@ dependencies = [
 
 [[package]]
 name = "addict-core"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "addict-deepl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "addict-core",
  "addict-deepl",
@@ -44,7 +44,7 @@ dependencies = [
 
 [[package]]
 name = "addict-dictionary"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "addict-core",
  "bzip2",
@@ -59,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "addict-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "addict-core",
  "ashpd",
