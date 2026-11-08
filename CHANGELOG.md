@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/doqhu/addict/compare/v0.1.0...v0.1.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **platform:** configure shortcuts on portals without ConfigureShortcuts ([#8](https://github.com/doqhu/addict/issues/8)) ([7ce30eb](https://github.com/doqhu/addict/commit/7ce30eb0ef6ad596f8accdf94ec7a401051f24b3))
+
 ## 0.1.0 (2026-10-31)
 
 First release of addict, a hotkey translator for Linux readers of English, Spanish and Catalan.
