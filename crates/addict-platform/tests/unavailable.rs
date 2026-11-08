@@ -47,9 +47,18 @@ fn run_child() {
 
 fn child_body() {
     let (sender, receiver) = mpsc::channel();
-    let handle = shortcut::start("io.github.doqhu.Test", "LOGO+q", BIND_LIMIT, move |event| {
-        let _ = sender.send(event);
-    });
+    let handle = shortcut::start(
+        "io.github.doqhu.Test",
+        "LOGO+q",
+        shortcut::Limits {
+            start: BIND_LIMIT,
+            answer: BIND_LIMIT * 10,
+        },
+        None,
+        move |event| {
+            let _ = sender.send(event);
+        },
+    );
 
     match receiver
         .recv_timeout(EVENT_TIMEOUT)

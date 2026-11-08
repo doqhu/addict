@@ -17,7 +17,7 @@ use std::{
 
 use addict_platform::{
     screenshot::{self, CaptureFailure},
-    shortcut::{self, Action, Bindings, ShortcutEvent},
+    shortcut::{self, Action, Bindings, Limits, ShortcutEvent},
 };
 use zbus::{
     Connection,
@@ -36,7 +36,7 @@ const WAIT: Duration = Duration::from_secs(5);
 type Options = HashMap<String, OwnedValue>;
 type Shortcuts = Vec<(String, Options)>;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Definition {
     id: String,
     description: String,
@@ -53,9 +53,44 @@ enum Shot {
     Refused,
 }
 
+/// How the person answers the dialog of GNOME's backend, opened by a bind.
+#[derive(Clone)]
+enum Dialog {
+    /// Accepted, with these rows edited (0 is the clipboard, 1 the screenshot);
+    /// the other rows keep what they were filled in with.
+    Accept(Vec<(usize, &'static str)>),
+    /// Closed or Esc: nothing is stored, and the response has code 2.
+    Cancel,
+    /// Stays open until [`Mock::answer`].
+    Hold,
+}
+
+/// A dialog that is open, to be answered.
+struct OpenDialog {
+    request: OwnedObjectPath,
+    rows: Vec<Definition>,
+}
+
 /// One portal process: what it was asked, and how it answers.
 #[derive(Default)]
 struct State {
+    /// With a value, the backend works like GNOME's: a bind is answered from
+    /// this map, a dialog opens only for an ID not in it, and
+    /// `ConfigureShortcuts`, if the frontend lets it through, is not implemented.
+    stored: Mutex<Option<HashMap<String, String>>>,
+    /// The answers to the next dialogs.
+    answers: Mutex<VecDeque<Dialog>>,
+    /// The rows of each dialog that opened.
+    dialogs: Mutex<Vec<Vec<Definition>>>,
+    open_dialog: Mutex<Option<OpenDialog>>,
+    /// The IDs of each bind.
+    binds: Mutex<Vec<Vec<String>>>,
+    /// How many of the next binds the portal refuses.
+    refused_binds: AtomicUsize,
+    created: AtomicUsize,
+    /// Binds made while an older session of this process was open: it would
+    /// hold the keys.
+    binds_over_a_session: AtomicUsize,
     /// The calls that matter to the order: `Register` must come first.
     log: Mutex<Vec<&'static str>>,
     registered: Mutex<Option<String>>,
@@ -182,6 +217,7 @@ impl Portal {
     ) -> zbus::fdo::Result<OwnedObjectPath> {
         self.state.check_registered(&header)?;
         self.state.log.lock().unwrap().push("CreateSession");
+        self.state.created.fetch_add(1, Ordering::SeqCst);
         let session = path("session", "session_handle_token", &options, &header);
         connection
             .object_server()
@@ -225,6 +261,26 @@ impl Portal {
             activated(connection, &session, "screenshot", "during-bind", 41).await;
         }
         let request = path("request", "handle_token", &options, &header);
+        self.state
+            .binds
+            .lock()
+            .unwrap()
+            .push(shortcuts.iter().map(|(id, _)| id.clone()).collect());
+        if self.state.created.load(Ordering::SeqCst) != self.state.closed.load(Ordering::SeqCst) + 1
+        {
+            self.state
+                .binds_over_a_session
+                .fetch_add(1, Ordering::SeqCst);
+        }
+        let refusals = &self.state.refused_binds;
+        if refusals.load(Ordering::SeqCst) > 0 {
+            refusals.fetch_sub(1, Ordering::SeqCst);
+            return Err(zbus::fdo::Error::Failed("bind refused".to_owned()));
+        }
+        if self.state.stored.lock().unwrap().is_some() {
+            bind_like_gnome(&self.state, connection, request.clone()).await?;
+            return Ok(request);
+        }
         if self.state.silent_bind {
             return Ok(request);
         }
@@ -244,10 +300,123 @@ impl Portal {
         _parent: String,
         _options: Options,
         #[zbus(connection)] connection: &Connection,
-    ) {
+    ) -> zbus::fdo::Result<()> {
         self.state.configured.lock().unwrap().push(session.clone());
+        if self.state.stored.lock().unwrap().is_some() {
+            // GNOME's backend has no such method; a version 2 frontend before
+            // xdg-desktop-portal 1.22 passes on gdbus-codegen's answer.
+            return Err(zbus::fdo::Error::UnknownMethod(
+                "Method ConfigureShortcuts is not implemented on interface \
+                 org.freedesktop.impl.portal.GlobalShortcuts"
+                    .to_owned(),
+            ));
+        }
         changed(connection, &session, &[("screenshot", "Super+S")]).await;
+        Ok(())
     }
+}
+
+/// What the version 1 portal does with a bind: a dialog only for an unknown ID,
+/// otherwise an answer at once with what is stored.
+async fn bind_like_gnome(
+    state: &State,
+    connection: &Connection,
+    request: OwnedObjectPath,
+) -> zbus::Result<()> {
+    let rows = state.definitions.lock().unwrap().clone();
+    let known = {
+        let stored = state.stored.lock().unwrap();
+        let stored = stored.as_ref().unwrap();
+        rows.iter().all(|row| stored.contains_key(&row.id))
+    };
+    if known {
+        return answer_from_store(state, connection, &request, &rows).await;
+    }
+    state.dialogs.lock().unwrap().push(rows.clone());
+    let answer = state.answers.lock().unwrap().pop_front();
+    match answer.unwrap_or(Dialog::Hold) {
+        Dialog::Hold => {
+            *state.open_dialog.lock().unwrap() = Some(OpenDialog { request, rows });
+            Ok(())
+        }
+        answer => answer_dialog(state, connection, &request, &rows, answer).await,
+    }
+}
+
+async fn answer_dialog(
+    state: &State,
+    connection: &Connection,
+    request: &OwnedObjectPath,
+    rows: &[Definition],
+    answer: Dialog,
+) -> zbus::Result<()> {
+    let Dialog::Accept(edits) = answer else {
+        return coded_response(connection, request, 2, Options::new()).await;
+    };
+    // Accepting replaces the whole list, with every ID: one with no key is
+    // stored empty, so it opens no dialog, and the answer omits it.
+    let accepted = rows
+        .iter()
+        .enumerate()
+        .map(|(row, definition)| {
+            let edited = edits.iter().find(|(index, _)| *index == row);
+            let key = edited.map_or_else(
+                || {
+                    definition
+                        .preferred
+                        .as_deref()
+                        .map_or_else(String::new, described)
+                },
+                |(_, key)| (*key).to_owned(),
+            );
+            (definition.id.clone(), key)
+        })
+        .collect();
+    *state.stored.lock().unwrap() = Some(accepted);
+    answer_from_store(state, connection, request, rows).await
+}
+
+async fn answer_from_store(
+    state: &State,
+    connection: &Connection,
+    request: &OwnedObjectPath,
+    rows: &[Definition],
+) -> zbus::Result<()> {
+    let answered: Shortcuts = {
+        let stored = state.stored.lock().unwrap();
+        let stored = stored.as_ref().unwrap();
+        rows.iter()
+            .filter_map(|row| {
+                let key = stored.get(&row.id).filter(|key| !key.is_empty())?;
+                let (id, options) = descriptors(&[(row.id.as_str(), key.as_str())]).remove(0);
+                Some((id, options))
+            })
+            .collect()
+    };
+    let shortcuts = OwnedValue::try_from(Value::new(answered)).unwrap();
+    response(
+        connection,
+        request,
+        HashMap::from([("shortcuts".to_owned(), shortcuts)]),
+    )
+    .await
+}
+
+/// A preferred trigger as GNOME's dialog shows it once accepted.
+fn described(preferred: &str) -> String {
+    let mut parts: Vec<&str> = preferred.split('+').collect();
+    let key = parts.pop().unwrap();
+    let modifiers: String = parts
+        .into_iter()
+        .map(|modifier| match modifier {
+            "CTRL" => "<Control>",
+            "LOGO" => "<Super>",
+            "SHIFT" => "<Shift>",
+            "ALT" => "<Alt>",
+            other => panic!("not a modifier of the syntax: {other}"),
+        })
+        .collect();
+    format!("Press {modifiers}{key}")
 }
 
 struct Session(Arc<State>);
@@ -386,11 +555,13 @@ async fn portal_process(
 }
 
 struct Mock {
+    // First, so that it goes first: a failing test must not leave a worker to
+    // see this portal go and activate the system's on the private bus.
+    worker: Option<shortcut::ShortcutHandle>,
     runtime: tokio::runtime::Runtime,
     connection: Connection,
     state: Arc<State>,
     events: mpsc::Receiver<ShortcutEvent>,
-    worker: Option<shortcut::ShortcutHandle>,
 }
 
 impl Mock {
@@ -409,12 +580,117 @@ impl Mock {
         limit: Duration,
     ) -> Self {
         let mut mock = Self::without_worker(initial, version, activate_during_bind);
-        let (sender, events) = mpsc::channel();
-        mock.events = events;
-        mock.worker = Some(shortcut::start(APP_ID, "LOGO+q", limit, move |event| {
-            sender.send(event).unwrap();
-        }));
+        mock.start_worker(limit, None);
         mock
+    }
+
+    /// A version 1 portal that holds `stored`, like GNOME's, with no worker.
+    fn gnome(stored: &[(&str, &str)]) -> Self {
+        Self::gnome_behind(1, stored)
+    }
+
+    /// GNOME's backend behind a frontend of `version`: of version 2, it lets
+    /// `ConfigureShortcuts` through, and the backend lacks it.
+    fn gnome_behind(version: u32, stored: &[(&str, &str)]) -> Self {
+        let mock = Self::without_worker(vec![], version, false);
+        *mock.state.stored.lock().unwrap() = Some(
+            stored
+                .iter()
+                .map(|(id, key)| ((*id).to_owned(), (*key).to_owned()))
+                .collect(),
+        );
+        mock
+    }
+
+    /// A worker on this portal, as a start of addict is, with `limit` for both
+    /// steps of an attempt.
+    fn start_worker(&mut self, limit: Duration, file: Option<PathBuf>) {
+        self.start_worker_with(
+            Limits {
+                start: limit,
+                answer: limit,
+            },
+            file,
+        );
+    }
+
+    fn start_worker_with(&mut self, limits: Limits, file: Option<PathBuf>) {
+        let (sender, events) = mpsc::channel();
+        self.events = events;
+        self.worker = Some(shortcut::start(
+            APP_ID,
+            "LOGO+q",
+            limits,
+            file,
+            move |event| {
+                sender.send(event).unwrap();
+            },
+        ));
+    }
+
+    /// Stops the worker: every session it created is closed.
+    fn stop_worker(&mut self) {
+        drop(self.worker.take());
+        assert_eq!(
+            self.state.closed.load(Ordering::SeqCst),
+            self.state.created.load(Ordering::SeqCst)
+        );
+    }
+
+    fn press_configure(&self) {
+        self.worker.as_ref().unwrap().configure();
+    }
+
+    fn script(&self, answer: Dialog) {
+        self.state.answers.lock().unwrap().push_back(answer);
+    }
+
+    fn dialogs(&self) -> Vec<Vec<Definition>> {
+        self.state.dialogs.lock().unwrap().clone()
+    }
+
+    fn binds(&self) -> Vec<Vec<String>> {
+        self.state.binds.lock().unwrap().clone()
+    }
+
+    fn stored(&self) -> HashMap<String, String> {
+        self.state.stored.lock().unwrap().clone().unwrap()
+    }
+
+    /// Waits for a [`Dialog::Hold`] to be open.
+    fn wait_for_dialog(&self) {
+        let deadline = Instant::now() + WAIT;
+        while self.state.open_dialog.lock().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "no dialog opened");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The person answers the dialog that is open.
+    fn answer(&self, answer: Dialog) {
+        let open = self.state.open_dialog.lock().unwrap().take().unwrap();
+        self.runtime
+            .block_on(answer_dialog(
+                &self.state,
+                &self.connection,
+                &open.request,
+                &open.rows,
+                answer,
+            ))
+            .unwrap();
+    }
+
+    /// No session stayed open under a later bind.
+    fn assert_no_bind_over_a_session(&self) {
+        assert_eq!(self.state.binds_over_a_session.load(Ordering::SeqCst), 0);
+    }
+
+    /// Nothing more arrives from the worker for a moment.
+    fn assert_quiet(&self) {
+        assert_eq!(
+            self.events.recv_timeout(Duration::from_millis(300)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
     }
 
     fn without_worker(
@@ -655,36 +931,555 @@ fn an_empty_session_remains_configurable_and_screenshot_only_is_usable() {
     portal.close();
 }
 
-#[test]
-fn an_older_portal_keeps_bindings_and_activations_after_configuration_is_unsupported() {
-    if !private("an_older_portal_keeps_bindings_and_activations_after_configuration_is_unsupported")
-    {
-        return;
+/// Where a test keeps the generation file: a new directory of its own, in the
+/// child that has the private bus.
+struct GenerationDir(PathBuf);
+
+impl GenerationDir {
+    fn new(test: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "addict-test-generation-{}-{test}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
     }
-    let mut portal = Mock::start(vec![("invoke", "F8"), ("screenshot", "")], 1, false);
+
+    fn file(&self) -> PathBuf {
+        self.0.join("shortcut-generation")
+    }
+
+    fn saved(&self) -> Option<String> {
+        std::fs::read_to_string(self.file()).ok()
+    }
+}
+
+impl Drop for GenerationDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+const SUPER_Q: &str = "Press <Super>q";
+const CTRL_SUPER_E: &str = "Press <Control><Super>e";
+
+fn stored_keys() -> [(&'static str, &'static str); 2] {
+    [("invoke", SUPER_Q), ("screenshot", CTRL_SUPER_E)]
+}
+
+fn bindings(clipboard: Option<&str>, screenshot: Option<&str>) -> Bindings {
+    Bindings {
+        clipboard: clipboard.map(str::to_owned),
+        screenshot: screenshot.map(str::to_owned),
+    }
+}
+
+fn ids(generation: &[&str]) -> Vec<String> {
+    generation.iter().map(|id| (*id).to_owned()).collect()
+}
+
+/// A person changes both keys, then changes one again, on GNOME's backend
+/// behind a frontend of `version`.
+fn change_keys_through_the_dialog(version: u32) {
+    let dir = GenerationDir::new("change");
+    let mut portal = Mock::gnome_behind(version, &[("invoke", SUPER_Q), ("screenshot", "")]);
+    portal.start_worker(WAIT, Some(dir.file()));
+    let old = bindings(Some(SUPER_Q), None);
     assert_eq!(
         portal.event(),
         ShortcutEvent::Bound {
-            bindings: Bindings {
-                clipboard: Some("F8".into()),
-                screenshot: None
-            }
+            bindings: old.clone()
         }
     );
-    portal.worker.as_ref().unwrap().configure();
-    assert_eq!(portal.event(), ShortcutEvent::ConfigureUnsupported);
-    assert!(portal.state.configured.lock().unwrap().is_empty());
-    assert_eq!(portal.state.closed.load(Ordering::SeqCst), 0);
-    portal.activated(&portal.session(), "invoke", "unchanged", 70);
+    assert!(portal.dialogs().is_empty(), "stored keys open no dialog");
+
+    portal.script(Dialog::Accept(vec![
+        (0, "Press <Super>x"),
+        (1, "Press <Super>F8"),
+    ]));
+    portal.press_configure();
+    assert_eq!(portal.event(), ShortcutEvent::Rebinding { bindings: old });
+    let new = bindings(Some("Press <Super>x"), Some("Press <Super>F8"));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: new.clone()
+        }
+    );
+    assert_eq!(portal.event(), ShortcutEvent::RebindEnded { message: None });
+    // A version 1 frontend refuses the dialog itself; version 2 asks the backend.
+    let asked = |presses| if version == 1 { 0 } else { presses };
+    assert_eq!(portal.state.configured.lock().unwrap().len(), asked(1));
+    assert_eq!(
+        portal.binds(),
+        [
+            ids(&["invoke", "screenshot"]),
+            ids(&["invoke-1", "screenshot-1"])
+        ]
+    );
+    assert_eq!(portal.state.closed.load(Ordering::SeqCst), 1);
+    portal.assert_no_bind_over_a_session();
+    assert_eq!(dir.saved().as_deref(), Some("1\n"));
+
+    // The new keys work, and an old ID is no action of this session.
+    let session = portal.session();
+    portal.activated(&session, "invoke", "old-id", 1);
+    portal.activated(&session, "screenshot-1", "new-id", 90);
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Activated {
+            action: Action::Screenshot,
+            activation_token: Some("new-id".into()),
+            timestamp_ms: 90
+        }
+    );
+
+    // Assignments that change later in this session still follow the new IDs.
+    portal.changed(&session, &[("screenshot-1", "Press <Super>F9")]);
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Changed {
+            bindings: bindings(Some("Press <Super>x"), Some("Press <Super>F9"))
+        }
+    );
+
+    // The next change uses the next generation.
+    portal.script(Dialog::Accept(vec![]));
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    assert_eq!(portal.event(), ShortcutEvent::RebindEnded { message: None });
+    assert_eq!(portal.binds()[2], ids(&["invoke-2", "screenshot-2"]));
+    assert_eq!(dir.saved().as_deref(), Some("2\n"));
+    assert_eq!(portal.state.configured.lock().unwrap().len(), asked(2));
+    portal.stop_worker();
+}
+
+#[test]
+fn a_version_1_portal_changes_keys_through_its_dialog_under_new_ids() {
+    if !private("a_version_1_portal_changes_keys_through_its_dialog_under_new_ids") {
+        return;
+    }
+    change_keys_through_the_dialog(1);
+}
+
+#[test]
+fn a_version_2_frontend_without_the_backend_method_changes_keys_under_new_ids() {
+    if !private("a_version_2_frontend_without_the_backend_method_changes_keys_under_new_ids") {
+        return;
+    }
+    change_keys_through_the_dialog(2);
+}
+
+/// A stand-in `dconf` first on the `PATH` leaves a mark if anything runs it.
+#[test]
+fn the_rebind_never_runs_dconf() {
+    if std::env::var_os(CHILD).is_some() {
+        change_keys_through_the_dialog(1);
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("addict-test-dconf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mark = dir.join("ran");
+    let stand_in = dir.join("dconf");
+    std::fs::write(&stand_in, format!("#!/bin/sh\n: > '{}'\n", mark.display())).unwrap();
+    std::fs::set_permissions(
+        &stand_in,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let mut path = std::ffi::OsString::from(&dir);
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap());
+    common::run_private_bus(
+        "the_rebind_never_runs_dconf",
+        Duration::from_secs(20),
+        &[(CHILD, OsStr::new("1")), ("PATH", path.as_os_str())],
+    );
+    assert!(!mark.exists(), "dconf was run");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn changing_one_key_keeps_the_other_through_its_filled_in_row() {
+    if !private("changing_one_key_keeps_the_other_through_its_filled_in_row") {
+        return;
+    }
+    let dir = GenerationDir::new("keep");
+    let mut portal = Mock::gnome(&stored_keys());
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    portal.script(Dialog::Accept(vec![(0, "Press F7")]));
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: bindings(Some("Press F7"), Some(CTRL_SUPER_E))
+        }
+    );
+    let dialogs = portal.dialogs();
+    assert_eq!(dialogs.len(), 1);
+    assert_eq!(dialogs[0][0].preferred.as_deref(), Some("LOGO+q"));
+    assert_eq!(dialogs[0][1].preferred.as_deref(), Some("CTRL+LOGO+e"));
+    assert_eq!(
+        portal.stored(),
+        HashMap::from([
+            ("invoke-1".to_owned(), "Press F7".to_owned()),
+            ("screenshot-1".to_owned(), CTRL_SUPER_E.to_owned()),
+        ])
+    );
+    portal.stop_worker();
+}
+
+/// A description that can't be read gives no preference: that row is empty.
+#[test]
+fn a_key_that_cannot_be_read_leaves_its_row_empty() {
+    if !private("a_key_that_cannot_be_read_leaves_its_row_empty") {
+        return;
+    }
+    let dir = GenerationDir::new("unreadable");
+    let mut portal = Mock::gnome(&[("invoke", SUPER_Q), ("screenshot", "Some other sentence")]);
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    portal.script(Dialog::Accept(vec![]));
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: bindings(Some(SUPER_Q), None)
+        }
+    );
+    assert_eq!(portal.dialogs()[0][1].preferred, None);
+    portal.stop_worker();
+}
+
+#[test]
+fn a_cancelled_dialog_returns_to_the_old_keys_and_says_so() {
+    if !private("a_cancelled_dialog_returns_to_the_old_keys_and_says_so") {
+        return;
+    }
+    let dir = GenerationDir::new("cancel");
+    let mut portal = Mock::gnome(&stored_keys());
+    portal.start_worker(WAIT, Some(dir.file()));
+    let old = bindings(Some(SUPER_Q), Some(CTRL_SUPER_E));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    portal.script(Dialog::Cancel);
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: old.clone()
+        }
+    );
+    let ShortcutEvent::RebindEnded {
+        message: Some(message),
+    } = portal.event()
+    else {
+        panic!("the end of the rebind must say what happened");
+    };
+    assert_eq!(message, "No new keys were chosen. The keys are unchanged.");
+    assert_eq!(portal.dialogs().len(), 1, "going back opens no dialog");
+    assert_eq!(
+        portal.binds(),
+        [
+            ids(&["invoke", "screenshot"]),
+            ids(&["invoke-1", "screenshot-1"]),
+            ids(&["invoke", "screenshot"]),
+        ]
+    );
+    portal.assert_no_bind_over_a_session();
+    assert_eq!(dir.saved(), None, "the generation is unchanged");
+    assert_eq!(portal.stored().len(), 2, "cancelling stores nothing");
+    portal.activated(&portal.session(), "invoke", "still-works", 91);
     assert!(matches!(
         portal.event(),
         ShortcutEvent::Activated {
             action: Action::Clipboard,
-            timestamp_ms: 70,
+            timestamp_ms: 91,
             ..
         }
     ));
-    portal.close();
+    portal.stop_worker();
+}
+
+#[test]
+fn a_restart_binds_the_saved_generation_without_a_dialog() {
+    if !private("a_restart_binds_the_saved_generation_without_a_dialog") {
+        return;
+    }
+    let dir = GenerationDir::new("restart");
+    let mut portal = Mock::gnome(&stored_keys());
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    portal.script(Dialog::Accept(vec![(1, "Press F6")]));
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    assert!(matches!(portal.event(), ShortcutEvent::RebindEnded { .. }));
+    portal.stop_worker();
+
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: bindings(Some(SUPER_Q), Some("Press F6"))
+        }
+    );
+    assert_eq!(portal.dialogs().len(), 1, "no second dialog");
+    assert_eq!(
+        portal.binds().last().unwrap(),
+        &ids(&["invoke-1", "screenshot-1"])
+    );
+    portal.activated(&portal.session(), "invoke-1", "after-restart", 92);
+    assert!(matches!(
+        portal.event(),
+        ShortcutEvent::Activated {
+            action: Action::Clipboard,
+            timestamp_ms: 92,
+            ..
+        }
+    ));
+    portal.stop_worker();
+
+    // With the file lost, the worker starts over at generation 0, whose IDs
+    // are no longer stored: the dialog opens, and that is all that happens.
+    std::fs::remove_file(dir.file()).unwrap();
+    portal.script(Dialog::Accept(vec![(0, "Press F5"), (1, "Press F4")]));
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: bindings(Some("Press F5"), Some("Press F4"))
+        }
+    );
+    assert_eq!(portal.dialogs().len(), 2);
+    assert_eq!(
+        portal.binds().last().unwrap(),
+        &ids(&["invoke", "screenshot"])
+    );
+    portal.stop_worker();
+
+    // So with a file that holds no number.
+    std::fs::write(dir.file(), "not a number\n").unwrap();
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: bindings(Some("Press F5"), Some("Press F4"))
+        }
+    );
+    assert_eq!(portal.dialogs().len(), 2);
+    portal.stop_worker();
+}
+
+#[test]
+fn keys_that_cannot_be_remembered_work_now_and_settings_is_told() {
+    if !private("keys_that_cannot_be_remembered_work_now_and_settings_is_told") {
+        return;
+    }
+    let dir = GenerationDir::new("save");
+    // A regular file stands where the directory of the file would be.
+    let blocker = dir.0.join("blocker");
+    std::fs::write(&blocker, "").unwrap();
+    let file = blocker.join("shortcut-generation");
+    let mut portal = Mock::gnome(&stored_keys());
+    portal.start_worker(WAIT, Some(file.clone()));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    portal.script(Dialog::Accept(vec![(0, "Press F7")]));
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    let ShortcutEvent::RebindEnded {
+        message: Some(message),
+    } = portal.event()
+    else {
+        panic!("the end of the rebind must say the keys were not saved");
+    };
+    assert!(message.contains("next start"), "{message}");
+    assert!(!message.contains('\n'), "{message}");
+    portal.activated(&portal.session(), "invoke-1", "this-run", 93);
+    assert!(matches!(
+        portal.event(),
+        ShortcutEvent::Activated {
+            action: Action::Clipboard,
+            timestamp_ms: 93,
+            ..
+        }
+    ));
+    portal.stop_worker();
+
+    // As it said: at the next start the dialog returns.
+    portal.script(Dialog::Accept(vec![]));
+    portal.start_worker(WAIT, Some(file));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    assert_eq!(portal.dialogs().len(), 2);
+    portal.stop_worker();
+}
+
+#[test]
+fn a_refused_rebind_returns_to_the_old_keys() {
+    if !private("a_refused_rebind_returns_to_the_old_keys") {
+        return;
+    }
+    let dir = GenerationDir::new("refused");
+    let mut portal = Mock::gnome(&stored_keys());
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    portal.state.refused_binds.store(1, Ordering::SeqCst);
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: bindings(Some(SUPER_Q), Some(CTRL_SUPER_E))
+        }
+    );
+    let ShortcutEvent::RebindEnded {
+        message: Some(message),
+    } = portal.event()
+    else {
+        panic!("the end of the rebind must say what happened");
+    };
+    assert!(message.contains("unchanged"), "{message}");
+    assert!(message.contains("bind refused"), "{message}");
+    assert_eq!(dir.saved(), None);
+    assert_eq!(
+        portal.binds().last().unwrap(),
+        &ids(&["invoke", "screenshot"])
+    );
+    portal.assert_no_bind_over_a_session();
+    portal.stop_worker();
+}
+
+#[test]
+fn a_rebind_that_fails_twice_is_a_failure_with_retry_rereading_the_file() {
+    if !private("a_rebind_that_fails_twice_is_a_failure_with_retry_rereading_the_file") {
+        return;
+    }
+    let dir = GenerationDir::new("twice");
+    let mut portal = Mock::gnome(&stored_keys());
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    portal.state.refused_binds.store(2, Ordering::SeqCst);
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    let ShortcutEvent::Failed { message } = portal.event() else {
+        panic!("the second failure must be the end");
+    };
+    assert!(message.contains("bind refused"), "{message}");
+    assert_eq!(
+        portal.events.recv_timeout(WAIT),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    );
+    assert_eq!(dir.saved(), None);
+    portal.stop_worker();
+
+    // What Retry does: a new worker.
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: bindings(Some(SUPER_Q), Some(CTRL_SUPER_E))
+        }
+    );
+    portal.stop_worker();
+}
+
+#[test]
+fn a_portal_restarting_during_the_dialog_binds_the_old_ids_on_a_new_attempt() {
+    if !private("a_portal_restarting_during_the_dialog_binds_the_old_ids_on_a_new_attempt") {
+        return;
+    }
+    let dir = GenerationDir::new("left");
+    let mut portal = Mock::gnome(&stored_keys());
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    portal.wait_for_dialog();
+
+    let stored = portal.stored();
+    let old = portal.restart(
+        State {
+            stored: Mutex::new(Some(stored)),
+            ..State::default()
+        },
+        vec![],
+    );
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: bindings(Some(SUPER_Q), Some(CTRL_SUPER_E))
+        }
+    );
+    let ShortcutEvent::RebindEnded {
+        message: Some(message),
+    } = portal.event()
+    else {
+        panic!("the end of the rebind must say what happened");
+    };
+    assert!(message.contains("unchanged"), "{message}");
+    assert_eq!(portal.log(), ["Register", "CreateSession"]);
+    assert_eq!(portal.binds(), [ids(&["invoke", "screenshot"])]);
+    // The first session was closed for the rebind; the one of the dialog went
+    // with the portal.
+    assert_eq!(old.closed.load(Ordering::SeqCst), 1);
+    assert_eq!(dir.saved(), None);
+    portal.stop_worker();
+}
+
+#[test]
+fn a_press_during_a_rebind_is_dropped_when_it_ends() {
+    if !private("a_press_during_a_rebind_is_dropped_when_it_ends") {
+        return;
+    }
+    let dir = GenerationDir::new("double");
+    let mut portal = Mock::gnome(&stored_keys());
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    portal.wait_for_dialog();
+    portal.press_configure();
+    portal.press_configure();
+    portal.answer(Dialog::Accept(vec![]));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    assert_eq!(portal.event(), ShortcutEvent::RebindEnded { message: None });
+    portal.assert_quiet();
+    assert_eq!(portal.dialogs().len(), 1, "no second dialog");
+
+    // Drained, not stuck: the next press works.
+    portal.script(Dialog::Cancel);
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    assert!(matches!(portal.event(), ShortcutEvent::RebindEnded { .. }));
+    assert_eq!(portal.dialogs().len(), 2);
+    portal.stop_worker();
+}
+
+/// Stopping addict with the dialog open changes nothing.
+#[test]
+fn stopping_during_the_dialog_saves_nothing() {
+    if !private("stopping_during_the_dialog_saves_nothing") {
+        return;
+    }
+    let dir = GenerationDir::new("stop");
+    let mut portal = Mock::gnome(&stored_keys());
+    portal.start_worker(WAIT, Some(dir.file()));
+    assert!(matches!(portal.event(), ShortcutEvent::Bound { .. }));
+    portal.press_configure();
+    assert!(matches!(portal.event(), ShortcutEvent::Rebinding { .. }));
+    portal.wait_for_dialog();
+    portal.stop_worker();
+    assert_eq!(dir.saved(), None);
+    assert_eq!(
+        portal.events.recv_timeout(WAIT),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    );
 }
 
 #[test]
@@ -802,6 +1597,62 @@ fn a_portal_that_vanishes_and_cannot_be_activated_reports_one_failure() {
     };
     assert!(message.starts_with("host registration of"), "{message}");
     assert!(message.contains("ServiceUnknown"), "{message}");
+    assert_eq!(
+        portal.events.recv_timeout(WAIT),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    );
+}
+
+/// On a first launch GNOME opens its dialog for the first bind, and the
+/// window may cover it: an answer after the start limit still binds.
+#[test]
+fn a_first_bind_answered_after_the_start_limit_is_bound() {
+    if !private("a_first_bind_answered_after_the_start_limit_is_bound") {
+        return;
+    }
+    let dir = GenerationDir::new("first");
+    let mut portal = Mock::gnome(&[]);
+    let start = Duration::from_millis(500);
+    portal.start_worker_with(
+        Limits {
+            start,
+            answer: WAIT,
+        },
+        Some(dir.file()),
+    );
+    portal.wait_for_dialog();
+    std::thread::sleep(start * 3);
+    portal.answer(Dialog::Accept(vec![(0, SUPER_Q)]));
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Bound {
+            bindings: bindings(Some(SUPER_Q), None)
+        }
+    );
+    assert_eq!(portal.dialogs().len(), 1);
+    portal.close();
+}
+
+/// A dialog nobody answers ends at the answer limit, named in the failure.
+#[test]
+fn an_unanswered_first_bind_fails_at_the_answer_limit() {
+    if !private("an_unanswered_first_bind_fails_at_the_answer_limit") {
+        return;
+    }
+    let mut portal = Mock::gnome(&[]);
+    let limits = Limits {
+        start: Duration::from_millis(300),
+        answer: Duration::from_millis(1500),
+    };
+    let started = Instant::now();
+    portal.start_worker_with(limits, None);
+    assert_eq!(
+        portal.event(),
+        ShortcutEvent::Failed {
+            message: "binding the shortcut: no result within 1.5s".to_owned()
+        }
+    );
+    assert!(started.elapsed() >= limits.answer);
     assert_eq!(
         portal.events.recv_timeout(WAIT),
         Err(mpsc::RecvTimeoutError::Disconnected)

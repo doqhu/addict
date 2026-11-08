@@ -24,6 +24,10 @@ use addict_platform::{
 /// configuration directory.
 const STARTUP_FILE: &str = "login-startup";
 
+/// The file of the current generation of the shortcut IDs, in the configuration
+/// directory.
+const SHORTCUT_FILE: &str = "shortcut-generation";
+
 /// How long the portal may take over one request. It can be waiting for the
 /// user to answer its dialog.
 pub const STARTUP_LIMIT: Duration = Duration::from_secs(60);
@@ -32,6 +36,12 @@ pub const STARTUP_LIMIT: Duration = Duration::from_secs(60);
 /// environment names no configuration directory.
 pub fn startup_file() -> Option<PathBuf> {
     Some(key::config_dir()?.join(STARTUP_FILE))
+}
+
+/// Where the shortcut worker keeps which shortcut IDs are current, or `None`
+/// when the environment names no configuration directory.
+pub fn shortcut_file() -> Option<PathBuf> {
+    Some(key::config_dir()?.join(SHORTCUT_FILE))
 }
 
 /// What stands at the login entry, outside the sandbox. A foreign file or a

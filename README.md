@@ -113,8 +113,14 @@ The clipboard action suggests Super+Q and keeps any existing assignment.
 The screenshot action has no suggested key: open Settings → Configure
 shortcuts… and assign a free key to Screen region (OCR). The portal owns both
 assignments, and Settings shows changes immediately. Its dialog configures
-both actions independently. On older portals that cannot reopen configuration,
-use the desktop's shortcut settings if available; addict keeps existing keys.
+both actions independently. Portals of GlobalShortcuts version 1, as on stock
+GNOME, have no such dialog to reopen, and neither do portals that offer version
+2 over a desktop backend without it (xdg-desktop-portal before 1.22 with
+GNOME's backend). There addict binds both actions again under new IDs, which
+makes the desktop show its dialog with the current keys filled in; cancelling
+it leaves the keys as they were. addict remembers which IDs are current in
+`shortcut-generation`, in its configuration directory. Ubuntu's dock holds
+Super+Q, so choose another key there.
 
 With the window closed, the screenshot key opens the region picker. Choose
 an area to put editable OCR text in the window, using its reading language;

@@ -187,6 +187,13 @@ pub fn read_saved(path: &Path) -> Option<bool> {
 /// so a symlink there is not followed. The directory is created. Every error
 /// names the path.
 pub fn save(path: &Path, enabled: bool) -> io::Result<()> {
+    let content = if enabled { ENABLED } else { DISABLED };
+    replace_file(path, &format!("{content}\n"))
+}
+
+/// Writes `content` as a whole new file that replaces the name. The directory
+/// is created. Every error names the path.
+pub(crate) fn replace_file(path: &Path, content: &str) -> io::Result<()> {
     let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
     let dir = path.parent().ok_or_else(|| {
         named(io::Error::new(
@@ -196,9 +203,8 @@ pub fn save(path: &Path, enabled: bool) -> io::Result<()> {
     })?;
     std::fs::create_dir_all(dir).map_err(named)?;
     let temporary = temporary_beside(path);
-    let content = if enabled { ENABLED } else { DISABLED };
-    let written = std::fs::write(&temporary, format!("{content}\n"))
-        .and_then(|()| std::fs::rename(&temporary, path));
+    let written =
+        std::fs::write(&temporary, content).and_then(|()| std::fs::rename(&temporary, path));
     if let Err(e) = written {
         let _ = std::fs::remove_file(&temporary);
         return Err(named(e));

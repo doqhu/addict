@@ -292,9 +292,25 @@ pub fn change_text(answer: Option<&str>) -> String {
     }
 }
 
-/// Older portals cannot configure an existing session. Never reset stored keys.
-pub const CONFIGURE_UNSUPPORTED: &str = "This desktop portal cannot open shortcut configuration (version 2 is required). \
-     Use the desktop's shortcut settings if available. Existing assignments are kept.";
+/// Configure shortcuts needs a session, and no new binding running.
+fn change_sensitive(bound: bool, rebinding: bool) -> bool {
+    bound && !rebinding
+}
+
+/// The line while a new binding has the system's dialog open.
+pub const REBINDING: &str = "Choose the keys in the system's dialog.";
+
+/// The line when the window is shown again: empty, unless a new binding is
+/// running, which is why the button is off.
+fn reopened_status(rebinding: bool) -> &'static str {
+    if rebinding { REBINDING } else { "" }
+}
+
+/// The line after a new binding ended: what the worker said, or that the keys
+/// that were chosen are in place.
+pub fn rebind_text(message: Option<&str>) -> String {
+    message.map_or_else(|| "The new keys are set.".to_owned(), str::to_owned)
+}
 
 /// The line after a save of the key: nothing on success, else why the key
 /// was not saved. The reason never holds the key.
@@ -527,6 +543,10 @@ pub struct Settings {
     startup: gtk::Switch,
     /// Set while the code, not the user, moves the switch.
     startup_rendering: Rc<Cell<bool>>,
+    /// Whether the shortcuts are bound, as last rendered.
+    bound: Cell<bool>,
+    /// A new binding is running, so Configure shortcuts would do nothing.
+    rebinding: Cell<bool>,
     /// The line of the startup state.
     startup_status: gtk::Label,
 }
@@ -814,6 +834,8 @@ impl Settings {
             cache_status,
             startup,
             startup_rendering,
+            bound: Cell::new(false),
+            rebinding: Cell::new(false),
             startup_status,
         };
         settings.render_binding(&Binding::Attempting, &Bindings::default());
@@ -831,7 +853,19 @@ impl Settings {
             .render(binding, bindings.clipboard.as_deref());
         self.screenshot
             .render(binding, bindings.screenshot.as_deref());
-        self.change.set_sensitive(matches!(binding, Binding::Bound));
+        self.bound.set(matches!(binding, Binding::Bound));
+        self.render_change();
+    }
+
+    /// Whether a new binding is running: Configure shortcuts waits for its end.
+    pub fn set_rebinding(&self, rebinding: bool) {
+        self.rebinding.set(rebinding);
+        self.render_change();
+    }
+
+    fn render_change(&self) {
+        self.change
+            .set_sensitive(change_sensitive(self.bound.get(), self.rebinding.get()));
     }
 
     pub fn render_key(&self, state: Option<KeyState>) {
@@ -851,6 +885,11 @@ impl Settings {
     /// window is shown again.
     pub fn clear_key_entry(&self) {
         self.key_entry.set_text("");
+    }
+
+    /// Clears the line when the window is shown again, keeping what still holds.
+    pub fn reset_status(&self) {
+        self.say(reopened_status(self.rebinding.get()));
     }
 
     pub fn say(&self, text: &str) {
@@ -899,10 +938,10 @@ mod tests {
     use addict_platform::{desktop::LoginEntry, startup::StartupFailure, work::Outcome};
 
     use super::{
-        CONFIGURE_UNSUPPORTED, CacheState, KeyState, NO_KEY_PLACE, StartupEnd, StartupShown, badge,
-        cache_text, change_startup, change_text, clear_text, key_placeholder, key_text, key_tone,
-        save_text, saved_in_text, size_text, startup_end_text, startup_outcome, startup_shown,
-        trigger_keys, trigger_text,
+        CacheState, KeyState, NO_KEY_PLACE, REBINDING, StartupEnd, StartupShown, badge, cache_text,
+        change_sensitive, change_startup, change_text, clear_text, key_placeholder, key_text,
+        key_tone, rebind_text, reopened_status, save_text, saved_in_text, size_text,
+        startup_end_text, startup_outcome, startup_shown, trigger_keys, trigger_text,
     };
     use crate::{cache::Footprint, view::Binding};
 
@@ -1238,10 +1277,15 @@ mod tests {
     }
 
     #[test]
-    fn unassigned_actions_and_older_portals_explain_configuration_without_resetting_keys() {
+    fn unassigned_actions_and_a_new_binding_explain_configuration_without_resetting_keys() {
         assert!(trigger_text(&Binding::Bound, None).starts_with("Unassigned"));
         assert!(trigger_text(&Binding::Bound, Some("")).starts_with("Unassigned"));
-        assert!(CONFIGURE_UNSUPPORTED.contains("Existing assignments are kept"));
+        assert!(REBINDING.contains("dialog"));
+        assert!(!rebind_text(None).contains("unchanged"));
+        assert_eq!(
+            rebind_text(Some("The keys are unchanged.")),
+            "The keys are unchanged."
+        );
         assert!(!change_text(None).contains("next start"));
     }
 
@@ -1279,6 +1323,20 @@ mod tests {
             line.contains("XDG_CONFIG_HOME") && line.contains("HOME"),
             "{line}"
         );
+    }
+
+    #[test]
+    fn reopening_keeps_only_the_line_of_a_running_new_binding() {
+        assert_eq!(reopened_status(true), REBINDING);
+        assert_eq!(reopened_status(false), "");
+    }
+
+    #[test]
+    fn configure_is_offered_only_when_bound_and_not_during_a_new_binding() {
+        assert!(change_sensitive(true, false));
+        assert!(!change_sensitive(true, true));
+        assert!(!change_sensitive(false, false));
+        assert!(!change_sensitive(false, true));
     }
 
     #[test]
