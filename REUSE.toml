@@ -59,3 +59,12 @@ path = "data/io.github.doqhu.Addict.metainfo.xml"
 precedence = "closest"
 SPDX-FileCopyrightText = "2026 Ilia Gordeev <ilya.tanat@gmail.com>"
 SPDX-License-Identifier = "CC0-1.0"
+
+# The Princeton WordNet 3.0 license, verbatim from the LICENSE file of
+# WordNet-3.0.tar.gz; the builder of the published indexes ships it beside
+# the OEWN index.
+[[annotations]]
+path = "crates/addict-dictionary/examples/WNDB_License.txt"
+precedence = "override"
+SPDX-FileCopyrightText = "2006 Princeton University"
+SPDX-License-Identifier = "LicenseRef-WordNet"

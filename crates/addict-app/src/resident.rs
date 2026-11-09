@@ -143,6 +143,11 @@ use addict_core::{
     translation::{Request, Source as Language, Translator},
 };
 use addict_deepl::{DeepL, key};
+use addict_dictionary::{
+    import,
+    release::{Manifest, Published},
+    sources,
+};
 use addict_platform::{
     ocr::OcrFailure,
     shortcut::{self, Action, Bindings, ShortcutEvent, ShortcutHandle},
@@ -159,7 +164,9 @@ use crate::{
     cache::{self, Cached},
     capture::{self, Capture, Captured, Failure, Timing},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
+    download::{self, Downloader},
     entries, evidence,
+    first_run::{self, Offer},
     history::History,
     language,
     manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
@@ -263,6 +270,16 @@ enum Event {
     LanguageChosen(Language),
     /// The check at the start says where the dictionary indexes stand.
     Indexes(Indexes),
+    /// The first-run offer to download a dictionary is due; this is the
+    /// manifest of the published indexes.
+    FirstRunOffer(Manifest),
+    /// Download was pressed in the first-run dialog.
+    FirstRunDownload,
+    /// Not now was pressed in the first-run dialog.
+    FirstRunNotNow,
+    /// The download and the install of the offered index ended: its path, or
+    /// why not, in one line.
+    FirstRunInstalled(Outcome<Result<std::path::PathBuf, String>>),
     /// Capture was pressed.
     Capture,
     /// The window hidden for a capture is off the screen.
@@ -510,6 +527,32 @@ struct Session {
     language_chosen: bool,
     /// The read or the write of the language file on the runner.
     language_job: Option<Job>,
+    /// Where the first-run offer to download a dictionary stands.
+    first_run: FirstRun,
+}
+
+/// Where the first-run offer of a [`Session`] stands. It is decided once, at
+/// the first answer of the indexes check: with every index missing, the
+/// choice file is read and the manifest fetched on the runner; the dialog
+/// shows once the window is, which a `--background` launch delays.
+enum FirstRun {
+    /// The indexes have not been checked yet.
+    Unasked,
+    /// The choice file is read and the manifest fetched; dropping the job
+    /// gives them up.
+    Asking { _job: Job },
+    /// The offer is due and waits for the window to be shown.
+    Pending(Published),
+    /// The dialog is shown and waits for a press.
+    Shown { offer: Offer, published: Published },
+    /// Download was pressed; dropping the job gives the download up.
+    Installing { offer: Offer, _job: Job },
+    /// The install ended, and the dialog says how.
+    Ended { _offer: Offer },
+    /// Not now was pressed; the choice file is written on the runner.
+    Declined { _job: Option<Job> },
+    /// Nothing is offered in this run.
+    Done,
 }
 
 /// Where the capture of a [`Session`] stands; at first no capture runs.
@@ -635,6 +678,11 @@ impl Copying {
 
 impl Session {
     fn handle(&mut self, event: Event) {
+        self.dispatch(event);
+        self.offer_when_shown();
+    }
+
+    fn dispatch(&mut self, event: Event) {
         match event {
             Event::Window(event) => dispatch_window(self, event),
             Event::Tray(event) => self.tray(event),
@@ -688,7 +736,12 @@ impl Session {
                 self.check = None;
                 self.indexes = Some(indexes);
                 self.view.render_indexes(indexes);
+                self.first_indexes(indexes);
             }
+            Event::FirstRunOffer(manifest) => self.first_run_offer(manifest),
+            Event::FirstRunDownload => self.first_run_download(),
+            Event::FirstRunNotNow => self.first_run_not_now(),
+            Event::FirstRunInstalled(outcome) => self.first_run_installed(outcome),
             Event::Capture => self.capture(None),
             Event::Hidden => self.start_capture(),
             Event::Captured(number) => self.snapshot_taken(number),
@@ -696,6 +749,165 @@ impl Session {
             Event::Active => self.window_active(),
             Event::Clipboard(number, line) => self.copied(number, line),
         }
+    }
+
+    /// The indexes as a check found them: the first answer decides whether
+    /// the first-run offer is asked for, on the runner; a later one that
+    /// finds an index drops an offer that still waits for the window.
+    fn first_indexes(&mut self, indexes: Indexes) {
+        match self.first_run {
+            FirstRun::Unasked if first_run::should_offer(&indexes, false) => {
+                self.first_run =
+                    self.work
+                        .upgrade()
+                        .map_or(FirstRun::Done, |work| FirstRun::Asking {
+                            _job: start_first_run(&work, indexes, &self.sender),
+                        });
+            }
+            FirstRun::Unasked => self.first_run = FirstRun::Done,
+            FirstRun::Pending(_) | FirstRun::Asking { .. }
+                if !first_run::should_offer(&indexes, false) =>
+            {
+                self.first_run = FirstRun::Done;
+            }
+            _ => {}
+        }
+    }
+
+    /// The offer is due: it waits for the window, with the offered index of
+    /// `manifest`. A manifest without it offers nothing.
+    fn first_run_offer(&mut self, manifest: Manifest) {
+        if !matches!(self.first_run, FirstRun::Asking { .. }) {
+            return;
+        }
+        let offered = sources::row(first_run::OFFERED).index;
+        self.first_run = match manifest
+            .indexes
+            .into_iter()
+            .find(|published| published.name == offered)
+        {
+            Some(published) => FirstRun::Pending(published),
+            None => {
+                eprintln!(
+                    "addict: no dictionary download is offered: the manifest has no {offered}"
+                );
+                FirstRun::Done
+            }
+        };
+    }
+
+    /// Shows the dialog of a pending offer once the window is shown.
+    fn offer_when_shown(&mut self) {
+        if !matches!(self.first_run, FirstRun::Pending(_)) || !self.window.is_visible() {
+            return;
+        }
+        let FirstRun::Pending(published) = std::mem::replace(&mut self.first_run, FirstRun::Done)
+        else {
+            return;
+        };
+        let download = self.sender.clone();
+        let not_now = self.sender.clone();
+        let offer = Offer::new(
+            &self.window,
+            published.size,
+            move || {
+                let _ = download.unbounded_send(Event::FirstRunDownload);
+            },
+            move || {
+                let _ = not_now.unbounded_send(Event::FirstRunNotNow);
+            },
+        );
+        offer.present();
+        self.first_run = FirstRun::Shown { offer, published };
+    }
+
+    /// Download was pressed: the offered index is downloaded and installed
+    /// on the runner, within [`download::DOWNLOAD_LIMIT`].
+    fn first_run_download(&mut self) {
+        let FirstRun::Shown { offer, published } =
+            std::mem::replace(&mut self.first_run, FirstRun::Done)
+        else {
+            return;
+        };
+        offer.installing();
+        let (Some(work), Some(dir)) = (self.work.upgrade(), import::data_dir()) else {
+            let why = first_run::NO_PLACE;
+            eprintln!("addict: the dictionary download failed: {why}");
+            offer.ended(Some(why));
+            self.first_run = FirstRun::Ended { _offer: offer };
+            return;
+        };
+        let installed = self.sender.clone();
+        let job = work.run(
+            download::DOWNLOAD_LIMIT,
+            async move {
+                Downloader::new()
+                    .install(&published, &dir)
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            move |outcome| {
+                // On the worker: the UI thread wakes for the event.
+                let _ = installed.unbounded_send(Event::FirstRunInstalled(outcome));
+            },
+        );
+        self.first_run = FirstRun::Installing { offer, _job: job };
+    }
+
+    /// The install ended: the dialog says how, and the indexes are checked
+    /// again, so the line of the window follows.
+    fn first_run_installed(&mut self, outcome: Outcome<Result<std::path::PathBuf, String>>) {
+        let FirstRun::Installing { offer, .. } =
+            std::mem::replace(&mut self.first_run, FirstRun::Done)
+        else {
+            return;
+        };
+        let error = match outcome {
+            Outcome::Finished(Ok(_)) => None,
+            Outcome::Finished(Err(error)) => Some(error),
+            Outcome::TimedOut => Some(first_run::late_text(download::DOWNLOAD_LIMIT)),
+            Outcome::Cancelled | Outcome::Panicked => Some(first_run::STOPPED.to_owned()),
+        };
+        if let Some(error) = &error {
+            eprintln!("addict: the dictionary download failed: {error}");
+        }
+        offer.ended(error.as_deref());
+        self.first_run = FirstRun::Ended { _offer: offer };
+        self.check = start_check(
+            self.work.upgrade().as_deref(),
+            self.articles.clone(),
+            &self.sender,
+        );
+    }
+
+    /// Not now was pressed: the choice is written on the runner, and the
+    /// offer is not made again. A write that fails is written to stderr.
+    fn first_run_not_now(&mut self) {
+        if !matches!(self.first_run, FirstRun::Shown { .. }) {
+            return;
+        }
+        let path = first_run::path();
+        let job = self.work.upgrade().map(|work| {
+            work.run(
+                first_run::FILE_LIMIT,
+                async move { first_run::write(path.as_deref()) },
+                |outcome| match outcome {
+                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
+                    Outcome::Finished(Err(e)) => {
+                        eprintln!(
+                            "addict: the answer to the dictionary download was not kept: {e}"
+                        );
+                    }
+                    Outcome::TimedOut | Outcome::Panicked => {
+                        eprintln!("addict: the answer to the dictionary download was not kept");
+                    }
+                },
+            )
+        });
+        if job.is_none() {
+            eprintln!("addict: the answer to the dictionary download was not kept: no runner");
+        }
+        self.first_run = FirstRun::Declined { _job: job };
     }
 
     /// Capture was pressed: the window hides, so it is not in the capture,
@@ -2259,6 +2471,39 @@ fn start_language(
     Some(job)
 }
 
+/// Starts the decision of the first-run offer on `work`, for the `indexes`
+/// of the first check: the choice file is read and, when the offer is due,
+/// the manifest is fetched and comes to `sender` as an event. When the
+/// manifest cannot be had, why is written to stderr and nothing is kept, so
+/// the next start asks again.
+fn start_first_run(work: &Work, indexes: Indexes, sender: &UnboundedSender<Event>) -> Job {
+    let path = first_run::path();
+    let offered = sender.clone();
+    work.run(
+        download::MANIFEST_LIMIT,
+        async move {
+            let chosen = first_run::read(path.as_deref());
+            first_run::offered_manifest(indexes, chosen, &Downloader::new()).await
+        },
+        move |outcome| match outcome {
+            Outcome::Finished(Ok(Some(manifest))) => {
+                // On the worker: the UI thread wakes for the event.
+                let _ = offered.unbounded_send(Event::FirstRunOffer(manifest));
+            }
+            Outcome::Finished(Ok(None)) | Outcome::Cancelled => {}
+            Outcome::Finished(Err(e)) => {
+                eprintln!("addict: no dictionary download is offered: {e}");
+            }
+            Outcome::TimedOut => {
+                eprintln!(
+                    "addict: no dictionary download is offered: the manifest did not come in time"
+                );
+            }
+            Outcome::Panicked => eprintln!("addict: no dictionary download is offered"),
+        },
+    )
+}
+
 /// The online translator, DeepL behind the on-disk cache, the key file it
 /// reads, for the window to name, and the cache, for its size and its clear.
 /// Nothing is read, opened or connected here: the key file, the cache and the
@@ -2359,6 +2604,7 @@ fn start(
         language_file,
         language_chosen: false,
         language_job,
+        first_run: FirstRun::Unasked,
     };
     serve(session, receiver);
     let tray = start_tray(&events);

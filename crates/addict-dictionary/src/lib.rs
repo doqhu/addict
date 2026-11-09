@@ -14,9 +14,11 @@
 //! input, with what the first two do the same way in `xml` and the SQLite
 //! file read by [`sqlite`], [`analysis`] is what a Spanish or Catalan verb
 //! form is, from the tags of a Kaikki conjugation table, [`import`] is the
-//! logic of `addict import`, and [`sources`] is the one table of dictionary
+//! logic of `addict import`, [`sources`] is the one table of dictionary
 //! sources, with their licenses and credit lines, that CREDITS (the text
-//! its `credits` makes), About → Credits and the downloader read.
+//! its `credits` makes), About → Credits and the downloader read, and
+//! [`release`] is the contract of the published indexes, their manifest and
+//! the install of a downloaded one, with no network code.
 
 #![forbid(unsafe_code)]
 
@@ -31,6 +33,7 @@ pub mod kaikki;
 pub mod lookup;
 pub mod mythes;
 pub mod oewn;
+pub mod release;
 pub mod sources;
 pub mod sqlite;
 pub mod wikdict;

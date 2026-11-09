@@ -592,7 +592,19 @@ fn recognise<'a>(
 /// Puts `index` at `path` inside `dir` through a temporary file in `dir`
 /// and a rename; on an error the temporary file is removed and `path` is as
 /// it was.
-fn replace(dir: &Path, path: &Path, index: &[u8]) -> io::Result<()> {
+pub(crate) fn replace(dir: &Path, path: &Path, index: &[u8]) -> io::Result<()> {
+    replace_checked(dir, path, index, |_| Ok(()))
+}
+
+/// As [`replace`], with `check` run on the written temporary file before the
+/// rename: an error of it is an error of the whole, and `path` stays as it
+/// was.
+pub(crate) fn replace_checked(
+    dir: &Path,
+    path: &Path,
+    index: &[u8],
+    check: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let mut name = OsString::from(".");
     name.push(path.file_name().unwrap_or_default());
@@ -603,6 +615,7 @@ fn replace(dir: &Path, path: &Path, index: &[u8]) -> io::Result<()> {
             file.write_all(index)?;
             file.sync_all()
         })
+        .and_then(|()| check(&temporary))
         .and_then(|()| fs::rename(&temporary, path));
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
