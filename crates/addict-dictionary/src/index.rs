@@ -23,7 +23,7 @@ use addict_core::dictionary::{Article, Dictionary, Sense, SourcedSense};
 
 use crate::{
     analysis::Analyses,
-    format::{self, Damage, Entry, Header, Section, SectionId},
+    format::{self, Damage, Entry, Header, Notice, Section, SectionId},
 };
 
 /// Why an index could not be opened or read.
@@ -97,6 +97,7 @@ pub struct Index {
     path: PathBuf,
     header: Header,
     source: String,
+    notice: Option<Notice>,
 }
 
 /// The `members` of a sense other than `word`, each once, in their order.
@@ -120,8 +121,9 @@ pub struct SynonymGroup {
 }
 
 impl Index {
-    /// Opens the index at `path` and checks its header. A missing file is
-    /// [`Error::NotImported`].
+    /// Opens the index at `path`, checks its header and reads its source id
+    /// and its license notice. A missing file is [`Error::NotImported`]; a
+    /// damaged notice is a damaged index.
     pub fn open(path: &Path) -> Result<Self, Error> {
         let io = |source| Error::Io {
             path: path.to_owned(),
@@ -139,8 +141,8 @@ impl Index {
             path: path.to_owned(),
             reason: damage.0,
         };
-        // The longer header; a file without analyses reads less of it.
-        let mut bytes = [0; format::ANALYSED_HEADER_LEN];
+        // The longest header; a file of an older version reads less of it.
+        let mut bytes = [0; format::MAX_HEADER_LEN];
         let read = read_some(&file, path, &mut bytes, 0)?;
         let header = Header::parse(&bytes[..read], metadata.len()).map_err(damaged)?;
         // The header bounds the length of the source id.
@@ -151,12 +153,31 @@ impl Index {
         }
         let source =
             String::from_utf8(source).map_err(|_| damaged(Damage("its source id is not UTF-8")))?;
+        // The header bounds the length of the notice too; a file of an older
+        // version, or one written without a notice, has an empty one.
+        let section = header.section(SectionId::Notice);
+        let notice = if section.len == 0 {
+            None
+        } else {
+            let mut record = vec![0; section.len as usize];
+            if read_some(&file, path, &mut record, section.offset)? < record.len() {
+                return Err(damaged(Damage("the file ends too early")));
+            }
+            Some(format::decode_notice(&record).map_err(damaged)?)
+        };
         Ok(Self {
             file,
             path: path.to_owned(),
             header,
             source,
+            notice,
         })
+    }
+
+    /// The license notice the index was written with; `None` for an index
+    /// of format v1 or v2, which has none, and for one written without it.
+    pub fn notice(&self) -> Option<&Notice> {
+        self.notice.as_ref()
     }
 
     /// The path the index was opened at.
@@ -558,6 +579,100 @@ mod tests {
             Index::open(dir.path()),
             Err(Error::Io { .. } | Error::Damaged { .. })
         ));
+    }
+
+    #[test]
+    fn the_notice_is_read_at_the_open() {
+        let dir = TempDir::new("notice");
+        let notice = format::tests::notice();
+        for contents in [sample(), format::tests::analysed()] {
+            let bytes = format::encode_with_notice(&contents, &notice).expect("encode");
+            let index = Index::open(&written(&dir, &bytes)).expect("open");
+            assert_eq!(index.notice(), Some(&notice));
+            assert!(index.find("bank").expect("find").is_some());
+        }
+        // A v3 file written without a notice has none.
+        assert_eq!(opened(&dir).notice(), None);
+    }
+
+    /// The bytes of a v2 index of one headword, `bank`, as the v2 writer
+    /// (v0.1.1) wrote them.
+    const V2_WITHOUT_NOTICE: &[u8] = include_bytes!("../tests/data/v2-without-notice.index");
+
+    #[test]
+    fn an_index_of_format_v2_opens_without_a_notice() {
+        assert_eq!(V2_WITHOUT_NOTICE[8..16], [2, 0, 0, 0, 8, 0, 0, 0]);
+        let dir = TempDir::new("golden-v2");
+        let index = Index::open(&written(&dir, V2_WITHOUT_NOTICE)).expect("open");
+        assert_eq!(index.notice(), None);
+        assert_eq!(index.source(), "oewn-fixture");
+        assert_eq!(index.headwords(), 1);
+        let article = index.find("bank").expect("find").expect("bank");
+        assert_eq!(
+            article.senses[0].definition,
+            "sloping land beside a body of water"
+        );
+        assert_eq!(article.senses[0].synonyms, ["shore"]);
+        assert!(index.find("shore").expect("find").is_none());
+    }
+
+    #[test]
+    fn a_v1_or_v2_index_with_analyses_opens_without_a_notice() {
+        let dir = TempDir::new("legacy-analyses");
+        let contents = format::tests::analysed();
+        for version in [1, 2] {
+            let bytes = format::encode_legacy(&contents, version).expect("encode");
+            let index = Index::open(&written(&dir, &bytes)).expect("open");
+            assert_eq!(index.notice(), None);
+            assert_eq!(
+                index.analyses("fue").expect("fue"),
+                contents.analyses[0].lemmas
+            );
+            assert!(index.find("bank").expect("find").is_some());
+        }
+    }
+
+    #[test]
+    fn a_damaged_notice_fails_the_open() {
+        let dir = TempDir::new("notice-damaged");
+        let good = format::encode_with_notice(&sample(), &format::tests::notice()).expect("encode");
+        let notice = header(&good).section(SectionId::Notice);
+        let (start, end) = (
+            notice.offset as usize,
+            (notice.offset + notice.len) as usize,
+        );
+        let damaged = |bytes: &[u8]| {
+            let error = Index::open(&written(&dir, bytes)).expect_err("damaged notice");
+            assert!(matches!(error, Error::Damaged { .. }), "{error}");
+        };
+        // Truncated: the file, or the notice section within the file; an
+        // empty section is no notice.
+        for len in start..end {
+            damaged(&good[..len]);
+            if len == start {
+                continue;
+            }
+            let mut short = good[..len].to_vec();
+            let at = 16 + SectionId::Notice as usize * 16 + 8;
+            short[at..at + 8].copy_from_slice(&((len - start) as u64).to_le_bytes());
+            damaged(&short);
+        }
+        // A trailing byte inside the section.
+        let mut longer = good.clone();
+        longer.push(0);
+        let at = 16 + SectionId::Notice as usize * 16 + 8;
+        longer[at..at + 8].copy_from_slice(&(notice.len + 1).to_le_bytes());
+        damaged(&longer);
+        // A blank field: the text of the credit made of spaces.
+        let mut blank = good.clone();
+        let credit = u32::from_le_bytes(blank[start..start + 4].try_into().unwrap()) as usize;
+        blank[start + 4..start + 4 + credit].fill(b' ');
+        damaged(&blank);
+        // A section longer than a record.
+        let mut huge = good.clone();
+        huge.resize(start + format::MAX_RECORD as usize + 1, 0);
+        huge[at..at + 8].copy_from_slice(&(u64::from(format::MAX_RECORD) + 1).to_le_bytes());
+        damaged(&huge);
     }
 
     #[test]
@@ -1250,10 +1365,10 @@ mod tests {
     #[test]
     fn legacy_v1_articles_remain_usable_without_lexical_metadata() {
         let dir = TempDir::new("metadata-v1");
-        let mut bytes = encode(&sample()).unwrap();
-        // Metadata-free record layout is identical to v1; only the writer version changed.
-        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        // Metadata-free record layout is identical to v1.
+        let bytes = format::encode_legacy(&sample(), 1).unwrap();
         let index = Index::open(&written(&dir, &bytes)).unwrap();
+        assert_eq!(index.notice(), None);
         let article = index.find("bank").unwrap().unwrap();
         assert_eq!(article.senses.len(), 2);
         assert!(article.entries.is_empty());

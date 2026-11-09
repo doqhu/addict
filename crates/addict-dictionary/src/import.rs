@@ -5,7 +5,9 @@
 //! memory once, so the bytes that were hashed are the bytes that are parsed.
 //! The index is built in memory, written to a temporary file beside its
 //! final place and renamed over it: an import that fails leaves the previous
-//! index as it was, and the same file gives the same index bytes.
+//! index as it was, and the same file gives the same index bytes. Every
+//! index carries the license notice of its source, from [`crate::sources`],
+//! with the edition and the SHA-256 of the file it was built from.
 //!
 //! Each source has its own index file, and an import touches no other. The
 //! WordNet file is a gzip of its XML, the Kaikki files gzips of JSON Lines.
@@ -30,7 +32,7 @@ use sha2::{Digest, Sha256};
 
 use addict_core::translation::Source as Language;
 
-use crate::{dbnary, format, freedict, kaikki, mythes, oewn, wikdict};
+use crate::{dbnary, format, freedict, kaikki, mythes, oewn, sources, wikdict};
 
 /// A dictionary source. Each has one index file in the data directory, in
 /// the one index format; what the file holds and in which language is the
@@ -425,7 +427,8 @@ pub fn import(file: &Path, dir: &Path) -> Result<Imported, ImportError> {
 }
 
 fn import_known(file: &Path, dir: &Path, known: &[KnownFile<'_>]) -> Result<Imported, ImportError> {
-    let (bytes, known) = recognise(file, known)?;
+    let (bytes, known, sha256) = recognise(file, known)?;
+    let notice = notice_of(known, sha256);
     let contents = match known.source {
         Source::Oewn => oewn::parse(
             BufReader::new(MultiGzDecoder::new(bytes.as_slice())),
@@ -457,7 +460,8 @@ fn import_known(file: &Path, dir: &Path, known: &[KnownFile<'_>]) -> Result<Impo
         }
     }
     .and_then(|contents| {
-        let index = format::encode(&contents).map_err(|error| error.to_string())?;
+        let index =
+            format::encode_with_notice(&contents, &notice).map_err(|error| error.to_string())?;
         Ok((contents, index))
     });
     let (contents, index) = contents.map_err(|cause| ImportError::Contents {
@@ -476,6 +480,25 @@ fn import_known(file: &Path, dir: &Path, known: &[KnownFile<'_>]) -> Result<Impo
         headwords: contents.headwords.len(),
         exception_forms: contents.forms.len(),
     })
+}
+
+/// The license notice of the index of `known`, a file whose SHA-256 is
+/// `sha256`: the credit, the license, the author, the license URI and the
+/// link of its source's row, [`sources::MODIFIED`],
+/// [`sources::DISCLAIMER`], its edition and its hash.
+fn notice_of(known: &KnownFile<'_>, sha256: String) -> format::Notice {
+    let row = sources::row(known.source);
+    format::Notice {
+        credit: row.credit.to_owned(),
+        author: row.author.to_owned(),
+        license: row.license.to_owned(),
+        license_uri: row.license_uri.to_owned(),
+        link: row.link.to_owned(),
+        modified: sources::MODIFIED.to_owned(),
+        disclaimer: sources::DISCLAIMER.to_owned(),
+        edition: known.edition.to_owned(),
+        sha256,
+    }
 }
 
 /// The contents of the index of an xz of a tar archive: the xz stream is
@@ -532,12 +555,13 @@ fn one_line(error: &dyn fmt::Display) -> String {
         .join(" ")
 }
 
-/// The bytes of `file` and the known file they are: the size is compared
-/// first and the hash is computed only for a size that is known.
+/// The bytes of `file`, the known file they are and their SHA-256 in
+/// lowercase hexadecimal: the size is compared first and the hash is
+/// computed only for a size that is known.
 fn recognise<'a>(
     file: &Path,
     known: &'a [KnownFile<'a>],
-) -> Result<(Vec<u8>, &'a KnownFile<'a>), ImportError> {
+) -> Result<(Vec<u8>, &'a KnownFile<'a>, String), ImportError> {
     let unreadable = |cause| ImportError::Unreadable {
         file: file.to_owned(),
         cause,
@@ -578,7 +602,7 @@ fn recognise<'a>(
         .collect();
     let same_size = || known.iter().filter(|known| known.size == size);
     match same_size().find(|known| known.sha256.eq_ignore_ascii_case(&actual)) {
-        Some(known) => Ok((bytes, known)),
+        Some(known) => Ok((bytes, known, actual)),
         None => Err(ImportError::Hash {
             file: file.to_owned(),
             actual,
@@ -1411,6 +1435,63 @@ mod tests {
 
     fn strings(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    #[test]
+    fn every_source_writes_its_license_notice_into_its_index() {
+        let fixture = Fixture::new("notices");
+        let freedict = Archive::whole(&fixture);
+        let freedict = fs::read(&freedict.file).expect("the archive");
+        let mut seen = Vec::new();
+        for known in KNOWN {
+            let source = known.source;
+            let bytes = match source {
+                Source::Oewn => fixture.gz.clone(),
+                Source::Freedict => freedict.clone(),
+                _ => file_of(source),
+            };
+            let row = sources::row(source);
+            let file = Archive::new(&fixture, &format!("{}.upstream", row.index), &bytes);
+            let edition = format!("{}-notice", row.index);
+            let known_file = KnownFile {
+                name: "fixture.file",
+                edition: &edition,
+                source,
+                size: file.size,
+                sha256: &file.sha256,
+            };
+            let imported = import_known(&file.file, &fixture.data(), &[known_file])
+                .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+            let index = Index::open(&imported.path).expect("open");
+            let notice = index.notice().unwrap_or_else(|| panic!("{source:?}"));
+            assert_eq!(notice.credit, row.credit, "{source:?}");
+            assert_eq!(notice.license, row.license, "{source:?}");
+            assert_eq!(notice.author, row.author, "{source:?}");
+            assert_eq!(notice.license_uri, row.license_uri, "{source:?}");
+            assert_eq!(notice.link, row.link, "{source:?}");
+            assert_eq!(notice.modified, sources::MODIFIED, "{source:?}");
+            assert_eq!(notice.disclaimer, sources::DISCLAIMER, "{source:?}");
+            assert_eq!(notice.edition, edition, "{source:?}");
+            assert_eq!(index.source(), edition, "{source:?}");
+            assert_eq!(notice.sha256, hex(&bytes), "{source:?}");
+            assert_eq!(notice.sha256, notice.sha256.to_lowercase(), "{source:?}");
+            seen.push(source);
+        }
+        assert_eq!(seen.len(), 13);
+    }
+
+    #[test]
+    fn the_notice_records_the_hash_of_the_file_in_lowercase() {
+        let fixture = Fixture::new("notice-hash");
+        // A pin written in uppercase still accepts the file.
+        let upper = fixture.sha256.to_uppercase();
+        let known = [KnownFile {
+            sha256: &upper,
+            ..fixture.known()[0]
+        }];
+        let imported = import_known(&fixture.file(), &fixture.data(), &known).expect("import");
+        let index = Index::open(&imported.path).expect("open");
+        assert_eq!(index.notice().expect("notice").sha256, fixture.sha256);
     }
 
     #[test]

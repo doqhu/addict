@@ -22,13 +22,21 @@
 //!          analysis keys     the forms, back to back
 //!          analysis records  lemma count u32 | per lemma: lemma text
 //!                            | shape count u32 | shapes, 3 bytes each
+//!          notice        the license notice: 9 texts, see below
 //! ```
 //!
-//! The three analysis sections are there only in a file whose contents
-//! have analyses: its header names 11 sections, any other 8. A file of 8
-//! sections has no analyses, so a source without tags gives the same bytes
-//! apart from the v2 header. A shape is stored as [`analysis::encode`] gives
-//! it.
+//! A version 3 file, the one the writer writes, always has the 12 sections
+//! above; the analysis sections of contents without analyses are empty, and
+//! so is the notice of a file [`encode`] writes. [`encode_with_notice`]
+//! writes the notice: the texts of the fields of [`Notice`] back to back,
+//! in its field order, with no tags and no bytes after them; the section
+//! length is the record length, at most [`MAX_RECORD`], and no text is
+//! blank. A shape is stored as [`analysis::encode`] gives it.
+//!
+//! A version 1 or 2 file has no notice. Its three analysis sections are
+//! there only when its contents have analyses: its header names 11
+//! sections, any other 8. Any other pair of version and section count is
+//! damage.
 //!
 //! A table entry is `key offset u64 | key length u32 | record offset u64 |
 //! record length u32`, the offsets into the keys and the records section of
@@ -45,7 +53,8 @@
 //! optional text/notation, labels/raw labels and audio URL/format pairs.
 //! The source identity comes from the enclosing index. Optional values use
 //! a strict 0/1 byte tag; lists use u32 counts and texts use u32 byte lengths.
-//! Version 1 records (including MyThes META labels) remain readable.
+//! Version 1 records (including MyThes META labels) remain readable, and
+//! version 3 keeps the records of version 2.
 //!
 //! This module does no I/O: [`encode`] gives the bytes of a file and the
 //! decoders take bytes the reader has read. A decoder never trusts a length
@@ -61,21 +70,30 @@ use addict_core::dictionary::{
 /// The first bytes of every index file.
 pub const MAGIC: [u8; 8] = *b"ADDICTIX";
 
-/// The writer version. Readers accept both v1 and v2.
-pub const VERSION: u32 = 2;
+/// The writer version. Readers accept v1, v2 and v3.
+pub const VERSION: u32 = 3;
 
-/// The sections of a file without analyses, in the order of the header.
+/// The sections of a v1 or v2 file without analyses, in the order of the
+/// header.
 pub const SECTIONS: usize = 8;
 
-/// The sections of a file with analyses.
+/// The sections of a v1 or v2 file with analyses.
 pub const ANALYSED_SECTIONS: usize = 11;
 
-/// The length of the header of a file without analyses: magic, version,
-/// section count, section table.
+/// The sections of a v3 file: those of a file with analyses, then the
+/// notice.
+pub const NOTICED_SECTIONS: usize = 12;
+
+/// The length of the header of a v1 or v2 file without analyses: magic,
+/// version, section count, section table.
 pub const HEADER_LEN: usize = 16 + SECTIONS * 16;
 
-/// The length of the header of a file with analyses, the longest header.
+/// The length of the header of a v1 or v2 file with analyses.
 pub const ANALYSED_HEADER_LEN: usize = 16 + ANALYSED_SECTIONS * 16;
+
+/// The length of the header of a v3 file, the longest header: what a
+/// reader reads before it knows the version.
+pub const MAX_HEADER_LEN: usize = 16 + NOTICED_SECTIONS * 16;
 
 /// The length of one table entry.
 pub const ENTRY_LEN: u64 = 24;
@@ -101,6 +119,7 @@ pub enum SectionId {
     AnalysisTable = 8,
     AnalysisKeys = 9,
     AnalysisRecords = 10,
+    Notice = 11,
 }
 
 /// Everything an index file holds: the input of [`encode`].
@@ -267,6 +286,49 @@ pub struct AnalysedForm {
     pub lemmas: Vec<Analyses>,
 }
 
+/// The license notice of an index: the credit and the license of the data
+/// it was built from, where that data is, that it was changed, the
+/// warranty disclaimer, and which upstream file it was built from. Stored
+/// in this field order; no field is blank.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Notice {
+    /// The credit line of the source, as in `CREDITS`.
+    pub credit: String,
+    /// The authors of the data.
+    pub author: String,
+    /// The license, as in `CREDITS`.
+    pub license: String,
+    /// The address of the license text.
+    pub license_uri: String,
+    /// The address of the source.
+    pub link: String,
+    /// How the index changes the upstream data.
+    pub modified: String,
+    /// The warranty disclaimer.
+    pub disclaimer: String,
+    /// The edition of the upstream file, the source id of the index.
+    pub edition: String,
+    /// The SHA-256 of the upstream file, in lowercase hexadecimal.
+    pub sha256: String,
+}
+
+impl Notice {
+    /// The fields with their names, in the stored order.
+    fn fields(&self) -> [(&'static str, &str); 9] {
+        [
+            ("credit", &self.credit),
+            ("author", &self.author),
+            ("license", &self.license),
+            ("license_uri", &self.license_uri),
+            ("link", &self.link),
+            ("modified", &self.modified),
+            ("disclaimer", &self.disclaimer),
+            ("edition", &self.edition),
+            ("sha256", &self.sha256),
+        ]
+    }
+}
+
 /// Why [`encode`] refused its input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
@@ -286,12 +348,15 @@ pub enum WriteError {
     /// has neither text nor audio; this is its headword, or the start of
     /// the definition of its sense.
     Metadata(String),
+    /// A field of the notice, named here, is blank.
+    Notice(&'static str),
 }
 
 impl fmt::Display for WriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Metadata(what) => write!(f, "the grammar or pronunciation of {what:?} is blank"),
+            Self::Notice(field) => write!(f, "the {field} of the license notice is blank"),
             Self::Source => write!(f, "the source id is empty or too long"),
             Self::EmptyKey => write!(f, "an empty headword or form"),
             Self::Unsorted(key) => write!(f, "{key:?} is out of order or repeated"),
@@ -305,9 +370,72 @@ impl fmt::Display for WriteError {
 
 impl std::error::Error for WriteError {}
 
-/// The bytes of the index file of `contents`. The same contents give the
-/// same bytes.
+/// The bytes of the index file of `contents`, with an empty notice. The
+/// same contents give the same bytes.
 pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
+    let mut sections = sections_of(contents)?;
+    sections.push(Vec::new());
+    Ok(assemble(VERSION, &sections))
+}
+
+/// The bytes of the index file of `contents` with `notice`. The same
+/// contents and notice give the same bytes.
+pub fn encode_with_notice(contents: &Contents, notice: &Notice) -> Result<Vec<u8>, WriteError> {
+    let notice = encode_notice(notice)?;
+    let mut sections = sections_of(contents)?;
+    sections.push(notice);
+    Ok(assemble(VERSION, &sections))
+}
+
+/// The bytes of a v1 or v2 file of `contents`, as the writer of that
+/// version wrote them: 8 sections, or 11 with analyses.
+#[cfg(test)]
+pub(crate) fn encode_legacy(contents: &Contents, version: u32) -> Result<Vec<u8>, WriteError> {
+    assert!(matches!(version, 1 | 2), "version {version}");
+    let mut sections = sections_of(contents)?;
+    if contents.analyses.is_empty() {
+        sections.truncate(SECTIONS);
+    }
+    Ok(assemble(version, &sections))
+}
+
+/// The record of `notice`.
+fn encode_notice(notice: &Notice) -> Result<Vec<u8>, WriteError> {
+    let mut record = Vec::new();
+    for (name, text) in notice.fields() {
+        if text.trim().is_empty() {
+            return Err(WriteError::Notice(name));
+        }
+        put_text(&mut record, text)?;
+    }
+    bounded(record.len(), "the license notice")?;
+    Ok(record)
+}
+
+/// A file of `version` of `sections`: the header, then the sections in
+/// their order.
+fn assemble(version: u32, sections: &[Vec<u8>]) -> Vec<u8> {
+    let header_len = 16 + sections.len() * 16;
+    let total = header_len + sections.iter().map(Vec::len).sum::<usize>();
+    let mut file = Vec::with_capacity(total);
+    file.extend_from_slice(&MAGIC);
+    file.extend_from_slice(&version.to_le_bytes());
+    file.extend_from_slice(&(sections.len() as u32).to_le_bytes());
+    let mut offset = header_len as u64;
+    for section in sections {
+        file.extend_from_slice(&offset.to_le_bytes());
+        file.extend_from_slice(&(section.len() as u64).to_le_bytes());
+        offset += section.len() as u64;
+    }
+    for section in sections {
+        file.extend_from_slice(section);
+    }
+    file
+}
+
+/// The sections of `contents` up to the analysis records, the analysis
+/// sections empty when it has none.
+fn sections_of(contents: &Contents) -> Result<Vec<Vec<u8>>, WriteError> {
     let source = contents.source.as_bytes();
     if source.is_empty() || source.len() as u64 > MAX_SOURCE {
         return Err(WriteError::Source);
@@ -431,39 +559,19 @@ pub fn encode(contents: &Contents) -> Result<Vec<u8>, WriteError> {
         analyses.push(&analysed.form, &record)?;
     }
 
-    let mut sections: Vec<&[u8]> = vec![
-        source,
-        &senses,
-        &words.entries,
-        &words.keys,
-        &words.records,
-        &forms.entries,
-        &forms.keys,
-        &forms.records,
-    ];
-    if !contents.analyses.is_empty() {
-        sections.extend([
-            &analyses.entries[..],
-            &analyses.keys[..],
-            &analyses.records[..],
-        ]);
-    }
-    let header_len = 16 + sections.len() * 16;
-    let total = header_len + sections.iter().map(|section| section.len()).sum::<usize>();
-    let mut file = Vec::with_capacity(total);
-    file.extend_from_slice(&MAGIC);
-    file.extend_from_slice(&VERSION.to_le_bytes());
-    file.extend_from_slice(&(sections.len() as u32).to_le_bytes());
-    let mut offset = header_len as u64;
-    for section in &sections {
-        file.extend_from_slice(&offset.to_le_bytes());
-        file.extend_from_slice(&(section.len() as u64).to_le_bytes());
-        offset += section.len() as u64;
-    }
-    for section in sections {
-        file.extend_from_slice(section);
-    }
-    Ok(file)
+    Ok(vec![
+        source.to_vec(),
+        senses,
+        words.entries,
+        words.keys,
+        words.records,
+        forms.entries,
+        forms.keys,
+        forms.records,
+        analyses.entries,
+        analyses.keys,
+        analyses.records,
+    ])
 }
 
 /// A table under construction: its entries, its keys and its records.
@@ -598,34 +706,39 @@ pub struct Section {
     pub len: u64,
 }
 
-/// The header of a file: where its sections are. The analysis sections of
-/// a file without them are empty.
+/// The header of a file: where its sections are. The sections a file of
+/// an older version does not have, the analyses of a v1 or v2 file without
+/// them and the notice of any v1 or v2 file, are empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
-    sections: [Section; ANALYSED_SECTIONS],
+    sections: [Section; NOTICED_SECTIONS],
 }
 
 impl Header {
     /// Reads the header from the first bytes of a file that is `file_len`
-    /// bytes long: [`HEADER_LEN`] of them, or [`ANALYSED_HEADER_LEN`] for a
-    /// file with analyses; more are ignored. Every section lies inside the
-    /// file.
+    /// bytes long: [`MAX_HEADER_LEN`] of them for a v3 file, and for a v1
+    /// or v2 file [`HEADER_LEN`], or [`ANALYSED_HEADER_LEN`] with analyses;
+    /// more are ignored. A v3 file has [`NOTICED_SECTIONS`] sections, a v1
+    /// or v2 file [`SECTIONS`] or [`ANALYSED_SECTIONS`]. Every section lies
+    /// inside the file.
     pub fn parse(bytes: &[u8], file_len: u64) -> Result<Self, Damage> {
         let mut cursor = Cursor(bytes);
         if cursor.take(MAGIC.len())? != MAGIC {
             return Err(Damage("it does not start with the index magic"));
         }
-        if !matches!(cursor.u32()?, 1 | VERSION) {
-            return Err(Damage("its format version is unknown"));
-        }
+        let counts: &[usize] = match cursor.u32()? {
+            1 | 2 => &[SECTIONS, ANALYSED_SECTIONS],
+            3 => &[NOTICED_SECTIONS],
+            _ => return Err(Damage("its format version is unknown")),
+        };
         let count = cursor.u32()? as usize;
-        if count != SECTIONS && count != ANALYSED_SECTIONS {
+        if !counts.contains(&count) {
             return Err(Damage("its section count is wrong"));
         }
         let mut sections = [Section {
             offset: HEADER_LEN as u64,
             len: 0,
-        }; ANALYSED_SECTIONS];
+        }; NOTICED_SECTIONS];
         // No section starts inside the header of its own file.
         let header_len = (16 + count * 16) as u64;
         for section in &mut sections[..count] {
@@ -641,6 +754,9 @@ impl Header {
         let header = Self { sections };
         if header.section(SectionId::Source).len > MAX_SOURCE {
             return Err(Damage("its source id is too long"));
+        }
+        if header.section(SectionId::Notice).len > u64::from(MAX_RECORD) {
+            return Err(Damage("its license notice is too long"));
         }
         for table in [
             SectionId::WordTable,
@@ -804,6 +920,36 @@ pub fn decode_form(record: &[u8]) -> Result<Vec<String>, Damage> {
     let lemmas = cursor.texts()?;
     cursor.end()?;
     Ok(lemmas)
+}
+
+/// The notice of a notice record, which is no longer than [`MAX_RECORD`],
+/// has no blank field and nothing after its fields.
+pub fn decode_notice(record: &[u8]) -> Result<Notice, Damage> {
+    if record.len() > MAX_RECORD as usize {
+        return Err(Damage("its license notice is too long"));
+    }
+    let mut cursor = Cursor(record);
+    let field = |cursor: &mut Cursor<'_>| {
+        let text = cursor.text()?;
+        if text.trim().is_empty() {
+            return Err(Damage("its license notice has a blank field"));
+        }
+        Ok(text)
+    };
+    // The fields are read in the order they are written in.
+    let notice = Notice {
+        credit: field(&mut cursor)?,
+        author: field(&mut cursor)?,
+        license: field(&mut cursor)?,
+        license_uri: field(&mut cursor)?,
+        link: field(&mut cursor)?,
+        modified: field(&mut cursor)?,
+        disclaimer: field(&mut cursor)?,
+        edition: field(&mut cursor)?,
+        sha256: field(&mut cursor)?,
+    };
+    cursor.end()?;
+    Ok(notice)
 }
 
 /// The analyses of an analysis record, a shape [`analysis::decode`] does
@@ -1117,7 +1263,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn header(file: &[u8]) -> Header {
-        let len = file.len().min(ANALYSED_HEADER_LEN);
+        let len = file.len().min(MAX_HEADER_LEN);
         Header::parse(&file[..len], file.len() as u64).expect("header")
     }
 
@@ -1199,14 +1345,16 @@ pub(crate) mod tests {
         }
     }
 
+    /// The section count of a file.
+    fn count(file: &[u8]) -> usize {
+        u32::from_le_bytes(file[12..16].try_into().expect("count")) as usize
+    }
+
     #[test]
-    fn the_analyses_are_read_back_from_a_file_of_eleven_sections() {
+    fn the_analyses_are_read_back_from_a_file_of_twelve_sections() {
         let contents = analysed();
         let file = encode(&contents).expect("encode");
-        assert_eq!(
-            u32::from_le_bytes(file[12..16].try_into().expect("count")) as usize,
-            ANALYSED_SECTIONS
-        );
+        assert_eq!(count(&file), NOTICED_SECTIONS);
         let rows = table(
             &file,
             SectionId::AnalysisTable,
@@ -1229,9 +1377,9 @@ pub(crate) mod tests {
             )
         };
         assert_eq!(words(&file), words(&plain));
-        let mut expected = ANALYSED_HEADER_LEN as u64;
+        let mut expected = MAX_HEADER_LEN as u64;
         let header = header(&file);
-        for id in 0..ANALYSED_SECTIONS {
+        for id in 0..NOTICED_SECTIONS {
             assert_eq!(header.sections[id].offset, expected, "section {id}");
             expected += header.sections[id].len;
         }
@@ -1239,14 +1387,217 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn contents_without_analyses_give_eight_sections() {
+    fn contents_without_analyses_give_twelve_sections_with_empty_analyses() {
         let file = encode(&sample()).expect("encode");
-        assert_eq!(
-            u32::from_le_bytes(file[12..16].try_into().expect("count")) as usize,
-            SECTIONS
-        );
+        assert_eq!(count(&file), NOTICED_SECTIONS);
         assert_eq!(header(&file).section(SectionId::AnalysisTable).len, 0);
         assert_eq!(header(&file).section(SectionId::AnalysisRecords).len, 0);
+        assert_eq!(header(&file).section(SectionId::Notice).len, 0);
+    }
+
+    #[test]
+    fn the_legacy_writer_gives_eight_or_eleven_sections() {
+        for version in [1, 2] {
+            let plain = encode_legacy(&sample(), version).expect("encode");
+            assert_eq!(count(&plain), SECTIONS);
+            assert_eq!(plain[8..12], version.to_le_bytes());
+            let plain_header = header(&plain);
+            assert_eq!(plain_header.section(SectionId::AnalysisTable).len, 0);
+            assert_eq!(plain_header.section(SectionId::Notice).len, 0);
+            let analysed = encode_legacy(&analysed(), version).expect("encode");
+            assert_eq!(count(&analysed), ANALYSED_SECTIONS);
+            let analysed_header = header(&analysed);
+            assert_ne!(analysed_header.section(SectionId::AnalysisTable).len, 0);
+            assert_eq!(analysed_header.section(SectionId::Notice).len, 0);
+        }
+        // The sections are those of v3 apart from the header.
+        let v2 = encode_legacy(&sample(), 2).expect("encode");
+        let v3 = encode(&sample()).expect("encode");
+        assert_eq!(v2[HEADER_LEN..], v3[MAX_HEADER_LEN..]);
+    }
+
+    /// A notice with every field filled.
+    pub(crate) fn notice() -> Notice {
+        Notice {
+            credit: "the credit".to_owned(),
+            author: "the author".to_owned(),
+            license: "CC BY 4.0".to_owned(),
+            license_uri: "https://creativecommons.org/licenses/by/4.0/".to_owned(),
+            link: "https://example.org/".to_owned(),
+            modified: "converted".to_owned(),
+            disclaimer: "as is".to_owned(),
+            edition: "test-1".to_owned(),
+            sha256: "ab".repeat(32),
+        }
+    }
+
+    #[test]
+    fn the_notice_is_read_back_as_written_after_the_other_sections() {
+        for contents in [sample(), analysed()] {
+            let file = encode_with_notice(&contents, &notice()).expect("encode");
+            assert_eq!(count(&file), NOTICED_SECTIONS);
+            let header = header(&file);
+            let section = header.section(SectionId::Notice);
+            // The notice is the last section, and it ends the file.
+            assert_eq!(section.offset + section.len, file.len() as u64);
+            assert_eq!(decode_notice(slice(&file, section)), Ok(notice()));
+            // The other sections are those of the file without a notice.
+            let plain = encode(&contents).expect("encode");
+            assert_eq!(file[..16 + 11 * 16], plain[..16 + 11 * 16]);
+            assert_eq!(
+                file[MAX_HEADER_LEN..file.len() - section.len as usize],
+                plain[MAX_HEADER_LEN..]
+            );
+        }
+        assert_eq!(
+            encode_with_notice(&sample(), &notice()),
+            encode_with_notice(&sample(), &notice())
+        );
+    }
+
+    #[test]
+    fn a_blank_notice_field_is_refused_by_the_writer() {
+        let names = [
+            "credit",
+            "author",
+            "license",
+            "license_uri",
+            "link",
+            "modified",
+            "disclaimer",
+            "edition",
+            "sha256",
+        ];
+        assert_eq!(notice().fields().map(|(name, _)| name), names);
+        for (at, name) in names.into_iter().enumerate() {
+            for blank in ["", " \n\t"] {
+                let mut notice = notice();
+                let fields = [
+                    &mut notice.credit,
+                    &mut notice.author,
+                    &mut notice.license,
+                    &mut notice.license_uri,
+                    &mut notice.link,
+                    &mut notice.modified,
+                    &mut notice.disclaimer,
+                    &mut notice.edition,
+                    &mut notice.sha256,
+                ];
+                *fields.into_iter().nth(at).expect("a field") = blank.to_owned();
+                assert_eq!(
+                    encode_with_notice(&sample(), &notice),
+                    Err(WriteError::Notice(name))
+                );
+            }
+        }
+        let mut huge = notice();
+        huge.disclaimer = "x".repeat(MAX_RECORD as usize);
+        assert!(matches!(
+            encode_with_notice(&sample(), &huge),
+            Err(WriteError::TooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn a_damaged_notice_record_is_damage() {
+        let record = encode_notice(&notice()).expect("record");
+        assert_eq!(decode_notice(&record), Ok(notice()));
+        for len in 0..record.len() {
+            assert!(decode_notice(&record[..len]).is_err(), "length {len}");
+        }
+        let mut longer = record.clone();
+        longer.push(0);
+        assert_eq!(
+            decode_notice(&longer),
+            Err(Damage("a record is longer than its contents"))
+        );
+        // Each field in turn blank, and then not UTF-8.
+        let texts: Vec<String> = notice().fields().map(|(_, text)| text.to_owned()).into();
+        for at in 0..texts.len() {
+            for replacement in [&b""[..], b"  ", &[0xff, 0xfe]] {
+                let mut damaged = Vec::new();
+                for (other, text) in texts.iter().enumerate() {
+                    let bytes = if other == at {
+                        replacement
+                    } else {
+                        text.as_bytes()
+                    };
+                    damaged.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    damaged.extend_from_slice(bytes);
+                }
+                if replacement.is_ascii() {
+                    assert_eq!(
+                        decode_notice(&damaged),
+                        Err(Damage("its license notice has a blank field")),
+                        "field {at}"
+                    );
+                } else {
+                    assert!(decode_notice(&damaged).is_err(), "field {at}");
+                }
+            }
+        }
+        assert!(decode_notice(&u32::MAX.to_le_bytes()).is_err());
+        assert_eq!(
+            decode_notice(&vec![0; MAX_RECORD as usize + 1]),
+            Err(Damage("its license notice is too long"))
+        );
+    }
+
+    #[test]
+    fn a_notice_section_longer_than_a_record_is_damage() {
+        let mut file = encode(&sample()).expect("encode");
+        let len = MAX_RECORD as usize + 1;
+        let at = 16 + SectionId::Notice as usize * 16;
+        let offset = file.len() as u64;
+        file[at..at + 8].copy_from_slice(&offset.to_le_bytes());
+        file[at + 8..at + 16].copy_from_slice(&(len as u64).to_le_bytes());
+        file.resize(file.len() + len, 0);
+        assert_eq!(
+            Header::parse(&file[..MAX_HEADER_LEN], file.len() as u64),
+            Err(Damage("its license notice is too long"))
+        );
+    }
+
+    #[test]
+    fn each_version_has_its_own_section_counts() {
+        let v3 = encode(&sample()).expect("encode");
+        let v2 = encode_legacy(&sample(), 2).expect("encode");
+        let parse =
+            |file: &[u8]| Header::parse(&file[..file.len().min(MAX_HEADER_LEN)], file.len() as u64);
+        assert!(parse(&v3).is_ok());
+        assert!(parse(&v2).is_ok());
+        assert!(parse(&encode_legacy(&analysed(), 1).expect("encode")).is_ok());
+        let with_count = |file: &[u8], count: u32| {
+            let mut file = file.to_vec();
+            file[12..16].copy_from_slice(&count.to_le_bytes());
+            file
+        };
+        // A v3 file of 8 or 11 sections, and a v1 or v2 file of 12.
+        for count in [0, 7, 8, 9, 10, 11, 13, u32::MAX] {
+            assert_eq!(
+                parse(&with_count(&v3, count)),
+                Err(Damage("its section count is wrong")),
+                "v3 of {count}"
+            );
+        }
+        for version in [1u32, 2] {
+            let mut file = encode(&analysed()).expect("encode");
+            file[8..12].copy_from_slice(&version.to_le_bytes());
+            assert_eq!(
+                parse(&file),
+                Err(Damage("its section count is wrong")),
+                "v{version} of 12"
+            );
+        }
+        for version in [0u32, 4, 99, u32::MAX] {
+            let mut file = v3.clone();
+            file[8..12].copy_from_slice(&version.to_le_bytes());
+            assert_eq!(
+                parse(&file),
+                Err(Damage("its format version is unknown")),
+                "v{version}"
+            );
+        }
     }
 
     #[test]
@@ -1290,8 +1641,8 @@ pub(crate) mod tests {
     fn the_sections_fill_the_file_without_gaps() {
         let file = encode(&sample()).expect("encode");
         let header = header(&file);
-        let mut expected = HEADER_LEN as u64;
-        for id in 0..SECTIONS {
+        let mut expected = MAX_HEADER_LEN as u64;
+        for id in 0..NOTICED_SECTIONS {
             assert_eq!(header.sections[id].offset, expected, "section {id}");
             expected += header.sections[id].len;
         }
@@ -1311,7 +1662,7 @@ pub(crate) mod tests {
             ..Contents::default()
         })
         .expect("encode");
-        assert_eq!(file.len(), HEADER_LEN + 5);
+        assert_eq!(file.len(), MAX_HEADER_LEN + 5);
         assert_eq!(header(&file).section(SectionId::WordTable).len, 0);
     }
 
@@ -1376,7 +1727,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_wrong_section_count_is_damage() {
-        let mut file = encode(&sample()).expect("encode");
+        let mut file = encode_legacy(&sample(), 2).expect("encode");
         for count in [0u32, 7, 9, 10, 12, u32::MAX] {
             file[12..16].copy_from_slice(&count.to_le_bytes());
             assert!(
@@ -1388,49 +1739,73 @@ pub(crate) mod tests {
 
     #[test]
     fn a_truncated_file_is_damage_at_every_length() {
-        let file = encode(&sample()).expect("encode");
-        for len in 0..file.len() {
-            let head = &file[..len.min(HEADER_LEN)];
-            assert!(Header::parse(head, len as u64).is_err(), "length {len}");
+        for file in [
+            encode(&sample()).expect("encode"),
+            encode_with_notice(&sample(), &notice()).expect("encode"),
+            encode_legacy(&sample(), 2).expect("encode"),
+        ] {
+            for len in 0..file.len() {
+                let head = &file[..len.min(MAX_HEADER_LEN)];
+                assert!(Header::parse(head, len as u64).is_err(), "length {len}");
+            }
+            assert!(Header::parse(&file[..MAX_HEADER_LEN], file.len() as u64).is_ok());
         }
-        assert!(Header::parse(&file[..HEADER_LEN], file.len() as u64).is_ok());
     }
 
     #[test]
-    fn a_truncated_header_of_eleven_sections_is_damage() {
-        let file = encode(&analysed()).expect("encode");
-        for len in HEADER_LEN..ANALYSED_HEADER_LEN {
-            assert!(
-                Header::parse(&file[..len], file.len() as u64).is_err(),
-                "length {len}"
-            );
+    fn a_truncated_header_of_eleven_or_twelve_sections_is_damage() {
+        for (file, header_len) in [
+            (
+                encode_legacy(&analysed(), 2).expect("encode"),
+                ANALYSED_HEADER_LEN,
+            ),
+            (encode(&sample()).expect("encode"), MAX_HEADER_LEN),
+        ] {
+            for len in HEADER_LEN..header_len {
+                assert!(
+                    Header::parse(&file[..len], file.len() as u64).is_err(),
+                    "length {len}"
+                );
+            }
+            assert!(Header::parse(&file[..header_len], file.len() as u64).is_ok());
         }
-        assert!(Header::parse(&file[..ANALYSED_HEADER_LEN], file.len() as u64).is_ok());
     }
 
     #[test]
     fn a_section_inside_the_longer_header_is_damage() {
-        let mut file = encode(&analysed()).expect("encode");
-        // The offset of the last section, moved into the header.
-        let at = 16 + (ANALYSED_SECTIONS - 1) * 16;
-        file[at..at + 8].copy_from_slice(&(HEADER_LEN as u64).to_le_bytes());
-        assert_eq!(
-            Header::parse(&file[..ANALYSED_HEADER_LEN], file.len() as u64),
-            Err(Damage("a section lies outside the file"))
-        );
+        for (mut file, sections, header_len) in [
+            (
+                encode_legacy(&analysed(), 2).expect("encode"),
+                ANALYSED_SECTIONS,
+                ANALYSED_HEADER_LEN,
+            ),
+            (
+                encode_with_notice(&analysed(), &notice()).expect("encode"),
+                NOTICED_SECTIONS,
+                MAX_HEADER_LEN,
+            ),
+        ] {
+            // The offset of the last section, moved into the header.
+            let at = 16 + (sections - 1) * 16;
+            file[at..at + 8].copy_from_slice(&(header_len as u64 - 1).to_le_bytes());
+            assert_eq!(
+                Header::parse(&file[..header_len], file.len() as u64),
+                Err(Damage("a section lies outside the file"))
+            );
+        }
     }
 
     #[test]
     fn a_section_past_the_end_is_damage() {
-        let file = encode(&sample()).expect("encode");
+        let file = encode_with_notice(&sample(), &notice()).expect("encode");
         // Each field of the section table in turn, pushed past the end.
-        for field in 0..SECTIONS * 2 {
+        for field in 0..NOTICED_SECTIONS * 2 {
             for value in [file.len() as u64 + 1, u64::MAX, u64::MAX - 3] {
                 let mut damaged = file.clone();
                 let at = 16 + field * 8;
                 damaged[at..at + 8].copy_from_slice(&value.to_le_bytes());
                 assert!(
-                    Header::parse(&damaged[..HEADER_LEN], damaged.len() as u64).is_err(),
+                    Header::parse(&damaged[..MAX_HEADER_LEN], damaged.len() as u64).is_err(),
                     "field {field} = {value}"
                 );
             }
@@ -1444,7 +1819,7 @@ pub(crate) mod tests {
         let len = u64::from_le_bytes(file[at..at + 8].try_into().expect("length"));
         file[at..at + 8].copy_from_slice(&(len - 1).to_le_bytes());
         assert_eq!(
-            Header::parse(&file[..HEADER_LEN], file.len() as u64),
+            Header::parse(&file[..MAX_HEADER_LEN], file.len() as u64),
             Err(Damage("a table is not a whole number of entries"))
         );
     }

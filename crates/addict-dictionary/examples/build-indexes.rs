@@ -178,17 +178,10 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::write(path, bytes).map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
-/// The address of the license text of the index `name`, for the release
-/// page. Every source the builder builds has one.
-fn license_uri(name: &str) -> Option<&'static str> {
-    match name {
-        "oewn" => Some("https://creativecommons.org/licenses/by/4.0/"),
-        _ => None,
-    }
-}
-
-/// The text of the release page: per index its credit, its license, its
-/// upstream file and that it was modified, then the warranty disclaimer.
+/// The text of the release page: per index its credit, its author, its
+/// license and the address of its text, its source, its upstream file and
+/// that it was modified, then the warranty disclaimer. Each index carries
+/// the same notice in its file.
 fn release_body(rows: &[&Row]) -> String {
     let mut body = String::new();
     body.push_str(&format!(
@@ -197,7 +190,8 @@ fn release_body(rows: &[&Row]) -> String {
     ));
     body.push_str(
         "The application downloads these files on its first run. Each `.index.xz` is an xz-compressed \
-         index; `manifest.json` gives the size and the SHA-256 of each.\n",
+         index; `manifest.json` gives the size and the SHA-256 of each. Each index also carries \
+         the license notice below in its file.\n",
     );
     for row in rows {
         let edition = KNOWN
@@ -206,32 +200,25 @@ fn release_body(rows: &[&Row]) -> String {
             .map_or("", |known| known.edition);
         body.push_str(&format!("\n## {}\n\n", release::asset_name(row.index)));
         body.push_str(&format!("- Credit: {}\n", row.credit));
+        body.push_str(&format!("- Author: {}\n", row.author));
         body.push_str(&format!("- License: {}\n", row.license));
-        if let Some(uri) = license_uri(row.index) {
-            body.push_str(&format!("- License text: {uri}\n"));
-        }
+        body.push_str(&format!("- License text: {}\n", row.license_uri));
+        body.push_str(&format!("- Source: {}\n", row.link));
         body.push_str(&format!(
             "- Upstream: {} ({})\n",
             row.url.unwrap_or(row.upstream),
             edition
         ));
-        body.push_str(
-            "- Modified: converted from the upstream file to the addict index format, \
-             which keeps only what addict shows.\n",
-        );
+        body.push_str(&format!("- Modified: {}\n", sources::MODIFIED));
         if row.index == "oewn" {
             body.push_str(&format!(
                 "- The Princeton WordNet license ships beside the index as `{WNDB_LICENSE}`.\n"
             ));
         }
     }
-    body.push_str(
-        "\n## No warranty\n\n\
-         The indexes are provided \"as is\", without warranty of any kind, express or implied, \
-         including but not limited to the warranties of merchantability, fitness for a particular \
-         purpose and noninfringement. The licensors of the upstream data and the authors of addict \
-         are not liable for any claim, damages or other liability arising from the use of the \
-         indexes.\n",
-    );
+    body.push_str(&format!(
+        "\n## No warranty\n\nEach index carries this disclaimer in its license notice:\n\n> {}\n",
+        sources::DISCLAIMER
+    ));
     body
 }

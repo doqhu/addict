@@ -323,7 +323,7 @@ pub(crate) mod stub {
     }
 
     impl Stub {
-        /// Serves `routes`, by path, such as `/indexes-v2/manifest.json`.
+        /// Serves `routes`, by path, such as `/indexes-v3/manifest.json`.
         pub fn start(routes: HashMap<String, Route>) -> io::Result<Self> {
             let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
             listener.set_nonblocking(true)?;
@@ -440,7 +440,7 @@ mod tests {
     use addict_dictionary::{
         Index,
         format::{Contents, Headword, SenseRecord, encode},
-        release::{Manifest, Published},
+        release::{self, Manifest, Published},
     };
 
     use super::{
@@ -535,13 +535,11 @@ mod tests {
     /// A stub of the release with `manifest` and, when given, the asset of
     /// OEWN, which is reached through a redirect, as GitHub's is.
     fn release(manifest: Vec<u8>, asset: Option<Vec<u8>>) -> Stub {
-        let mut routes = HashMap::from([(
-            "/indexes-v2/manifest.json".to_owned(),
-            Route::File(manifest),
-        )]);
+        let tag = release::tag();
+        let mut routes = HashMap::from([(format!("/{tag}/manifest.json"), Route::File(manifest))]);
         if let Some(asset) = asset {
             routes.insert(
-                "/indexes-v2/oewn.index.xz".to_owned(),
+                format!("/{tag}/oewn.index.xz"),
                 Route::Redirect("/objects/oewn".to_owned()),
             );
             routes.insert("/objects/oewn".to_owned(), Route::File(asset));
@@ -567,12 +565,13 @@ mod tests {
         let index = Index::open(&path).expect("open");
         assert!(index.find("bank").expect("find").is_some());
         assert_eq!(dir.entries(), ["oewn.index"]);
+        let tag = release::tag();
         assert_eq!(
             stub.seen(),
             [
-                "GET /indexes-v2/manifest.json HTTP/1.1",
-                "GET /indexes-v2/oewn.index.xz HTTP/1.1",
-                "GET /objects/oewn HTTP/1.1",
+                format!("GET /{tag}/manifest.json HTTP/1.1"),
+                format!("GET /{tag}/oewn.index.xz HTTP/1.1"),
+                "GET /objects/oewn HTTP/1.1".to_owned(),
             ]
         );
     }
@@ -698,11 +697,11 @@ mod tests {
             .expect_err("unknown");
         assert!(matches!(error, DownloadError::Unknown { .. }), "{error:?}");
         published.name = "oewn".to_owned();
-        published.format = 3;
+        published.format = addict_dictionary::format::VERSION + 1;
         let error = downloader
             .install(&published, &dir.data())
             .await
-            .expect_err("format 3");
+            .expect_err("a newer format");
         assert!(matches!(error, DownloadError::Format { .. }), "{error:?}");
         assert!(error.to_string().contains("oewn"), "{error}");
         assert!(stub.seen().is_empty());
@@ -712,13 +711,14 @@ mod tests {
     #[test]
     fn the_product_asks_the_fixed_release_of_this_format() {
         let downloader = Downloader::new();
+        let tag = release::tag();
         assert_eq!(
             downloader.url("manifest.json"),
-            "https://github.com/doqhu/addict/releases/download/indexes-v2/manifest.json"
+            format!("https://github.com/doqhu/addict/releases/download/{tag}/manifest.json")
         );
         assert_eq!(
             downloader.url("oewn.index.xz"),
-            "https://github.com/doqhu/addict/releases/download/indexes-v2/oewn.index.xz"
+            format!("https://github.com/doqhu/addict/releases/download/{tag}/oewn.index.xz")
         );
     }
 }

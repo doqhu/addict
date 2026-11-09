@@ -361,7 +361,7 @@ mod tests {
 
         use crate::download::stub::{Route, Stub};
 
-        const MANIFEST: &str = "/indexes-v2/manifest.json";
+        let manifest_path = format!("/{}/manifest.json", addict_dictionary::release::tag());
         let empty = Stub::start(HashMap::new()).expect("the stub");
         let downloader = Downloader::with_base_url(empty.base_url());
         let error = offered_manifest(MISSING, false, &downloader)
@@ -373,7 +373,7 @@ mod tests {
         );
 
         let garbled = Stub::start(HashMap::from([(
-            MANIFEST.to_owned(),
+            manifest_path.clone(),
             Route::File(b"<html>Not Found</html>".to_vec()),
         )]))
         .expect("the stub");
@@ -388,7 +388,7 @@ mod tests {
             indexes: Vec::new(),
         };
         let good = Stub::start(HashMap::from([(
-            MANIFEST.to_owned(),
+            manifest_path.clone(),
             Route::File(published.to_json().into_bytes()),
         )]))
         .expect("the stub");

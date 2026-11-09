@@ -271,8 +271,8 @@ mod tests {
 
     #[test]
     fn the_tag_and_the_asset_follow_the_format_version() {
-        assert_eq!(format::VERSION, 2);
-        assert_eq!(tag(), "indexes-v2");
+        assert_eq!(format::VERSION, 3);
+        assert_eq!(tag(), "indexes-v3");
         assert_eq!(asset_name("oewn"), "oewn.index.xz");
         assert_eq!(MANIFEST, "manifest.json");
     }
@@ -308,11 +308,15 @@ mod tests {
     fn a_garbled_manifest_or_one_of_another_format_is_refused() {
         assert!(Manifest::parse(b"").is_err());
         assert!(Manifest::parse(b"<html>Not Found</html>").is_err());
-        assert!(Manifest::parse(br#"{"format":2}"#).is_err());
-        let older = br#"{"format":1,"indexes":[]}"#;
-        let error = Manifest::parse(older).expect_err("format 1");
-        assert!(error.contains("format 1"), "{error}");
-        let empty = Manifest::parse(br#"{"format":2,"indexes":[]}"#).expect("parse");
+        let without_indexes = format!(r#"{{"format":{}}}"#, format::VERSION);
+        assert!(Manifest::parse(without_indexes.as_bytes()).is_err());
+        for older in 1..format::VERSION {
+            let json = format!(r#"{{"format":{older},"indexes":[]}}"#);
+            let error = Manifest::parse(json.as_bytes()).expect_err("an older format");
+            assert!(error.contains(&format!("format {older}")), "{error}");
+        }
+        let empty = format!(r#"{{"format":{},"indexes":[]}}"#, format::VERSION);
+        let empty = Manifest::parse(empty.as_bytes()).expect("parse");
         assert!(empty.indexes.is_empty());
     }
 
@@ -374,6 +378,34 @@ mod tests {
         fs::remove_file(&path).expect("remove");
         assert!(install(&xz_of(b"nothing"), Source::Oewn, dir.path()).is_err());
         assert!(entries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn an_asset_whose_notice_is_damaged_writes_nothing() {
+        let dir = TempDir::new("notice-damaged");
+        let path = import::index_path(dir.path(), Source::Oewn);
+        fs::write(&path, b"the old index").expect("write");
+        let contents = format::tests::sample();
+        let mut damaged =
+            format::encode_with_notice(&contents, &format::tests::notice()).expect("encode");
+        // The last byte of the file is the last of the notice, its hash.
+        damaged.push(0);
+        let at = 16 + format::SectionId::Notice as usize * 16 + 8;
+        let len = u64::from_le_bytes(damaged[at..at + 8].try_into().expect("length"));
+        damaged[at..at + 8].copy_from_slice(&(len + 1).to_le_bytes());
+        let error = install(&xz_of(&damaged), Source::Oewn, dir.path()).expect_err("bad notice");
+        assert!(
+            matches!(error, InstallError::NotAnIndex { .. }),
+            "{error:?}"
+        );
+        assert_eq!(fs::read(&path).expect("index"), b"the old index");
+        assert_eq!(entries(dir.path()), ["oewn.index"]);
+        // The same file with its notice whole installs.
+        damaged.pop();
+        damaged[at..at + 8].copy_from_slice(&len.to_le_bytes());
+        install(&xz_of(&damaged), Source::Oewn, dir.path()).expect("install");
+        let index = Index::open(&path).expect("open");
+        assert_eq!(index.notice(), Some(&format::tests::notice()));
     }
 
     #[test]

@@ -602,6 +602,26 @@ pub mod tests {
         other_sources,
     };
 
+    /// The v1 file of the contents of `v3`, a file [`encode`] wrote of
+    /// contents without analyses or entries: the same sections under a
+    /// header of version 1 and 8 sections.
+    fn v1_of(v3: &[u8]) -> Vec<u8> {
+        use addict_dictionary::format::{HEADER_LEN, MAX_HEADER_LEN, NOTICED_SECTIONS, SECTIONS};
+        let field = |at: usize| u64::from_le_bytes(v3[at..at + 8].try_into().unwrap());
+        // The sections past the eighth, the analyses and the notice, are empty.
+        assert!((SECTIONS..NOTICED_SECTIONS).all(|section| field(16 + section * 16 + 8) == 0));
+        let mut v1 = v3[..8].to_vec();
+        v1.extend_from_slice(&1u32.to_le_bytes());
+        v1.extend_from_slice(&(SECTIONS as u32).to_le_bytes());
+        for section in 0..SECTIONS {
+            let offset = field(16 + section * 16) - (MAX_HEADER_LEN - HEADER_LEN) as u64;
+            v1.extend_from_slice(&offset.to_le_bytes());
+            v1.extend_from_slice(&field(16 + section * 16 + 8).to_le_bytes());
+        }
+        v1.extend_from_slice(&v3[MAX_HEADER_LEN..]);
+        v1
+    }
+
     /// The sample dictionary as a source of articles with both indexes open.
     pub struct Sampled;
 
@@ -2107,7 +2127,7 @@ pub mod tests {
             }
             let mut bytes = encode(&definitions).unwrap();
             if legacy {
-                bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+                bytes = v1_of(&bytes);
             }
             std::fs::write(dir.index(Source::Oewn), bytes).unwrap();
             let dictionaries = dir.dictionaries();
