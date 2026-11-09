@@ -21,7 +21,7 @@ use addict_platform::{
 };
 use gtk::{glib, prelude::*};
 
-use crate::{cache::Footprint, entries, view::Binding};
+use crate::{cache::Footprint, entries, file_import, view::Binding};
 
 /// How long reading the state of the key file may take.
 pub const KEY_CHECK_LIMIT: Duration = Duration::from_secs(2);
@@ -549,6 +549,8 @@ pub struct Settings {
     rebinding: Cell<bool>,
     /// The line of the startup state.
     startup_status: gtk::Label,
+    download: gtk::Button,
+    download_status: gtk::Label,
 }
 
 pub(crate) fn label(text: &str, classes: &[&str]) -> gtk::Label {
@@ -623,13 +625,17 @@ impl Settings {
     /// field, trimmed and not empty, when Save key or Enter in the field is
     /// pressed; `on_clear` runs when Clear cache is pressed; `on_startup` runs
     /// with the state asked for when the user moves the Start at login switch.
-    pub fn new(
+    /// `on_imported` refreshes resident dictionary states before success is shown.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new<F: Future<Output = Result<(), String>> + 'static>(
         parent: &impl IsA<gtk::Window>,
         key_file: Option<&Path>,
         on_change: impl Fn() + 'static,
         on_save: impl Fn(String) + 'static,
         on_clear: impl Fn() + 'static,
         on_startup: impl Fn(bool) + 'static,
+        on_imported: impl Fn() -> F + 'static,
+        on_download: impl Fn() + 'static,
     ) -> Self {
         let clipboard = ShortcutRow::new("Selection or clipboard");
         let screenshot = ShortcutRow::new("Screen region (OCR)");
@@ -762,6 +768,15 @@ impl Settings {
         startup_status.set_visible(false);
 
         let key_note = label("The key is never shown back here.", &["hint"]);
+        let import_file = file_import::Row::new();
+        let download = gtk::Button::builder()
+            .label("Download dictionaries")
+            .halign(gtk::Align::Start)
+            .css_classes(["settings-button"])
+            .build();
+        download.connect_clicked(move |_| on_download());
+        let download_status = label("", &["hint"]);
+        download_status.set_visible(false);
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -790,6 +805,13 @@ impl Settings {
             ],
         ));
         content.append(&list_section(
+            "Dictionaries",
+            &[
+                &row(&[download.upcast_ref(), download_status.upcast_ref()]),
+                &row(&[import_file.root.upcast_ref()]),
+            ],
+        ));
+        content.append(&list_section(
             "General",
             &[
                 &row(&[cache_row.upcast_ref(), cache_status.upcast_ref()]),
@@ -797,15 +819,25 @@ impl Settings {
             ],
         ));
 
+        // Let refusal details grow inside the scroller rather than making
+        // lower settings unreachable on a 768-pixel-high desktop.
+        let scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .max_content_height(600)
+            .child(&content)
+            .build();
         let window = gtk::Window::builder()
             .title("Addict settings")
             .transient_for(parent)
             .default_width(520)
             .hide_on_close(true)
             .titlebar(&crate::resident::header_bar("Addict settings"))
-            .child(&content)
+            .child(&scroll)
             .css_classes(["addict", "settings"])
             .build();
+        import_file.connect(&window, on_imported);
         let escape = gtk::EventControllerKey::new();
         let esc = window.downgrade();
         escape.connect_key_pressed(move |_, key, _, _| {
@@ -837,10 +869,22 @@ impl Settings {
             bound: Cell::new(false),
             rebinding: Cell::new(false),
             startup_status,
+            download,
+            download_status,
         };
         settings.render_binding(&Binding::Attempting, &Bindings::default());
         settings.render_key(None);
         settings
+    }
+
+    pub fn window(&self) -> &gtk::Window {
+        &self.window
+    }
+
+    /// Disable only while preparing; active progress remains reachable.
+    pub fn render_download(&self, busy: bool, text: &str) {
+        self.download.set_sensitive(!busy);
+        say_in(&self.download_status, text);
     }
 
     pub fn present(&self) {
@@ -983,6 +1027,61 @@ mod tests {
 
     #[test]
     #[ignore = "needs a display; run alone"]
+    fn dictionary_download_action_shows_preparation_feedback_and_keeps_retry_available() {
+        use gtk::prelude::*;
+        gtk::init().expect("a display");
+        let parent = gtk::Window::new();
+        let presses = std::rc::Rc::new(std::cell::Cell::new(0));
+        let pressed = presses.clone();
+        let settings = super::Settings::new(
+            &parent,
+            None,
+            || {},
+            |_| {},
+            || {},
+            |_| {},
+            || async { Ok(()) },
+            move || pressed.set(pressed.get() + 1),
+        );
+        settings.present();
+        assert_eq!(
+            settings.download.label().as_deref(),
+            Some("Download dictionaries")
+        );
+        settings.download.emit_clicked();
+        assert_eq!(presses.get(), 1);
+        settings.render_download(true, crate::first_run::FETCHING);
+        assert!(!settings.download.is_sensitive());
+        assert!(settings.download_status.is_visible());
+        assert_eq!(settings.download_status.label(), crate::first_run::FETCHING);
+        for status in [
+            crate::first_run::NOTHING.to_owned(),
+            crate::first_run::recovery_failed_text("cannot read the index manifest: malformed"),
+        ] {
+            settings.render_download(false, &status);
+            assert!(settings.download.is_sensitive());
+            assert!(settings.download_status.is_visible());
+            assert_eq!(settings.download_status.label(), status);
+            settings.download.emit_clicked();
+        }
+        assert_eq!(
+            presses.get(),
+            3,
+            "empty/error results keep the action retryable"
+        );
+        let scroll = settings
+            .window
+            .child()
+            .unwrap()
+            .downcast::<gtk::ScrolledWindow>()
+            .unwrap();
+        assert_eq!(scroll.max_content_height(), 600);
+        settings.window.destroy();
+        parent.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
     fn the_switch_asks_and_stays_off_until_it_is_told() {
         use gtk::prelude::*;
         gtk::init().expect("a display");
@@ -996,6 +1095,8 @@ mod tests {
             |_| {},
             || {},
             move |wanted| told.borrow_mut().push(wanted),
+            || async { Ok(()) },
+            || {},
         );
         assert!(!settings.startup.is_sensitive());
         settings.set_startup_sensitive(true);
@@ -1017,6 +1118,116 @@ mod tests {
         settings.startup.set_active(false);
         assert_eq!(*asked.borrow(), [true, false]);
         assert!(settings.startup.state(), "on until the portal confirms");
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_long_import_refusal_keeps_lower_controls_reachable_at_768px() {
+        use gtk::prelude::*;
+        gtk::init().expect("a display");
+        let parent = gtk::Window::new();
+        let settings = super::Settings::new(
+            &parent,
+            None,
+            || {},
+            |_| {},
+            || {},
+            |_| {},
+            || async { Ok(()) },
+            || {},
+        );
+        let scroll = settings
+            .window
+            .child()
+            .unwrap()
+            .downcast::<gtk::ScrolledWindow>()
+            .unwrap();
+        assert_eq!(scroll.max_content_height(), 600);
+        assert_eq!(scroll.hscrollbar_policy(), gtk::PolicyType::Never);
+
+        fn import_button(widget: &gtk::Widget) -> Option<gtk::Button> {
+            if let Some(button) = widget.downcast_ref::<gtk::Button>()
+                && button.label().as_deref() == Some(crate::file_import::LABEL)
+            {
+                return Some(button.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(found) = import_button(&current) {
+                    return Some(found);
+                }
+                child = current.next_sibling();
+            }
+            None
+        }
+        let button = import_button(scroll.upcast_ref()).expect("mounted import action");
+        let status = button
+            .parent()
+            .unwrap()
+            .next_sibling()
+            .unwrap()
+            .downcast::<gtk::Label>()
+            .unwrap();
+        // Use an ordinary refusal, including the full list of pinned files.
+        let path =
+            std::env::temp_dir().join(format!("addict-settings-refusal-{}", std::process::id()));
+        std::fs::write(&path, b"unrecognized download").unwrap();
+        let refusal = addict_dictionary::import::import(
+            &path,
+            &path.with_extension("data"),
+            addict_dictionary::import::Origin::Manual,
+        )
+        .unwrap_err()
+        .to_string();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            refusal.len() > 400,
+            "exercise the long production error: {refusal}"
+        );
+        assert!(refusal.contains("english-wordnet-2025.xml.gz"));
+        status.set_label(&refusal);
+        status.set_visible(true);
+        settings.window.set_default_size(520, 680);
+        settings.present();
+        let context = gtk::glib::MainContext::default();
+        context.block_on(gtk::glib::timeout_future(std::time::Duration::from_millis(
+            200,
+        )));
+        assert!(
+            settings.window.height() <= 720,
+            "fits a 768px display with shell chrome"
+        );
+        let adjustment = scroll.vadjustment();
+        assert!(
+            adjustment.upper() > adjustment.page_size(),
+            "refusal causes scrolling"
+        );
+        adjustment.set_value(adjustment.upper() - adjustment.page_size());
+        // Changing the adjustment queues allocation of the viewport's
+        // translated child. A standalone display test may not receive a
+        // compositor frame, so settle that allocation at the existing
+        // window size before measuring the controls' actual coordinates.
+        settings
+            .window
+            .allocate(settings.window.width(), settings.window.height(), -1, None);
+        assert_eq!(
+            adjustment.value(),
+            adjustment.upper() - adjustment.page_size()
+        );
+        let clear_cache = settings
+            .cache_size
+            .next_sibling()
+            .expect("Clear cache button");
+        for widget in [&clear_cache, settings.startup.upcast_ref::<gtk::Widget>()] {
+            let bounds = widget
+                .compute_bounds(&scroll)
+                .expect("lower control bounds");
+            assert!(
+                bounds.y() >= 0.0 && bounds.y() + bounds.height() <= scroll.height() as f32,
+                "lower control reachable after scrolling: {bounds:?}"
+            );
+        }
+        settings.window.close();
     }
 
     #[test]

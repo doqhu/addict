@@ -155,16 +155,32 @@ build from source with the system Tesseract needs neither file.
 
 ## Dictionaries
 
-addict looks words up in dictionary indexes it builds from files you
-download. A download on the first start is coming. For now, download the files
-below and import each one:
+addict looks words up in dictionary indexes. The first start offers to download
+the published indexes. Settings → Dictionaries → Download dictionaries checks
+all published indexes and offers only missing or unreadable files. You can use
+it after choosing Not now, or to restore a deleted or damaged index; healthy
+files, including manually imported editions, are kept. To import an upstream
+file yourself, download a file
+below, open Settings → Dictionaries → Import file…, and choose it. The app
+builds its index in the background and shows completion or a failure beside
+the action. A newly added dictionary is available on the next lookup. If that
+dictionary was already in use, restart Addict to use its new edition.
+
+Use this in-app route for Flatpak: its file chooser grants access to the
+selected download through the desktop portal, with no additional filesystem
+permissions. The command line remains available for a build from source:
 
 ```sh
 target/release/addict import ~/Downloads/english-wordnet-2025.xml.gz
 ```
 
 addict accepts only these exact editions: it checks each file's size and
-SHA-256 before it writes anything. One index is enough to start, and the
+SHA-256 before it writes anything. The Kaikki files are the exception: Kaikki
+replaces them about every week, so addict accepts any edition of them by its
+content (it must read as a Kaikki file and hold at least 10,000 headwords),
+but only under its upstream name, as linked below; the older name
+`kaikki.org-dictionary-Español.jsonl.gz` is accepted too. Such an index is dated by the
+file's modification time. One index is enough to start, and the
 window says which ones are missing. The indexes are kept in
 `~/.local/share/addict`.
 
@@ -173,26 +189,29 @@ window says which ones are missing. The indexes are kept in
 | English | definitions and synonyms | [english-wordnet-2025.xml.gz][oewn] |
 | English | Russian translations | [freedict-eng-rus-2025.11.23.src.tar.xz][freedict] |
 | Spanish | Russian translations | [es-ru.sqlite3][es-ru] |
+| Spanish | definitions and synonyms | [es-extract.jsonl.gz][kaikki-es] |
 | Spanish | synonyms | [omw-es-2.0.tar.xz][omw-es] |
+| Spanish | English glosses | [kaikki.org-dictionary-Spanish.jsonl.gz][kaikki-en-spanish] |
 | Catalan | Russian translations | [ca-ru.sqlite3][ca-ru] |
+| Catalan | definitions | [ca_dbnary_ontolex_2026-10-01.ttl.bz2][dbnary-ca] |
 | Catalan | synonyms | [th_ca_ES.dat][sinonims-cat] |
+| Catalan | English glosses | [kaikki.org-dictionary-Catalan.jsonl.gz][kaikki-en-catalan] |
 | Russian | English translations | [ru-en.sqlite3][ru-en] |
 | Russian | Spanish translations | [ru-es.sqlite3][ru-es] |
 | Russian | Catalan translations | [ru-ca.sqlite3][ru-ca] |
 
-Two kinds of data are not listed yet. Kaikki gives the Spanish definitions and
-the English glosses of Spanish and Catalan words, but it replaces its files
-every week, so the editions addict accepts can no longer be downloaded.
-DBnary gives the Catalan definitions; its server could not be reached when
-this list was checked. Both come with the first-start download.
 [CREDITS](CREDITS) names the authors and the license of each source.
 
 [oewn]: https://github.com/globalwordnet/english-wordnet/releases/download/2025-edition/english-wordnet-2025.xml.gz
 [freedict]: https://download.freedict.org/dictionaries/eng-rus/2025.11.23/freedict-eng-rus-2025.11.23.src.tar.xz
 [es-ru]: https://download.wikdict.com/dictionaries/sqlite/2_2026-06/es-ru.sqlite3
+[kaikki-es]: https://kaikki.org/dictionary/downloads/es/es-extract.jsonl.gz
 [omw-es]: https://github.com/omwn/omw-data/releases/download/v2.0/omw-es-2.0.tar.xz
+[kaikki-en-spanish]: https://kaikki.org/dictionary/Spanish/kaikki.org-dictionary-Spanish.jsonl.gz
 [ca-ru]: https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ca-ru.sqlite3
+[dbnary-ca]: https://kaiko.getalp.org/static/ontolex/ca/ca_dbnary_ontolex_2026-10-01.ttl.bz2
 [sinonims-cat]: https://github.com/Softcatala/sinonims-cat/releases/download/2.3.2/th_ca_ES.dat
+[kaikki-en-catalan]: https://kaikki.org/dictionary/Catalan/kaikki.org-dictionary-Catalan.jsonl.gz
 [ru-en]: https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ru-en.sqlite3
 [ru-es]: https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ru-es.sqlite3
 [ru-ca]: https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ru-ca.sqlite3

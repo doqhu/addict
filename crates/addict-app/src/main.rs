@@ -8,15 +8,25 @@
 //! removes those files and the saved startup state; when the portal does not
 //! confirm, it removes nothing and names the entry.
 //!
+//! On the first start with no index at all, the window offers to download
+//! every dictionary published as an asset of the release `indexes-v<format>`
+//! of the repository: Download fetches them one after another, checks the
+//! size and SHA-256 of each against the release's manifest and installs it,
+//! such as `oewn.index`; one that fails says why on its row and the others go
+//! on. Not now is remembered and the offer is not made again. When the
+//! manifest cannot be fetched or lists no index, nothing is shown and the
+//! next start offers again.
+//!
 //! `addict import <FILE>` turns a dictionary file the user has downloaded
 //! into an index in the data directory, `$XDG_DATA_HOME/addict` or
-//! `$HOME/.local/share/addict`. Only the two chosen files are accepted, by
-//! size and SHA-256: `english-wordnet-2025.xml.gz`, the English definitions
-//! and synonyms, gives `oewn.index`, and
-//! `freedict-eng-rus-2025.11.23.src.tar.xz`, the Russian translations, gives
-//! `freedict.index`. The index replaces the previous one of the same source
-//! and the index of the other source is not touched. The command prints the
-//! path of the index and the counts of its headwords and exception forms.
+//! `$HOME/.local/share/addict`. Only the chosen files are accepted, by size
+//! and SHA-256: `english-wordnet-2025.xml.gz`, the English definitions and
+//! synonyms, gives `oewn.index`, and so on for each source. A Kaikki file is accepted by
+//! its content instead, under its upstream name only, and is dated by its
+//! modification time. The index replaces the previous one of the same source
+//! and the indexes of the other sources are not touched. The command prints
+//! the path of the index, its edition and the counts of its headwords and
+//! exception forms.
 //!
 //! With no arguments the process shows the resident application's main window.
 //! `--background` starts it silently for login; the Start at login switch in
@@ -39,7 +49,7 @@
 //! its dictionary forms. The indexes are opened and read off the UI thread,
 //! and a lookup has a deadline. The window shows its outcome: the article, a
 //! line saying the dictionary has no entry, a line saying that nothing is
-//! imported or that an index cannot be read, each with the import command,
+//! imported or that an index cannot be read, each pointing to Settings → Import file…,
 //! or a line saying the lookup did not finish. One index is enough: the
 //! article has what that index gives. Whenever an index is missing or cannot
 //! be read, the window says so in a line of its own from the moment it is
@@ -215,7 +225,9 @@
 //!
 //! This module owns the command line and what each form of it starts; the entry
 //! commands are [`entries`]'s, the import is `addict_dictionary`'s, the indexes
-//! as a source of articles are [`dictionaries`]'s, the online translator is
+//! as a source of articles are [`dictionaries`]'s, the download of the
+//! published indexes is [`download`]'s and its first-run offer
+//! [`first_run`]'s, the online translator is
 //! `addict_deepl`'s, what is asked of it and kept is [`online`]'s, where every
 //! request to it starts is [`translate`]'s, the capture job is [`capture`]'s,
 //! the Vulkan drivers the resident lets the loader list are [`gpu`]'s,
@@ -229,8 +241,11 @@ mod about;
 mod cache;
 mod capture;
 mod dictionaries;
+mod download;
 mod entries;
 mod evidence;
+mod file_import;
+mod first_run;
 mod gpu;
 mod history;
 mod language;
@@ -326,9 +341,10 @@ fn import_file(file: &Path) -> ExitCode {
             "cannot find the data directory: XDG_DATA_HOME is not set to an absolute path and HOME is unset or empty",
         );
     };
-    match import::import(file, &dir) {
+    match import::import(file, &dir, import::Origin::Manual) {
         Ok(imported) => {
             println!("{}", imported.path.display());
+            println!("edition: {}", imported.edition);
             println!("headwords: {}", imported.headwords);
             println!("exception forms: {}", imported.exception_forms);
             ExitCode::SUCCESS

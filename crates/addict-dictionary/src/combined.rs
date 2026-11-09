@@ -288,10 +288,11 @@ mod tests {
                     .iter_mut()
                     .for_each(|sense| sense.part_of_speech = None);
             }
-            let mut bytes = encode(&wordnet_contents).unwrap();
-            if legacy {
-                bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
-            }
+            let bytes = if legacy {
+                crate::format::encode_legacy(&wordnet_contents, 1).unwrap()
+            } else {
+                encode(&wordnet_contents).unwrap()
+            };
             let definitions_path = dir.path().join("wordnet.index");
             std::fs::write(&definitions_path, bytes).unwrap();
             let combined = Combined::new(

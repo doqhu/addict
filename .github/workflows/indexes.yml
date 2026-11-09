@@ -1,0 +1,172 @@
+name: Dictionary indexes
+
+# Builds the indexes from their upstream files and publishes them to the data
+# release of the current index format, as docs/index-release.md describes.
+on:
+  schedule:
+    # Monthly, on the 2nd at 03:17 UTC: off the hour, when runners are busy.
+    - cron: '17 3 2 * *'
+  workflow_dispatch:
+
+permissions: {}
+
+# Two runs must not upload over each other; a second run waits.
+concurrency:
+  group: indexes-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # No container: the dictionary crate needs no GTK, and the runner has
+    # rustup's stable Rust, xz and gh.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: always
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      OUT: target/indexes
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The disk and memory of the runner, recorded: 13 upstream files and
+      # their indexes must fit.
+      - name: Show the runner's limits
+        run: |
+          df -h
+          free -h
+
+      - name: Build the builder
+        run: cargo build --locked --release -p addict-dictionary --example build-indexes
+
+      # The tag comes from the builder, so a new index format writes a new
+      # release and never touches the release of an older one.
+      - name: Find the tag
+        id: tag
+        run: |
+          tag=$(target/release/examples/build-indexes --print-tag)
+          if [ -z "$tag" ]; then
+            echo "::error::build-indexes --print-tag printed no tag."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      # The published manifest, whose entries of sources that fail now are
+      # kept. Any error other than a missing release stops the job before an
+      # upload: without the manifest, a failed source would vanish from it.
+      - name: Download the published manifest
+        id: previous
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if names=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2> "$RUNNER_TEMP/view.err"); then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            if grep -qx manifest.json <<< "$names"; then
+              gh release download "$TAG" --pattern manifest.json --dir "$RUNNER_TEMP/previous"
+              echo "manifest=$RUNNER_TEMP/previous/manifest.json" >> "$GITHUB_OUTPUT"
+            else
+              echo "$TAG has no manifest.json: building without --previous."
+            fi
+          elif grep -q 'release not found' "$RUNNER_TEMP/view.err"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "There is no release $TAG yet: building without --previous."
+          else
+            cat "$RUNNER_TEMP/view.err" >&2
+            exit 1
+          fi
+
+      # The builder's status is kept for the last step: a failed source still
+      # lets the others be published. stderr goes to the log and to a file,
+      # stdout (the paths of the assets) to a file.
+      - name: Build the indexes
+        id: build
+        env:
+          PREVIOUS: ${{ steps.previous.outputs.manifest }}
+        run: |
+          set +e +o pipefail
+          args=(--out "$OUT")
+          if [ -n "$PREVIOUS" ]; then
+            args+=(--previous "$PREVIOUS")
+          fi
+          target/release/examples/build-indexes "${args[@]}" \
+            2>&1 > "$RUNNER_TEMP/build.out" | tee "$RUNNER_TEMP/build.err"
+          code=${PIPESTATUS[0]}
+          cat "$RUNNER_TEMP/build.out"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Show the disk after the build
+        run: df -h
+
+      # Only when the builder wrote a manifest: a setup or usage error writes
+      # none. The indexes and the license first, the manifest after them (the
+      # app reads it first, so every asset it lists must be there), the
+      # release page last. The assets are the ones the builder printed: the
+      # indexes built, not the kept ones, whose published assets stay.
+      - name: Upload to the release
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          EXISTS: ${{ steps.previous.outputs.exists }}
+        run: |
+          if [ ! -f "$OUT/manifest.json" ]; then
+            echo "The builder wrote no manifest: nothing is uploaded."
+            exit 0
+          fi
+          if [ "$EXISTS" != true ]; then
+            gh release create "$TAG" --latest=false --target master \
+              --title "Dictionary indexes, format ${TAG#indexes-v}" \
+              --notes-file "$OUT/release-body.md"
+          fi
+          mapfile -t assets < <(grep '\.index\.xz$' "$RUNNER_TEMP/build.out")
+          assets+=("$OUT/WNDB_License.txt")
+          gh release upload "$TAG" --clobber "${assets[@]}"
+          gh release upload "$TAG" --clobber "$OUT/manifest.json"
+          gh release edit "$TAG" --notes-file "$OUT/release-body.md"
+
+      # Built, kept and failed indexes, from the builder's stdout and stderr:
+      # a failed index has a `build-indexes: <index>: <error>` line, a kept
+      # one also `build-indexes: <index>: keeping the published index`.
+      - name: Write the summary
+        if: always() && steps.build.outcome == 'success'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          CODE: ${{ steps.build.outputs.code }}
+        run: |
+          kept='^build-indexes: [^ :]+: keeping the published index$'
+          failed='^build-indexes: [^ :]+: '
+          {
+            echo "## Dictionary indexes, $TAG"
+            echo
+            if [ ! -f "$OUT/manifest.json" ]; then
+              echo "The builder stopped with status $CODE and wrote no manifest; nothing was uploaded."
+              echo
+              echo '```'
+              tail -n 20 "$RUNNER_TEMP/build.err"
+              echo '```'
+              exit 0
+            fi
+            built=$(grep '\.index\.xz$' "$RUNNER_TEMP/build.out" \
+              | sed -E 's|.*/([^/]+)\.index\.xz$|- \1|')
+            kept_list=$(grep -E "$kept" "$RUNNER_TEMP/build.err" \
+              | sed -E 's|^build-indexes: ([^ :]+): .*|- \1|')
+            failed_list=$(grep -E "$failed" "$RUNNER_TEMP/build.err" | grep -vE "$kept" \
+              | sed -E 's|^build-indexes: ([^ :]+): (.*)|- \1: \2|')
+            echo "### Built"
+            echo
+            echo "${built:-None.}"
+            echo
+            echo "### Kept from the published release"
+            echo
+            echo "${kept_list:-None.}"
+            echo
+            echo "### Failed"
+            echo
+            echo "${failed_list:-None.}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Red when any source failed, after the others were published.
+      - name: Fail when a source failed
+        env:
+          CODE: ${{ steps.build.outputs.code }}
+        run: exit "$CODE"

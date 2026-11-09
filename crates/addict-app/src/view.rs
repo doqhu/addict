@@ -128,9 +128,10 @@ pub fn binding_texts(binding: &Binding) -> Option<BindingTexts<'_>> {
 /// What the button of the binding row says.
 pub(crate) const RETRY_LABEL: &str = "Retry";
 
-/// The command that imports a downloaded dictionary file, as the user types
-/// it.
-const IMPORT_COMMAND: &str = "addict import <FILE>";
+/// Reinstalls only the published indexes that are missing or unreadable.
+const DOWNLOAD_ACTION: &str = "Settings → Download dictionaries";
+/// The in-app route works through the file chooser portal in Flatpak too.
+const IMPORT_ACTION: &str = "Settings → Import file…";
 
 /// The start of the line of the indexes when neither is imported.
 const NOT_IMPORTED: &str = "The dictionaries are not imported.";
@@ -140,7 +141,7 @@ const NOT_IMPORTED: &str = "The dictionaries are not imported.";
 const INDEX_GIVES: [&str; 2] = ["English definitions and synonyms", "Russian translations"];
 
 /// The line of the indexes: what is said about every index that is missing
-/// or cannot be read, one line for each, with the command that imports its
+/// or cannot be read, one line for each, with the action that imports its
 /// file. Empty when both are open. Plain text, not markup.
 pub fn indexes_text(indexes: Indexes) -> String {
     // The Spanish index is not one of the files: the line is the same with
@@ -155,7 +156,7 @@ pub fn indexes_text(indexes: Indexes) -> String {
     ] = files
     {
         return format!(
-            "{NOT_IMPORTED} Import each downloaded file with {IMPORT_COMMAND}: {} and {}.",
+            "{NOT_IMPORTED} Use {DOWNLOAD_ACTION}, or import each downloaded file through {IMPORT_ACTION}: {} and {}.",
             definitions.published, translations.published
         );
     }
@@ -164,7 +165,7 @@ pub fn indexes_text(indexes: Indexes) -> String {
         let line = match state {
             State::Open => continue,
             State::Missing => format!(
-                "No {gives}: {} is not imported. Import it with {IMPORT_COMMAND}.",
+                "No {gives}: {} is not imported. Use {DOWNLOAD_ACTION}, or import it through {IMPORT_ACTION}",
                 file.published
             ),
             State::Unreadable => format!("No {gives}: {}", unreadable_text(file)),
@@ -181,7 +182,7 @@ pub fn indexes_text(indexes: Indexes) -> String {
 /// dictionary file to import again.
 fn unreadable_text(file: IndexFile) -> String {
     format!(
-        "the index {} cannot be read. Import {} again with {IMPORT_COMMAND}.",
+        "the index {} cannot be read. Use {DOWNLOAD_ACTION}, or import {} again through {IMPORT_ACTION}",
         file.index, file.published
     )
 }
@@ -467,7 +468,7 @@ fn elsewhere_text(chosen: Language, found: Language) -> String {
 /// The line of a word that no imported dictionary could be asked about: what
 /// stands before the word and what stands after it.
 const NOT_IMPORTED_BEFORE: &str = "There is no imported dictionary to look “";
-const NOT_IMPORTED_AFTER: &str = "” up in. Import a downloaded dictionary file with ";
+const NOT_IMPORTED_AFTER: &str = "” up in. Use Settings → Download dictionaries, or import a downloaded dictionary file through ";
 
 /// What stands before the line of an index that cannot be read.
 const UNREADABLE_BEFORE: &str = "The word was not looked up: ";
@@ -1699,7 +1700,7 @@ fn lookup_texts<'a>(
             dictionary_language(*language)
         ))),
         Lookup::NotImported { word } => line(Cow::Owned(format!(
-            "{NOT_IMPORTED_BEFORE}{word}{NOT_IMPORTED_AFTER}{IMPORT_COMMAND}."
+            "{NOT_IMPORTED_BEFORE}{word}{NOT_IMPORTED_AFTER}{IMPORT_ACTION}"
         ))),
         Lookup::NoRussianDictionary(language) => {
             line(Cow::Borrowed(missing_from_russian(*language)))
@@ -3645,7 +3646,7 @@ mod tests {
     }
 
     #[test]
-    fn the_not_imported_line_names_the_word_and_the_command() {
+    fn the_not_imported_line_names_the_word_and_the_import_action() {
         let line = details(
             &Lookup::NotImported {
                 word: "a<b".to_owned(),
@@ -3655,19 +3656,20 @@ mod tests {
         assert_eq!(
             line,
             ["There is no imported dictionary to look “a<b” up in. \
-             Import a downloaded dictionary file with addict import <FILE>."]
+             Use Settings → Download dictionaries, or import a downloaded dictionary file through Settings → Import file…"]
         );
     }
 
     #[test]
-    fn the_unreadable_line_names_the_index_its_file_and_the_command() {
+    fn the_unreadable_line_names_the_index_its_file_and_the_import_action() {
         for file in [OEWN, FREEDICT] {
             let line = details(&Lookup::Unreadable(file), None).join("\n");
             assert!(line.contains(file.index), "{line}");
             assert!(line.contains(file.published), "{line}");
             assert!(line.contains("cannot be read"), "{line}");
             assert!(line.contains("again"), "{line}");
-            assert!(line.contains("addict import <FILE>"), "{line}");
+            assert!(line.contains(super::DOWNLOAD_ACTION), "{line}");
+            assert!(line.contains("Settings → Import file…"), "{line}");
             assert!(!line.contains("did not finish"), "{line}");
         }
     }
@@ -3703,8 +3705,8 @@ mod tests {
         });
         assert_eq!(
             line,
-            "The dictionaries are not imported. Import each downloaded file with \
-             addict import <FILE>: english-wordnet-2025.xml.gz and \
+            "The dictionaries are not imported. Use Settings → Download dictionaries, or import each downloaded file through \
+             Settings → Import file…: english-wordnet-2025.xml.gz and \
              freedict-eng-rus-2025.11.23.src.tar.xz."
         );
     }
@@ -3739,7 +3741,8 @@ mod tests {
                     );
                 }
                 if !text.is_empty() {
-                    assert!(text.contains("addict import <FILE>"), "{text}");
+                    assert!(text.contains(super::DOWNLOAD_ACTION), "{text}");
+                    assert!(text.contains("Settings → Import file…"), "{text}");
                 }
             }
         }
@@ -3756,7 +3759,7 @@ mod tests {
         assert_eq!(
             text,
             "No Russian translations: freedict-eng-rus-2025.11.23.src.tar.xz is not \
-             imported. Import it with addict import <FILE>."
+             imported. Use Settings → Download dictionaries, or import it through Settings → Import file…"
         );
         let text = indexes_text(Indexes {
             definitions: State::Unreadable,
@@ -3767,7 +3770,7 @@ mod tests {
         assert_eq!(
             text,
             "No English definitions and synonyms: the index oewn.index cannot be read. \
-             Import english-wordnet-2025.xml.gz again with addict import <FILE>."
+             Use Settings → Download dictionaries, or import english-wordnet-2025.xml.gz again through Settings → Import file…"
         );
     }
 

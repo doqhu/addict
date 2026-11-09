@@ -27,10 +27,15 @@ futures-util = "=0.3.34"
 gdk4-wayland = { version = "=0.11.5", features = ["wayland_crate"] }
 gtk = { package = "gtk4", version = "=0.11.5", features = ["v4_20"] }
 libc = "=0.2.190"
+# The download of the published indexes, as addict-deepl's: no default
+# features, rustls with the bundled Mozilla roots.
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-webpki-roots"] }
 rusqlite = { version = "=0.41.0", features = ["bundled"] }
 serde_json = "=1.0.151"
 sha2 = "=0.10.9"
-tokio = { version = "=1.53.2", features = ["time"] }
+# `rt` for `spawn_blocking`: the checks and the install of a downloaded
+# index leave the runner's thread.
+tokio = { version = "=1.53.2", features = ["rt", "sync", "time"] }
 wayland-client = "=0.31.15"
 wayland-protocols = { version = "=0.32.13", features = ["client"] }
 
@@ -43,7 +48,10 @@ addict-deepl = { path = "../addict-deepl", features = ["stub"] }
 # For the acceptance harness, the `harness` example, whose format and rules
 # the evidence tests include.
 serde = { version = "=1.0.229", features = ["derive"] }
-tokio = { version = "=1.53.2", features = ["macros", "process", "rt", "time"] }
+# `net` and `io-util` for the static-file stub of the download tests.
+tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "process", "rt", "time"] }
+# The xz assets of the download tests.
+lzma-rs = "=0.3.0"
 # The mock Background portal of the uninstall tests; already in the product
 # through addict-platform.
 zbus = { version = "=5.19.0", default-features = false, features = ["tokio"] }
