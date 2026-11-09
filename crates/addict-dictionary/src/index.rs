@@ -1455,9 +1455,12 @@ mod tests {
                 false,
             ),
         ] {
-            let imported = crate::import::import(&root.join(file), dir.path()).expect(file);
+            let imported =
+                crate::import::import(&root.join(file), dir.path(), crate::import::Origin::Manual)
+                    .expect(file);
             let first = std::fs::read(&imported.path).unwrap();
-            crate::import::import(&root.join(file), dir.path()).expect("deterministic reimport");
+            crate::import::import(&root.join(file), dir.path(), crate::import::Origin::Manual)
+                .expect("deterministic reimport");
             assert_eq!(first, std::fs::read(&imported.path).unwrap(), "{file}");
             let index = Index::open(&imported.path).unwrap();
             let article = index.find(word).unwrap().expect(word);

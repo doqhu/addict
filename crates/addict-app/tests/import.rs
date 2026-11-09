@@ -52,6 +52,42 @@ fn a_file_of_another_size_is_refused_and_nothing_is_written() {
     assert!(line.contains("11363503 bytes"), "{line}");
     assert!(line.contains("3948540 bytes"), "{line}");
     assert!(!line.contains("SHA-256"), "{line}");
+    // A kaikki file is taken by its content only under its upstream name.
+    assert!(
+        line.contains("a kaikki file is accepted by its content only under its upstream name"),
+        "{line}"
+    );
+    assert!(line.contains("es-extract.jsonl.gz"), "{line}");
+    assert!(!data_home.exists());
+}
+
+#[test]
+fn a_broken_file_under_a_kaikki_name_is_refused_and_names_its_source() {
+    let temp = TempDir::new("import-kaikki");
+    let data_home = temp.path().join("data");
+    let file = temp.path().join("kaikki.org-dictionary-Catalan.jsonl.gz");
+    for bytes in [b"".as_slice(), b"not a gzip of JSON Lines".as_slice()] {
+        std::fs::write(&file, bytes).expect("write file");
+        let line = refusal(&import(&file, Some(temp.path()), Some(&data_home)));
+        assert!(line.contains("kaikki-en-Catalan"), "{line}");
+        assert!(line.contains(&file.display().to_string()), "{line}");
+        assert!(!data_home.exists());
+    }
+}
+
+#[test]
+fn a_file_of_a_known_size_and_another_hash_is_refused_by_its_sha256() {
+    let temp = TempDir::new("import-hash");
+    let file = temp.path().join("english-wordnet-2025.xml.gz");
+    std::fs::write(&file, vec![0u8; 11_363_503]).expect("write file");
+    let data_home = temp.path().join("data");
+
+    let line = refusal(&import(&file, Some(temp.path()), Some(&data_home)));
+    assert!(line.contains("SHA-256"), "{line}");
+    assert!(
+        line.contains("9ca6d1dcb75f822fdd66617f7d9da48142ace38dd544d6ad5e2feca1674ad3fe"),
+        "{line}"
+    );
     assert!(!data_home.exists());
 }
 

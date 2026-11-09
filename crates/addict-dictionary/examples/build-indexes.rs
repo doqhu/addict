@@ -23,7 +23,7 @@ use std::{
 
 use addict_dictionary::{
     format,
-    import::{self, KNOWN},
+    import::{self, Day, KNOWN, Origin},
     release::{self, MANIFEST, Manifest, Published},
     sources::{self, Row},
 };
@@ -90,14 +90,12 @@ fn build(out: &Path) -> Result<Manifest, String> {
         format: format::VERSION,
         indexes: Vec::new(),
     };
-    let built: Vec<&Row> = sources::ROWS
-        .iter()
-        .filter(|row| row.url.is_some())
-        .collect();
-    for row in &built {
-        let published =
+    let mut built: Vec<(&Row, String)> = Vec::new();
+    for row in sources::ROWS.iter().filter(|row| row.url.is_some()) {
+        let (published, edition) =
             build_one(&http, row, out).map_err(|error| format!("{}: {error}", row.index))?;
         manifest.indexes.push(published);
+        built.push((row, edition));
     }
     write(&out.join(MANIFEST), manifest.to_json().as_bytes())?;
     write(
@@ -108,16 +106,27 @@ fn build(out: &Path) -> Result<Manifest, String> {
     Ok(manifest)
 }
 
-/// Downloads, imports and compresses the index of `row` into `out`.
-fn build_one(http: &reqwest::blocking::Client, row: &Row, out: &Path) -> Result<Published, String> {
+/// Downloads, imports and compresses the index of `row` into `out`; gives
+/// the published index and the edition of the file it was built from.
+fn build_one(
+    http: &reqwest::blocking::Client,
+    row: &Row,
+    out: &Path,
+) -> Result<(Published, String), String> {
     let url = row.url.ok_or("no download URL")?;
+    let source = KNOWN
+        .iter()
+        .map(|known| known.source)
+        .find(|source| sources::row(*source).index == row.index)
+        .ok_or("no source has this index")?;
     let name = url.rsplit('/').next().unwrap_or(url);
     let downloads = out.join(".downloads");
     fs::create_dir_all(&downloads)
         .map_err(|error| format!("cannot make {}: {error}", downloads.display()))?;
     let file = downloads.join(name);
-    download(http, url, &file)?;
-    let imported = import::import(&file, out).map_err(|error| error.to_string())?;
+    let published = download(http, url, &file)?;
+    let imported = import::import(&file, out, Origin::Download { source, published })
+        .map_err(|error| error.to_string())?;
     let expected = out.join(format!("{}.index", row.index));
     if imported.path != expected {
         return Err(format!(
@@ -132,11 +141,17 @@ fn build_one(http: &reqwest::blocking::Client, row: &Row, out: &Path) -> Result<
     let asset = out.join(release::asset_name(row.index));
     let bytes =
         fs::read(&asset).map_err(|error| format!("cannot read {}: {error}", asset.display()))?;
-    Ok(Published::of(row.index, &bytes))
+    Ok((Published::of(row.index, &bytes), imported.edition))
 }
 
-/// Downloads `url` into `file`, through a temporary file beside it.
-fn download(http: &reqwest::blocking::Client, url: &str, file: &Path) -> Result<(), String> {
+/// Downloads `url` into `file`, through a temporary file beside it; gives
+/// the day of its `Last-Modified` header, `None` when it is missing or not
+/// an HTTP date.
+fn download(
+    http: &reqwest::blocking::Client,
+    url: &str,
+    file: &Path,
+) -> Result<Option<Day>, String> {
     let mut response = http
         .get(url)
         .send()
@@ -145,6 +160,11 @@ fn download(http: &reqwest::blocking::Client, url: &str, file: &Path) -> Result<
     if !status.is_success() {
         return Err(format!("cannot download {url}: HTTP {status}"));
     }
+    let published = response
+        .headers()
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|value| value.to_str().ok())
+        .and_then(Day::from_http_date);
     let partial = file.with_extension("part");
     let written = fs::File::create(&partial).and_then(|mut target| {
         io::copy(&mut response, &mut target)?;
@@ -152,7 +172,7 @@ fn download(http: &reqwest::blocking::Client, url: &str, file: &Path) -> Result<
         target.sync_all()
     });
     match written.and_then(|()| fs::rename(&partial, file)) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(published),
         Err(error) => {
             let _ = fs::remove_file(&partial);
             Err(format!("cannot download {url}: {error}"))
@@ -181,8 +201,9 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// The text of the release page: per index its credit, its author, its
 /// license and the address of its text, its source, its upstream file and
 /// that it was modified, then the warranty disclaimer. Each index carries
-/// the same notice in its file.
-fn release_body(rows: &[&Row]) -> String {
+/// the same notice in its file. Each row comes with the edition of the file
+/// its index was built from.
+fn release_body(rows: &[(&Row, String)]) -> String {
     let mut body = String::new();
     body.push_str(&format!(
         "Dictionary indexes of [addict](https://github.com/doqhu/addict) in index format {}.\n\n",
@@ -193,11 +214,7 @@ fn release_body(rows: &[&Row]) -> String {
          index; `manifest.json` gives the size and the SHA-256 of each. Each index also carries \
          the license notice below in its file.\n",
     );
-    for row in rows {
-        let edition = KNOWN
-            .iter()
-            .find(|known| sources::row(known.source).index == row.index)
-            .map_or("", |known| known.edition);
+    for (row, edition) in rows {
         body.push_str(&format!("\n## {}\n\n", release::asset_name(row.index)));
         body.push_str(&format!("- Credit: {}\n", row.credit));
         body.push_str(&format!("- Author: {}\n", row.author));

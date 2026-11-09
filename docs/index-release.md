@@ -82,7 +82,7 @@ in their stored order:
 | `link` | The address of the source. |
 | `modified` | That the index was converted from the upstream file (`sources::MODIFIED`). |
 | `disclaimer` | The warranty disclaimer (`sources::DISCLAIMER`). |
-| `edition` | The edition of the upstream file, also the source id of the index. |
+| `edition` | The edition of the upstream file, also the source id of the index. For a pinned file it is the edition in `import::KNOWN`; for a kaikki file accepted by its content it is `<index>-<date>`, the date being the day of the download's `Last-Modified` header (the file's modification time on a manual import), for example `kaikki-en-Spanish-2026-11-02`. |
 | `sha256` | The SHA-256 of the upstream file the index was built from, in lowercase hex. |
 
 The first five come from the source's row in

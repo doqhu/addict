@@ -18,13 +18,14 @@
 //!
 //! `addict import <FILE>` turns a dictionary file the user has downloaded
 //! into an index in the data directory, `$XDG_DATA_HOME/addict` or
-//! `$HOME/.local/share/addict`. Only the two chosen files are accepted, by
-//! size and SHA-256: `english-wordnet-2025.xml.gz`, the English definitions
-//! and synonyms, gives `oewn.index`, and
-//! `freedict-eng-rus-2025.11.23.src.tar.xz`, the Russian translations, gives
-//! `freedict.index`. The index replaces the previous one of the same source
-//! and the index of the other source is not touched. The command prints the
-//! path of the index and the counts of its headwords and exception forms.
+//! `$HOME/.local/share/addict`. Only the chosen files are accepted, by size
+//! and SHA-256: `english-wordnet-2025.xml.gz`, the English definitions and
+//! synonyms, gives `oewn.index`, and so on for each source. A Kaikki file is accepted by
+//! its content instead, under its upstream name only, and is dated by its
+//! modification time. The index replaces the previous one of the same source
+//! and the indexes of the other sources are not touched. The command prints
+//! the path of the index, its edition and the counts of its headwords and
+//! exception forms.
 //!
 //! With no arguments the process shows the resident application's main window.
 //! `--background` starts it silently for login; the Start at login switch in
@@ -338,9 +339,10 @@ fn import_file(file: &Path) -> ExitCode {
             "cannot find the data directory: XDG_DATA_HOME is not set to an absolute path and HOME is unset or empty",
         );
     };
-    match import::import(file, &dir) {
+    match import::import(file, &dir, import::Origin::Manual) {
         Ok(imported) => {
             println!("{}", imported.path.display());
+            println!("edition: {}", imported.edition);
             println!("headwords: {}", imported.headwords);
             println!("exception forms: {}", imported.exception_forms);
             ExitCode::SUCCESS

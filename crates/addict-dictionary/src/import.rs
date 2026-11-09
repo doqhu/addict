@@ -3,6 +3,17 @@
 //! A file is accepted when its byte size and then its SHA-256 equal an entry
 //! of [`KNOWN`]; until both match, nothing is written. The file is read into
 //! memory once, so the bytes that were hashed are the bytes that are parsed.
+//!
+//! Kaikki replaces its three files about weekly under the same URL, so a
+//! Kaikki file that is not in [`KNOWN`] is accepted by its content: it must
+//! parse and give at least [`MIN_KAIKKI_HEADWORDS`] headwords. Its source is
+//! the one the builder downloaded it for ([`Origin::Download`]), or, on a
+//! manual import, the one its upstream file name in [`KAIKKI_NAMES`] tells;
+//! the name is matched exactly. Its edition is the index name and the day
+//! the file was published, `kaikki-en-Spanish-2026-11-02`: the
+//! `Last-Modified` date of the download, or the file's modification time on
+//! a manual import, in UTC. A pinned match in [`KNOWN`] still wins, and
+//! every other source keeps the pinned check.
 //! The index is built in memory, written to a temporary file beside its
 //! final place and renamed over it: an import that fails leaves the previous
 //! index as it was, and the same file gives the same index bytes. Every
@@ -25,6 +36,7 @@ use std::{
     fs::{self, File},
     io::{self, BufReader, Read, Write},
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use flate2::bufread::MultiGzDecoder;
@@ -307,6 +319,157 @@ pub const OMW_ES_MEMBER: &str = "omw-es/omw-es.xml";
 /// The `lexvo:` code of the language of the DBnary entries read.
 const DBNARY_CA_LANGUAGE: &str = "cat";
 
+/// The fewest headwords a Kaikki file accepted by its content must give. The
+/// smallest real edition, `kaikki-en-Catalan`, gives about 31 500.
+pub const MIN_KAIKKI_HEADWORDS: usize = 10_000;
+
+/// The upstream names of the Kaikki files and their sources. On a manual
+/// import a Kaikki file that is not in [`KNOWN`] is accepted by its content
+/// only under one of these names, matched exactly.
+pub const KAIKKI_NAMES: &[(&str, Source)] = &[
+    ("es-extract.jsonl.gz", Source::KaikkiEs),
+    ("kaikki.org-dictionary-Español.jsonl.gz", Source::KaikkiEs),
+    (
+        "kaikki.org-dictionary-Spanish.jsonl.gz",
+        Source::KaikkiEnSpanish,
+    ),
+    (
+        "kaikki.org-dictionary-Catalan.jsonl.gz",
+        Source::KaikkiEnCatalan,
+    ),
+];
+
+/// Whether a file of `source` that is not in [`KNOWN`] is accepted by its
+/// content.
+fn by_content(source: Source) -> bool {
+    matches!(
+        source,
+        Source::KaikkiEs | Source::KaikkiEnSpanish | Source::KaikkiEnCatalan
+    )
+}
+
+/// The source [`KAIKKI_NAMES`] gives the name of `file`.
+fn kaikki_source(file: &Path) -> Option<Source> {
+    let name = file.file_name()?.to_str()?;
+    KAIKKI_NAMES
+        .iter()
+        .find(|(upstream, _)| *upstream == name)
+        .map(|(_, source)| *source)
+}
+
+/// Where the file being imported comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The user brought it: the source of a Kaikki file is told by its name
+    /// and its date is its modification time.
+    Manual,
+    /// The builder downloaded it for `source`, and the server said it was
+    /// last modified on `published`.
+    Download {
+        source: Source,
+        published: Option<Day>,
+    },
+}
+
+/// A calendar day, in UTC. It is shown as `YYYY-MM-DD`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Day {
+    pub year: i32,
+    /// 1 to 12.
+    pub month: u8,
+    /// 1 to 31.
+    pub day: u8,
+}
+
+/// The English month names of an HTTP date.
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// The English day names of an HTTP date.
+const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+impl Day {
+    /// The day of `time` in UTC.
+    pub fn of(time: SystemTime) -> Self {
+        let seconds = match time.duration_since(UNIX_EPOCH) {
+            Ok(after) => i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
+            Err(before) => {
+                let before = before.duration();
+                let whole = i64::try_from(before.as_secs()).unwrap_or(i64::MAX);
+                // A part of a second before the epoch is still the day before.
+                -whole - i64::from(before.subsec_nanos() > 0)
+            }
+        };
+        Self::from_days(seconds.div_euclid(86_400))
+    }
+
+    /// The day `days` days after 1970-01-01: Howard Hinnant's
+    /// `civil_from_days`.
+    fn from_days(days: i64) -> Self {
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        Self {
+            year: i32::try_from(year).unwrap_or(i32::MAX),
+            month: month as u8,
+            day: day as u8,
+        }
+    }
+
+    /// The day of an HTTP date in the preferred form (IMF-fixdate, RFC 9110),
+    /// `Sat, 03 Oct 2026 11:00:43 GMT`; `None` for anything else, or for a
+    /// day the month does not have.
+    pub fn from_http_date(text: &str) -> Option<Self> {
+        let (weekday, rest) = text.split_once(", ")?;
+        if !WEEKDAYS.contains(&weekday) {
+            return None;
+        }
+        let parts: Vec<&str> = rest.split(' ').collect();
+        let [day, month, year, time, "GMT"] = parts.as_slice() else {
+            return None;
+        };
+        let digits = |text: &str, count: usize| {
+            (text.len() == count && text.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| text.parse::<u32>().ok())
+                .flatten()
+        };
+        let day = digits(day, 2)?;
+        let month = MONTHS.iter().position(|name| name == month)? as u8 + 1;
+        let year = digits(year, 4)? as i32;
+        let [hours, minutes, seconds] = time.split(':').collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        if digits(hours, 2)? > 23 || digits(minutes, 2)? > 59 || digits(seconds, 2)? > 60 {
+            return None;
+        }
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let days_in_month = match month {
+            2 if leap => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            _ => 31,
+        };
+        (1..=days_in_month).contains(&day).then_some(Self {
+            year,
+            month,
+            day: day as u8,
+        })
+    }
+}
+
+impl fmt::Display for Day {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:04}-{:02}-{:02}", self.year, self.month, self.day)
+    }
+}
+
 /// The data directory of the product: `$XDG_DATA_HOME/addict` when the
 /// variable is an absolute path, else `$HOME/.local/share/addict`.
 pub fn data_dir() -> Option<PathBuf> {
@@ -332,6 +495,9 @@ pub fn index_path(dir: &Path, source: Source) -> PathBuf {
 pub struct Imported {
     /// The index file.
     pub path: PathBuf,
+    /// The edition of the file: the pinned one, or for a Kaikki file
+    /// accepted by its content its index name and date.
+    pub edition: String,
     pub headwords: usize,
     pub exception_forms: usize,
 }
@@ -347,6 +513,9 @@ pub enum ImportError {
         actual: u64,
         /// Name and size of every known file.
         expected: Vec<(String, u64)>,
+        /// Whether the user brought the file: the text then says under
+        /// which names a Kaikki file is accepted by its content.
+        manual: bool,
     },
     /// A known file has this size and another hash.
     Hash {
@@ -354,10 +523,27 @@ pub enum ImportError {
         actual: String,
         /// Name and hash of every known file of this size.
         expected: Vec<(String, String)>,
+        /// As for [`ImportError::Size`].
+        manual: bool,
     },
     /// The file is the known one and its contents could not be turned into
     /// an index.
     Contents { file: PathBuf, cause: String },
+    /// A Kaikki file taken by its content was refused: it does not parse,
+    /// gives too few headwords, or its download has no date.
+    Kaikki {
+        file: PathBuf,
+        source: Source,
+        cause: String,
+    },
+    /// The downloaded file is the known file of another source.
+    OtherSource {
+        file: PathBuf,
+        /// The source the file was downloaded for.
+        wanted: Source,
+        /// The source whose known file it is.
+        actual: Source,
+    },
     /// The index could not be written.
     Write { path: PathBuf, cause: io::Error },
 }
@@ -372,6 +558,7 @@ impl fmt::Display for ImportError {
                 file,
                 actual,
                 expected,
+                manual,
             } => {
                 write!(
                     f,
@@ -380,23 +567,48 @@ impl fmt::Display for ImportError {
                 )?;
                 list(f, expected, |f, (name, size)| {
                     write!(f, "{size} bytes ({name})")
-                })
+                })?;
+                kaikki_clause(f, *manual)
             }
             Self::Hash {
                 file,
                 actual,
                 expected,
+                manual,
             } => {
                 write!(
                     f,
                     "{} is not a known dictionary file: its SHA-256 is {actual}, expected ",
                     file.display()
                 )?;
-                list(f, expected, |f, (name, hash)| write!(f, "{hash} ({name})"))
+                list(f, expected, |f, (name, hash)| write!(f, "{hash} ({name})"))?;
+                kaikki_clause(f, *manual)
             }
             Self::Contents { file, cause } => {
                 write!(f, "cannot import {}: {cause}", file.display())
             }
+            Self::Kaikki {
+                file,
+                source,
+                cause,
+            } => write!(
+                f,
+                "cannot import {} as {}: {}",
+                file.display(),
+                sources::row(*source).index,
+                one_line(cause)
+            ),
+            Self::OtherSource {
+                file,
+                wanted,
+                actual,
+            } => write!(
+                f,
+                "{} is the known file of {}, not of {}",
+                file.display(),
+                sources::row(*actual).index,
+                sources::row(*wanted).index
+            ),
             Self::Write { path, cause } => {
                 write!(f, "cannot write the index {}: {cause}", path.display())
             }
@@ -405,6 +617,19 @@ impl fmt::Display for ImportError {
 }
 
 impl std::error::Error for ImportError {}
+
+/// On a manual import, the clause that says a Kaikki file is accepted by its
+/// content only under its upstream name.
+fn kaikki_clause(f: &mut fmt::Formatter<'_>, manual: bool) -> fmt::Result {
+    if !manual {
+        return Ok(());
+    }
+    write!(
+        f,
+        "; a kaikki file is accepted by its content only under its upstream name, "
+    )?;
+    list(f, KAIKKI_NAMES, |f, (name, _)| write!(f, "{name}"))
+}
 
 fn list<T>(
     f: &mut fmt::Formatter<'_>,
@@ -422,72 +647,101 @@ fn list<T>(
 
 /// Imports the dictionary file `file` into the data directory `dir`, which
 /// is created when missing. The index of the file's source is replaced.
-pub fn import(file: &Path, dir: &Path) -> Result<Imported, ImportError> {
-    import_known(file, dir, KNOWN)
+/// `origin` says where the file comes from, which tells the source and the
+/// date of a Kaikki file that is not in [`KNOWN`].
+pub fn import(file: &Path, dir: &Path, origin: Origin) -> Result<Imported, ImportError> {
+    import_known(file, dir, KNOWN, origin, MIN_KAIKKI_HEADWORDS)
 }
 
-fn import_known(file: &Path, dir: &Path, known: &[KnownFile<'_>]) -> Result<Imported, ImportError> {
-    let (bytes, known, sha256) = recognise(file, known)?;
-    let notice = notice_of(known, sha256);
-    let contents = match known.source {
+fn import_known(
+    file: &Path,
+    dir: &Path,
+    known: &[KnownFile<'_>],
+    origin: Origin,
+    min_headwords: usize,
+) -> Result<Imported, ImportError> {
+    let Recognised {
+        bytes,
+        source,
+        sha256,
+        edition,
+        by_content,
+    } = recognise(file, known, origin)?;
+    let notice = notice_of(source, &edition, sha256);
+    let refused = |cause: String| {
+        if by_content {
+            ImportError::Kaikki {
+                file: file.to_owned(),
+                source,
+                cause,
+            }
+        } else {
+            ImportError::Contents {
+                file: file.to_owned(),
+                cause,
+            }
+        }
+    };
+    let contents = match source {
         Source::Oewn => oewn::parse(
             BufReader::new(MultiGzDecoder::new(bytes.as_slice())),
-            known.edition,
+            &edition,
         )
         .map_err(|error| error.to_string()),
         Source::Freedict => archive_member(&bytes, FREEDICT_MEMBER, |member| {
-            freedict::parse(member, known.edition).map_err(|error| error.to_string())
+            freedict::parse(member, &edition).map_err(|error| error.to_string())
         }),
         Source::OmwEs => archive_member(&bytes, OMW_ES_MEMBER, |member| {
-            oewn::parse(member, known.edition).map_err(|error| error.to_string())
+            oewn::parse(member, &edition).map_err(|error| error.to_string())
         }),
-        Source::KaikkiEs => kaikki_file(&bytes, Language::Es, known.edition),
-        Source::KaikkiEnSpanish => kaikki_file(&bytes, Language::Es, known.edition),
-        Source::KaikkiEnCatalan => kaikki_file(&bytes, Language::Ca, known.edition),
+        Source::KaikkiEs => kaikki_file(&bytes, Language::Es, &edition),
+        Source::KaikkiEnSpanish => kaikki_file(&bytes, Language::Es, &edition),
+        Source::KaikkiEnCatalan => kaikki_file(&bytes, Language::Ca, &edition),
         Source::WikdictEsRu | Source::WikdictCaRu => {
-            wikdict::parse(&bytes, known.edition).map_err(|error| error.to_string())
+            wikdict::parse(&bytes, &edition).map_err(|error| error.to_string())
         }
         // The `translation` table reads alike whichever way it translates;
         // Russian headwords are then keyed without their stress marks.
         Source::WikdictRuEn | Source::WikdictRuEs | Source::WikdictRuCa => {
-            wikdict::parse(&bytes, known.edition)
+            wikdict::parse(&bytes, &edition)
                 .map(wikdict::unstressed)
                 .map_err(|error| error.to_string())
         }
-        Source::DbnaryCa => dbnary_file(&bytes, known.edition),
+        Source::DbnaryCa => dbnary_file(&bytes, &edition),
         Source::SinonimsCat => {
-            mythes::parse(bytes.as_slice(), known.edition).map_err(|error| error.to_string())
+            mythes::parse(bytes.as_slice(), &edition).map_err(|error| error.to_string())
         }
     }
-    .and_then(|contents| {
-        let index =
-            format::encode_with_notice(&contents, &notice).map_err(|error| error.to_string())?;
-        Ok((contents, index))
-    });
-    let (contents, index) = contents.map_err(|cause| ImportError::Contents {
-        file: file.to_owned(),
-        cause,
-    })?;
+    .map_err(refused)?;
     drop(bytes);
+    let headwords = contents.headwords.len();
+    if by_content && headwords < min_headwords {
+        return Err(refused(format!(
+            "it has {headwords} headwords, fewer than the minimum of {min_headwords}"
+        )));
+    }
+    let index = format::encode_with_notice(&contents, &notice)
+        .map_err(|error| refused(error.to_string()))?;
 
-    let path = index_path(dir, known.source);
+    let path = index_path(dir, source);
     replace(dir, &path, &index).map_err(|cause| ImportError::Write {
         path: path.clone(),
         cause,
     })?;
     Ok(Imported {
         path,
-        headwords: contents.headwords.len(),
+        edition,
+        headwords,
         exception_forms: contents.forms.len(),
     })
 }
 
-/// The license notice of the index of `known`, a file whose SHA-256 is
-/// `sha256`: the credit, the license, the author, the license URI and the
-/// link of its source's row, [`sources::MODIFIED`],
+/// The license notice of the index of `source` built from a file of
+/// `edition` whose SHA-256 is `sha256`: the credit, the license, the author,
+/// the license URI and the link of its source's row, [`sources::MODIFIED`],
 /// [`sources::DISCLAIMER`], its edition and its hash.
-fn notice_of(known: &KnownFile<'_>, sha256: String) -> format::Notice {
-    let row = sources::row(known.source);
+fn notice_of(source: Source, edition: &str, sha256: String) -> format::Notice {
+    let row = sources::row(source);
     format::Notice {
         credit: row.credit.to_owned(),
         author: row.author.to_owned(),
@@ -496,7 +750,7 @@ fn notice_of(known: &KnownFile<'_>, sha256: String) -> format::Notice {
         link: row.link.to_owned(),
         modified: sources::MODIFIED.to_owned(),
         disclaimer: sources::DISCLAIMER.to_owned(),
-        edition: known.edition.to_owned(),
+        edition: edition.to_owned(),
         sha256,
     }
 }
@@ -555,13 +809,29 @@ fn one_line(error: &dyn fmt::Display) -> String {
         .join(" ")
 }
 
-/// The bytes of `file`, the known file they are and their SHA-256 in
-/// lowercase hexadecimal: the size is compared first and the hash is
-/// computed only for a size that is known.
-fn recognise<'a>(
+/// A file the importer takes.
+struct Recognised {
+    bytes: Vec<u8>,
+    source: Source,
+    /// The SHA-256 of the bytes in lowercase hexadecimal.
+    sha256: String,
+    edition: String,
+    /// Whether the file is a Kaikki file taken by its content rather than a
+    /// known file.
+    by_content: bool,
+}
+
+/// The bytes of `file`, the source and the edition they are and their
+/// SHA-256. The size is compared first and the hash is computed only for a
+/// size that is known, or for a Kaikki file, which `origin` or its name
+/// tells: a Kaikki file that is not known is taken by its content, and its
+/// edition is dated by `origin`.
+fn recognise(
     file: &Path,
-    known: &'a [KnownFile<'a>],
-) -> Result<(Vec<u8>, &'a KnownFile<'a>, String), ImportError> {
+    known: &[KnownFile<'_>],
+    origin: Origin,
+) -> Result<Recognised, ImportError> {
+    let manual = origin == Origin::Manual;
     let unreadable = |cause| ImportError::Unreadable {
         file: file.to_owned(),
         cause,
@@ -573,6 +843,7 @@ fn recognise<'a>(
             .iter()
             .map(|known| (known.name.to_owned(), known.size))
             .collect(),
+        manual,
     };
     // The type is checked before the open: opening a FIFO would block.
     if !fs::metadata(file).map_err(unreadable)?.is_file() {
@@ -584,7 +855,12 @@ fn recognise<'a>(
         return Err(unreadable(io::Error::other("not a regular file")));
     }
     let size = metadata.len();
-    if !known.iter().any(|known| known.size == size) {
+    let told = match origin {
+        Origin::Download { source, .. } => Some(source),
+        Origin::Manual => kaikki_source(file),
+    };
+    let kaikki = told.filter(|source| by_content(*source));
+    if kaikki.is_none() && !known.iter().any(|known| known.size == size) {
         return Err(wrong_size(size));
     }
     // One byte more than expected shows a file that grew since.
@@ -594,23 +870,84 @@ fn recognise<'a>(
         .read_to_end(&mut bytes)
         .map_err(unreadable)?;
     if bytes.len() as u64 != size {
-        return Err(wrong_size(bytes.len() as u64));
+        return Err(match kaikki {
+            Some(source) => ImportError::Kaikki {
+                file: file.to_owned(),
+                source,
+                cause: format!(
+                    "its size changed while it was read, from {size} to {} bytes",
+                    bytes.len()
+                ),
+            },
+            None => wrong_size(bytes.len() as u64),
+        });
     }
     let actual: String = Sha256::digest(&bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
     let same_size = || known.iter().filter(|known| known.size == size);
-    match same_size().find(|known| known.sha256.eq_ignore_ascii_case(&actual)) {
-        Some(known) => Ok((bytes, known, actual)),
-        None => Err(ImportError::Hash {
+    if let Some(pinned) = same_size().find(|known| known.sha256.eq_ignore_ascii_case(&actual)) {
+        if let Origin::Download { source, .. } = origin
+            && pinned.source != source
+        {
+            return Err(ImportError::OtherSource {
+                file: file.to_owned(),
+                wanted: source,
+                actual: pinned.source,
+            });
+        }
+        return Ok(Recognised {
+            bytes,
+            source: pinned.source,
+            sha256: actual,
+            edition: pinned.edition.to_owned(),
+            by_content: false,
+        });
+    }
+    let Some(source) = kaikki else {
+        return Err(ImportError::Hash {
             file: file.to_owned(),
             actual,
             expected: same_size()
                 .map(|known| (known.name.to_owned(), known.sha256.to_owned()))
                 .collect(),
-        }),
-    }
+            manual,
+        });
+    };
+    let day = match origin {
+        Origin::Download {
+            published: Some(day),
+            ..
+        } => day,
+        Origin::Download {
+            published: None, ..
+        } => {
+            return Err(ImportError::Kaikki {
+                file: file.to_owned(),
+                source,
+                cause: "the download has no Last-Modified date to name the new edition by"
+                    .to_owned(),
+            });
+        }
+        Origin::Manual => match metadata.modified() {
+            Ok(modified) => Day::of(modified),
+            Err(error) => {
+                return Err(ImportError::Kaikki {
+                    file: file.to_owned(),
+                    source,
+                    cause: format!("cannot read its modification time to date it: {error}"),
+                });
+            }
+        },
+    };
+    Ok(Recognised {
+        bytes,
+        source,
+        sha256: actual,
+        edition: format!("{}-{day}", sources::row(source).index),
+        by_content: true,
+    })
 }
 
 /// Puts `index` at `path` inside `dir` through a temporary file in `dir`
@@ -665,6 +1002,367 @@ mod tests {
 
     fn os(text: &str) -> Option<OsString> {
         Some(OsString::from(text))
+    }
+
+    /// A manual import against `known`, with the real minimum of headwords.
+    fn import_known(
+        file: &Path,
+        dir: &Path,
+        known: &[KnownFile<'_>],
+    ) -> Result<Imported, ImportError> {
+        super::import_known(file, dir, known, Origin::Manual, MIN_KAIKKI_HEADWORDS)
+    }
+
+    fn day(year: i32, month: u8, day: u8) -> Day {
+        Day { year, month, day }
+    }
+
+    /// Sets the modification time of `file` to `seconds` after the epoch.
+    fn touch(file: &Path, seconds: u64) {
+        File::options()
+            .write(true)
+            .open(file)
+            .expect("open")
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+            .expect("set the modification time");
+    }
+
+    /// 2026-11-02 12:00:00 UTC.
+    const NOV_2: u64 = 1_793_620_800;
+
+    #[test]
+    fn a_day_is_the_utc_calendar_day_of_a_time() {
+        let at = |seconds: u64| Day::of(UNIX_EPOCH + std::time::Duration::from_secs(seconds));
+        assert_eq!(at(0), day(1970, 1, 1));
+        assert_eq!(at(0).to_string(), "1970-01-01");
+        // The last second of a leap day, and the next one.
+        assert_eq!(at(1_709_251_199), day(2024, 2, 29));
+        assert_eq!(at(1_709_251_200), day(2024, 3, 1));
+        assert_eq!(at(1_794_182_400), day(2026, 11, 9));
+        assert_eq!(at(1_794_182_400).to_string(), "2026-11-09");
+        assert_eq!(at(NOV_2), day(2026, 11, 2));
+        assert_eq!(
+            Day::of(UNIX_EPOCH - std::time::Duration::from_millis(1)),
+            day(1969, 12, 31)
+        );
+    }
+
+    #[test]
+    fn an_http_date_gives_its_day_and_anything_else_none() {
+        assert_eq!(
+            Day::from_http_date("Sat, 03 Oct 2026 11:00:43 GMT"),
+            Some(day(2026, 10, 3))
+        );
+        assert_eq!(
+            Day::from_http_date("Thu, 29 Feb 2024 00:00:00 GMT"),
+            Some(day(2024, 2, 29))
+        );
+        for garbled in [
+            "",
+            "garbage",
+            "Sat, 03 Oct 2026 11:00:43 UTC",
+            "Sat, 3 Oct 2026 11:00:43 GMT",
+            "Sat, 03 Okt 2026 11:00:43 GMT",
+            "Sat, 32 Oct 2026 11:00:43 GMT",
+            "Sat, 00 Oct 2026 11:00:43 GMT",
+            "Fri, 29 Feb 2026 11:00:43 GMT",
+            "Sat, 31 Sep 2026 11:00:43 GMT",
+            "Xyz, 03 Oct 2026 11:00:43 GMT",
+            "Sat, 03 Oct 2026 25:00:43 GMT",
+            "Sat, 03 Oct 26 11:00:43 GMT",
+            "Saturday, 03-Oct-26 11:00:43 GMT",
+            "Sat Oct  3 11:00:43 2026",
+            "Sat, 03 Oct 2026 11:00:43 GMT extra",
+        ] {
+            assert_eq!(Day::from_http_date(garbled), None, "{garbled}");
+        }
+    }
+
+    #[test]
+    fn a_new_kaikki_edition_under_its_upstream_name_is_accepted_by_its_content() {
+        let fixture = Fixture::new("kaikki-new");
+        let cases = [
+            ("es-extract.jsonl.gz", Source::KaikkiEs, KAIKKI, "banco"),
+            (
+                "kaikki.org-dictionary-Español.jsonl.gz",
+                Source::KaikkiEs,
+                KAIKKI,
+                "banco",
+            ),
+            (
+                "kaikki.org-dictionary-Spanish.jsonl.gz",
+                Source::KaikkiEnSpanish,
+                KAIKKI_EN,
+                "banco",
+            ),
+            (
+                "kaikki.org-dictionary-Catalan.jsonl.gz",
+                Source::KaikkiEnCatalan,
+                KAIKKI_EN,
+                "col·lecció",
+            ),
+        ];
+        for (name, source, lines, word) in cases {
+            let bytes = gz_of(lines.as_bytes());
+            let file = Archive::new(&fixture, name, &bytes);
+            touch(&file.file, NOV_2);
+            let imported = super::import_known(
+                &file.file,
+                &fixture.data(),
+                &fixture.known(),
+                Origin::Manual,
+                1,
+            )
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let index_name = sources::row(source).index;
+            let edition = format!("{index_name}-2026-11-02");
+            assert_eq!(imported.path, fixture.data().join(source.index_name()));
+            assert_eq!(imported.edition, edition, "{name}");
+            let index = Index::open(&imported.path).expect("open");
+            assert_eq!(index.source(), edition, "{name}");
+            let notice = index.notice().expect("notice");
+            assert_eq!(notice.edition, edition, "{name}");
+            assert_eq!(notice.sha256, hex(&bytes), "{name}");
+            assert_eq!(notice.credit, sources::row(source).credit, "{name}");
+            assert!(index.find(word).expect("find").is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_downloaded_kaikki_edition_is_dated_by_its_last_modified_day_whatever_its_name() {
+        let fixture = Fixture::new("kaikki-download");
+        let bytes = gz_of(KAIKKI_EN.as_bytes());
+        let file = Archive::new(&fixture, "any.name", &bytes);
+        let imported = super::import_known(
+            &file.file,
+            &fixture.data(),
+            &fixture.known(),
+            Origin::Download {
+                source: Source::KaikkiEnCatalan,
+                published: Some(day(2026, 10, 3)),
+            },
+            1,
+        )
+        .expect("import");
+        assert_eq!(
+            imported.path,
+            fixture.data().join("kaikki-en-Catalan.index")
+        );
+        assert_eq!(imported.edition, "kaikki-en-Catalan-2026-10-03");
+        let index = Index::open(&imported.path).expect("open");
+        assert_eq!(index.source(), "kaikki-en-Catalan-2026-10-03");
+        assert_eq!(index.notice().expect("notice").sha256, hex(&bytes));
+    }
+
+    #[test]
+    fn a_downloaded_kaikki_edition_without_a_date_writes_nothing() {
+        let fixture = Fixture::new("kaikki-undated");
+        let file = Archive::new(&fixture, "es-extract.jsonl.gz", &gz_of(KAIKKI.as_bytes()));
+        let error = super::import_known(
+            &file.file,
+            &fixture.data(),
+            &fixture.known(),
+            Origin::Download {
+                source: Source::KaikkiEs,
+                published: None,
+            },
+            1,
+        )
+        .expect_err("no date");
+        assert!(matches!(error, ImportError::Kaikki { .. }), "{error}");
+        let text = one_line(&error);
+        assert!(text.contains("kaikki-es-Espanol"), "{text}");
+        assert!(text.contains("Last-Modified"), "{text}");
+        assert!(!fixture.dir.path().join("data").exists());
+    }
+
+    #[test]
+    fn a_pinned_kaikki_file_keeps_its_pinned_edition_whatever_its_name_and_origin() {
+        let fixture = Fixture::new("kaikki-pinned");
+        let bytes = gz_of(KAIKKI_EN.as_bytes());
+        let file = Archive::new(&fixture, "kaikki.org-dictionary-Spanish.jsonl.gz", &bytes);
+        touch(&file.file, NOV_2);
+        let known = [KnownFile {
+            name: "kaikki.org-dictionary-Spanish.jsonl.gz",
+            edition: "kaikki-en-Spanish-pinned",
+            source: Source::KaikkiEnSpanish,
+            size: file.size,
+            sha256: &file.sha256,
+        }];
+        for origin in [
+            Origin::Manual,
+            Origin::Download {
+                source: Source::KaikkiEnSpanish,
+                published: None,
+            },
+            Origin::Download {
+                source: Source::KaikkiEnSpanish,
+                published: Some(day(2026, 10, 3)),
+            },
+        ] {
+            // The minimum applies only to a file taken by its content.
+            let imported =
+                super::import_known(&file.file, &fixture.data(), &known, origin, usize::MAX)
+                    .unwrap_or_else(|error| panic!("{origin:?}: {error}"));
+            assert_eq!(imported.edition, "kaikki-en-Spanish-pinned", "{origin:?}");
+            let index = Index::open(&imported.path).expect("open");
+            assert_eq!(index.source(), "kaikki-en-Spanish-pinned", "{origin:?}");
+            assert_eq!(index.notice().expect("notice").sha256, file.sha256);
+        }
+    }
+
+    #[test]
+    fn an_empty_or_cut_kaikki_file_writes_nothing_and_names_the_source() {
+        let fixture = Fixture::new("kaikki-broken");
+        let name = "kaikki.org-dictionary-Catalan.jsonl.gz";
+        let good = gz_of(KAIKKI_EN.as_bytes());
+        let file = Archive::new(&fixture, name, &good);
+        let imported = super::import_known(
+            &file.file,
+            &fixture.data(),
+            &fixture.known(),
+            Origin::Manual,
+            1,
+        )
+        .expect("import");
+        let before = fs::read(&imported.path).expect("index");
+        for (case, bytes) in [
+            ("empty", Vec::new()),
+            ("cut", good[..good.len() / 2].to_vec()),
+            ("not gzip", b"garbage".to_vec()),
+        ] {
+            fs::write(&file.file, &bytes).expect("write");
+            let error = super::import_known(
+                &file.file,
+                &fixture.data(),
+                &fixture.known(),
+                Origin::Manual,
+                1,
+            )
+            .expect_err(case);
+            assert!(
+                matches!(error, ImportError::Kaikki { .. }),
+                "{case}: {error}"
+            );
+            let text = one_line(&error);
+            assert!(text.contains("kaikki-en-Catalan"), "{case}: {text}");
+            assert!(text.contains(name), "{case}: {text}");
+            assert_eq!(fs::read(&imported.path).expect("index"), before, "{case}");
+        }
+    }
+
+    #[test]
+    fn a_kaikki_file_with_too_few_headwords_writes_nothing() {
+        let fixture = Fixture::new("kaikki-few");
+        let file = Archive::new(
+            &fixture,
+            "kaikki.org-dictionary-Catalan.jsonl.gz",
+            &gz_of(KAIKKI_EN.as_bytes()),
+        );
+        let error = import_known(&file.file, &fixture.data(), &fixture.known())
+            .expect_err("too few headwords");
+        assert!(matches!(error, ImportError::Kaikki { .. }), "{error}");
+        let text = one_line(&error);
+        assert!(text.contains("kaikki-en-Catalan"), "{text}");
+        assert!(text.contains("it has 2 headwords"), "{text}");
+        assert!(
+            text.contains(&format!("minimum of {MIN_KAIKKI_HEADWORDS}")),
+            "{text}"
+        );
+        assert!(!fixture.dir.path().join("data").exists());
+    }
+
+    #[test]
+    fn a_renamed_kaikki_file_is_refused_with_its_upstream_names_on_a_manual_import_only() {
+        let fixture = Fixture::new("kaikki-renamed");
+        let file = Archive::new(&fixture, "spanish.jsonl.gz", &gz_of(KAIKKI_EN.as_bytes()));
+        let clause = "a kaikki file is accepted by its content only under its upstream name";
+        let error = import_known(&file.file, &fixture.data(), &fixture.known()).expect_err("size");
+        assert!(matches!(error, ImportError::Size { .. }), "{error}");
+        let text = one_line(&error);
+        assert!(text.contains(clause), "{text}");
+        for (name, _) in KAIKKI_NAMES {
+            assert!(text.contains(name), "{text}");
+        }
+
+        // The same file downloaded for another source: no clause.
+        let error = super::import_known(
+            &file.file,
+            &fixture.data(),
+            &fixture.known(),
+            Origin::Download {
+                source: Source::Oewn,
+                published: None,
+            },
+            1,
+        )
+        .expect_err("size");
+        assert!(matches!(error, ImportError::Size { .. }), "{error}");
+        assert!(!one_line(&error).contains(clause), "{error}");
+        assert!(!fixture.dir.path().join("data").exists());
+    }
+
+    #[test]
+    fn a_pinned_source_with_another_hash_is_refused_whatever_its_origin() {
+        let fixture = Fixture::new("pinned-hash");
+        let mut changed = fixture.gz.clone();
+        *changed.last_mut().expect("bytes") ^= 1;
+        let file = Archive::new(&fixture, "english-wordnet-2025.xml.gz", &changed);
+        let clause = "accepted by its content";
+        let error = import_known(&file.file, &fixture.data(), &fixture.known()).expect_err("hash");
+        assert!(matches!(error, ImportError::Hash { .. }), "{error}");
+        assert!(one_line(&error).contains(clause), "{error}");
+        let error = super::import_known(
+            &file.file,
+            &fixture.data(),
+            &fixture.known(),
+            Origin::Download {
+                source: Source::Oewn,
+                published: Some(day(2026, 10, 3)),
+            },
+            1,
+        )
+        .expect_err("hash");
+        assert!(matches!(error, ImportError::Hash { .. }), "{error}");
+        let text = one_line(&error);
+        assert!(text.contains("SHA-256"), "{text}");
+        assert!(!text.contains(clause), "{text}");
+        assert!(!fixture.dir.path().join("data").exists());
+    }
+
+    #[test]
+    fn a_download_of_the_known_file_of_another_source_writes_nothing() {
+        let fixture = Fixture::new("other-source");
+        let error = super::import_known(
+            &fixture.file(),
+            &fixture.data(),
+            &fixture.known(),
+            Origin::Download {
+                source: Source::Freedict,
+                published: None,
+            },
+            1,
+        )
+        .expect_err("another source");
+        assert!(matches!(error, ImportError::OtherSource { .. }), "{error}");
+        let text = one_line(&error);
+        assert!(text.contains("oewn"), "{text}");
+        assert!(text.contains("freedict"), "{text}");
+        assert!(!fixture.dir.path().join("data").exists());
+
+        // Downloaded for its own source it is imported.
+        let imported = super::import_known(
+            &fixture.file(),
+            &fixture.data(),
+            &fixture.known(),
+            Origin::Download {
+                source: Source::Oewn,
+                published: None,
+            },
+            1,
+        )
+        .expect("import");
+        assert_eq!(imported.edition, "fixture-1");
     }
 
     #[test]
