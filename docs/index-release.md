@@ -1,5 +1,15 @@
 # Publishing the dictionary indexes
 
+Settings → Dictionaries → Download dictionaries fetches a fresh manifest and
+checks every published index through the index reader, including lexical
+records. Only missing or unreadable files are offered, in manifest order;
+healthy files and manually imported editions are kept. The check is repeated
+under the shared installation permit before recovery downloads an asset, so a
+manual edition imported after the offer also stays. This explicit action works
+after Not now and does not change the remembered first-run choice. Empty or
+failed checks are shown in Settings and the same action retries them. Manual
+file import remains available beside it.
+
 On its first run, with no index installed, addict offers to download every
 dictionary the manifest of the data release lists. The app downloads prebuilt
 indexes from a GitHub data release of this repository, one after another. Each
@@ -68,9 +78,10 @@ The app refuses a manifest of another format, and an index whose name it does
 not know or whose format it cannot read. It checks the size and the SHA-256 of
 an asset before it decompresses it. It then writes the index to a temporary
 file in the data directory, opens it as an index, and only then renames it
-over the old one. An install that is cancelled or runs out of time is never
-renamed into place, and a temporary file that another, killed, run of the app
-left for that index is removed before the install.
+over the old one. Cancellation or timeout before commit prevents the rename.
+If the file has already been committed, its resident availability refresh
+finishes independently of queue cancellation. A temporary file that another,
+killed, run of the app left for that index is removed before the install.
 
 When the SHA-256 of an asset does not match, the app fetches the manifest once
 more, because an asset can be newer than the manifest read before it (see

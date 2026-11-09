@@ -174,6 +174,62 @@ impl Index {
         })
     }
 
+    /// Checks every lexical record with the lookup decoders. Reads stay
+    /// bounded to one key/record at a time; callers must run this disk scan
+    /// off their UI thread. Opening alone deliberately checks only metadata.
+    pub fn validate(&self) -> Result<(), Error> {
+        for table in [WORDS, FORMS, ANALYSES] {
+            let entries = self.header.section(table.entries);
+            let keys = self.header.section(table.keys);
+            let records = self.header.section(table.records);
+            let mut previous: Option<Vec<u8>> = None;
+            for position in 0..entries.len / format::ENTRY_LEN {
+                let bytes = self.read(
+                    entries,
+                    position * format::ENTRY_LEN,
+                    format::ENTRY_LEN as usize,
+                )?;
+                let entry =
+                    Entry::parse(&bytes, keys, records).map_err(|damage| self.damaged(damage))?;
+                let key = self.read(keys, entry.key_offset, entry.key_len as usize)?;
+                if std::str::from_utf8(&key).is_err()
+                    || previous.as_ref().is_some_and(|previous| previous >= &key)
+                {
+                    return Err(self.damaged(Damage("table keys are not sorted UTF-8")));
+                }
+                previous = Some(key);
+                let record = self.read(records, entry.record_offset, entry.record_len as usize)?;
+                match table.records {
+                    SectionId::WordRecords => {
+                        let (offsets, _, _) =
+                            format::decode_word(&record).map_err(|damage| self.damaged(damage))?;
+                        for offset in offsets {
+                            self.sense(offset)?;
+                        }
+                    }
+                    SectionId::FormRecords => {
+                        format::decode_form(&record).map_err(|damage| self.damaged(damage))?;
+                    }
+                    SectionId::AnalysisRecords => {
+                        format::decode_analyses(&record).map_err(|damage| self.damaged(damage))?;
+                    }
+                    _ => unreachable!("only lexical tables are scanned"),
+                }
+            }
+        }
+        // Include senses that no headword references, without retaining
+        // all decoded records or all dictionaries in memory.
+        let senses = self.header.section(SectionId::Senses);
+        let mut offset = 0;
+        while offset < senses.len {
+            let length = self.read(senses, offset, 4)?;
+            let length = u32::from_le_bytes(length.try_into().expect("four bytes"));
+            self.sense(offset)?;
+            offset += 4 + u64::from(length);
+        }
+        Ok(())
+    }
+
     /// The license notice the index was written with; `None` for an index
     /// of format v1 or v2, which has none, and for one written without it.
     pub fn notice(&self) -> Option<&Notice> {
@@ -403,6 +459,42 @@ mod tests {
 
     fn opened(dir: &TempDir) -> Index {
         Index::open(&written(dir, &encode(&sample()).expect("encode"))).expect("open")
+    }
+
+    #[test]
+    fn validation_decodes_every_lexical_record_not_only_the_header() {
+        let contents = crate::format::tests::analysed();
+        let good = encode(&contents).unwrap();
+        let dir = TempDir::new("full-health");
+        let index = Index::open(&written(&dir, &good)).unwrap();
+        index.validate().unwrap();
+        for section in [
+            SectionId::WordRecords,
+            SectionId::Senses,
+            SectionId::FormRecords,
+            SectionId::AnalysisRecords,
+        ] {
+            let mut damaged = good.clone();
+            let start = header(&good).section(section).offset as usize;
+            let offset = start + if section == SectionId::Senses { 4 } else { 0 };
+            damaged[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+            let index = Index::open(&written(&dir, &damaged)).expect("metadata is still readable");
+            let read = match section {
+                SectionId::WordRecords => index.find("Bánk").map(drop),
+                SectionId::Senses => index.find("bank").map(drop),
+                SectionId::FormRecords => index.exception_lemmas("geese").map(drop),
+                SectionId::AnalysisRecords => index.analyses("fue").map(drop),
+                _ => unreachable!(),
+            };
+            assert!(
+                matches!(read, Err(Error::Damaged { .. })),
+                "{section:?}: {read:?}"
+            );
+            assert!(
+                matches!(index.validate(), Err(Error::Damaged { .. })),
+                "{section:?}"
+            );
+        }
     }
 
     #[test]

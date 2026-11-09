@@ -549,6 +549,8 @@ pub struct Settings {
     rebinding: Cell<bool>,
     /// The line of the startup state.
     startup_status: gtk::Label,
+    download: gtk::Button,
+    download_status: gtk::Label,
 }
 
 pub(crate) fn label(text: &str, classes: &[&str]) -> gtk::Label {
@@ -624,6 +626,7 @@ impl Settings {
     /// pressed; `on_clear` runs when Clear cache is pressed; `on_startup` runs
     /// with the state asked for when the user moves the Start at login switch.
     /// `on_imported` refreshes resident dictionary states before success is shown.
+    #[allow(clippy::too_many_arguments)]
     pub fn new<F: Future<Output = Result<(), String>> + 'static>(
         parent: &impl IsA<gtk::Window>,
         key_file: Option<&Path>,
@@ -632,6 +635,7 @@ impl Settings {
         on_clear: impl Fn() + 'static,
         on_startup: impl Fn(bool) + 'static,
         on_imported: impl Fn() -> F + 'static,
+        on_download: impl Fn() + 'static,
     ) -> Self {
         let clipboard = ShortcutRow::new("Selection or clipboard");
         let screenshot = ShortcutRow::new("Screen region (OCR)");
@@ -765,6 +769,14 @@ impl Settings {
 
         let key_note = label("The key is never shown back here.", &["hint"]);
         let import_file = file_import::Row::new();
+        let download = gtk::Button::builder()
+            .label("Download dictionaries")
+            .halign(gtk::Align::Start)
+            .css_classes(["settings-button"])
+            .build();
+        download.connect_clicked(move |_| on_download());
+        let download_status = label("", &["hint"]);
+        download_status.set_visible(false);
 
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -794,7 +806,10 @@ impl Settings {
         ));
         content.append(&list_section(
             "Dictionaries",
-            &[&row(&[import_file.root.upcast_ref()])],
+            &[
+                &row(&[download.upcast_ref(), download_status.upcast_ref()]),
+                &row(&[import_file.root.upcast_ref()]),
+            ],
         ));
         content.append(&list_section(
             "General",
@@ -854,10 +869,22 @@ impl Settings {
             bound: Cell::new(false),
             rebinding: Cell::new(false),
             startup_status,
+            download,
+            download_status,
         };
         settings.render_binding(&Binding::Attempting, &Bindings::default());
         settings.render_key(None);
         settings
+    }
+
+    pub fn window(&self) -> &gtk::Window {
+        &self.window
+    }
+
+    /// Disable only while preparing; active progress remains reachable.
+    pub fn render_download(&self, busy: bool, text: &str) {
+        self.download.set_sensitive(!busy);
+        say_in(&self.download_status, text);
     }
 
     pub fn present(&self) {
@@ -1000,6 +1027,61 @@ mod tests {
 
     #[test]
     #[ignore = "needs a display; run alone"]
+    fn dictionary_download_action_shows_preparation_feedback_and_keeps_retry_available() {
+        use gtk::prelude::*;
+        gtk::init().expect("a display");
+        let parent = gtk::Window::new();
+        let presses = std::rc::Rc::new(std::cell::Cell::new(0));
+        let pressed = presses.clone();
+        let settings = super::Settings::new(
+            &parent,
+            None,
+            || {},
+            |_| {},
+            || {},
+            |_| {},
+            || async { Ok(()) },
+            move || pressed.set(pressed.get() + 1),
+        );
+        settings.present();
+        assert_eq!(
+            settings.download.label().as_deref(),
+            Some("Download dictionaries")
+        );
+        settings.download.emit_clicked();
+        assert_eq!(presses.get(), 1);
+        settings.render_download(true, crate::first_run::FETCHING);
+        assert!(!settings.download.is_sensitive());
+        assert!(settings.download_status.is_visible());
+        assert_eq!(settings.download_status.label(), crate::first_run::FETCHING);
+        for status in [
+            crate::first_run::NOTHING.to_owned(),
+            crate::first_run::recovery_failed_text("cannot read the index manifest: malformed"),
+        ] {
+            settings.render_download(false, &status);
+            assert!(settings.download.is_sensitive());
+            assert!(settings.download_status.is_visible());
+            assert_eq!(settings.download_status.label(), status);
+            settings.download.emit_clicked();
+        }
+        assert_eq!(
+            presses.get(),
+            3,
+            "empty/error results keep the action retryable"
+        );
+        let scroll = settings
+            .window
+            .child()
+            .unwrap()
+            .downcast::<gtk::ScrolledWindow>()
+            .unwrap();
+        assert_eq!(scroll.max_content_height(), 600);
+        settings.window.destroy();
+        parent.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
     fn the_switch_asks_and_stays_off_until_it_is_told() {
         use gtk::prelude::*;
         gtk::init().expect("a display");
@@ -1014,6 +1096,7 @@ mod tests {
             || {},
             move |wanted| told.borrow_mut().push(wanted),
             || async { Ok(()) },
+            || {},
         );
         assert!(!settings.startup.is_sensitive());
         settings.set_startup_sensitive(true);
@@ -1051,6 +1134,7 @@ mod tests {
             || {},
             |_| {},
             || async { Ok(()) },
+            || {},
         );
         let scroll = settings
             .window
@@ -1119,9 +1203,17 @@ mod tests {
             "refusal causes scrolling"
         );
         adjustment.set_value(adjustment.upper() - adjustment.page_size());
-        context.block_on(gtk::glib::timeout_future(std::time::Duration::from_millis(
-            100,
-        )));
+        // Changing the adjustment queues allocation of the viewport's
+        // translated child. A standalone display test may not receive a
+        // compositor frame, so settle that allocation at the existing
+        // window size before measuring the controls' actual coordinates.
+        settings
+            .window
+            .allocate(settings.window.width(), settings.window.height(), -1, None);
+        assert_eq!(
+            adjustment.value(),
+            adjustment.upper() - adjustment.page_size()
+        );
         let clear_cache = settings
             .cache_size
             .next_sibling()

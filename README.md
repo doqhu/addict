@@ -156,7 +156,11 @@ build from source with the system Tesseract needs neither file.
 ## Dictionaries
 
 addict looks words up in dictionary indexes. The first start offers to download
-the published indexes. To import an upstream file yourself, download a file
+the published indexes. Settings → Dictionaries → Download dictionaries checks
+all published indexes and offers only missing or unreadable files. You can use
+it after choosing Not now, or to restore a deleted or damaged index; healthy
+files, including manually imported editions, are kept. To import an upstream
+file yourself, download a file
 below, open Settings → Dictionaries → Import file…, and choose it. The app
 builds its index in the background and shows completion or a failure beside
 the action. A newly added dictionary is available on the next lookup. If that

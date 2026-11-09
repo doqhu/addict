@@ -24,6 +24,7 @@ use std::{
 };
 
 use addict_dictionary::{
+    Index, import,
     release::{self, Manifest, Published},
     sources,
 };
@@ -172,6 +173,77 @@ pub async fn offered_manifest(
         });
     }
     Ok(Some(manifest))
+}
+
+/// Fetches a fresh manifest for explicit recovery, independent of the
+/// remembered first-run choice, then checks each source off the UI thread.
+pub async fn recovery_manifest(
+    downloader: &Downloader,
+    dir: PathBuf,
+) -> Result<Manifest, DownloadError> {
+    // The manifest keeps its own deadline; the health scan of every
+    // installed index that follows can take longer on a slow disk.
+    let manifest = tokio::time::timeout(crate::download::MANIFEST_LIMIT, downloader.manifest())
+        .await
+        .map_err(|_| DownloadError::Manifest {
+            cause: "it did not come in time".to_owned(),
+        })??;
+    if manifest.indexes.is_empty() {
+        return Err(DownloadError::Manifest {
+            cause: "it lists no index".to_owned(),
+        });
+    }
+    tokio::task::spawn_blocking(move || needed_indexes(manifest, &dir))
+        .await
+        .map_err(|_| DownloadError::Manifest {
+            cause: "the index check stopped".to_owned(),
+        })
+}
+
+/// Retains manifest order and unknown names, whose normal download refusal
+/// names them. Valid local editions are never compared to release editions.
+fn needed_indexes(mut manifest: Manifest, dir: &Path) -> Manifest {
+    manifest.indexes.retain(|published| {
+        release::source_of(&published.name).is_none_or(|source| {
+            Index::open(&import::index_path(dir, source))
+                .and_then(|index| index.validate())
+                .is_err()
+        })
+    });
+    manifest
+}
+
+/// A recovery offer must not claim that every dictionary is absent.
+pub const RECOVERY_HEADING: &str = "Restore missing or unreadable dictionaries";
+pub const FETCHING: &str = "Fetching the dictionary list and checking installed files…";
+pub const NOTHING: &str = "All published dictionaries are readable. Nothing to download.";
+pub const RETRY: &str = "You can try again through Settings → Download dictionaries.";
+
+pub fn recovery_failed_text(error: &str) -> String {
+    format!(
+        "The download failed: {}. {RETRY}",
+        error.trim_end_matches('.')
+    )
+}
+
+pub fn recovery_summary_text(queue: &Queue) -> String {
+    if queue
+        .rows()
+        .iter()
+        .any(|(_, state)| *state != RowState::Installed)
+    {
+        let installed = queue
+            .rows()
+            .iter()
+            .filter(|(_, state)| *state == RowState::Installed)
+            .count();
+        format!(
+            "{installed} of {} missing or unreadable dictionaries are restored. {RETRY}",
+            queue.rows().len()
+        )
+    } else {
+        "Every missing or unreadable dictionary is restored.".to_owned()
+    }
 }
 
 /// `bytes` in whole megabytes, rounded up, at least one.
@@ -441,12 +513,16 @@ impl Offer {
     pub fn new(
         parent: &impl IsA<gtk::Window>,
         indexes: &[Published],
+        recovery: bool,
         on_download: impl Fn() + 'static,
         on_not_now: impl Fn() + 'static,
         on_cancel: impl Fn(Option<String>) + 'static,
     ) -> Self {
         let on_cancel = std::rc::Rc::new(on_cancel);
-        let heading = label(HEADING, &["about-name"]);
+        let heading = label(
+            if recovery { RECOVERY_HEADING } else { HEADING },
+            &["about-name"],
+        );
         let body = label(BODY, &[]);
         let contents = label(&contents_text(indexes), &["hint"]);
         let credit = label(CREDIT, &["hint"]);
@@ -504,7 +580,7 @@ impl Offer {
             .build();
 
         let not_now = gtk::Button::builder()
-            .label(NOT_NOW)
+            .label(if recovery { CLOSE } else { NOT_NOW })
             .css_classes(["settings-button"])
             .build();
         let download = gtk::Button::builder()
@@ -597,6 +673,11 @@ impl Offer {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn window(&self) -> &gtk::Window {
+        &self.window
+    }
+
     /// Shows the dialog, with Download focused.
     pub fn present(&self) {
         self.window.present();
@@ -650,6 +731,12 @@ impl Offer {
     fn say(&self, text: &str) {
         self.status.set_label(text);
         self.status.set_visible(!text.is_empty());
+    }
+}
+
+impl Drop for Offer {
+    fn drop(&mut self) {
+        self.window.destroy();
     }
 }
 
@@ -758,6 +845,264 @@ mod tests {
             assert_eq!(due.expect("not due"), None);
         }
         assert_eq!(good.seen().len(), 1, "the release is asked only when due");
+    }
+
+    fn recovery_index(edition: &str) -> Vec<u8> {
+        use addict_dictionary::format::{self, AnalysedForm, Contents, Headword, SenseRecord};
+        format::encode(&Contents {
+            source: edition.to_owned(),
+            senses: vec![SenseRecord {
+                definition: "a bank".to_owned(),
+                members: vec!["bank".to_owned()],
+                ..Default::default()
+            }],
+            headwords: vec![Headword {
+                word: "bank".to_owned(),
+                senses: vec![0],
+                ..Default::default()
+            }],
+            analyses: vec![AnalysedForm {
+                form: "banking".to_owned(),
+                lemmas: vec![addict_dictionary::analysis::Analyses {
+                    lemma: "bank".to_owned(),
+                    shapes: vec![addict_dictionary::analysis::Shape::Gerund],
+                }],
+            }],
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    fn recovery_stub(indexes: Vec<Published>, asset: &[u8]) -> crate::download::stub::Stub {
+        use crate::download::stub::{Route, Stub};
+        let tag = release::tag();
+        let manifest = Manifest {
+            format: addict_dictionary::format::VERSION,
+            indexes: indexes.clone(),
+        };
+        let mut routes = std::collections::HashMap::from([(
+            format!("/{tag}/manifest.json"),
+            Route::File(manifest.to_json().into_bytes()),
+        )]);
+        for published in indexes {
+            routes.insert(
+                format!("/{tag}/{}", published.asset()),
+                Route::File(asset.to_vec()),
+            );
+        }
+        Stub::start(routes).unwrap()
+    }
+
+    fn recovery_xz(bytes: &[u8]) -> Vec<u8> {
+        let mut xz = Vec::new();
+        lzma_rs::xz_compress(&mut &bytes[..], &mut xz).unwrap();
+        xz
+    }
+
+    #[tokio::test]
+    async fn settings_restores_only_a_deleted_index_and_preserves_healthy_editions_and_choice() {
+        let dir = TempDir::new("recovery-deleted");
+        let data = dir.0.join("data");
+        fs::create_dir(&data).unwrap();
+        let manual = recovery_index("manual-edition");
+        let published = recovery_index("published-edition");
+        let xz = recovery_xz(&published);
+        for name in ["oewn", "freedict", "wikdict-ru-es"] {
+            fs::write(data.join(format!("{name}.index")), &manual).unwrap();
+        }
+        fs::remove_file(data.join("freedict.index")).unwrap();
+        write(Some(&dir.file())).unwrap();
+        let choice = fs::read(dir.file()).unwrap();
+        let entries = ["oewn", "freedict", "wikdict-ru-es"]
+            .into_iter()
+            .map(|name| Published::of(name, &xz))
+            .collect();
+        let stub = recovery_stub(entries, &xz);
+        let downloader = Downloader::with_base_url(stub.base_url());
+        let manifest = recovery_manifest(&downloader, data.clone()).await.unwrap();
+        assert_eq!(
+            manifest
+                .indexes
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["freedict"]
+        );
+        let mut queue = Queue::new(manifest.indexes);
+        while let Some(published) = queue.next() {
+            queue.finished(
+                &published.name,
+                downloader
+                    .install(&published, &data, |_| {})
+                    .await
+                    .map(drop)
+                    .map_err(|error| error.to_string()),
+            );
+        }
+        assert_eq!(fs::read(data.join("oewn.index")).unwrap(), manual);
+        assert_eq!(fs::read(data.join("wikdict-ru-es.index")).unwrap(), manual);
+        assert_eq!(fs::read(data.join("freedict.index")).unwrap(), published);
+        assert_eq!(fs::read(dir.file()).unwrap(), choice);
+        let complete = recovery_manifest(&downloader, data).await.unwrap();
+        assert!(complete.indexes.is_empty());
+        assert_eq!(
+            stub.seen()
+                .iter()
+                .filter(|line| line.contains(".index.xz"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_selects_each_unreadable_source_and_retains_unknown_names_in_order() {
+        use addict_dictionary::format::{self, Header, SectionId};
+        let dir = TempDir::new("recovery-unreadable");
+        let good = recovery_index("manual");
+        let xz = recovery_xz(&good);
+        let mut names = Vec::new();
+        for (name, section) in [
+            ("oewn", SectionId::WordRecords),
+            ("freedict", SectionId::Senses),
+            ("wikdict-ru-es", SectionId::AnalysisRecords),
+        ] {
+            let mut bad = good.clone();
+            let header = Header::parse(&good, good.len() as u64).unwrap();
+            let offset = header.section(section).offset as usize
+                + if section == SectionId::Senses { 4 } else { 0 };
+            bad[offset..offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+            let path = dir.0.join(format!("{name}.index"));
+            fs::write(&path, &bad).unwrap();
+            let index = Index::open(&path).expect("header-valid corruption");
+            let result = if section == SectionId::AnalysisRecords {
+                index.analyses("banking").map(drop)
+            } else {
+                index.find("bank").map(drop)
+            };
+            assert!(result.is_err(), "a real lookup must expose the damage");
+            names.push(name);
+        }
+        let mut unsupported = good.clone();
+        unsupported[8..12].copy_from_slice(&(format::VERSION + 1).to_le_bytes());
+        fs::write(dir.0.join("omw-es.index"), &unsupported).unwrap();
+        fs::write(dir.0.join("sinonims-cat.index"), &good).unwrap();
+        names.extend(["omw-es", "unknown", "sinonims-cat"]);
+        let stub = recovery_stub(
+            names
+                .into_iter()
+                .map(|name| Published::of(name, &xz))
+                .collect(),
+            &xz,
+        );
+        let downloader = Downloader::with_base_url(stub.base_url());
+        let manifest = recovery_manifest(&downloader, dir.0.clone()).await.unwrap();
+        assert_eq!(
+            manifest
+                .indexes
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["oewn", "freedict", "wikdict-ru-es", "omw-es", "unknown"]
+        );
+        // A failed replacement keeps the original damaged bytes.
+        let original = fs::read(dir.0.join("oewn.index")).unwrap();
+        let mut wrong = manifest.indexes[0].clone();
+        wrong.size = 0;
+        assert!(downloader.install(&wrong, &dir.0, |_| {}).await.is_err());
+        assert_eq!(fs::read(dir.0.join("oewn.index")).unwrap(), original);
+
+        let healthy = fs::read(dir.0.join("sinonims-cat.index")).unwrap();
+        let recovering = Downloader::with_base_url(stub.base_url()).recovering();
+        let mut queue = Queue::new(manifest.indexes);
+        while let Some(published) = queue.next() {
+            let result = recovering.install(&published, &dir.0, |_| {}).await;
+            queue.finished(
+                &published.name,
+                result.map(drop).map_err(|error| error.to_string()),
+            );
+        }
+        for name in ["oewn", "freedict", "wikdict-ru-es", "omw-es"] {
+            assert_eq!(queue.state(name), Some(&RowState::Installed), "{name}");
+            let path = dir.0.join(format!("{name}.index"));
+            let restored = Index::open(&path).expect("repaired index opens");
+            restored.validate().expect("all repaired records decode");
+            assert!(restored.find("bank").unwrap().is_some(), "{name}");
+            assert!(!restored.analyses("banking").unwrap().is_empty(), "{name}");
+            assert_eq!(
+                fs::read(path).unwrap(),
+                good,
+                "replacement installed the checked asset"
+            );
+        }
+        let Some(RowState::Failed(error)) = queue.state("unknown") else {
+            panic!("unknown source must fail on its own row");
+        };
+        assert!(
+            error.contains("unknown") && error.contains("does not know"),
+            "{error}"
+        );
+        assert_eq!(fs::read(dir.0.join("sinonims-cat.index")).unwrap(), healthy);
+        assert!(!stub.seen().iter().any(
+            |line| line.contains("sinonims-cat.index.xz") || line.contains("unknown.index.xz")
+        ));
+    }
+
+    #[tokio::test]
+    async fn settings_manifest_failures_leave_installed_files_unchanged_and_can_retry() {
+        use crate::download::stub::{Route, Stub};
+        let dir = TempDir::new("recovery-manifests");
+        let good = recovery_index("manual");
+        fs::write(dir.0.join("oewn.index"), &good).unwrap();
+        for body in [
+            None,
+            Some(b"garbled".to_vec()),
+            Some(
+                Manifest {
+                    format: addict_dictionary::format::VERSION,
+                    indexes: Vec::new(),
+                }
+                .to_json()
+                .into_bytes(),
+            ),
+        ] {
+            let routes = body
+                .map(|body| {
+                    (
+                        format!("/{}/manifest.json", release::tag()),
+                        Route::File(body),
+                    )
+                })
+                .into_iter()
+                .collect();
+            let stub = Stub::start(routes).unwrap();
+            let downloader = Downloader::with_base_url(stub.base_url());
+            for _ in 0..2 {
+                assert!(recovery_manifest(&downloader, dir.0.clone()).await.is_err());
+                assert_eq!(fs::read(dir.0.join("oewn.index")).unwrap(), good);
+            }
+            assert_eq!(stub.seen().len(), 2, "retry fetches afresh");
+        }
+    }
+
+    #[test]
+    fn recovery_summaries_speak_of_the_restored_files_only() {
+        let mut queue = Queue::new(vec![entry("oewn", 1), entry("omw-es", 1)]);
+        while let Some(published) = queue.next() {
+            queue.finished(&published.name, Ok(()));
+        }
+        assert_eq!(
+            recovery_summary_text(&queue),
+            "Every missing or unreadable dictionary is restored."
+        );
+        let mut queue = Queue::new(vec![entry("oewn", 1), entry("omw-es", 1)]);
+        let first = queue.next().unwrap();
+        queue.finished(&first.name, Ok(()));
+        let second = queue.next().unwrap();
+        queue.finished(&second.name, Err("refused".to_owned()));
+        assert_eq!(
+            recovery_summary_text(&queue),
+            format!("1 of 2 missing or unreadable dictionaries are restored. {RETRY}")
+        );
     }
 
     #[test]
@@ -1180,7 +1525,7 @@ mod tests {
             entry("kaikki-es-Espanol", 61_000_000),
             entry("omw-es", 900_000),
         ];
-        let offer = Offer::new(&parent, &indexes, || {}, || {}, |_| {});
+        let offer = Offer::new(&parent, &indexes, false, || {}, || {}, |_| {});
         offer.present();
         let mut queue = Queue::new(indexes);
         let state = std::env::var("ADDICT_SHOT_STATE");

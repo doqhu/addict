@@ -269,25 +269,31 @@ enum Event {
     /// The user pressed the button of this language in the switch.
     LanguageChosen(Language),
     /// The check at the start says where the dictionary indexes stand.
-    Indexes { generation: u64, indexes: Indexes },
+    Indexes {
+        generation: u64,
+        indexes: Indexes,
+    },
     /// The post-import check finished off-thread. Acknowledge only after
     /// the resident cache and view have received these states.
+    ImportRefreshing(oneshot::Sender<u64>),
     Imported(ImportCompletion),
+    SettingsDownload,
+    RecoveryPrepared(u64, Outcome<Result<Manifest, String>>),
     /// The first-run offer to download a dictionary is due; this is the
     /// manifest of the published indexes.
-    FirstRunOffer(Manifest),
+    FirstRunOffer(u64, Manifest),
     /// Download was pressed in the first-run dialog.
-    FirstRunDownload,
+    FirstRunDownload(u64),
     /// Not now was pressed in the first-run dialog.
-    FirstRunNotNow,
+    FirstRunNotNow(u64),
     /// This many bytes of the asset of the named index came.
-    FirstRunProgress(String, u64),
+    FirstRunProgress(u64, String, u64),
     /// Cancel was pressed on the row of the named index, or, with `None`,
     /// the dialog's own.
-    FirstRunCancel(Option<String>),
+    FirstRunCancel(u64, Option<String>),
     /// The download and the install of the named index ended: its path, or
     /// why not, in one line.
-    FirstRunInstalled(String, Outcome<Result<std::path::PathBuf, String>>),
+    FirstRunInstalled(u64, String, Outcome<Result<std::path::PathBuf, String>>),
     /// Capture was pressed.
     Capture,
     /// The window hidden for a capture is off the screen.
@@ -537,6 +543,9 @@ struct Session {
     language_job: Option<Job>,
     /// Where the first-run offer to download a dictionary stands.
     first_run: FirstRun,
+    download_run: u64,
+    /// Independent of recovery, which must never cancel a remembered choice.
+    first_run_choice: Option<Job>,
 }
 
 /// Reject checks and lookups that started before an in-app import's
@@ -556,20 +565,21 @@ impl IndexCache {
         true
     }
 
-    fn imported(&mut self, indexes: Indexes) {
+    fn begin_import(&mut self) -> u64 {
         self.generation += 1;
-        self.known = Some(indexes);
+        self.generation
     }
 }
 
 struct ImportCompletion {
+    generation: u64,
     indexes: Indexes,
     ready: oneshot::Sender<()>,
 }
 
 impl ImportCompletion {
-    fn apply(self, apply: impl FnOnce(Indexes)) {
-        apply(self.indexes);
+    fn apply(self, apply: impl FnOnce(u64, Indexes)) {
+        apply(self.generation, self.indexes);
         let _ = self.ready.send(());
     }
 }
@@ -583,11 +593,20 @@ enum FirstRun {
     Unasked,
     /// The choice file is read and the manifest fetched; dropping the job
     /// gives them up.
-    Asking { _job: Job },
+    Asking {
+        _job: Job,
+    },
+    Preparing {
+        _job: Job,
+    },
     /// The offer is due and waits for the window to be shown.
     Pending(Manifest),
     /// The dialog is shown and waits for a press.
-    Shown { offer: Offer, manifest: Manifest },
+    Shown {
+        offer: Offer,
+        manifest: Manifest,
+        recovery: bool,
+    },
     /// Download was pressed: the indexes of the queue are installed one
     /// after another into `dir`. `running` is the index whose job runs;
     /// dropping the job gives that one up.
@@ -596,11 +615,12 @@ enum FirstRun {
         queue: first_run::Queue,
         dir: std::path::PathBuf,
         running: Option<(String, Job)>,
+        recovery: bool,
     },
     /// The install ended, and the dialog says how.
-    Ended { _offer: Offer },
-    /// Not now was pressed; the choice file is written on the runner.
-    Declined { _job: Option<Job> },
+    Ended {
+        _offer: Offer,
+    },
     /// Nothing is offered in this run.
     Done,
 }
@@ -793,18 +813,39 @@ impl Session {
                     self.first_indexes(indexes);
                 }
             }
-            Event::Imported(completed) => completed.apply(|indexes| {
+            Event::ImportRefreshing(ready) => {
                 self.check = None;
-                self.indexes.imported(indexes);
-                self.view.render_indexes(indexes);
-                self.first_indexes(indexes);
+                let _ = ready.send(self.indexes.begin_import());
+            }
+            Event::Imported(completed) => completed.apply(|generation, indexes| {
+                if self.indexes.update(generation, indexes) {
+                    self.check = None;
+                    self.view.render_indexes(indexes);
+                    self.first_indexes(indexes);
+                }
             }),
-            Event::FirstRunOffer(manifest) => self.first_run_offer(manifest),
-            Event::FirstRunDownload => self.first_run_download(),
-            Event::FirstRunNotNow => self.first_run_not_now(),
-            Event::FirstRunProgress(name, received) => self.first_run_progress(&name, received),
-            Event::FirstRunCancel(name) => self.first_run_cancel(name),
-            Event::FirstRunInstalled(name, outcome) => self.first_run_installed(&name, outcome),
+            Event::SettingsDownload => self.settings_download(),
+            Event::RecoveryPrepared(run, outcome) => self.recovery_prepared(run, outcome),
+            Event::FirstRunOffer(run, manifest) if run == self.download_run => {
+                self.first_run_offer(manifest)
+            }
+            Event::FirstRunDownload(run) if run == self.download_run => self.first_run_download(),
+            Event::FirstRunNotNow(run) if run == self.download_run => self.first_run_not_now(),
+            Event::FirstRunProgress(run, name, received) if run == self.download_run => {
+                self.first_run_progress(&name, received)
+            }
+            Event::FirstRunCancel(run, name) if run == self.download_run => {
+                self.first_run_cancel(name)
+            }
+            Event::FirstRunInstalled(run, name, outcome) if run == self.download_run => {
+                self.first_run_installed(&name, outcome)
+            }
+            Event::FirstRunOffer(..)
+            | Event::FirstRunDownload(..)
+            | Event::FirstRunNotNow(..)
+            | Event::FirstRunProgress(..)
+            | Event::FirstRunCancel(..)
+            | Event::FirstRunInstalled(..) => {}
             Event::Capture => self.capture(None),
             Event::Hidden => self.start_capture(),
             Event::Captured(number) => self.snapshot_taken(number),
@@ -820,11 +861,12 @@ impl Session {
     fn first_indexes(&mut self, indexes: Indexes) {
         match self.first_run {
             FirstRun::Unasked if first_run::should_offer(&indexes, false) => {
+                self.download_run += 1;
                 self.first_run =
                     self.work
                         .upgrade()
                         .map_or(FirstRun::Done, |work| FirstRun::Asking {
-                            _job: start_first_run(&work, indexes, &self.sender),
+                            _job: start_first_run(&work, indexes, &self.sender, self.download_run),
                         });
             }
             FirstRun::Unasked => self.first_run = FirstRun::Done,
@@ -860,32 +902,120 @@ impl Session {
         else {
             return;
         };
+        self.show_download_offer(manifest, false);
+    }
+
+    fn show_download_offer(&mut self, manifest: Manifest, recovery: bool) {
         let download = self.sender.clone();
         let not_now = self.sender.clone();
         let cancel = self.sender.clone();
+        let run = self.download_run;
+        let parent: &gtk::Window = if recovery {
+            self.settings.window()
+        } else {
+            self.window.upcast_ref()
+        };
         let offer = Offer::new(
-            &self.window,
+            parent,
             &manifest.indexes,
+            recovery,
             move || {
-                let _ = download.unbounded_send(Event::FirstRunDownload);
+                let _ = download.unbounded_send(Event::FirstRunDownload(run));
             },
             move || {
-                let _ = not_now.unbounded_send(Event::FirstRunNotNow);
+                let _ = not_now.unbounded_send(Event::FirstRunNotNow(run));
             },
             move |name| {
-                let _ = cancel.unbounded_send(Event::FirstRunCancel(name));
+                let _ = cancel.unbounded_send(Event::FirstRunCancel(run, name));
             },
         );
         offer.present();
-        self.first_run = FirstRun::Shown { offer, manifest };
+        if recovery {
+            self.settings
+                .render_download(false, "The dictionary download dialog is open.");
+        }
+        self.first_run = FirstRun::Shown {
+            offer,
+            manifest,
+            recovery,
+        };
+    }
+
+    /// Explicit recovery supersedes an unstarted automatic offer, while an
+    /// active preparation or installation keeps its job and progress.
+    fn settings_download(&mut self) {
+        match &self.first_run {
+            FirstRun::Preparing { .. } => return,
+            FirstRun::Installing { offer, .. }
+            | FirstRun::Shown {
+                offer,
+                recovery: true,
+                ..
+            } => {
+                offer.present();
+                return;
+            }
+            _ => {}
+        }
+        let (Some(work), Some(dir)) = (self.work.upgrade(), import::data_dir()) else {
+            self.settings
+                .render_download(false, &first_run::recovery_failed_text(first_run::NO_PLACE));
+            return;
+        };
+        self.download_run += 1;
+        let run = self.download_run;
+        let prepared = self.sender.clone();
+        // The manifest has its own deadline inside; the health scan of
+        // every installed index needs the longer one.
+        let job = work.run(
+            download::DOWNLOAD_LIMIT,
+            async move {
+                first_run::recovery_manifest(&Downloader::new(), dir)
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            move |outcome| {
+                let _ = prepared.unbounded_send(Event::RecoveryPrepared(run, outcome));
+            },
+        );
+        self.first_run = FirstRun::Preparing { _job: job };
+        self.settings.render_download(true, first_run::FETCHING);
+    }
+
+    fn recovery_prepared(&mut self, run: u64, outcome: Outcome<Result<Manifest, String>>) {
+        if run != self.download_run || !matches!(self.first_run, FirstRun::Preparing { .. }) {
+            return;
+        }
+        self.first_run = FirstRun::Done;
+        match outcome {
+            Outcome::Finished(Ok(manifest)) if manifest.indexes.is_empty() => {
+                self.settings.render_download(false, first_run::NOTHING);
+            }
+            Outcome::Finished(Ok(manifest)) => self.show_download_offer(manifest, true),
+            outcome => {
+                let why = match outcome {
+                    Outcome::Finished(Err(error)) => error,
+                    Outcome::TimedOut => "the dictionary check did not finish in time".to_owned(),
+                    _ => first_run::STOPPED.to_owned(),
+                };
+                self.settings
+                    .render_download(false, &first_run::recovery_failed_text(&why));
+            }
+        }
     }
 
     /// Download was pressed: the indexes of the manifest are downloaded and
     /// installed on the runner, one after another, each within
     /// [`download::DOWNLOAD_LIMIT`].
     fn first_run_download(&mut self) {
-        let FirstRun::Shown { offer, manifest } =
-            std::mem::replace(&mut self.first_run, FirstRun::Done)
+        if !matches!(self.first_run, FirstRun::Shown { .. }) {
+            return;
+        }
+        let FirstRun::Shown {
+            offer,
+            manifest,
+            recovery,
+        } = std::mem::replace(&mut self.first_run, FirstRun::Done)
         else {
             return;
         };
@@ -896,7 +1026,13 @@ impl Session {
             eprintln!("addict: the dictionary download failed: {why}");
             queue.cancel_all();
             offer.show(&queue);
-            offer.ended(&first_run::failed_text(why));
+            let text = if recovery {
+                first_run::recovery_failed_text(why)
+            } else {
+                first_run::failed_text(why)
+            };
+            offer.ended(&text);
+            self.settings.render_download(false, &text);
             self.first_run = FirstRun::Ended { _offer: offer };
             return;
         };
@@ -906,6 +1042,7 @@ impl Session {
             queue,
             dir,
             running: None,
+            recovery,
         };
         self.first_run_next();
     }
@@ -919,6 +1056,7 @@ impl Session {
             queue,
             dir,
             running,
+            recovery,
         } = &mut self.first_run
         else {
             return;
@@ -936,21 +1074,33 @@ impl Session {
             let progress = self.sender.clone();
             let installed = self.sender.clone();
             let (of, ended) = (name.clone(), name.clone());
+            let run = self.download_run;
+            let recovery = *recovery;
+            let articles = self.articles.clone();
+            let refresh = self.sender.clone();
             let job = work.run(
                 download::DOWNLOAD_LIMIT,
                 async move {
-                    Downloader::new()
-                        .install(&published, &dir, move |received| {
-                            // On the worker: the UI thread wakes for it.
-                            let _ = progress
-                                .unbounded_send(Event::FirstRunProgress(of.clone(), received));
-                        })
-                        .await
-                        .map_err(|error| error.to_string())
+                    install_download(
+                        Downloader::new(),
+                        published,
+                        dir,
+                        recovery,
+                        articles,
+                        refresh,
+                        move |received| {
+                            let _ = progress.unbounded_send(Event::FirstRunProgress(
+                                run,
+                                of.clone(),
+                                received,
+                            ));
+                        },
+                    )
+                    .await
                 },
                 move |outcome| {
                     // On the worker: the UI thread wakes for the event.
-                    let _ = installed.unbounded_send(Event::FirstRunInstalled(ended, outcome));
+                    let _ = installed.unbounded_send(Event::FirstRunInstalled(run, ended, outcome));
                 },
             );
             *running = Some((name, job));
@@ -961,19 +1111,23 @@ impl Session {
         if !queue.is_done() {
             return;
         }
-        let FirstRun::Installing { offer, queue, .. } =
-            std::mem::replace(&mut self.first_run, FirstRun::Done)
+        let FirstRun::Installing {
+            offer,
+            queue,
+            recovery,
+            ..
+        } = std::mem::replace(&mut self.first_run, FirstRun::Done)
         else {
             return;
         };
-        offer.ended(&first_run::summary_text(&queue));
+        let text = if recovery {
+            first_run::recovery_summary_text(&queue)
+        } else {
+            first_run::summary_text(&queue)
+        };
+        offer.ended(&text);
+        self.settings.render_download(false, &text);
         self.first_run = FirstRun::Ended { _offer: offer };
-        self.check = start_check(
-            self.work.upgrade().as_deref(),
-            self.articles.clone(),
-            &self.sender,
-            self.indexes.generation,
-        );
     }
 
     /// Bytes of the running index came: its row says how many.
@@ -1057,7 +1211,12 @@ impl Session {
     /// Not now was pressed: the choice is written on the runner, and the
     /// offer is not made again. A write that fails is written to stderr.
     fn first_run_not_now(&mut self) {
-        if !matches!(self.first_run, FirstRun::Shown { .. }) {
+        let FirstRun::Shown { recovery, .. } = &self.first_run else {
+            return;
+        };
+        if *recovery {
+            self.first_run = FirstRun::Done;
+            self.settings.render_download(false, "");
             return;
         }
         let path = first_run::path();
@@ -1081,7 +1240,8 @@ impl Session {
         if job.is_none() {
             eprintln!("addict: the answer to the dictionary download was not kept: no runner");
         }
-        self.first_run = FirstRun::Declined { _job: job };
+        self.first_run_choice = job;
+        self.first_run = FirstRun::Done;
     }
 
     /// Capture was pressed: the window hides, so it is not in the capture,
@@ -2581,6 +2741,7 @@ fn start_settings(
     let clear = sender.clone();
     let startup = sender.clone();
     let imported = sender.clone();
+    let download = sender.clone();
     Settings::new(
         window,
         key_file,
@@ -2597,6 +2758,9 @@ fn start_settings(
             let _ = startup.unbounded_send(Event::ToggleStartup(enable));
         },
         move || refresh_import(articles.clone(), imported.clone()),
+        move || {
+            let _ = download.unbounded_send(Event::SettingsDownload);
+        },
     )
 }
 
@@ -2607,14 +2771,64 @@ async fn refresh_import(
     articles: Arc<dyn Articles>,
     sender: UnboundedSender<Event>,
 ) -> Result<(), String> {
+    let (started, generation) = oneshot::channel();
+    sender
+        .unbounded_send(Event::ImportRefreshing(started))
+        .map_err(|_| "The resident is no longer available.".to_owned())?;
+    let generation = generation
+        .await
+        .map_err(|_| "The resident is no longer available.".to_owned())?;
     let indexes = file_import::blocking(move || articles.indexes()).await?;
     let (ready, received) = oneshot::channel();
     sender
-        .unbounded_send(Event::Imported(ImportCompletion { indexes, ready }))
+        .unbounded_send(Event::Imported(ImportCompletion {
+            generation,
+            indexes,
+            ready,
+        }))
         .map_err(|_| "The resident is no longer available.".to_owned())?;
     received
         .await
         .map_err(|_| "The resident did not refresh its dictionary states.".to_owned())
+}
+
+/// The writer starts finalization from its commit callback, outside the
+/// cancellable queue future. Success waits for the resident acknowledgement.
+async fn install_download(
+    downloader: Downloader,
+    published: addict_dictionary::release::Published,
+    dir: std::path::PathBuf,
+    recovery: bool,
+    articles: Arc<dyn Articles>,
+    sender: UnboundedSender<Event>,
+    progress: impl FnMut(u64),
+) -> Result<std::path::PathBuf, String> {
+    let (ready, received) = oneshot::channel();
+    let ready = std::sync::Mutex::new(Some(ready));
+    let downloader = downloader.on_commit(move || {
+        let Some(ready) = ready.lock().expect("commit callback lock").take() else {
+            return;
+        };
+        let articles = articles.clone();
+        let sender = sender.clone();
+        // Dropping this join handle detaches, rather than aborts, refresh.
+        tokio::spawn(async move {
+            let _ = ready.send(refresh_import(articles, sender).await);
+        });
+    });
+    let downloader = if recovery {
+        downloader.recovering()
+    } else {
+        downloader
+    };
+    let path = downloader
+        .install(&published, &dir, progress)
+        .await
+        .map_err(|error| error.to_string())?;
+    received
+        .await
+        .map_err(|_| "The dictionary refresh stopped.".to_owned())??;
+    Ok(path)
 }
 
 /// Starts the icon in the top bar; the choices of its menu and the tray
@@ -2684,7 +2898,12 @@ fn start_language(
 /// the manifest is fetched and comes to `sender` as an event. When the
 /// manifest cannot be had, why is written to stderr and nothing is kept, so
 /// the next start asks again.
-fn start_first_run(work: &Work, indexes: Indexes, sender: &UnboundedSender<Event>) -> Job {
+fn start_first_run(
+    work: &Work,
+    indexes: Indexes,
+    sender: &UnboundedSender<Event>,
+    run: u64,
+) -> Job {
     let path = first_run::path();
     let offered = sender.clone();
     work.run(
@@ -2696,7 +2915,7 @@ fn start_first_run(work: &Work, indexes: Indexes, sender: &UnboundedSender<Event
         move |outcome| match outcome {
             Outcome::Finished(Ok(Some(manifest))) => {
                 // On the worker: the UI thread wakes for the event.
-                let _ = offered.unbounded_send(Event::FirstRunOffer(manifest));
+                let _ = offered.unbounded_send(Event::FirstRunOffer(run, manifest));
             }
             Outcome::Finished(Ok(None)) | Outcome::Cancelled => {}
             Outcome::Finished(Err(e)) => {
@@ -2813,6 +3032,8 @@ fn start(
         language_chosen: false,
         language_job,
         first_run: FirstRun::Unasked,
+        download_run: 0,
+        first_run_choice: None,
     };
     serve(session, receiver);
     let tray = start_tray(&events);
@@ -3142,6 +3363,10 @@ mod tests {
         let refreshed = super::refresh_import(articles.clone(), sender);
         pin_mut!(refreshed);
         assert!(poll!(refreshed.as_mut()).is_pending());
+        let Event::ImportRefreshing(started) = events.next().await.unwrap() else {
+            panic!("refresh start");
+        };
+        started.send(cached.begin_import()).unwrap();
         let event = tokio::select! {
             result = &mut refreshed => panic!("completed before resident delivery: {result:?}"),
             event = events.next() => event.expect("completion event"),
@@ -3155,7 +3380,7 @@ mod tests {
         );
         assert_eq!(cached.known, Some(missing));
         // The same ordered completion operation used by Session::handle.
-        completed.apply(|indexes| cached.imported(indexes));
+        completed.apply(|generation, indexes| assert!(cached.update(generation, indexes)));
         refreshed.await.expect("resident acknowledgement");
         assert!(
             !cached.update(old_generation, missing),
@@ -3184,6 +3409,362 @@ mod tests {
             };
             assert!(grouped.russian.iter().flatten().any(|text| text == "банк"));
         }
+    }
+
+    #[tokio::test]
+    async fn downloaded_dictionaries_refresh_even_when_cancelled_after_commit_before_refresh() {
+        use crate::{
+            dictionaries::{Answer, Articles, Dictionaries, State},
+            download::{
+                Downloader,
+                stub::{Route, Stub},
+            },
+            manual,
+        };
+        use addict_dictionary::{
+            format::{self, Contents, Headword},
+            import::{self, Source},
+            release::Published,
+        };
+        use addict_platform::work::{Outcome, Work};
+        use futures_util::StreamExt;
+        use std::{collections::HashMap, path::PathBuf, sync::Arc};
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = Temp(std::env::temp_dir().join(format!(
+            "addict-download-cancel-resident-{}",
+            std::process::id()
+        )));
+        std::fs::create_dir(&temp.0).unwrap();
+        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(Some(temp.0.clone())));
+        let mut cached = super::IndexCache {
+            known: Some(articles.indexes()),
+            ..Default::default()
+        };
+        assert_eq!(cached.known.unwrap().spanish, State::Missing);
+        assert_eq!(cached.known.unwrap().catalan, State::Missing);
+        let work = Work::start().unwrap();
+        let (sender, mut events) = futures_channel::mpsc::unbounded();
+        for (language, source, name, word) in [
+            (Language::Es, Source::WikdictEsRu, "wikdict-es-ru", "banco"),
+            (Language::Ca, Source::WikdictCaRu, "wikdict-ca-ru", "banc"),
+        ] {
+            let stale = cached.known.unwrap();
+            let stale_generation = cached.generation;
+            let bytes = format::encode(&Contents {
+                source: "download-cancel-regression".to_owned(),
+                headwords: vec![Headword {
+                    word: word.to_owned(),
+                    translations: vec!["банк".to_owned()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            let mut xz = Vec::new();
+            lzma_rs::xz_compress(&mut &bytes[..], &mut xz).unwrap();
+            let published = Published::of(name, &xz);
+            let stub = Stub::start(HashMap::from([(
+                format!(
+                    "/{}/{}",
+                    addict_dictionary::release::tag(),
+                    published.asset()
+                ),
+                Route::File(xz),
+            )]))
+            .unwrap();
+            let dir = temp.0.clone();
+            let refreshed = sender.clone();
+            let dictionaries = articles.clone();
+            let (finished, ended) = futures_channel::oneshot::channel();
+            let job = work.run(
+                crate::download::DOWNLOAD_LIMIT,
+                super::install_download(
+                    Downloader::with_base_url(stub.base_url()),
+                    published,
+                    dir,
+                    true,
+                    dictionaries,
+                    refreshed,
+                    |_| {},
+                ),
+                move |outcome| {
+                    let _ = finished.send(outcome);
+                },
+            );
+            // The commit callback has fired, but its independent finalizer
+            // is paused before the availability disk check can begin.
+            let Event::ImportRefreshing(started) = events.next().await.unwrap() else {
+                panic!("refresh start");
+            };
+            assert!(
+                import::index_path(&temp.0, source).is_file(),
+                "committed before cancellation"
+            );
+            drop(job);
+            assert!(matches!(ended.await.unwrap(), Outcome::Cancelled));
+            let generation = cached.begin_import();
+            assert!(
+                !cached.update(stale_generation, stale),
+                "advance before accepting old checks"
+            );
+            started.send(generation).unwrap();
+            let Event::Imported(completed) = events.next().await.unwrap() else {
+                panic!("independent completion");
+            };
+            completed.apply(|generation, indexes| assert!(cached.update(generation, indexes)));
+            assert!(!cached.update(stale_generation, stale));
+            let (send, receive) = futures_channel::oneshot::channel();
+            let _lookup = manual::offline(
+                Some(&work),
+                articles.clone(),
+                word.to_owned(),
+                language,
+                cached.known,
+                move |language, outcome| {
+                    let _ = send.send((language, outcome));
+                },
+            )
+            .expect("next lookup must be allowed");
+            let (answered, Outcome::Finished(looked)) = receive.await.unwrap() else {
+                panic!("lookup failed");
+            };
+            assert_eq!(answered, language);
+            let Answer::Grouped(grouped) = looked.answer else {
+                panic!("restored article");
+            };
+            assert!(
+                grouped
+                    .russian
+                    .iter()
+                    .flatten()
+                    .any(|translation| translation == "банк")
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn settings_download_uses_the_shared_dialog_and_ignores_old_runs() {
+        use super::*;
+        use addict_dictionary::release::Published;
+        gtk::init().expect("a display");
+        let app = gtk::Application::builder()
+            .application_id("io.github.doqhu.Addict.RecoveryTest")
+            .flags(gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(gio::Cancellable::NONE).unwrap();
+        let (sender, mut events) = futures_channel::mpsc::unbounded();
+        let binding = Binding::Attempting;
+        let (view, window) = build_ui(&app, &binding, &sender);
+        let work = Rc::new(Work::start().unwrap());
+        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(None));
+        let (translator, key_file, cache) = online_translator();
+        let settings = start_settings(&window, key_file.as_deref(), articles.clone(), &sender);
+        let about = About::new(&window);
+        let mut session = Session {
+            binding,
+            view,
+            window,
+            recording: None,
+            timed: false,
+            sender,
+            current: Weak::new(),
+            manual: Manual::default(),
+            history: History::default(),
+            looking_up: LookingUp::default(),
+            shown: Shown::default(),
+            work: Rc::downgrade(&work),
+            articles: articles.clone(),
+            translator,
+            key_file,
+            cache,
+            cache_job: None,
+            clear_job: None,
+            settings,
+            about,
+            bindings: Bindings::default(),
+            startup_on: false,
+            startup_read_job: None,
+            startup_job: None,
+            key_job: None,
+            save_job: None,
+            translating_word: None,
+            translating_sentence: None,
+            translating_definition: None,
+            online: Kept::default(),
+            check: None,
+            indexes: IndexCache::default(),
+            capturing: Capturing::default(),
+            copying: Copying::default(),
+            language: Language::default(),
+            language_file: None,
+            language_chosen: false,
+            language_job: None,
+            first_run: FirstRun::Done,
+            download_run: 0,
+            first_run_choice: None,
+        };
+
+        fn button(widget: &gtk::Widget, text: &str) -> Option<gtk::Button> {
+            if let Some(button) = widget.downcast_ref::<gtk::Button>()
+                && button.label().as_deref() == Some(text)
+            {
+                return Some(button.clone());
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if let Some(found) = button(&current, text) {
+                    return Some(found);
+                }
+                child = current.next_sibling();
+            }
+            None
+        }
+        fn label(widget: &gtk::Widget, text: &str) -> bool {
+            if widget
+                .downcast_ref::<gtk::Label>()
+                .is_some_and(|label| label.label() == text)
+            {
+                return true;
+            }
+            let mut child = widget.first_child();
+            while let Some(current) = child {
+                if label(&current, text) {
+                    return true;
+                }
+                child = current.next_sibling();
+            }
+            false
+        }
+        let pending = || {
+            work.run(
+                download::MANIFEST_LIMIT,
+                std::future::pending::<()>(),
+                |_| {},
+            )
+        };
+        session.download_run = 1;
+        session.first_run = FirstRun::Preparing { _job: pending() };
+        let action = button(
+            session.settings.window().upcast_ref(),
+            "Download dictionaries",
+        )
+        .unwrap();
+        action.emit_clicked();
+        assert!(
+            matches!(events.try_recv().unwrap(), Event::SettingsDownload),
+            "actual Settings callback"
+        );
+        session.handle(Event::SettingsDownload);
+        assert_eq!(session.download_run, 1, "repeat preserves preparation");
+        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
+        let manifest = Manifest {
+            format: addict_dictionary::format::VERSION,
+            indexes: vec![Published::of("oewn", b"asset")],
+        };
+        session.handle(Event::RecoveryPrepared(
+            0,
+            Outcome::Finished(Ok(manifest.clone())),
+        ));
+        assert!(
+            matches!(session.first_run, FirstRun::Preparing { .. }),
+            "stale preparation ignored"
+        );
+        session.handle(Event::RecoveryPrepared(
+            1,
+            Outcome::Finished(Ok(manifest.clone())),
+        ));
+        let FirstRun::Shown {
+            offer, recovery, ..
+        } = &session.first_run
+        else {
+            panic!("shared recovery offer");
+        };
+        assert!(*recovery);
+        assert_eq!(
+            offer.window().transient_for().as_ref(),
+            Some(session.settings.window())
+        );
+        assert!(label(
+            offer.window().upcast_ref(),
+            first_run::RECOVERY_HEADING
+        ));
+        assert!(button(offer.window().upcast_ref(), first_run::NOT_NOW).is_none());
+        button(offer.window().upcast_ref(), first_run::CLOSE)
+            .unwrap()
+            .emit_clicked();
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::FirstRunNotNow(1)
+        ));
+        session.handle(Event::FirstRunNotNow(1));
+        assert!(matches!(session.first_run, FirstRun::Done));
+        assert!(
+            session.first_run_choice.is_none(),
+            "recovery Close keeps the first-run choice"
+        );
+        session.download_run = 2;
+        session.show_download_offer(manifest, true);
+        let FirstRun::Shown {
+            offer,
+            manifest,
+            recovery,
+        } = std::mem::replace(&mut session.first_run, FirstRun::Done)
+        else {
+            unreachable!()
+        };
+        let mut queue = first_run::Queue::new(manifest.indexes);
+        queue.next();
+        offer.installing();
+        session.first_run = FirstRun::Installing {
+            offer,
+            queue,
+            dir: std::env::temp_dir(),
+            running: Some(("oewn".to_owned(), pending())),
+            recovery,
+        };
+        session.handle(Event::FirstRunProgress(1, "oewn".to_owned(), 100));
+        session.handle(Event::FirstRunInstalled(
+            1,
+            "oewn".to_owned(),
+            Outcome::Finished(Ok(std::path::PathBuf::new())),
+        ));
+        session.handle(Event::SettingsDownload);
+        session.handle(Event::FirstRunDownload(2));
+        let FirstRun::Installing {
+            queue,
+            running,
+            offer,
+            ..
+        } = &session.first_run
+        else {
+            panic!("repeat must preserve installation");
+        };
+        assert!(running.is_some());
+        assert!(
+            offer.window().is_visible(),
+            "active progress stays reachable"
+        );
+        assert_eq!(
+            queue.state("oewn"),
+            Some(&first_run::RowState::Running { received: 0 })
+        );
+        session.handle(Event::FirstRunProgress(2, "oewn".to_owned(), 3));
+        let FirstRun::Installing { queue, .. } = &session.first_run else {
+            unreachable!()
+        };
+        assert_eq!(
+            queue.state("oewn"),
+            Some(&first_run::RowState::Running { received: 3 })
+        );
+        session.first_run = FirstRun::Done;
+        session.settings.window().destroy();
+        session.window.destroy();
     }
 
     #[derive(Default)]

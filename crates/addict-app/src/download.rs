@@ -34,7 +34,7 @@ use std::{
 };
 
 use addict_dictionary::{
-    format,
+    Index, format, import,
     release::{self, InstallError, Manifest, Published},
 };
 
@@ -69,12 +69,13 @@ pub(crate) async fn installation_permit() -> tokio::sync::SemaphorePermit<'stati
 }
 
 /// The downloader of the indexes of one release.
-#[derive(Debug)]
 pub struct Downloader {
     /// Without a slash at its end.
     base_url: String,
     /// Built at the first request.
     http: OnceLock<reqwest::Client>,
+    recovery: bool,
+    committed: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Downloader {
@@ -90,7 +91,23 @@ impl Downloader {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             http: OnceLock::new(),
+            recovery: false,
+            committed: None,
         }
+    }
+
+    /// Recovery preserves an edition that became healthy after selection.
+    pub fn recovering(mut self) -> Self {
+        self.recovery = true;
+        self
+    }
+
+    /// Called from the blocking writer after a successful commit, even if
+    /// the async caller is cancelled before it receives the result. The
+    /// callback must return promptly and own any required finalization.
+    pub fn on_commit(mut self, committed: impl Fn() + Send + Sync + 'static) -> Self {
+        self.committed = Some(Arc::new(committed));
+        self
     }
 
     /// The URL of `asset` in the release of this index format.
@@ -158,7 +175,28 @@ impl Downloader {
         }
         // Held until the blocking part ends, even when this future is
         // dropped first. The semaphore is never closed.
-        let permit = installation_permit().await;
+        let mut permit = installation_permit().await;
+        if self.recovery {
+            let path = import::index_path(dir, source);
+            let checked = path.clone();
+            // Move the permit into the scan too: cancellation cannot let
+            // another writer race an unfinished blocking health check.
+            let (held, healthy) = tokio::task::spawn_blocking(move || {
+                let healthy = Index::open(&checked)
+                    .and_then(|index| index.validate())
+                    .is_ok();
+                (permit, healthy)
+            })
+            .await
+            .map_err(|_| DownloadError::Stopped { name: name.clone() })?;
+            permit = held;
+            if healthy {
+                if let Some(committed) = &self.committed {
+                    committed();
+                }
+                return Ok(path);
+            }
+        }
         let body = self
             .fetch(&name, &published.asset(), published.size, progress)
             .await?;
@@ -176,6 +214,7 @@ impl Downloader {
         // cannot be aborted, sees before it renames anything into place.
         let stop = Arc::new(AtomicBool::new(false));
         let _guard = StopOnDrop(stop.clone());
+        let committed = self.committed.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let actual = release::sha256(&body);
@@ -186,8 +225,12 @@ impl Downloader {
                     actual,
                 });
             }
-            release::install_unless(&body, source, &dir, || stop.load(Ordering::SeqCst))
-                .map_err(DownloadError::Install)
+            let path = release::install_unless(&body, source, &dir, || stop.load(Ordering::SeqCst))
+                .map_err(DownloadError::Install)?;
+            if let Some(committed) = committed {
+                committed();
+            }
+            Ok(path)
         })
         .await
         .map_err(|_| DownloadError::Stopped { name })?
@@ -606,6 +649,78 @@ mod tests {
         let error = importing.await.unwrap_err();
         assert!(error.contains("missing-file"), "{error}");
         assert!(!dir.data().exists());
+    }
+
+    #[tokio::test]
+    async fn recovery_keeps_a_manual_edition_imported_after_manifest_selection() {
+        let xz = xz_of(&index());
+        let stub = release(manifest_of(vec![Published::of("oewn", &xz)]), None);
+        let downloader = Downloader::with_base_url(stub.base_url()).recovering();
+        let dir = DataDir::new("manual-after-selection");
+        let manifest = crate::first_run::recovery_manifest(&downloader, dir.data())
+            .await
+            .unwrap();
+        assert_eq!(manifest.indexes.len(), 1);
+        let manual = encode(&Contents {
+            source: "a-manual-edition".to_owned(),
+            headwords: vec![Headword {
+                word: "manual".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        fs::create_dir_all(dir.data()).unwrap();
+        fs::write(dir.data().join("oewn.index"), &manual).unwrap();
+        downloader
+            .install(&manifest.indexes[0], &dir.data(), |_| {
+                panic!("no asset request")
+            })
+            .await
+            .unwrap();
+        assert_eq!(fs::read(dir.data().join("oewn.index")).unwrap(), manual);
+        assert_eq!(
+            stub.seen().len(),
+            1,
+            "only the selection manifest was fetched"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_rechecks_after_a_queued_manual_writer_releases_the_permit() {
+        use futures_util::{pin_mut, poll};
+        let stub = Stub::start(HashMap::new()).unwrap();
+        let downloader = Downloader::with_base_url(stub.base_url()).recovering();
+        let dir = DataDir::new("manual-before-recovery");
+        let published = Published::of("oewn", b"unused");
+        let manual = index();
+        let path = dir.data().join("oewn.index");
+        let held = super::installation_permit().await;
+        // The same shared permit and blocking-writer lifetime as import_file.
+        // Queue that writer first, then queue recovery before either runs.
+        let importing = async {
+            let permit = super::installation_permit().await;
+            crate::file_import::blocking(move || {
+                let _permit = permit;
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, &manual).unwrap();
+            })
+            .await
+            .unwrap();
+        };
+        let data = dir.data();
+        let recovery = downloader.install(&published, &data, |_| panic!("no asset request"));
+        pin_mut!(importing, recovery);
+        assert!(poll!(importing.as_mut()).is_pending());
+        assert!(poll!(recovery.as_mut()).is_pending());
+        drop(held);
+        let ((), result) = tokio::join!(importing, recovery);
+        result.unwrap();
+        assert_eq!(fs::read(dir.data().join("oewn.index")).unwrap(), index());
+        assert!(
+            stub.seen().is_empty(),
+            "the recheck happens after waiting for the writer"
+        );
     }
 
     /// A small English index whose one headword is `bank`.
