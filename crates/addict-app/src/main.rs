@@ -9,12 +9,13 @@
 //! confirm, it removes nothing and names the entry.
 //!
 //! On the first start with no index at all, the window offers to download
-//! the English dictionary, Open English WordNet, published as an asset of
-//! the release `indexes-v<format>` of the repository: Download fetches it,
-//! checks its size and SHA-256 against the release's manifest and installs
-//! it as `oewn.index`; Not now is remembered and the offer is not made again.
-//! When the manifest cannot be fetched, nothing is shown and the next start
-//! offers again.
+//! every dictionary published as an asset of the release `indexes-v<format>`
+//! of the repository: Download fetches them one after another, checks the
+//! size and SHA-256 of each against the release's manifest and installs it,
+//! such as `oewn.index`; one that fails says why on its row and the others go
+//! on. Not now is remembered and the offer is not made again. When the
+//! manifest cannot be fetched or lists no index, nothing is shown and the
+//! next start offers again.
 //!
 //! `addict import <FILE>` turns a dictionary file the user has downloaded
 //! into an index in the data directory, `$XDG_DATA_HOME/addict` or

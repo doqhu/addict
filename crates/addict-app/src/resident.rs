@@ -143,11 +143,7 @@ use addict_core::{
     translation::{Request, Source as Language, Translator},
 };
 use addict_deepl::{DeepL, key};
-use addict_dictionary::{
-    import,
-    release::{Manifest, Published},
-    sources,
-};
+use addict_dictionary::{import, release::Manifest};
 use addict_platform::{
     ocr::OcrFailure,
     shortcut::{self, Action, Bindings, ShortcutEvent, ShortcutHandle},
@@ -277,9 +273,14 @@ enum Event {
     FirstRunDownload,
     /// Not now was pressed in the first-run dialog.
     FirstRunNotNow,
-    /// The download and the install of the offered index ended: its path, or
+    /// This many bytes of the asset of the named index came.
+    FirstRunProgress(String, u64),
+    /// Cancel was pressed on the row of the named index, or, with `None`,
+    /// the dialog's own.
+    FirstRunCancel(Option<String>),
+    /// The download and the install of the named index ended: its path, or
     /// why not, in one line.
-    FirstRunInstalled(Outcome<Result<std::path::PathBuf, String>>),
+    FirstRunInstalled(String, Outcome<Result<std::path::PathBuf, String>>),
     /// Capture was pressed.
     Capture,
     /// The window hidden for a capture is off the screen.
@@ -542,11 +543,18 @@ enum FirstRun {
     /// gives them up.
     Asking { _job: Job },
     /// The offer is due and waits for the window to be shown.
-    Pending(Published),
+    Pending(Manifest),
     /// The dialog is shown and waits for a press.
-    Shown { offer: Offer, published: Published },
-    /// Download was pressed; dropping the job gives the download up.
-    Installing { offer: Offer, _job: Job },
+    Shown { offer: Offer, manifest: Manifest },
+    /// Download was pressed: the indexes of the queue are installed one
+    /// after another into `dir`. `running` is the index whose job runs;
+    /// dropping the job gives that one up.
+    Installing {
+        offer: Offer,
+        queue: first_run::Queue,
+        dir: std::path::PathBuf,
+        running: Option<(String, Job)>,
+    },
     /// The install ended, and the dialog says how.
     Ended { _offer: Offer },
     /// Not now was pressed; the choice file is written on the runner.
@@ -741,7 +749,9 @@ impl Session {
             Event::FirstRunOffer(manifest) => self.first_run_offer(manifest),
             Event::FirstRunDownload => self.first_run_download(),
             Event::FirstRunNotNow => self.first_run_not_now(),
-            Event::FirstRunInstalled(outcome) => self.first_run_installed(outcome),
+            Event::FirstRunProgress(name, received) => self.first_run_progress(&name, received),
+            Event::FirstRunCancel(name) => self.first_run_cancel(name),
+            Event::FirstRunInstalled(name, outcome) => self.first_run_installed(&name, outcome),
             Event::Capture => self.capture(None),
             Event::Hidden => self.start_capture(),
             Event::Captured(number) => self.snapshot_taken(number),
@@ -774,25 +784,17 @@ impl Session {
         }
     }
 
-    /// The offer is due: it waits for the window, with the offered index of
-    /// `manifest`. A manifest without it offers nothing.
+    /// The offer is due: it waits for the window, with every index of
+    /// `manifest`. A manifest without an index offers nothing.
     fn first_run_offer(&mut self, manifest: Manifest) {
         if !matches!(self.first_run, FirstRun::Asking { .. }) {
             return;
         }
-        let offered = sources::row(first_run::OFFERED).index;
-        self.first_run = match manifest
-            .indexes
-            .into_iter()
-            .find(|published| published.name == offered)
-        {
-            Some(published) => FirstRun::Pending(published),
-            None => {
-                eprintln!(
-                    "addict: no dictionary download is offered: the manifest has no {offered}"
-                );
-                FirstRun::Done
-            }
+        self.first_run = if manifest.indexes.is_empty() {
+            eprintln!("addict: no dictionary download is offered: the manifest lists no index");
+            FirstRun::Done
+        } else {
+            FirstRun::Pending(manifest)
         };
     }
 
@@ -801,83 +803,201 @@ impl Session {
         if !matches!(self.first_run, FirstRun::Pending(_)) || !self.window.is_visible() {
             return;
         }
-        let FirstRun::Pending(published) = std::mem::replace(&mut self.first_run, FirstRun::Done)
+        let FirstRun::Pending(manifest) = std::mem::replace(&mut self.first_run, FirstRun::Done)
         else {
             return;
         };
         let download = self.sender.clone();
         let not_now = self.sender.clone();
+        let cancel = self.sender.clone();
         let offer = Offer::new(
             &self.window,
-            published.size,
+            &manifest.indexes,
             move || {
                 let _ = download.unbounded_send(Event::FirstRunDownload);
             },
             move || {
                 let _ = not_now.unbounded_send(Event::FirstRunNotNow);
             },
+            move |name| {
+                let _ = cancel.unbounded_send(Event::FirstRunCancel(name));
+            },
         );
         offer.present();
-        self.first_run = FirstRun::Shown { offer, published };
+        self.first_run = FirstRun::Shown { offer, manifest };
     }
 
-    /// Download was pressed: the offered index is downloaded and installed
-    /// on the runner, within [`download::DOWNLOAD_LIMIT`].
+    /// Download was pressed: the indexes of the manifest are downloaded and
+    /// installed on the runner, one after another, each within
+    /// [`download::DOWNLOAD_LIMIT`].
     fn first_run_download(&mut self) {
-        let FirstRun::Shown { offer, published } =
+        let FirstRun::Shown { offer, manifest } =
             std::mem::replace(&mut self.first_run, FirstRun::Done)
         else {
             return;
         };
         offer.installing();
-        let (Some(work), Some(dir)) = (self.work.upgrade(), import::data_dir()) else {
+        let mut queue = first_run::Queue::new(manifest.indexes);
+        let (Some(_), Some(dir)) = (self.work.upgrade(), import::data_dir()) else {
             let why = first_run::NO_PLACE;
             eprintln!("addict: the dictionary download failed: {why}");
-            offer.ended(Some(why));
+            queue.cancel_all();
+            offer.show(&queue);
+            offer.ended(&first_run::failed_text(why));
             self.first_run = FirstRun::Ended { _offer: offer };
             return;
         };
-        let installed = self.sender.clone();
-        let job = work.run(
-            download::DOWNLOAD_LIMIT,
-            async move {
-                Downloader::new()
-                    .install(&published, &dir)
-                    .await
-                    .map_err(|error| error.to_string())
-            },
-            move |outcome| {
-                // On the worker: the UI thread wakes for the event.
-                let _ = installed.unbounded_send(Event::FirstRunInstalled(outcome));
-            },
-        );
-        self.first_run = FirstRun::Installing { offer, _job: job };
+        offer.show(&queue);
+        self.first_run = FirstRun::Installing {
+            offer,
+            queue,
+            dir,
+            running: None,
+        };
+        self.first_run_next();
     }
 
-    /// The install ended: the dialog says how, and the indexes are checked
+    /// Starts the next queued index when none runs; once every index has
+    /// ended, the dialog says how it went and the indexes are checked
     /// again, so the line of the window follows.
-    fn first_run_installed(&mut self, outcome: Outcome<Result<std::path::PathBuf, String>>) {
-        let FirstRun::Installing { offer, .. } =
+    fn first_run_next(&mut self) {
+        let FirstRun::Installing {
+            offer,
+            queue,
+            dir,
+            running,
+        } = &mut self.first_run
+        else {
+            return;
+        };
+        if running.is_some() {
+            return;
+        }
+        while let Some(published) = queue.next() {
+            let Some(work) = self.work.upgrade() else {
+                queue.finished(&published.name, Err(first_run::NO_PLACE.to_owned()));
+                continue;
+            };
+            let name = published.name.clone();
+            let dir = dir.clone();
+            let progress = self.sender.clone();
+            let installed = self.sender.clone();
+            let (of, ended) = (name.clone(), name.clone());
+            let job = work.run(
+                download::DOWNLOAD_LIMIT,
+                async move {
+                    Downloader::new()
+                        .install(&published, &dir, move |received| {
+                            // On the worker: the UI thread wakes for it.
+                            let _ = progress
+                                .unbounded_send(Event::FirstRunProgress(of.clone(), received));
+                        })
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+                move |outcome| {
+                    // On the worker: the UI thread wakes for the event.
+                    let _ = installed.unbounded_send(Event::FirstRunInstalled(ended, outcome));
+                },
+            );
+            *running = Some((name, job));
+            offer.show(queue);
+            return;
+        }
+        offer.show(queue);
+        if !queue.is_done() {
+            return;
+        }
+        let FirstRun::Installing { offer, queue, .. } =
             std::mem::replace(&mut self.first_run, FirstRun::Done)
         else {
             return;
         };
-        let error = match outcome {
-            Outcome::Finished(Ok(_)) => None,
-            Outcome::Finished(Err(error)) => Some(error),
-            Outcome::TimedOut => Some(first_run::late_text(download::DOWNLOAD_LIMIT)),
-            Outcome::Cancelled | Outcome::Panicked => Some(first_run::STOPPED.to_owned()),
-        };
-        if let Some(error) = &error {
-            eprintln!("addict: the dictionary download failed: {error}");
-        }
-        offer.ended(error.as_deref());
+        offer.ended(&first_run::summary_text(&queue));
         self.first_run = FirstRun::Ended { _offer: offer };
         self.check = start_check(
             self.work.upgrade().as_deref(),
             self.articles.clone(),
             &self.sender,
         );
+    }
+
+    /// Bytes of the running index came: its row says how many.
+    fn first_run_progress(&mut self, name: &str, received: u64) {
+        let FirstRun::Installing {
+            offer,
+            queue,
+            running: Some((running, _)),
+            ..
+        } = &mut self.first_run
+        else {
+            return;
+        };
+        if running != name {
+            return;
+        }
+        queue.progress(name, received);
+        if let Some((published, state)) = queue.row(name) {
+            offer.show_row(name, state, published.size);
+        }
+    }
+
+    /// Cancel was pressed on a row, or on the dialog: that index, or every
+    /// index that has not ended, ends as cancelled. The job of the running
+    /// one is dropped, so nothing of it is put in place, and the next index
+    /// starts.
+    fn first_run_cancel(&mut self, name: Option<String>) {
+        let FirstRun::Installing {
+            offer,
+            queue,
+            running,
+            ..
+        } = &mut self.first_run
+        else {
+            return;
+        };
+        let was_running = match &name {
+            Some(name) => queue.cancel(name),
+            None => queue.cancel_all(),
+        };
+        if was_running {
+            // Its outcome, Cancelled, comes later and is ignored.
+            *running = None;
+        }
+        // A queued row says Cancelled at once, while another one runs.
+        offer.show(queue);
+        self.first_run_next();
+    }
+
+    /// The running index ended: its row says how, and the next one starts.
+    /// An end of an index that no longer runs, as one cancelled, changes
+    /// nothing.
+    fn first_run_installed(
+        &mut self,
+        name: &str,
+        outcome: Outcome<Result<std::path::PathBuf, String>>,
+    ) {
+        let FirstRun::Installing { queue, running, .. } = &mut self.first_run else {
+            return;
+        };
+        if running.as_ref().is_none_or(|(running, _)| running != name) {
+            return;
+        }
+        *running = None;
+        let result = match outcome {
+            Outcome::Finished(Ok(_)) => Ok(()),
+            Outcome::Finished(Err(error)) => Err(error),
+            Outcome::TimedOut => Err(first_run::late_text(download::DOWNLOAD_LIMIT)),
+            Outcome::Cancelled | Outcome::Panicked => Err(first_run::STOPPED.to_owned()),
+        };
+        if let Err(error) = &result {
+            eprintln!(
+                "addict: the dictionary download failed: {}",
+                first_run::failure_text(name, error)
+            );
+        }
+        queue.finished(name, result);
+        self.first_run_next();
     }
 
     /// Not now was pressed: the choice is written on the runner, and the

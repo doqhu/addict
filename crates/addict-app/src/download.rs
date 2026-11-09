@@ -6,10 +6,17 @@
 //!
 //! An asset is read whole into memory, never beyond the size the manifest
 //! gives, and its size and then its SHA-256 are checked against the manifest
-//! before it is unpacked; `addict_dictionary::release::install` then puts it
-//! in the data directory, so an install that fails leaves the previous index
-//! as it was. The hash and the install run on tokio's blocking threads, off
-//! the runner's one thread.
+//! before it is unpacked; `addict_dictionary::release::install_unless` then
+//! puts it in the data directory, so an install that fails leaves the
+//! previous index as it was. The hash and the install run on tokio's blocking
+//! threads, off the runner's one thread; when the install's future is dropped
+//! (the job was cancelled or ran out of time), the blocking part is told to
+//! stop and renames nothing into place.
+//!
+//! The release uploads the manifest last, so an asset can be newer than the
+//! manifest read before it. On a checksum mismatch the manifest is therefore
+//! fetched once more, and the index is downloaded again when its entry there
+//! differs; it is never fetched a third time.
 //!
 //! What the release is and how an index is installed is
 //! `addict_dictionary::release`'s; when the download is offered is
@@ -19,7 +26,10 @@ use std::{
     error::Error,
     fmt,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -46,6 +56,11 @@ const MANIFEST_MAX: u64 = 1 << 20;
 
 /// What the errors about the manifest call it.
 const MANIFEST_WHAT: &str = "the index manifest";
+
+/// One install at a time in the whole process: an asset is held whole in
+/// memory, and the blocking part of an install that was given up still runs
+/// to its end, so the next one waits for it.
+static INSTALLS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 /// The downloader of the indexes of one release.
 #[derive(Debug)]
@@ -80,18 +95,51 @@ impl Downloader {
     /// The manifest of the release.
     pub async fn manifest(&self) -> Result<Manifest, DownloadError> {
         let body = self
-            .fetch(MANIFEST_WHAT, release::MANIFEST, MANIFEST_MAX)
+            .fetch(MANIFEST_WHAT, release::MANIFEST, MANIFEST_MAX, |_| {})
             .await?;
         Manifest::parse(&body).map_err(|cause| DownloadError::Manifest { cause })
     }
 
     /// Downloads the index `published` lists, checks it against the entry
     /// and installs it into the data directory `dir`; the path of the
-    /// index. On any error nothing is written.
+    /// index. On any error nothing is written. `progress` hears how many
+    /// bytes of the asset came so far, in steps of about one percent and at
+    /// the end. On a checksum mismatch the manifest is fetched once more:
+    /// when its entry of the index differs, the index is downloaded again by
+    /// that entry; otherwise, or when the manifest cannot be had, the error
+    /// is the mismatch.
     pub async fn install(
         &self,
         published: &Published,
         dir: &Path,
+        mut progress: impl FnMut(u64),
+    ) -> Result<PathBuf, DownloadError> {
+        let error = match self.install_once(published, dir, &mut progress).await {
+            Err(error @ DownloadError::Checksum { .. }) => error,
+            done => return done,
+        };
+        let fresh = match self.manifest().await {
+            Ok(manifest) => manifest
+                .indexes
+                .into_iter()
+                .find(|fresh| fresh.name == published.name),
+            Err(_) => None,
+        };
+        match fresh {
+            Some(fresh) if fresh != *published => {
+                self.install_once(&fresh, dir, &mut progress).await
+            }
+            _ => Err(error),
+        }
+    }
+
+    /// [`install`](Self::install) by the entry `published`, without asking
+    /// the manifest again.
+    async fn install_once(
+        &self,
+        published: &Published,
+        dir: &Path,
+        progress: impl FnMut(u64),
     ) -> Result<PathBuf, DownloadError> {
         let name = published.name.clone();
         let source = release::source_of(&name)
@@ -102,8 +150,14 @@ impl Downloader {
                 format: published.format,
             });
         }
+        // Held until the blocking part ends, even when this future is
+        // dropped first. The semaphore is never closed.
+        let permit = INSTALLS
+            .acquire()
+            .await
+            .map_err(|_| DownloadError::Stopped { name: name.clone() })?;
         let body = self
-            .fetch(&name, &published.asset(), published.size)
+            .fetch(&name, &published.asset(), published.size, progress)
             .await?;
         if body.len() as u64 != published.size {
             return Err(DownloadError::Size {
@@ -115,7 +169,12 @@ impl Downloader {
         let expected = published.sha256.to_ascii_lowercase();
         let dir = dir.to_owned();
         let what = name.clone();
+        // Set when this future is dropped, which the blocking part, that
+        // cannot be aborted, sees before it renames anything into place.
+        let stop = Arc::new(AtomicBool::new(false));
+        let _guard = StopOnDrop(stop.clone());
         tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             let actual = release::sha256(&body);
             if actual != expected {
                 return Err(DownloadError::Checksum {
@@ -124,14 +183,23 @@ impl Downloader {
                     actual,
                 });
             }
-            release::install(&body, source, &dir).map_err(DownloadError::Install)
+            release::install_unless(&body, source, &dir, || stop.load(Ordering::SeqCst))
+                .map_err(DownloadError::Install)
         })
         .await
         .map_err(|_| DownloadError::Stopped { name })?
     }
 
     /// The body of `asset`, at most `limit` bytes, which `what` names.
-    async fn fetch(&self, what: &str, asset: &str, limit: u64) -> Result<Vec<u8>, DownloadError> {
+    /// `progress` hears the bytes read so far each time about one percent
+    /// of `limit` more came, and once at the end.
+    async fn fetch(
+        &self,
+        what: &str,
+        asset: &str,
+        limit: u64,
+        mut progress: impl FnMut(u64),
+    ) -> Result<Vec<u8>, DownloadError> {
         let connection = |error: reqwest::Error| DownloadError::Connection {
             what: what.to_owned(),
             cause: causes(&error),
@@ -158,11 +226,22 @@ impl Downloader {
             return Err(too_large());
         }
         let mut body = Vec::with_capacity(length.unwrap_or(0) as usize);
+        let step = (limit / 100).max(1);
+        let mut told = 0;
         while let Some(chunk) = response.chunk().await.map_err(connection)? {
             if (body.len() + chunk.len()) as u64 > limit {
                 return Err(too_large());
             }
             body.extend_from_slice(&chunk);
+            let received = body.len() as u64;
+            if received - told >= step {
+                progress(received);
+                told = received;
+            }
+        }
+        let received = body.len() as u64;
+        if received != told || received == 0 {
+            progress(received);
         }
         Ok(body)
     }
@@ -190,6 +269,15 @@ impl Downloader {
 impl Default for Downloader {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Sets its flag when dropped.
+struct StopOnDrop(Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
     }
 }
 
@@ -557,7 +645,7 @@ mod tests {
         let manifest = downloader.manifest().await.expect("the manifest");
         assert_eq!(manifest.indexes.len(), 1);
         let path = downloader
-            .install(&manifest.indexes[0], &dir.data())
+            .install(&manifest.indexes[0], &dir.data(), |_| {})
             .await
             .expect("installed");
 
@@ -587,7 +675,7 @@ mod tests {
 
         let manifest = downloader.manifest().await.expect("the manifest");
         let error = downloader
-            .install(&manifest.indexes[0], &dir.data())
+            .install(&manifest.indexes[0], &dir.data(), |_| {})
             .await
             .expect_err("another checksum");
 
@@ -595,6 +683,81 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("oewn") && text.contains("checksum"), "{text}");
         assert!(dir.entries().is_empty());
+        // The manifest was asked once more, and the asset not again: the
+        // fresh entry is the one that failed.
+        let tag = release::tag();
+        assert_eq!(
+            stub.seen(),
+            [
+                format!("GET /{tag}/manifest.json HTTP/1.1"),
+                format!("GET /{tag}/oewn.index.xz HTTP/1.1"),
+                "GET /objects/oewn HTTP/1.1".to_owned(),
+                format!("GET /{tag}/manifest.json HTTP/1.1"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_entry_is_fixed_by_the_manifest_fetched_again() {
+        let xz = xz_of(&index());
+        // The entry of the last run: the same size, another checksum.
+        let mut stale = Published::of("oewn", &xz);
+        stale.sha256 = "0".repeat(64);
+        let stub = release(manifest_of(vec![Published::of("oewn", &xz)]), Some(xz));
+        let downloader = Downloader::with_base_url(stub.base_url());
+        let dir = DataDir::new("stale");
+
+        // Asked first, as the app does; then the stale entry is installed.
+        downloader.manifest().await.expect("the manifest");
+        let path = downloader
+            .install(&stale, &dir.data(), |_| {})
+            .await
+            .expect("installed by the fresh entry");
+
+        assert!(Index::open(&path).is_ok());
+        assert_eq!(dir.entries(), ["oewn.index"]);
+        let manifests = stub
+            .seen()
+            .iter()
+            .filter(|line| line.contains("manifest.json"))
+            .count();
+        assert_eq!(manifests, 2, "{:?}", stub.seen());
+        assert_eq!(stub.seen().len(), 6, "{:?}", stub.seen());
+    }
+
+    #[tokio::test]
+    async fn the_progress_reaches_the_size_in_about_one_percent_steps() {
+        // Text that xz packs poorly, so the asset spans many chunks.
+        let mut seed = 0x2545_f491_u32;
+        let noise: Vec<u8> = (0..400_000)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed.to_le_bytes()[0]
+            })
+            .collect();
+        let xz = xz_of(&noise);
+        let published = Published::of("oewn", &xz);
+        let stub = release(manifest_of(vec![published.clone()]), Some(xz));
+        let dir = DataDir::new("progress");
+        let mut heard = Vec::new();
+        let error = Downloader::with_base_url(stub.base_url())
+            .install(&published, &dir.data(), |received| heard.push(received))
+            .await
+            .expect_err("noise is no index");
+        assert!(matches!(error, DownloadError::Install(_)), "{error:?}");
+        assert_eq!(heard.last(), Some(&published.size), "{heard:?}");
+        assert!(heard.windows(2).all(|pair| pair[0] < pair[1]), "{heard:?}");
+        assert!(heard.len() <= 101, "{}", heard.len());
+        let step = published.size / 100;
+        assert!(
+            heard
+                .windows(2)
+                .take(heard.len().saturating_sub(2))
+                .all(|pair| pair[1] - pair[0] >= step),
+            "{heard:?}"
+        );
     }
 
     #[tokio::test]
@@ -606,7 +769,7 @@ mod tests {
 
         let manifest = downloader.manifest().await.expect("the manifest");
         let error = downloader
-            .install(&manifest.indexes[0], &dir.data())
+            .install(&manifest.indexes[0], &dir.data(), |_| {})
             .await
             .expect_err("404");
 
@@ -650,7 +813,7 @@ mod tests {
             published.size = size;
             let stub = release(manifest_of(vec![published.clone()]), Some(xz.clone()));
             let error = Downloader::with_base_url(stub.base_url())
-                .install(&published, &dir.data())
+                .install(&published, &dir.data(), |_| {})
                 .await
                 .expect_err("another size");
             assert!(
@@ -675,7 +838,7 @@ mod tests {
             let published = Published::of("oewn", &asset);
             let stub = release(manifest_of(vec![published.clone()]), Some(asset));
             let error = Downloader::with_base_url(stub.base_url())
-                .install(&published, &dir.data())
+                .install(&published, &dir.data(), |_| {})
                 .await
                 .expect_err("not an index");
             assert!(matches!(error, DownloadError::Install(_)), "{error:?}");
@@ -692,20 +855,36 @@ mod tests {
         let dir = DataDir::new("unknown");
         let mut published = Published::of("tessdata", b"");
         let error = downloader
-            .install(&published, &dir.data())
+            .install(&published, &dir.data(), |_| {})
             .await
             .expect_err("unknown");
         assert!(matches!(error, DownloadError::Unknown { .. }), "{error:?}");
         published.name = "oewn".to_owned();
         published.format = addict_dictionary::format::VERSION + 1;
         let error = downloader
-            .install(&published, &dir.data())
+            .install(&published, &dir.data(), |_| {})
             .await
             .expect_err("a newer format");
         assert!(matches!(error, DownloadError::Format { .. }), "{error:?}");
         assert!(error.to_string().contains("oewn"), "{error}");
         assert!(stub.seen().is_empty());
         assert!(dir.entries().is_empty());
+    }
+
+    /// A cancelled or timed-out job drops the install's future: the flag
+    /// the blocking part asks before the rename is then set.
+    #[test]
+    fn dropping_the_install_tells_the_blocking_part_to_stop() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let guard = super::StopOnDrop(stop.clone());
+        assert!(!stop.load(Ordering::SeqCst));
+        drop(guard);
+        assert!(stop.load(Ordering::SeqCst));
     }
 
     #[test]

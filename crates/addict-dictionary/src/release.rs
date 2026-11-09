@@ -15,10 +15,14 @@
 //! checked against the manifest, into a temporary file beside the index,
 //! opens it as an index and only then renames it over the old one: an
 //! install that fails leaves the previous index as it was and no temporary
-//! file behind.
+//! file behind. [`install_unless`] does the same, and gives up before the
+//! rename once its caller says to stop, so an install that was cancelled or
+//! ran out of time never replaces the index after the fact. Before it
+//! writes, the temporary files of that index left by other processes, which
+//! were killed in the middle of an install, are removed.
 
 use std::{
-    fmt, io,
+    fmt, fs, io,
     path::{Path, PathBuf},
 };
 
@@ -140,6 +144,8 @@ pub enum InstallError {
         path: PathBuf,
         cause: io::Error,
     },
+    /// The caller said to stop before the index was put in place.
+    Stopped { source: Source },
 }
 
 impl InstallError {
@@ -148,7 +154,8 @@ impl InstallError {
         match self {
             Self::NotXz { source, .. }
             | Self::NotAnIndex { source, .. }
-            | Self::Write { source, .. } => *source,
+            | Self::Write { source, .. }
+            | Self::Stopped { source } => *source,
         }
     }
 }
@@ -168,6 +175,7 @@ impl fmt::Display for InstallError {
                 "cannot install {name}: cannot write {}: {cause}",
                 path.display()
             ),
+            Self::Stopped { .. } => write!(f, "cannot install {name}: the install was stopped"),
         }
     }
 }
@@ -180,29 +188,86 @@ impl std::error::Error for InstallError {}
 /// must open as an index before it is renamed over the previous one; on any
 /// error the temporary file is removed and the previous index stays.
 pub fn install(xz: &[u8], source: Source, dir: &Path) -> Result<PathBuf, InstallError> {
+    install_unless(xz, source, dir, || false)
+}
+
+/// As [`install`], but `stopped` is asked before the asset is unpacked and
+/// once more right before the rename: when it says `true`, the temporary
+/// file is removed, the previous index stays and the error is
+/// [`InstallError::Stopped`]. The temporary files of this index that other
+/// processes left in `dir` are removed first.
+pub fn install_unless(
+    xz: &[u8],
+    source: Source,
+    dir: &Path,
+    stopped: impl Fn() -> bool,
+) -> Result<PathBuf, InstallError> {
+    if stopped() {
+        return Err(InstallError::Stopped { source });
+    }
+    let path = import::index_path(dir, source);
+    sweep(dir, &path);
     let mut packed = xz;
     let mut unpacked = Vec::new();
     lzma_rs::xz_decompress(&mut packed, &mut unpacked).map_err(|error| InstallError::NotXz {
         source,
         cause: one_line(&error),
     })?;
-    let path = import::index_path(dir, source);
     let mut unreadable = None;
+    let mut halted = false;
     let written = import::replace_checked(dir, &path, &unpacked, |temporary| {
         Index::open(temporary).map(drop).map_err(|error| {
             let cause = io::Error::other(error.to_string());
             unreadable = Some(error);
             cause
-        })
+        })?;
+        if stopped() {
+            halted = true;
+            return Err(io::Error::other("the install was stopped"));
+        }
+        Ok(())
     });
     match (written, unreadable) {
         (Ok(()), _) => Ok(path),
+        (Err(_), _) if halted => Err(InstallError::Stopped { source }),
         (Err(_), Some(cause)) => Err(InstallError::NotAnIndex { source, cause }),
         (Err(cause), None) => Err(InstallError::Write {
             source,
             path,
             cause,
         }),
+    }
+}
+
+/// Removes the temporary files of the index at `path` that processes other
+/// than this one left in `dir`, `.<file>.<pid>.tmp`; one of this process is
+/// its own install's and is left alone. Nothing is reported: a file that
+/// cannot be removed is in the way of nothing.
+fn sweep(dir: &Path, path: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let own = import::temporary_path(dir, path, std::process::id());
+    let Some(file) = path.file_name().and_then(|file| file.to_str()) else {
+        return;
+    };
+    let prefix = format!(".{file}.");
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(&prefix))
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+        else {
+            continue;
+        };
+        if pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let stale = entry.path();
+        if stale != own && entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            let _ = fs::remove_file(stale);
+        }
     }
 }
 
@@ -406,6 +471,59 @@ mod tests {
         install(&xz_of(&damaged), Source::Oewn, dir.path()).expect("install");
         let index = Index::open(&path).expect("open");
         assert_eq!(index.notice(), Some(&format::tests::notice()));
+    }
+
+    #[test]
+    fn a_stop_before_the_rename_leaves_the_old_index_and_no_temporary_file() {
+        use std::cell::Cell;
+
+        let dir = TempDir::new("stopped");
+        let path = import::index_path(dir.path(), Source::Oewn);
+        fs::write(&path, b"the old index").expect("write");
+        let xz = xz_of(&index_bytes());
+        // Not stopped before the unpacking, stopped right before the rename.
+        let asked = Cell::new(0);
+        let error = install_unless(&xz, Source::Oewn, dir.path(), || {
+            asked.set(asked.get() + 1);
+            asked.get() > 1
+        })
+        .expect_err("stopped");
+        assert_eq!(asked.get(), 2);
+        assert!(matches!(error, InstallError::Stopped { .. }), "{error:?}");
+        assert_eq!(error.source(), Source::Oewn);
+        let text = error.to_string();
+        assert!(text.contains("oewn") && !text.contains('\n'), "{text}");
+        assert_eq!(fs::read(&path).expect("index"), b"the old index");
+        assert_eq!(entries(dir.path()), ["oewn.index"]);
+        // Stopped from the start: nothing is unpacked or written.
+        let error = install_unless(&xz, Source::Oewn, dir.path(), || true).expect_err("stopped");
+        assert!(matches!(error, InstallError::Stopped { .. }), "{error:?}");
+        assert_eq!(entries(dir.path()), ["oewn.index"]);
+        // Never stopped: installed.
+        install_unless(&xz, Source::Oewn, dir.path(), || false).expect("install");
+        assert_eq!(fs::read(&path).expect("index"), index_bytes());
+    }
+
+    #[test]
+    fn the_temporary_files_other_processes_left_are_swept() {
+        let dir = TempDir::new("sweep");
+        // This process's own temporary file is its install's, which writes
+        // it anew and renames it, so it is not among them.
+        let foreign = std::process::id().wrapping_add(1);
+        let kept = [
+            format!(".freedict.index.{foreign}.tmp"),
+            ".oewn.index.tmp".to_owned(),
+            ".oewn.index.12a.tmp".to_owned(),
+            "notes.txt".to_owned(),
+        ];
+        for name in kept.iter().chain([&format!(".oewn.index.{foreign}.tmp")]) {
+            fs::write(dir.path().join(name), b"left").expect("write");
+        }
+        install(&xz_of(&index_bytes()), Source::Oewn, dir.path()).expect("install");
+        let mut expected: Vec<String> = kept.to_vec();
+        expected.push("oewn.index".to_owned());
+        expected.sort();
+        assert_eq!(entries(dir.path()), expected);
     }
 
     #[test]

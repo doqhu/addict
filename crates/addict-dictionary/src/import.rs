@@ -957,6 +957,15 @@ pub(crate) fn replace(dir: &Path, path: &Path, index: &[u8]) -> io::Result<()> {
     replace_checked(dir, path, index, |_| Ok(()))
 }
 
+/// The temporary file that the process `pid` writes in `dir` before it
+/// renames it to `path`: `.<file>.<pid>.tmp`.
+pub(crate) fn temporary_path(dir: &Path, path: &Path, pid: u32) -> PathBuf {
+    let mut name = OsString::from(".");
+    name.push(path.file_name().unwrap_or_default());
+    name.push(format!(".{pid}.tmp"));
+    dir.join(name)
+}
+
 /// As [`replace`], with `check` run on the written temporary file before the
 /// rename: an error of it is an error of the whole, and `path` stays as it
 /// was.
@@ -967,10 +976,7 @@ pub(crate) fn replace_checked(
     check: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
     fs::create_dir_all(dir)?;
-    let mut name = OsString::from(".");
-    name.push(path.file_name().unwrap_or_default());
-    name.push(format!(".{}.tmp", std::process::id()));
-    let temporary = dir.join(name);
+    let temporary = temporary_path(dir, path, std::process::id());
     let written = File::create(&temporary)
         .and_then(|mut file| {
             file.write_all(index)?;

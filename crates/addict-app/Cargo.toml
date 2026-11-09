@@ -35,7 +35,7 @@ serde_json = "=1.0.151"
 sha2 = "=0.10.9"
 # `rt` for `spawn_blocking`: the checks and the install of a downloaded
 # index leave the runner's thread.
-tokio = { version = "=1.53.2", features = ["rt", "time"] }
+tokio = { version = "=1.53.2", features = ["rt", "sync", "time"] }
 wayland-client = "=0.31.15"
 wayland-protocols = { version = "=0.32.13", features = ["client"] }
 

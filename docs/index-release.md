@@ -1,8 +1,13 @@
 # Publishing the dictionary indexes
 
-On its first run, with no index installed, addict offers to download the
-English dictionary (Open English WordNet). The app downloads prebuilt indexes
-from a GitHub data release of this repository. This page is the contract
+On its first run, with no index installed, addict offers to download every
+dictionary the manifest of the data release lists. The app downloads prebuilt
+indexes from a GitHub data release of this repository, one after another. Each
+index has its own row in the dialog, with its progress and a Cancel button; an
+index that fails (a missing asset, a network error, a wrong size or checksum,
+an unknown name or format, a file the app cannot open) says why on its row,
+and the other indexes still install. A manifest that lists no index offers
+nothing. This page is the contract
 between that release and the app, and the steps the maintainer follows to
 publish it. The schema lives in `crates/addict-dictionary/src/release.rs`,
 which both the builder and the app read.
@@ -63,7 +68,15 @@ The app refuses a manifest of another format, and an index whose name it does
 not know or whose format it cannot read. It checks the size and the SHA-256 of
 an asset before it decompresses it. It then writes the index to a temporary
 file in the data directory, opens it as an index, and only then renames it
-over the old one.
+over the old one. An install that is cancelled or runs out of time is never
+renamed into place, and a temporary file that another, killed, run of the app
+left for that index is removed before the install.
+
+When the SHA-256 of an asset does not match, the app fetches the manifest once
+more, because an asset can be newer than the manifest read before it (see
+**Order** above). If the fresh manifest gives that index another entry, the app
+downloads the index again by it; otherwise, or when the manifest cannot be
+fetched, the checksum error stands. This happens at most once per index.
 
 ## The license notice in each index
 
@@ -130,7 +143,9 @@ gh release upload indexes-v3 --repo doqhu/addict target/indexes/manifest.json
 
 To refresh the indexes of an existing release, replace the indexes first, then
 the manifest. Between the two uploads, an app that reads the old manifest sees
-a checksum mismatch and offers the download again at its next start.
+a checksum mismatch, fetches the manifest again and still finds the old entry,
+so that index fails on its row and the download is offered again at the next
+start when no index got installed.
 
 ```sh
 gh release upload indexes-v3 --repo doqhu/addict --clobber \
@@ -146,8 +161,9 @@ as the monthly release job does. Download it first with
 
 After the upload, check by hand that the first-run download works from a
 clean profile: with no index and no choice file, start addict and press
-Download. `oewn.index` must appear in the data directory, and the window's
-index line must update. The choice file and the data directory are:
+Download. Every listed index must appear in the data directory, for example
+`oewn.index`, each row must end as Installed, and the window's index line must
+update. The choice file and the data directory are:
 
 - native build: `~/.config/addict/first-run-download` and
   `~/.local/share/addict`;
