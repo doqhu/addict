@@ -26,3 +26,9 @@ tar = { version = "=0.4.46", default-features = false }
 # downloads; the library has no network code. The TLS is addict-deepl's:
 # rustls with the bundled Mozilla roots.
 reqwest = { version = "=0.12.28", default-features = false, features = ["blocking", "rustls-tls-webpki-roots"] }
+
+# The builder's tests, of a run against a local stub server, run with
+# `cargo test --workspace`.
+[[example]]
+name = "build-indexes"
+test = true

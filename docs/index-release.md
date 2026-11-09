@@ -92,16 +92,29 @@ format 1 or 2 have no notice; the app still opens them.
 
 ## Building and uploading
 
-Build the assets. This needs `xz` on `PATH` and network access:
+Build the assets. This needs `xz` on `PATH` and network access, and takes
+minutes: it downloads all 13 upstream files, from the URLs in
+`crates/addict-dictionary/src/sources.rs`.
 
 ```sh
-cargo run -p addict-dictionary --example build-indexes -- --out target/indexes
-xz -t target/indexes/oewn.index.xz
+cargo run --release -p addict-dictionary --example build-indexes -- --out target/indexes
+xz -t target/indexes/*.index.xz
 ```
 
-`target/indexes` then holds `oewn.index.xz`, `manifest.json`,
-`WNDB_License.txt` and `release-body.md`, plus the uncompressed `oewn.index`,
-which is not uploaded.
+`target/indexes` then holds one `<name>.index.xz` per index, `manifest.json`,
+`WNDB_License.txt` and `release-body.md`, plus the uncompressed `.index`
+files, which are not uploaded.
+
+A source that fails (its upstream file is gone, the importer refuses it, `xz`
+fails) does not stop the run. The builder goes on with the next source and
+exits with status 1. It prints one `build-indexes: <index>: <error>` line per
+failed source to stderr, then a line naming all of them. `manifest.json` and
+`release-body.md` then list only the indexes that were built. Do not upload
+that manifest over a release that still serves the failed indexes: the app
+would no longer see them. Fix the source (a new pin in `import::KNOWN` and a
+new URL in `sources.rs`, for example) and build again, or leave the release as
+it is. The monthly release job, still to come, will keep the previous index of
+a failed source.
 
 For a new format, create the release with the indexes, then upload the
 manifest. `--latest=false` keeps the app's own release marked as the latest
@@ -111,7 +124,7 @@ one:
 gh release create indexes-v3 --repo doqhu/addict --target master --latest=false \
   --title "Dictionary indexes, format 3" \
   --notes-file target/indexes/release-body.md \
-  target/indexes/oewn.index.xz target/indexes/WNDB_License.txt
+  target/indexes/*.index.xz target/indexes/WNDB_License.txt
 gh release upload indexes-v3 --repo doqhu/addict target/indexes/manifest.json
 ```
 
@@ -121,7 +134,7 @@ a checksum mismatch and offers the download again at its next start.
 
 ```sh
 gh release upload indexes-v3 --repo doqhu/addict --clobber \
-  target/indexes/oewn.index.xz target/indexes/WNDB_License.txt
+  target/indexes/*.index.xz target/indexes/WNDB_License.txt
 gh release upload indexes-v3 --repo doqhu/addict --clobber target/indexes/manifest.json
 gh release edit indexes-v3 --repo doqhu/addict --notes-file target/indexes/release-body.md
 ```

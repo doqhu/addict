@@ -18,12 +18,13 @@ jobs:
     steps:
       # Git before the checkout: without it, the checkout is a tarball, not a
       # repository. Tesseract with English: the recognition tests run it.
-      # util-linux: runuser; dbus-daemon: private-bus portal/launch tests.
+      # util-linux: runuser; dbus-daemon: private-bus portal/launch tests;
+      # xz: the test of the builder of the published indexes compresses with it.
       - name: Install the build dependencies
         run: >-
           dnf -y install --setopt=install_weak_deps=False
           gcc pkgconf-pkg-config gtk4-devel rust cargo clippy rustfmt git
-          tesseract tesseract-langpack-eng util-linux dbus-daemon
+          tesseract tesseract-langpack-eng util-linux dbus-daemon xz
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

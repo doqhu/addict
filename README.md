@@ -182,15 +182,13 @@ window says which ones are missing. The indexes are kept in
 | Spanish | synonyms | [omw-es-2.0.tar.xz][omw-es] |
 | Spanish | English glosses | [kaikki.org-dictionary-Spanish.jsonl.gz][kaikki-en-spanish] |
 | Catalan | Russian translations | [ca-ru.sqlite3][ca-ru] |
+| Catalan | definitions | [ca_dbnary_ontolex_2026-10-01.ttl.bz2][dbnary-ca] |
 | Catalan | synonyms | [th_ca_ES.dat][sinonims-cat] |
 | Catalan | English glosses | [kaikki.org-dictionary-Catalan.jsonl.gz][kaikki-en-catalan] |
 | Russian | English translations | [ru-en.sqlite3][ru-en] |
 | Russian | Spanish translations | [ru-es.sqlite3][ru-es] |
 | Russian | Catalan translations | [ru-ca.sqlite3][ru-ca] |
 
-One kind of data is not listed yet. DBnary gives the Catalan definitions; its
-server could not be reached when this list was checked. It comes with the
-first-start download.
 [CREDITS](CREDITS) names the authors and the license of each source.
 
 [oewn]: https://github.com/globalwordnet/english-wordnet/releases/download/2025-edition/english-wordnet-2025.xml.gz
@@ -200,6 +198,7 @@ first-start download.
 [omw-es]: https://github.com/omwn/omw-data/releases/download/v2.0/omw-es-2.0.tar.xz
 [kaikki-en-spanish]: https://kaikki.org/dictionary/Spanish/kaikki.org-dictionary-Spanish.jsonl.gz
 [ca-ru]: https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ca-ru.sqlite3
+[dbnary-ca]: https://kaiko.getalp.org/static/ontolex/ca/ca_dbnary_ontolex_2026-10-01.ttl.bz2
 [sinonims-cat]: https://github.com/Softcatala/sinonims-cat/releases/download/2.3.2/th_ca_ES.dat
 [kaikki-en-catalan]: https://kaikki.org/dictionary/Catalan/kaikki.org-dictionary-Catalan.jsonl.gz
 [ru-en]: https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ru-en.sqlite3
