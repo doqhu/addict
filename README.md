@@ -155,9 +155,16 @@ build from source with the system Tesseract needs neither file.
 
 ## Dictionaries
 
-addict looks words up in dictionary indexes it builds from files you
-download. A download on the first start is coming. For now, download the files
-below and import each one:
+addict looks words up in dictionary indexes. The first start offers to download
+the published indexes. To import an upstream file yourself, download a file
+below, open Settings → Dictionaries → Import file…, and choose it. The app
+builds its index in the background and shows completion or a failure beside
+the action. A newly added dictionary is available on the next lookup. If that
+dictionary was already in use, restart Addict to use its new edition.
+
+Use this in-app route for Flatpak: its file chooser grants access to the
+selected download through the desktop portal, with no additional filesystem
+permissions. The command line remains available for a build from source:
 
 ```sh
 target/release/addict import ~/Downloads/english-wordnet-2025.xml.gz

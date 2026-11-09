@@ -49,7 +49,7 @@
 //! its dictionary forms. The indexes are opened and read off the UI thread,
 //! and a lookup has a deadline. The window shows its outcome: the article, a
 //! line saying the dictionary has no entry, a line saying that nothing is
-//! imported or that an index cannot be read, each with the import command,
+//! imported or that an index cannot be read, each pointing to Settings → Import file…,
 //! or a line saying the lookup did not finish. One index is enough: the
 //! article has what that index gives. Whenever an index is missing or cannot
 //! be read, the window says so in a line of its own from the moment it is
@@ -244,6 +244,7 @@ mod dictionaries;
 mod download;
 mod entries;
 mod evidence;
+mod file_import;
 mod first_run;
 mod gpu;
 mod history;

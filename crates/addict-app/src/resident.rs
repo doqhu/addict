@@ -151,7 +151,10 @@ use addict_platform::{
     tray::{self, TrayEvent, TrayHandle},
     work::{Job, Outcome, Work},
 };
-use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
+use futures_channel::{
+    mpsc::{UnboundedReceiver, UnboundedSender},
+    oneshot,
+};
 use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
@@ -161,7 +164,7 @@ use crate::{
     capture::{self, Capture, Captured, Failure, Timing},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     download::{self, Downloader},
-    entries, evidence,
+    entries, evidence, file_import,
     first_run::{self, Offer},
     history::History,
     language,
@@ -246,6 +249,7 @@ enum Event {
     /// no entry for it.
     Lookup {
         run: u64,
+        generation: u64,
         language: Language,
         outcome: Outcome<Looked>,
     },
@@ -265,7 +269,10 @@ enum Event {
     /// The user pressed the button of this language in the switch.
     LanguageChosen(Language),
     /// The check at the start says where the dictionary indexes stand.
-    Indexes(Indexes),
+    Indexes { generation: u64, indexes: Indexes },
+    /// The post-import check finished off-thread. Acknowledge only after
+    /// the resident cache and view have received these states.
+    Imported(ImportCompletion),
     /// The first-run offer to download a dictionary is due; this is the
     /// manifest of the published indexes.
     FirstRunOffer(Manifest),
@@ -512,7 +519,7 @@ struct Session {
     check: Option<Job>,
     /// Where the indexes stood when last asked, by a check or a lookup;
     /// `None` until the first answer.
-    indexes: Option<Indexes>,
+    indexes: IndexCache,
     /// Where the capture stands.
     capturing: Capturing,
     /// Where the read of the selection and the clipboard of a press stands.
@@ -530,6 +537,41 @@ struct Session {
     language_job: Option<Job>,
     /// Where the first-run offer to download a dictionary stands.
     first_run: FirstRun,
+}
+
+/// Reject checks and lookups that started before an in-app import's
+/// refresh. A late old answer must not put Missing back in the cache.
+#[derive(Default)]
+struct IndexCache {
+    generation: u64,
+    known: Option<Indexes>,
+}
+
+impl IndexCache {
+    fn update(&mut self, generation: u64, indexes: Indexes) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        self.known = Some(indexes);
+        true
+    }
+
+    fn imported(&mut self, indexes: Indexes) {
+        self.generation += 1;
+        self.known = Some(indexes);
+    }
+}
+
+struct ImportCompletion {
+    indexes: Indexes,
+    ready: oneshot::Sender<()>,
+}
+
+impl ImportCompletion {
+    fn apply(self, apply: impl FnOnce(Indexes)) {
+        apply(self.indexes);
+        let _ = self.ready.send(());
+    }
 }
 
 /// Where the first-run offer of a [`Session`] stands. It is decided once, at
@@ -722,9 +764,10 @@ impl Session {
             } => self.definition_translated(number, source, outcome, elapsed),
             Event::Lookup {
                 run,
+                generation,
                 language,
                 outcome,
-            } => self.looked_up(run, language, outcome),
+            } => self.looked_up(run, generation, language, outcome),
             Event::Translated {
                 text,
                 subject,
@@ -740,12 +783,22 @@ impl Session {
                 }
             }
             Event::LanguageChosen(language) => self.language_chosen(language),
-            Event::Indexes(indexes) => {
+            Event::Indexes {
+                generation,
+                indexes,
+            } => {
+                if self.indexes.update(generation, indexes) {
+                    self.check = None;
+                    self.view.render_indexes(indexes);
+                    self.first_indexes(indexes);
+                }
+            }
+            Event::Imported(completed) => completed.apply(|indexes| {
                 self.check = None;
-                self.indexes = Some(indexes);
+                self.indexes.imported(indexes);
                 self.view.render_indexes(indexes);
                 self.first_indexes(indexes);
-            }
+            }),
             Event::FirstRunOffer(manifest) => self.first_run_offer(manifest),
             Event::FirstRunDownload => self.first_run_download(),
             Event::FirstRunNotNow => self.first_run_not_now(),
@@ -919,6 +972,7 @@ impl Session {
             self.work.upgrade().as_deref(),
             self.articles.clone(),
             &self.sender,
+            self.indexes.generation,
         );
     }
 
@@ -1508,16 +1562,18 @@ impl Session {
         };
         let sender = self.sender.clone();
         let language = self.language;
+        let generation = self.indexes.generation;
         let started = manual::offline(
             self.work.upgrade().as_deref(),
             self.articles.clone(),
             word,
             language,
-            self.indexes,
+            self.indexes.known,
             move |language, outcome| {
                 // On the worker: the UI thread wakes for the event.
                 let _ = sender.unbounded_send(Event::Lookup {
                     run,
+                    generation,
                     language,
                     outcome,
                 });
@@ -1538,6 +1594,7 @@ impl Session {
                         self.work.upgrade().as_deref(),
                         self.articles.clone(),
                         &self.sender,
+                        self.indexes.generation,
                     );
                 }
             }
@@ -1550,14 +1607,21 @@ impl Session {
     /// sent then, from that language; where it found the indexes is shown
     /// for every one that read them, and every one that was not given up is
     /// recorded.
-    fn looked_up(&mut self, run: u64, language: Language, outcome: Outcome<Looked>) {
+    fn looked_up(
+        &mut self,
+        run: u64,
+        generation: u64,
+        language: Language,
+        outcome: Outcome<Looked>,
+    ) {
         if let Some(recording) = &self.recording
             && let Some(answered) = evidence::answered(&outcome)
         {
             recording.looked_up(answered);
         }
-        if let Outcome::Finished(looked) = &outcome {
-            self.indexes = Some(looked.indexes);
+        if let Outcome::Finished(looked) = &outcome
+            && self.indexes.update(generation, looked.indexes)
+        {
             self.view.render_indexes(looked.indexes);
         }
         if !self.manual.awaits(run) {
@@ -2509,12 +2573,14 @@ async fn request_startup_change(enable: bool) -> StartupEnd {
 fn start_settings(
     window: &gtk::ApplicationWindow,
     key_file: Option<&std::path::Path>,
+    articles: Arc<dyn Articles>,
     sender: &UnboundedSender<Event>,
 ) -> Settings {
     let change = sender.clone();
     let save = sender.clone();
     let clear = sender.clone();
     let startup = sender.clone();
+    let imported = sender.clone();
     Settings::new(
         window,
         key_file,
@@ -2530,7 +2596,25 @@ fn start_settings(
         move |enable| {
             let _ = startup.unbounded_send(Event::ToggleStartup(enable));
         },
+        move || refresh_import(articles.clone(), imported.clone()),
     )
+}
+
+/// The check does disk work on a separate thread. Waiting for the event's
+/// acknowledgement guarantees the next lookup sees the refreshed states
+/// before Settings advertises that the dictionary is ready.
+async fn refresh_import(
+    articles: Arc<dyn Articles>,
+    sender: UnboundedSender<Event>,
+) -> Result<(), String> {
+    let indexes = file_import::blocking(move || articles.indexes()).await?;
+    let (ready, received) = oneshot::channel();
+    sender
+        .unbounded_send(Event::Imported(ImportCompletion { indexes, ready }))
+        .map_err(|_| "The resident is no longer available.".to_owned())?;
+    received
+        .await
+        .map_err(|_| "The resident did not refresh its dictionary states.".to_owned())
 }
 
 /// Starts the icon in the top bar; the choices of its menu and the tray
@@ -2561,11 +2645,15 @@ fn start_check(
     work: Option<&Work>,
     articles: Arc<dyn Articles>,
     sender: &UnboundedSender<Event>,
+    generation: u64,
 ) -> Option<Job> {
     let checked = sender.clone();
     manual::check_indexes(work, articles, move |indexes| {
         // On the worker: the UI thread wakes for the event.
-        let _ = checked.unbounded_send(Event::Indexes(indexes));
+        let _ = checked.unbounded_send(Event::Indexes {
+            generation,
+            indexes,
+        });
     })
 }
 
@@ -2677,13 +2765,13 @@ fn start(
     // Nothing is opened here: the indexes are files, and files are the
     // runner's.
     let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());
-    let check = start_check(work.as_deref(), articles.clone(), &sender);
+    let check = start_check(work.as_deref(), articles.clone(), &sender, 0);
     // After the check: the runner takes its jobs in this order. Only the
     // path is made here; the file is the runner's.
     let language_file = language::path();
     let language_job = start_language(work.as_deref(), language_file.clone(), &sender);
     let (translator, key_file, cache) = online_translator();
-    let settings = start_settings(&window, key_file.as_deref(), &sender);
+    let settings = start_settings(&window, key_file.as_deref(), articles.clone(), &sender);
     let about = About::new(&window);
     let session = Session {
         binding,
@@ -2717,7 +2805,7 @@ fn start(
         translating_definition: None,
         online: Kept::default(),
         check,
-        indexes: None,
+        indexes: IndexCache::default(),
         capturing: Capturing::default(),
         copying: Copying::default(),
         language: Language::default(),
@@ -2983,6 +3071,120 @@ mod tests {
         Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
     };
     use addict_core::translation::Source as Language;
+
+    #[tokio::test]
+    async fn import_completion_refreshes_missing_languages_before_the_next_lookup() {
+        use crate::{
+            dictionaries::{Answer, Articles, Dictionaries, State},
+            manual,
+        };
+        use addict_dictionary::{
+            format::{self, Contents, Headword},
+            import::{self, Source},
+        };
+        use addict_platform::work::{Outcome, Work};
+        use futures_util::{StreamExt, pin_mut, poll};
+        use std::{path::PathBuf, sync::Arc};
+
+        struct Temp(PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = Temp(
+            std::env::temp_dir().join(format!("addict-import-resident-{}", std::process::id())),
+        );
+        std::fs::create_dir(&temp.0).unwrap();
+        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(Some(temp.0.clone())));
+        let missing = articles.indexes();
+        assert_eq!(missing.spanish, State::Missing);
+        assert_eq!(missing.catalan, State::Missing);
+        let mut cached = super::IndexCache {
+            known: Some(missing),
+            ..Default::default()
+        };
+        let old_generation = cached.generation;
+        let work = Work::start().expect("lookup runner");
+
+        for (language, source, word) in [
+            (Language::Es, Source::WikdictEsRu, "banco"),
+            (Language::Ca, Source::WikdictCaRu, "banc"),
+        ] {
+            assert!(
+                manual::offline(
+                    Some(&work),
+                    articles.clone(),
+                    word.to_owned(),
+                    language,
+                    cached.known,
+                    |_, _| {}
+                )
+                .is_err(),
+                "initially gated by Missing"
+            );
+            // The index writer is a small fixture for the resident cache
+            // regression; the real chooser/importer is tested separately.
+            let bytes = format::encode(&Contents {
+                source: "manual-import-regression".to_owned(),
+                headwords: vec![Headword {
+                    word: word.to_owned(),
+                    translations: vec!["банк".to_owned()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            std::fs::write(import::index_path(&temp.0, source), bytes).unwrap();
+        }
+
+        let (sender, mut events) = futures_channel::mpsc::unbounded();
+        let refreshed = super::refresh_import(articles.clone(), sender);
+        pin_mut!(refreshed);
+        assert!(poll!(refreshed.as_mut()).is_pending());
+        let event = tokio::select! {
+            result = &mut refreshed => panic!("completed before resident delivery: {result:?}"),
+            event = events.next() => event.expect("completion event"),
+        };
+        let Event::Imported(completed) = event else {
+            panic!("expected import completion");
+        };
+        assert!(
+            poll!(refreshed.as_mut()).is_pending(),
+            "not ready before resident delivery"
+        );
+        assert_eq!(cached.known, Some(missing));
+        // The same ordered completion operation used by Session::handle.
+        completed.apply(|indexes| cached.imported(indexes));
+        refreshed.await.expect("resident acknowledgement");
+        assert!(
+            !cached.update(old_generation, missing),
+            "late pre-import events are ignored"
+        );
+
+        for (language, word) in [(Language::Es, "banco"), (Language::Ca, "banc")] {
+            let (send, receive) = futures_channel::oneshot::channel();
+            let _job = manual::offline(
+                Some(&work),
+                articles.clone(),
+                word.to_owned(),
+                language,
+                cached.known,
+                move |language, outcome| {
+                    let _ = send.send((language, outcome));
+                },
+            )
+            .expect("the first lookup after completion must be allowed");
+            let (answered, Outcome::Finished(looked)) = receive.await.unwrap() else {
+                panic!("lookup did not finish");
+            };
+            assert_eq!(answered, language);
+            let Answer::Grouped(grouped) = looked.answer else {
+                panic!("expected the imported language entry");
+            };
+            assert!(grouped.russian.iter().flatten().any(|text| text == "банк"));
+        }
+    }
 
     #[derive(Default)]
     struct ObservedWindow {

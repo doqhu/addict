@@ -57,10 +57,16 @@ const MANIFEST_MAX: u64 = 1 << 20;
 /// What the errors about the manifest call it.
 const MANIFEST_WHAT: &str = "the index manifest";
 
-/// One install at a time in the whole process: an asset is held whole in
-/// memory, and the blocking part of an install that was given up still runs
-/// to its end, so the next one waits for it.
+/// One install at a time in the whole process, including manual imports:
+/// both writers use a per-process temporary index name. The blocking part
+/// of an install that was given up still runs to its end.
 static INSTALLS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+/// Shared by release installs and manual imports. Move the permit into the
+/// blocking work so cancelling its async caller cannot release it early.
+pub(crate) async fn installation_permit() -> tokio::sync::SemaphorePermit<'static> {
+    INSTALLS.acquire().await.expect("installs are never closed")
+}
 
 /// The downloader of the indexes of one release.
 #[derive(Debug)]
@@ -152,10 +158,7 @@ impl Downloader {
         }
         // Held until the blocking part ends, even when this future is
         // dropped first. The semaphore is never closed.
-        let permit = INSTALLS
-            .acquire()
-            .await
-            .map_err(|_| DownloadError::Stopped { name: name.clone() })?;
+        let permit = installation_permit().await;
         let body = self
             .fetch(&name, &published.asset(), published.size, progress)
             .await?;
@@ -581,6 +584,28 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[tokio::test]
+    async fn a_manual_import_waits_for_the_release_installation_permit() {
+        use futures_util::{pin_mut, poll};
+        let dir = DataDir::new("manual-overlap");
+        let existing = super::installation_permit().await;
+        let importing = crate::file_import::import_file(dir.0.join("missing-file"), dir.data());
+        pin_mut!(importing);
+        assert!(poll!(importing.as_mut()).is_pending());
+        drop(existing);
+        // acquire() reserves the released permit for its queued waiter
+        // before that future is polled again. Merely spawning an unlocked
+        // worker would also return Pending, but would leave this permit
+        // available. No timing assumption or sleep is needed here.
+        assert!(
+            super::INSTALLS.try_acquire().is_err(),
+            "the manual import must have queued on the shared semaphore"
+        );
+        let error = importing.await.unwrap_err();
+        assert!(error.contains("missing-file"), "{error}");
+        assert!(!dir.data().exists());
     }
 
     /// A small English index whose one headword is `bank`.
