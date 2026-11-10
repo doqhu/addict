@@ -145,7 +145,7 @@ manifest. `--latest=false` keeps the app's own release marked as the latest
 one:
 
 ```sh
-gh release create indexes-v3 --repo doqhu/addict --target master --latest=false \
+gh release create indexes-v3 --repo doqhu/addict --target main --latest=false \
   --title "Dictionary indexes, format 3" \
   --notes-file target/indexes/release-body.md \
   target/indexes/*.index.xz target/indexes/WNDB_License.txt

@@ -2,7 +2,7 @@ name: Release Please
 
 on:
   push:
-    branches: [master]
+    branches: [main]
 
 permissions: {}
 
@@ -12,7 +12,7 @@ jobs:
     steps:
       # A personal access token, not GITHUB_TOKEN: events made with
       # GITHUB_TOKEN start no workflows, so the release pull request would
-      # never get the status checks that master requires.
+      # never get the status checks that main requires.
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}

@@ -114,7 +114,7 @@ jobs:
             exit 0
           fi
           if [ "$EXISTS" != true ]; then
-            gh release create "$TAG" --latest=false --target master \
+            gh release create "$TAG" --latest=false --target main \
               --title "Dictionary indexes, format ${TAG#indexes-v}" \
               --notes-file "$OUT/release-body.md"
           fi

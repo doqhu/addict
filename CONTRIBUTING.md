@@ -21,7 +21,7 @@ Do not paste your DeepL key, and check that a screenshot does not show it.
 For anything larger than a small fix, open an issue first, so we can agree on
 the change before you spend time on it. Then:
 
-1. Fork the repository and make a branch from `master`.
+1. Fork the repository and make a branch from `main`.
 2. Make the change, with tests for new behaviour.
 3. Run the checks below.
 4. Open a pull request that says what the change does and why.
@@ -30,7 +30,7 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 `feat(window): …`, `fix(ocr): …`, `docs: …`, `ci: …`, with a short subject
 in the imperative.
 
-The messages also drive the releases. On every push to `master`,
+The messages also drive the releases. On every push to `main`,
 [release-please](https://github.com/googleapis/release-please) keeps a release
 pull request open: `fix` raises the patch version, `feat` the minor version,
 and, before 1.0, a breaking change (`feat!:`) the minor version too. The pull
