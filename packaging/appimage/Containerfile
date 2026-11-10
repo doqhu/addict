@@ -1,0 +1,10 @@
+FROM registry.fedoraproject.org/fedora@sha256:1965dd267a1be0f695534e132de7719e50b142389528226d49288a8866dbe5ad
+# The complete closure replaces the container release-identity with the basic
+# identity of the same Fedora release; --allowerasing permits that replacement.
+# The build context is private and contains only inputs verified by the launcher.
+COPY inputs /inputs
+RUN cd /inputs && sha256sum --check --strict SHA256SUMS \
+    && dnf -y --disablerepo='*' --setopt=install_weak_deps=False install --allowerasing /inputs/*.rpm \
+    && rpm -qa --qf '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > /inputs/installed-rpms.txt
+WORKDIR /build
+ENTRYPOINT ["bash", "scripts/build-appimage.sh", "--inside"]

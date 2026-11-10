@@ -87,6 +87,11 @@ Before you try a Flatpak you built from `packaging/flatpak`, run
 `addict uninstall` and quit the running addict, as the
 [README](README.md#build-from-source) says.
 
+The experimental x86_64 AppImage has a separate pinned build and packaging
+checks. See [AppImage build and isolated desktop acceptance](docs/appimage-build.md).
+Its download and typed-translation desktop checks are required before claiming
+that an artifact works on a target distribution.
+
 ## The workspace
 
 - `crates/addict-core` -- the product identity and the domain types.
