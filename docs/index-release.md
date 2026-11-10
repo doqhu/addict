@@ -16,8 +16,13 @@ indexes from a GitHub data release of this repository, one after another. Each
 index has its own row in the dialog, with its progress and a Cancel button; an
 index that fails (a missing asset, a network error, a wrong size or checksum,
 an unknown name or format, a file the app cannot open) says why on its row,
-and the other indexes still install. A manifest that lists no index offers
-nothing. This page is the contract
+and the other indexes still install. A network failure is shown in plain
+words, such as `cannot download oewn: cannot reach the server`, `no answer in
+time` (when the server does not answer in time, or an answer goes 60 seconds
+without a byte) or `the connection was interrupted`, and the full error of the
+HTTP library is written to standard error as
+`addict: cannot download <index or the index manifest>: <error>`. A manifest that lists no index
+offers nothing. This page is the contract
 between that release and the app, and the steps the maintainer follows to
 publish it. The schema lives in `crates/addict-dictionary/src/release.rs`,
 which both the builder and the app read.
