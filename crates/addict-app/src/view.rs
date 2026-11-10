@@ -468,7 +468,14 @@ fn elsewhere_text(chosen: Language, found: Language) -> String {
 /// The line of a word that no imported dictionary could be asked about: what
 /// stands before the word and what stands after it.
 const NOT_IMPORTED_BEFORE: &str = "There is no imported dictionary to look “";
-const NOT_IMPORTED_AFTER: &str = "” up in. Use Settings → Download dictionaries, or import a downloaded dictionary file through ";
+const NOT_IMPORTED_AFTER: &str = "” up in.";
+
+/// What a lookup line of a missing dictionary says after its first
+/// sentence: the two actions that install one. No final period, as the
+/// other lines that end in [`IMPORT_ACTION`].
+fn recovery_text() -> String {
+    format!("Use {DOWNLOAD_ACTION}, or import a downloaded dictionary file through {IMPORT_ACTION}")
+}
 
 /// What stands before the line of an index that cannot be read.
 const UNREADABLE_BEFORE: &str = "The word was not looked up: ";
@@ -509,8 +516,9 @@ fn from_russian_label(language: Language) -> &'static str {
     }
 }
 
-/// The line of a Russian word read with no Russian index of `language`
-/// imported, as [`missing_russian`] is for the other way. No wildcard arm,
+/// The first sentence of the line of a Russian word read with no Russian
+/// index of `language` imported, as [`missing_russian`] is for the other
+/// way; [`recovery_text`] follows it. No wildcard arm,
 /// as in [`definitions_label`].
 fn missing_from_russian(language: Language) -> &'static str {
     match language {
@@ -1696,15 +1704,19 @@ fn lookup_texts<'a>(
             "{NO_ENTRY_BEFORE}{word}{NO_ENTRY_AFTER}"
         ))),
         Lookup::NoDictionary(language) => line(Cow::Owned(format!(
-            "{NO_DICTIONARY_BEFORE}{}{NO_DICTIONARY_AFTER}",
-            dictionary_language(*language)
+            "{NO_DICTIONARY_BEFORE}{}{NO_DICTIONARY_AFTER} {}",
+            dictionary_language(*language),
+            recovery_text()
         ))),
         Lookup::NotImported { word } => line(Cow::Owned(format!(
-            "{NOT_IMPORTED_BEFORE}{word}{NOT_IMPORTED_AFTER}{IMPORT_ACTION}"
+            "{NOT_IMPORTED_BEFORE}{word}{NOT_IMPORTED_AFTER} {}",
+            recovery_text()
         ))),
-        Lookup::NoRussianDictionary(language) => {
-            line(Cow::Borrowed(missing_from_russian(*language)))
-        }
+        Lookup::NoRussianDictionary(language) => line(Cow::Owned(format!(
+            "{} {}",
+            missing_from_russian(*language),
+            recovery_text()
+        ))),
         Lookup::Unreadable(file) => line(Cow::Owned(format!(
             "{UNREADABLE_BEFORE}{}",
             unreadable_text(*file)
@@ -3334,18 +3346,19 @@ mod tests {
             assert!(!shown.choose(0));
             assert_eq!(shown_texts(&shown), texts);
         }
-        assert_eq!(
-            details(&Lookup::NoRussianDictionary(Language::Ca), None),
-            ["No Russian-Catalan dictionary is imported."]
-        );
-        assert_eq!(
-            details(&Lookup::NoRussianDictionary(Language::Es), None),
-            ["No Russian-Spanish dictionary is imported."]
-        );
-        assert_eq!(
-            details(&Lookup::NoRussianDictionary(Language::En), None),
-            ["No Russian-English dictionary is imported."]
-        );
+        for (language, name) in [
+            (Language::Ca, "Catalan"),
+            (Language::Es, "Spanish"),
+            (Language::En, "English"),
+        ] {
+            assert_eq!(
+                details(&Lookup::NoRussianDictionary(language), None),
+                [format!(
+                    "No Russian-{name} dictionary is imported. Use Settings → Download dictionaries, \
+                     or import a downloaded dictionary file through Settings → Import file…"
+                )]
+            );
+        }
     }
 
     #[test]
@@ -3595,15 +3608,28 @@ mod tests {
     }
 
     #[test]
-    fn the_no_dictionary_line_names_the_language() {
-        assert_eq!(
-            details(&Lookup::NoDictionary(Language::Es), None),
-            ["There is no offline dictionary for Spanish."]
-        );
-        assert_eq!(
-            details(&Lookup::NoDictionary(Language::Ca), None),
-            ["There is no offline dictionary for Catalan."]
-        );
+    fn the_no_dictionary_line_names_the_language_and_the_actions() {
+        for (language, name) in [(Language::Es, "Spanish"), (Language::Ca, "Catalan")] {
+            assert_eq!(
+                details(&Lookup::NoDictionary(language), None),
+                [format!(
+                    "There is no offline dictionary for {name}. Use Settings → Download dictionaries, \
+                     or import a downloaded dictionary file through Settings → Import file…"
+                )]
+            );
+        }
+        // Every line of a missing dictionary names both ways to install one.
+        for lookup in [
+            Lookup::NoDictionary(Language::Es),
+            Lookup::NoRussianDictionary(Language::Ca),
+            Lookup::NotImported {
+                word: "sat".to_owned(),
+            },
+        ] {
+            let line = details(&lookup, None).join("\n");
+            assert!(line.contains(super::DOWNLOAD_ACTION), "{line}");
+            assert!(line.contains(super::IMPORT_ACTION), "{line}");
+        }
         // A line, not an article: no list, no translations.
         let texts = result_texts(&Lookup::NoDictionary(Language::Ca), Some(0), None, None);
         assert!(texts.senses.is_empty());
@@ -4692,7 +4718,10 @@ mod tests {
         let none = result_texts(&Lookup::NoDictionary(Language::Ca), None, None, None);
         assert_eq!(
             none.line.as_deref(),
-            Some("There is no offline dictionary for Catalan.")
+            Some(
+                "There is no offline dictionary for Catalan. Use Settings → Download dictionaries, \
+                 or import a downloaded dictionary file through Settings → Import file…"
+            )
         );
         assert_eq!(sections(&none), [None, None, None]);
     }

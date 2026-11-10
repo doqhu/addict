@@ -51,6 +51,10 @@ pub const DOWNLOAD_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// How long a connection may take to open.
 const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
+/// How long an answer may go without a byte. A stalled download then fails
+/// as `no answer in time`; a slow one that still moves is never cut.
+const READ_LIMIT: Duration = Duration::from_secs(60);
+
 /// The largest manifest read, in bytes.
 const MANIFEST_MAX: u64 = 1 << 20;
 
@@ -74,6 +78,8 @@ pub struct Downloader {
     base_url: String,
     /// Built at the first request.
     http: OnceLock<reqwest::Client>,
+    /// [`READ_LIMIT`], shorter in the tests.
+    read_limit: Duration,
     recovery: bool,
     committed: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -91,9 +97,18 @@ impl Downloader {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             http: OnceLock::new(),
+            read_limit: READ_LIMIT,
             recovery: false,
             committed: None,
         }
+    }
+
+    /// A downloader whose answers may go `limit` without a byte, for the
+    /// tests. Set before the first request.
+    #[cfg(test)]
+    fn with_read_limit(mut self, limit: Duration) -> Self {
+        self.read_limit = limit;
+        self
     }
 
     /// Recovery preserves an edition that became healthy after selection.
@@ -246,10 +261,7 @@ impl Downloader {
         limit: u64,
         mut progress: impl FnMut(u64),
     ) -> Result<Vec<u8>, DownloadError> {
-        let connection = |error: reqwest::Error| DownloadError::Connection {
-            what: what.to_owned(),
-            cause: causes(&error),
-        };
+        let connection = |error: reqwest::Error| connection(what, &error);
         let mut response = self
             .http(what)?
             .get(self.url(asset))
@@ -300,14 +312,12 @@ impl Downloader {
         let built = reqwest::Client::builder()
             .user_agent(concat!("addict/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_LIMIT)
+            .read_timeout(self.read_limit)
             // No connection outlives its answer, so nothing here wakes an
             // idle process.
             .pool_max_idle_per_host(0)
             .build()
-            .map_err(|error| DownloadError::Connection {
-                what: what.to_owned(),
-                cause: causes(&error),
-            })?;
+            .map_err(|error| connection(what, &error))?;
         Ok(self.http.get_or_init(|| built))
     }
 }
@@ -331,7 +341,8 @@ impl Drop for StopOnDrop {
 /// and names the index, or the manifest.
 #[derive(Debug)]
 pub enum DownloadError {
-    /// The request could not be sent or its answer not read.
+    /// The request could not be sent or its answer not read; `cause` is
+    /// one of the plain causes of [`plain_cause`].
     Connection { what: String, cause: String },
     /// The server answered with this HTTP status.
     Status { what: String, status: u16 },
@@ -408,6 +419,52 @@ impl fmt::Display for DownloadError {
 
 impl Error for DownloadError {}
 
+/// The error of a request for what `what` names, with a plain cause; the
+/// library's whole chain of causes goes to stderr, since it is lost here.
+fn connection(what: &str, error: &reqwest::Error) -> DownloadError {
+    eprintln!("addict: cannot download {what}: {}", causes(error));
+    DownloadError::Connection {
+        what: what.to_owned(),
+        cause: plain_cause(error).to_owned(),
+    }
+}
+
+/// Why a request failed, in words a user can read: no library text and no
+/// URL. A connect timeout is both a timeout and a connect error, so the
+/// timeout is asked first.
+fn plain_cause(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "no answer in time"
+    } else if error.is_connect() {
+        "cannot reach the server"
+    } else if error.is_body() || error.is_decode() || interrupted(error) {
+        "the connection was interrupted"
+    } else {
+        "the download failed"
+    }
+}
+
+/// Whether an I/O error somewhere in the causes of `error` says the
+/// connection broke off.
+fn interrupted(error: &dyn Error) -> bool {
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        if let Some(io) = error.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
+}
+
 /// The text of `error` and of its causes, on one line.
 fn causes(error: &dyn Error) -> String {
     let mut text = error.to_string();
@@ -446,6 +503,11 @@ pub(crate) mod stub {
         File(Vec<u8>),
         /// 302 to this path of the stub.
         Redirect(String),
+        /// 200 that declares these bytes and closes after the first half.
+        Short(Vec<u8>),
+        /// 200 that declares these bytes, sends the first half and then
+        /// holds the connection open, silent, until the stub stops.
+        Stall(Vec<u8>),
     }
 
     /// The running stub; dropping it stops it.
@@ -546,8 +608,11 @@ pub(crate) mod stub {
             .unwrap_or_else(PoisonError::into_inner)
             .push(line.clone());
         let path = line.split(' ').nth(1).unwrap_or_default();
-        let (status, extra, body): (&str, String, &[u8]) = match routes.get(path) {
-            Some(Route::File(bytes)) => ("200 OK", String::new(), bytes),
+        let route = routes.get(path);
+        let (status, extra, body): (&str, String, &[u8]) = match route {
+            Some(Route::File(bytes) | Route::Short(bytes) | Route::Stall(bytes)) => {
+                ("200 OK", String::new(), bytes)
+            }
             Some(Route::Redirect(to)) => ("302 Found", format!("location: {to}\r\n"), b""),
             None => ("404 Not Found", String::new(), b"Not Found"),
         };
@@ -556,8 +621,18 @@ pub(crate) mod stub {
              content-length: {}\r\nconnection: close\r\n\r\n",
             body.len()
         );
+        let sent = match route {
+            Some(Route::Short(_) | Route::Stall(_)) => &body[..body.len() / 2],
+            _ => body,
+        };
         let _ = stream.write_all(head.as_bytes()).await;
-        let _ = stream.write_all(body).await;
+        let _ = stream.write_all(sent).await;
+        let _ = stream.flush().await;
+        if matches!(route, Some(Route::Stall(_))) {
+            // Ends when the stub's runtime is dropped, which closes the
+            // connection.
+            std::future::pending::<()>().await;
+        }
         let _ = stream.shutdown().await;
     }
 }
@@ -569,6 +644,7 @@ mod tests {
         fs,
         path::PathBuf,
         sync::atomic::{AtomicU32, Ordering},
+        time::Duration,
     };
 
     use addict_dictionary::{
@@ -917,9 +993,96 @@ mod tests {
             matches!(error, DownloadError::Status { status: 404, .. }),
             "{error:?}"
         );
-        let text = error.to_string();
-        assert!(text.contains("oewn") && text.contains("404"), "{text}");
+        assert_eq!(
+            error.to_string(),
+            "cannot download oewn: the server answered HTTP 404"
+        );
         assert!(dir.entries().is_empty());
+    }
+
+    /// Asserts that `error` is a network failure whose whole text is
+    /// `expected`, with no library text and no URL in it.
+    fn assert_plain(error: &DownloadError, expected: &str) {
+        assert!(
+            matches!(error, DownloadError::Connection { .. }),
+            "{error:?}"
+        );
+        let text = error.to_string();
+        assert_eq!(text, expected);
+        for library in ["http", "://", "error sending request", "docs.rs"] {
+            assert!(!text.contains(library), "{library} in {text}");
+        }
+    }
+
+    /// The base URL of a loopback port nothing listens on.
+    fn refused_base_url() -> String {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("a loopback port");
+        let address = listener.local_addr().expect("its address");
+        drop(listener);
+        format!("http://{address}")
+    }
+
+    /// The error of installing OEWN from a release whose asset is `route`.
+    async fn install_error(route: Route, xz: &[u8], read_limit: Duration) -> DownloadError {
+        let published = Published::of("oewn", xz);
+        let tag = release::tag();
+        let stub = Stub::start(HashMap::from([(format!("/{tag}/oewn.index.xz"), route)]))
+            .expect("the stub");
+        let dir = DataDir::new("network");
+        let error = Downloader::with_base_url(stub.base_url())
+            .with_read_limit(read_limit)
+            .install(&published, &dir.data(), |_| {})
+            .await
+            .expect_err("a network failure");
+        assert!(dir.entries().is_empty());
+        error
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_cannot_reach_the_server() {
+        let xz = xz_of(&index());
+        let dir = DataDir::new("refused");
+        let error = Downloader::with_base_url(refused_base_url())
+            .install(&Published::of("oewn", &xz), &dir.data(), |_| {})
+            .await
+            .expect_err("refused");
+        assert_plain(&error, "cannot download oewn: cannot reach the server");
+        assert!(dir.entries().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_refused_manifest_cannot_reach_the_server() {
+        let error = Downloader::with_base_url(refused_base_url())
+            .manifest()
+            .await
+            .expect_err("refused");
+        assert_plain(
+            &error,
+            "cannot download the index manifest: cannot reach the server",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_asset_cut_short_was_interrupted() {
+        let xz = xz_of(&index());
+        let error = install_error(Route::Short(xz.clone()), &xz, super::READ_LIMIT).await;
+        assert_plain(
+            &error,
+            "cannot download oewn: the connection was interrupted",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_asset_has_no_answer_in_time() {
+        let xz = xz_of(&index());
+        let error = tokio::time::timeout(
+            Duration::from_secs(20),
+            install_error(Route::Stall(xz.clone()), &xz, Duration::from_millis(300)),
+        )
+        .await
+        .expect("the read limit ends the download");
+        assert_plain(&error, "cannot download oewn: no answer in time");
     }
 
     #[tokio::test]
