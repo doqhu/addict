@@ -1,0 +1,1545 @@
+{
+ "schema": 1,
+ "generated_by": "packaging/appimage/closures.py",
+ "hosts": {
+  "uruntime": {
+   "location": "runtime header",
+   "determined_by": "uruntime v0.8.1 variant appimage-dwarfs-lite (the only helper embedded in the pinned header is dwarfs-fuse-extract, payload sha256 2c230635... = uruntime checksums.txt x86_64 dwarfs-fuse-extract). Crates: cargo metadata over the pinned Cargo.lock, --no-default-features --features appimage,dwarfs,lite, target x86_64-unknown-linux-musl, normal dependencies only, proc-macro crates and their build-time dependencies excluded. std: the header .comment names rustc 1.100.0-nightly (6eeff9a52 2026-09-23), the 2026-09-24 nightly; build-std = std, panic_abort. Linked by xtask zig-linker with Zig 0.16.0 (uruntime checksums.txt), which supplies musl and compiler_rt."
+  },
+  "dwarfs": {
+   "location": "runtime header",
+   "determined_by": "dwarfs-fuse-extract 0.15.7, built by the DwarFS static release (.docker/build-linux.sh, clang, -static, -rtlib=libgcc, libressl variant, minimal feature set). Libraries from the pinned source at 3945d23 (.docker/static-libs-versions.sh, toolchain-versions.sh) confirmed by the strings of the embedded binary (LibreSSL 4.3.1, libarchive 3.8.8, liblzma, libzstd, jemalloc, FUSE3, boost filesystem/program_options, utf8, nlohmann, xxh3, GCC 16.1.0 runtime). Absent: lz4, brotli, flac, ricepp (minimal build; only DwarFS compression-type names remain), fuse2 (FUSE3 found and ONLY_UNIVERSAL_BINARIES), mimalloc, OpenSSL, libunwind, cpptrace, libdwarf, benchmark, libmagic, libucontext (other build types or architectures)."
+  },
+  "anylinux-sharun": {
+   "location": null,
+   "determined_by": "sharun 3.8.3 (Anylinux-sharun 2748a37, release run of 2026-11-05T03:42:31Z): the pinned source has no Cargo.lock, so the crates are resolved with cargo generate-lockfile --publish-time at that run, normal dependencies, target x86_64-unknown-linux-musl, proc-macro crates excluded. std from the pinned toolchain nightly-2026-09-11 (build-std = std, panic_abort). Linked by zig cc 0.16.0 (ci.yml, +crt-static, link-self-contained=no), which supplies musl and compiler_rt; the preload libraries are built with the same zig cc."
+  },
+  "dash": {
+   "location": null,
+   "determined_by": "dash 0.5.13.5 built by Anylinux-sharun tools/build-dash.sh with zig cc 0.16.0 -target x86_64-linux-musl -static: Zig supplies musl and compiler_rt."
+  }
+ },
+ "tool_texts": {
+  "dash": [
+   {
+    "input": "gnu-gpl-2.0.txt",
+    "member": null,
+    "as": "GPL-2.0.txt"
+   }
+  ]
+ },
+ "components": {
+  "rust-compiler-builtins-nightly-2026-09-11": {
+   "version": "0.1 (in-tree)",
+   "license": "MIT AND Apache-2.0 WITH LLVM-exception AND (MIT OR Apache-2.0)",
+   "in": [
+    "anylinux-sharun"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/compiler-builtins/LICENSE.txt",
+     "as": "LICENSE.txt"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-11.tar.xz"
+   ]
+  },
+  "rust-compiler-builtins-nightly-2026-09-24": {
+   "version": "0.1 (in-tree)",
+   "license": "MIT AND Apache-2.0 WITH LLVM-exception AND (MIT OR Apache-2.0)",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-24.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/compiler-builtins/LICENSE.txt",
+     "as": "LICENSE.txt"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-addr2line-0.27.1": {
+   "version": "0.27.1",
+   "license": "Apache-2.0 OR MIT",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/addr2line-0.27.1/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/addr2line-0.27.1/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-11.tar.xz",
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-adler2-2.0.1": {
+   "version": "2.0.1",
+   "license": "0BSD OR MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-adler2-2.0.1.crate",
+     "member": "adler2-2.0.1/LICENSE-0BSD",
+     "as": "LICENSE-0BSD"
+    },
+    {
+     "input": "crate-adler2-2.0.1.crate",
+     "member": "adler2-2.0.1/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-adler2-2.0.1.crate",
+     "member": "adler2-2.0.1/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-adler2-2.0.1.crate",
+    "rust-src-nightly-2026-09-11.tar.xz",
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-bitflags-2.13.2": {
+   "version": "2.13.2",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-bitflags-2.13.2.crate",
+     "member": "bitflags-2.13.2/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-bitflags-2.13.2.crate",
+     "member": "bitflags-2.13.2/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-bitflags-2.13.2.crate"
+   ]
+  },
+  "rust-crate-cfg-if-1.0.4": {
+   "version": "1.0.4",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/cfg-if-1.0.4/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/cfg-if-1.0.4/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-11.tar.xz",
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-cfg-if-1.0.5": {
+   "version": "1.0.5",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-cfg-if-1.0.5.crate",
+     "member": "cfg-if-1.0.5/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-cfg-if-1.0.5.crate",
+     "member": "cfg-if-1.0.5/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-cfg-if-1.0.5.crate"
+   ]
+  },
+  "rust-crate-chrono-0.4.45": {
+   "version": "0.4.45",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-chrono-0.4.45.crate",
+     "member": "chrono-0.4.45/LICENSE.txt",
+     "as": "LICENSE.txt"
+    }
+   ],
+   "sources": [
+    "crate-chrono-0.4.45.crate"
+   ]
+  },
+  "rust-crate-crc32fast-1.5.2": {
+   "version": "1.5.2",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-crc32fast-1.5.2.crate",
+     "member": "crc32fast-1.5.2/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-crc32fast-1.5.2.crate",
+     "member": "crc32fast-1.5.2/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-crc32fast-1.5.2.crate"
+   ]
+  },
+  "rust-crate-dotenv-0.16.0": {
+   "version": "0.16.0",
+   "license": "MIT",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "git-dotenv-367085af80a8.tar.gz",
+     "member": "dotenv-367085af80a8d29d2241c85cbfc25736486230c5/LICENSE.md",
+     "as": "LICENSE.md"
+    }
+   ],
+   "sources": [
+    "git-dotenv-367085af80a8.tar.gz"
+   ]
+  },
+  "rust-crate-errno-0.3.14": {
+   "version": "0.3.14",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-errno-0.3.14.crate",
+     "member": "errno-0.3.14/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-errno-0.3.14.crate",
+     "member": "errno-0.3.14/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-errno-0.3.14.crate"
+   ]
+  },
+  "rust-crate-flate2-1.1.10": {
+   "version": "1.1.10",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-flate2-1.1.10.crate",
+     "member": "flate2-1.1.10/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-flate2-1.1.10.crate",
+     "member": "flate2-1.1.10/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-flate2-1.1.10.crate"
+   ]
+  },
+  "rust-crate-gimli-0.34.0": {
+   "version": "0.34.0",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/gimli-0.34.0/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/gimli-0.34.0/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-11.tar.xz",
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-goblin-0.10.7": {
+   "version": "0.10.7",
+   "license": "MIT",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-goblin-0.10.7.crate",
+     "member": "goblin-0.10.7/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "crate-goblin-0.10.7.crate"
+   ]
+  },
+  "rust-crate-goblin-0.8.2": {
+   "version": "0.8.2",
+   "license": "MIT",
+   "in": [
+    "anylinux-sharun"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-goblin-0.8.2.crate",
+     "member": "goblin-0.8.2/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "crate-goblin-0.8.2.crate"
+   ]
+  },
+  "rust-crate-hashbrown-0.17.1": {
+   "version": "0.17.1",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/hashbrown-0.17.1/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/hashbrown-0.17.1/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-11.tar.xz",
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-hex-0.4.3": {
+   "version": "0.4.3",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-hex-0.4.3.crate",
+     "member": "hex-0.4.3/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-hex-0.4.3.crate",
+     "member": "hex-0.4.3/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-hex-0.4.3.crate"
+   ]
+  },
+  "rust-crate-iana-time-zone-0.1.65": {
+   "version": "0.1.65",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-iana-time-zone-0.1.65.crate",
+     "member": "iana-time-zone-0.1.65/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-iana-time-zone-0.1.65.crate",
+     "member": "iana-time-zone-0.1.65/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-iana-time-zone-0.1.65.crate"
+   ]
+  },
+  "rust-crate-libc-0.2.189": {
+   "version": "0.2.189",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-libc-0.2.189.crate",
+     "member": "libc-0.2.189/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-libc-0.2.189.crate",
+     "member": "libc-0.2.189/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-libc-0.2.189.crate",
+    "rust-src-nightly-2026-09-11.tar.xz",
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-libc-0.2.191": {
+   "version": "0.2.191",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-libc-0.2.191.crate",
+     "member": "libc-0.2.191/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-libc-0.2.191.crate",
+     "member": "libc-0.2.191/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-libc-0.2.191.crate"
+   ]
+  },
+  "rust-crate-linux-raw-sys-0.12.1": {
+   "version": "0.12.1",
+   "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-linux-raw-sys-0.12.1.crate",
+     "member": "linux-raw-sys-0.12.1/COPYRIGHT",
+     "as": "COPYRIGHT"
+    },
+    {
+     "input": "crate-linux-raw-sys-0.12.1.crate",
+     "member": "linux-raw-sys-0.12.1/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-linux-raw-sys-0.12.1.crate",
+     "member": "linux-raw-sys-0.12.1/LICENSE-Apache-2.0_WITH_LLVM-exception",
+     "as": "LICENSE-Apache-2.0_WITH_LLVM-exception"
+    },
+    {
+     "input": "crate-linux-raw-sys-0.12.1.crate",
+     "member": "linux-raw-sys-0.12.1/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-linux-raw-sys-0.12.1.crate"
+   ]
+  },
+  "rust-crate-log-0.4.34": {
+   "version": "0.4.34",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-log-0.4.34.crate",
+     "member": "log-0.4.34/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-log-0.4.34.crate",
+     "member": "log-0.4.34/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-log-0.4.34.crate"
+   ]
+  },
+  "rust-crate-log-0.4.35": {
+   "version": "0.4.35",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-log-0.4.35.crate",
+     "member": "log-0.4.35/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-log-0.4.35.crate",
+     "member": "log-0.4.35/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-log-0.4.35.crate"
+   ]
+  },
+  "rust-crate-memchr-2.8.3": {
+   "version": "2.8.3",
+   "license": "Unlicense OR MIT",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/memchr-2.8.3/COPYING",
+     "as": "COPYING"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/memchr-2.8.3/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/memchr-2.8.3/UNLICENSE",
+     "as": "UNLICENSE"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-11.tar.xz",
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-memfd-exec-0.2.6": {
+   "version": "0.2.6",
+   "license": "MIT",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "spdx-MIT.txt",
+     "member": null,
+     "as": "MIT.txt"
+    }
+   ],
+   "sources": [
+    "git-memfd-exec-2decf7d1cec3.tar.gz"
+   ]
+  },
+  "rust-crate-miniz_oxide-0.9.1": {
+   "version": "0.9.1",
+   "license": "MIT OR Zlib OR Apache-2.0",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-miniz_oxide-0.9.1.crate",
+     "member": "miniz_oxide-0.9.1/LICENSE",
+     "as": "LICENSE"
+    },
+    {
+     "input": "crate-miniz_oxide-0.9.1.crate",
+     "member": "miniz_oxide-0.9.1/LICENSE-APACHE.md",
+     "as": "LICENSE-APACHE.md"
+    },
+    {
+     "input": "crate-miniz_oxide-0.9.1.crate",
+     "member": "miniz_oxide-0.9.1/LICENSE-MIT.md",
+     "as": "LICENSE-MIT.md"
+    },
+    {
+     "input": "crate-miniz_oxide-0.9.1.crate",
+     "member": "miniz_oxide-0.9.1/LICENSE-ZLIB.md",
+     "as": "LICENSE-ZLIB.md"
+    }
+   ],
+   "sources": [
+    "crate-miniz_oxide-0.9.1.crate",
+    "rust-src-nightly-2026-09-11.tar.xz",
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-nix-0.27.1": {
+   "version": "0.27.1",
+   "license": "MIT",
+   "in": [
+    "anylinux-sharun"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-nix-0.27.1.crate",
+     "member": "nix-0.27.1/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "crate-nix-0.27.1.crate"
+   ]
+  },
+  "rust-crate-nix-0.31.3": {
+   "version": "0.31.3",
+   "license": "MIT",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-nix-0.31.3.crate",
+     "member": "nix-0.31.3/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "crate-nix-0.31.3.crate"
+   ]
+  },
+  "rust-crate-num-traits-0.2.19": {
+   "version": "0.2.19",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-num-traits-0.2.19.crate",
+     "member": "num-traits-0.2.19/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-num-traits-0.2.19.crate",
+     "member": "num-traits-0.2.19/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-num-traits-0.2.19.crate"
+   ]
+  },
+  "rust-crate-num_cpus-1.17.0": {
+   "version": "1.17.0",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-num_cpus-1.17.0.crate",
+     "member": "num_cpus-1.17.0/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-num_cpus-1.17.0.crate",
+     "member": "num_cpus-1.17.0/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-num_cpus-1.17.0.crate"
+   ]
+  },
+  "rust-crate-object-0.39.1": {
+   "version": "0.39.1",
+   "license": "Apache-2.0 OR MIT",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/object-0.39.1/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/object-0.39.1/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-11.tar.xz",
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-plain-0.2.3": {
+   "version": "0.2.3",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-plain-0.2.3.crate",
+     "member": "plain-0.2.3/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-plain-0.2.3.crate",
+     "member": "plain-0.2.3/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-plain-0.2.3.crate"
+   ]
+  },
+  "rust-crate-procfs-0.18.0": {
+   "version": "0.18.0",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-procfs-0.18.0.crate",
+     "member": "procfs-0.18.0/COPYRIGHT.txt",
+     "as": "COPYRIGHT.txt"
+    },
+    {
+     "input": "crate-procfs-0.18.0.crate",
+     "member": "procfs-0.18.0/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-procfs-0.18.0.crate",
+     "member": "procfs-0.18.0/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-procfs-0.18.0.crate"
+   ]
+  },
+  "rust-crate-procfs-core-0.18.0": {
+   "version": "0.18.0",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-procfs-core-0.18.0.crate",
+     "member": "procfs-core-0.18.0/COPYRIGHT.txt",
+     "as": "COPYRIGHT.txt"
+    },
+    {
+     "input": "crate-procfs-core-0.18.0.crate",
+     "member": "procfs-core-0.18.0/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-procfs-core-0.18.0.crate",
+     "member": "procfs-core-0.18.0/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-procfs-core-0.18.0.crate"
+   ]
+  },
+  "rust-crate-rustc-demangle-0.1.28": {
+   "version": "0.1.28",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/rustc-demangle-0.1.28/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/rust-src/lib/rustlib/src/rust/library/vendor/rustc-demangle-0.1.28/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-11.tar.xz",
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ]
+  },
+  "rust-crate-rustix-1.1.5": {
+   "version": "1.1.5",
+   "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-rustix-1.1.5.crate",
+     "member": "rustix-1.1.5/COPYRIGHT",
+     "as": "COPYRIGHT"
+    },
+    {
+     "input": "crate-rustix-1.1.5.crate",
+     "member": "rustix-1.1.5/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-rustix-1.1.5.crate",
+     "member": "rustix-1.1.5/LICENSE-Apache-2.0_WITH_LLVM-exception",
+     "as": "LICENSE-Apache-2.0_WITH_LLVM-exception"
+    },
+    {
+     "input": "crate-rustix-1.1.5.crate",
+     "member": "rustix-1.1.5/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-rustix-1.1.5.crate"
+   ]
+  },
+  "rust-crate-same-file-1.0.6": {
+   "version": "1.0.6",
+   "license": "Unlicense OR MIT",
+   "in": [
+    "anylinux-sharun"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-same-file-1.0.6.crate",
+     "member": "same-file-1.0.6/COPYING",
+     "as": "COPYING"
+    },
+    {
+     "input": "crate-same-file-1.0.6.crate",
+     "member": "same-file-1.0.6/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    },
+    {
+     "input": "crate-same-file-1.0.6.crate",
+     "member": "same-file-1.0.6/UNLICENSE",
+     "as": "UNLICENSE"
+    }
+   ],
+   "sources": [
+    "crate-same-file-1.0.6.crate"
+   ]
+  },
+  "rust-crate-scroll-0.12.0": {
+   "version": "0.12.0",
+   "license": "MIT",
+   "in": [
+    "anylinux-sharun"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-scroll-0.12.0.crate",
+     "member": "scroll-0.12.0/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "crate-scroll-0.12.0.crate"
+   ]
+  },
+  "rust-crate-scroll-0.13.0": {
+   "version": "0.13.0",
+   "license": "MIT",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-scroll-0.13.0.crate",
+     "member": "scroll-0.13.0/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "crate-scroll-0.13.0.crate"
+   ]
+  },
+  "rust-crate-signal-hook-0.4.4": {
+   "version": "0.4.4",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-signal-hook-0.4.4.crate",
+     "member": "signal-hook-0.4.4/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-signal-hook-0.4.4.crate",
+     "member": "signal-hook-0.4.4/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-signal-hook-0.4.4.crate"
+   ]
+  },
+  "rust-crate-signal-hook-registry-1.4.8": {
+   "version": "1.4.8",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-signal-hook-registry-1.4.8.crate",
+     "member": "signal-hook-registry-1.4.8/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "crate-signal-hook-registry-1.4.8.crate",
+     "member": "signal-hook-registry-1.4.8/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    }
+   ],
+   "sources": [
+    "crate-signal-hook-registry-1.4.8.crate"
+   ]
+  },
+  "rust-crate-simd-adler32-0.3.10": {
+   "version": "0.3.10",
+   "license": "MIT",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-simd-adler32-0.3.10.crate",
+     "member": "simd-adler32-0.3.10/LICENSE.md",
+     "as": "LICENSE.md"
+    }
+   ],
+   "sources": [
+    "crate-simd-adler32-0.3.10.crate"
+   ]
+  },
+  "rust-crate-userland-execve-0.3.2": {
+   "version": "0.3.2",
+   "license": "MIT",
+   "in": [
+    "anylinux-sharun"
+   ],
+   "license_texts": [
+    {
+     "input": "git-userland-execve-d2b58d8b5164.tar.gz",
+     "member": "userland-execve-rust-d2b58d8b5164b8c815c3f504eb3ddfff47f31556/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "git-userland-execve-d2b58d8b5164.tar.gz"
+   ]
+  },
+  "rust-crate-walkdir-2.5.0": {
+   "version": "2.5.0",
+   "license": "Unlicense OR MIT",
+   "in": [
+    "anylinux-sharun"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-walkdir-2.5.0.crate",
+     "member": "walkdir-2.5.0/COPYING",
+     "as": "COPYING"
+    },
+    {
+     "input": "crate-walkdir-2.5.0.crate",
+     "member": "walkdir-2.5.0/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    },
+    {
+     "input": "crate-walkdir-2.5.0.crate",
+     "member": "walkdir-2.5.0/UNLICENSE",
+     "as": "UNLICENSE"
+    }
+   ],
+   "sources": [
+    "crate-walkdir-2.5.0.crate"
+   ]
+  },
+  "rust-crate-which-8.0.6": {
+   "version": "8.0.6",
+   "license": "MIT",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-which-8.0.6.crate",
+     "member": "which-8.0.6/LICENSE.txt",
+     "as": "LICENSE.txt"
+    }
+   ],
+   "sources": [
+    "crate-which-8.0.6.crate"
+   ]
+  },
+  "rust-crate-xxhash-rust-0.8.18": {
+   "version": "0.8.18",
+   "license": "BSL-1.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-xxhash-rust-0.8.18.crate",
+     "member": "xxhash-rust-0.8.18/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "crate-xxhash-rust-0.8.18.crate"
+   ]
+  },
+  "rust-crate-zlib-rs-0.6.8": {
+   "version": "0.6.8",
+   "license": "Zlib",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-zlib-rs-0.6.8.crate",
+     "member": "zlib-rs-0.6.8/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "crate-zlib-rs-0.6.8.crate"
+   ]
+  },
+  "rust-crate-zstd-0.13.3": {
+   "version": "0.13.3",
+   "license": "MIT",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-zstd-0.13.3.crate",
+     "member": "zstd-0.13.3/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "crate-zstd-0.13.3.crate"
+   ]
+  },
+  "rust-crate-zstd-safe-7.3.0": {
+   "version": "7.3.0",
+   "license": "BSD-3-Clause",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-zstd-safe-7.3.0.crate",
+     "member": "zstd-safe-7.3.0/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "crate-zstd-safe-7.3.0.crate"
+   ]
+  },
+  "rust-crate-zstd-sys-2.1.0+zstd.1.5.7": {
+   "version": "2.1.0+zstd.1.5.7",
+   "license": "BSD-3-Clause",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "crate-zstd-sys-2.1.0+zstd.1.5.7.crate",
+     "member": "zstd-sys-2.1.0+zstd.1.5.7/LICENSE",
+     "as": "LICENSE"
+    },
+    {
+     "input": "crate-zstd-sys-2.1.0+zstd.1.5.7.crate",
+     "member": "zstd-sys-2.1.0+zstd.1.5.7/LICENSE.BSD-3-Clause",
+     "as": "LICENSE.BSD-3-Clause"
+    }
+   ],
+   "sources": [
+    "crate-zstd-sys-2.1.0+zstd.1.5.7.crate"
+   ]
+  },
+  "rust-std-nightly-2026-09-11": {
+   "version": "1.100.0-nightly (67eda617e 2026-09-10)",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "anylinux-sharun"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-11.tar.xz",
+     "member": "rust-src-nightly/COPYRIGHT",
+     "as": "COPYRIGHT"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-11.tar.xz"
+   ],
+   "note": "core, alloc, std, std_detect, panic_abort, panic_unwind and unwind"
+  },
+  "rust-std-nightly-2026-09-24": {
+   "version": "1.100.0-nightly (6eeff9a52 2026-09-23)",
+   "license": "MIT OR Apache-2.0",
+   "in": [
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "rust-src-nightly-2026-09-24.tar.xz",
+     "member": "rust-src-nightly/LICENSE-MIT",
+     "as": "LICENSE-MIT"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-24.tar.xz",
+     "member": "rust-src-nightly/LICENSE-APACHE",
+     "as": "LICENSE-APACHE"
+    },
+    {
+     "input": "rust-src-nightly-2026-09-24.tar.xz",
+     "member": "rust-src-nightly/COPYRIGHT",
+     "as": "COPYRIGHT"
+    }
+   ],
+   "sources": [
+    "rust-src-nightly-2026-09-24.tar.xz"
+   ],
+   "note": "core, alloc, std, std_detect, panic_abort, panic_unwind and unwind"
+  },
+  "static-boost-1.91.0": {
+   "version": "1.91.0",
+   "license": "BSL-1.0",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "boost-1.91.0-1-cmake.tar.xz",
+     "member": "boost-1.91.0-1/LICENSE_1_0.txt",
+     "as": "LICENSE_1_0.txt"
+    }
+   ],
+   "sources": [
+    "boost-1.91.0-1-cmake.tar.xz",
+    "dwarfs-source.tar.gz"
+   ]
+  },
+  "static-fmt-12.2.0": {
+   "version": "12.2.0",
+   "license": "MIT",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "fmt-12.2.0.tar.gz",
+     "member": "fmt-12.2.0/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "fmt-12.2.0.tar.gz"
+   ]
+  },
+  "static-jemalloc-5.3.1": {
+   "version": "5.3.1",
+   "license": "BSD-2-Clause",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "jemalloc-5.3.1.tar.bz2",
+     "member": "jemalloc-5.3.1/COPYING",
+     "as": "COPYING"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "jemalloc-5.3.1.tar.bz2"
+   ]
+  },
+  "static-libarchive-3.8.8": {
+   "version": "3.8.8",
+   "license": "BSD-2-Clause AND BSD-3-Clause AND LicenseRef-Public-Domain AND (CC0-1.0 OR OpenSSL OR Apache-2.0)",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "libarchive-3.8.8.tar.xz",
+     "member": "libarchive-3.8.8/COPYING",
+     "as": "COPYING"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "libarchive-3.8.8.tar.xz"
+   ]
+  },
+  "static-libfuse3-3.18.2": {
+   "version": "3.18.2",
+   "license": "LGPL-2.1-only",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "fuse-3.18.2.tar.gz",
+     "member": "fuse-3.18.2/LICENSE",
+     "as": "LICENSE"
+    },
+    {
+     "input": "fuse-3.18.2.tar.gz",
+     "member": "fuse-3.18.2/LGPL2.txt",
+     "as": "LGPL2.txt"
+    },
+    {
+     "input": "fuse-3.18.2.tar.gz",
+     "member": "fuse-3.18.2/GPL2.txt",
+     "as": "GPL2.txt"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "fuse-3.18.2.tar.gz"
+   ]
+  },
+  "static-libgcc-16.1.0": {
+   "version": "16.1.0",
+   "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "gcc-16.1.0.tar.xz",
+     "member": "gcc-16.1.0/COPYING3",
+     "as": "COPYING3"
+    },
+    {
+     "input": "gcc-16.1.0.tar.xz",
+     "member": "gcc-16.1.0/COPYING.RUNTIME",
+     "as": "COPYING.RUNTIME"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "gcc-16.1.0.tar.xz"
+   ]
+  },
+  "static-liblzma-5.8.3": {
+   "version": "5.8.3",
+   "license": "0BSD",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "xz-5.8.3.tar.xz",
+     "member": "xz-5.8.3/COPYING",
+     "as": "COPYING"
+    },
+    {
+     "input": "xz-5.8.3.tar.xz",
+     "member": "xz-5.8.3/COPYING.0BSD",
+     "as": "COPYING.0BSD"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "xz-5.8.3.tar.xz"
+   ]
+  },
+  "static-libressl-4.3.1": {
+   "version": "4.3.1",
+   "license": "OpenSSL AND ISC AND LicenseRef-Public-Domain",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "libressl-4.3.1.tar.gz",
+     "member": "libressl-4.3.1/COPYING",
+     "as": "COPYING"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "libressl-4.3.1.tar.gz"
+   ]
+  },
+  "static-libstdc++-16.1.0": {
+   "version": "16.1.0",
+   "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "gcc-16.1.0.tar.xz",
+     "member": "gcc-16.1.0/COPYING3",
+     "as": "COPYING3"
+    },
+    {
+     "input": "gcc-16.1.0.tar.xz",
+     "member": "gcc-16.1.0/COPYING.RUNTIME",
+     "as": "COPYING.RUNTIME"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "gcc-16.1.0.tar.xz"
+   ]
+  },
+  "static-musl-1.2.6": {
+   "version": "1.2.6",
+   "license": "MIT",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "musl-1.2.6.tar.gz",
+     "member": "musl-1.2.6/COPYRIGHT",
+     "as": "COPYRIGHT"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "musl-1.2.6.tar.gz"
+   ]
+  },
+  "static-nlohmann-json-3.12.0": {
+   "version": "3.12.0",
+   "license": "MIT",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "nlohmann-json-3.12.0-LICENSE.MIT",
+     "member": null,
+     "as": "LICENSE.MIT"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "nlohmann-json-3.12.0-LICENSE.MIT",
+    "nlohmann-json-3.12.0.hpp"
+   ]
+  },
+  "static-parallel-hashmap-2.0.0": {
+   "version": "2.0.0",
+   "license": "Apache-2.0",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "parallel-hashmap-2.0.0.tar.gz",
+     "member": "parallel-hashmap-2.0.0/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "parallel-hashmap-2.0.0.tar.gz"
+   ]
+  },
+  "static-range-v3-0.12.0": {
+   "version": "0.12.0",
+   "license": "BSL-1.0 AND (NCSA OR MIT) AND HPND",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "range-v3-0.12.0.tar.gz",
+     "member": "range-v3-0.12.0/LICENSE.txt",
+     "as": "LICENSE.txt"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "range-v3-0.12.0.tar.gz"
+   ]
+  },
+  "static-utfcpp-4.1.1": {
+   "version": "4.1.1",
+   "license": "BSL-1.0",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "utfcpp-4.1.1.tar.gz",
+     "member": "utfcpp-4.1.1/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "utfcpp-4.1.1.tar.gz"
+   ]
+  },
+  "static-xxhash-0.8.3": {
+   "version": "0.8.3",
+   "license": "BSD-2-Clause",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "xxHash-0.8.3.tar.gz",
+     "member": "xxHash-0.8.3/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "xxHash-0.8.3.tar.gz"
+   ]
+  },
+  "static-zstd-1.5.7": {
+   "version": "1.5.7",
+   "license": "BSD-3-Clause OR GPL-2.0-only",
+   "in": [
+    "dwarfs"
+   ],
+   "license_texts": [
+    {
+     "input": "zstd-1.5.7.tar.gz",
+     "member": "zstd-1.5.7/LICENSE",
+     "as": "LICENSE"
+    },
+    {
+     "input": "zstd-1.5.7.tar.gz",
+     "member": "zstd-1.5.7/COPYING",
+     "as": "COPYING"
+    }
+   ],
+   "sources": [
+    "dwarfs-source.tar.gz",
+    "zstd-1.5.7.tar.gz"
+   ]
+  },
+  "zig-compiler-rt-0.16.0": {
+   "version": "0.16.0",
+   "license": "MIT",
+   "in": [
+    "anylinux-sharun",
+    "dash",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "zig-0.16.0.tar.xz",
+     "member": "zig-0.16.0/LICENSE",
+     "as": "LICENSE"
+    }
+   ],
+   "sources": [
+    "zig-0.16.0.tar.xz"
+   ],
+   "note": "Zig's compiler_rt, linked into every Zig-linked binary"
+  },
+  "zig-musl-1.2.5": {
+   "version": "1.2.5 (Zig 0.16.0)",
+   "license": "MIT",
+   "in": [
+    "anylinux-sharun",
+    "dash",
+    "uruntime"
+   ],
+   "license_texts": [
+    {
+     "input": "zig-0.16.0.tar.xz",
+     "member": "zig-0.16.0/lib/libc/musl/COPYRIGHT",
+     "as": "COPYRIGHT"
+    }
+   ],
+   "sources": [
+    "zig-0.16.0.tar.xz"
+   ],
+   "note": "the musl libc Zig 0.16.0 builds for -target x86_64-linux-musl"
+  }
+ }
+}

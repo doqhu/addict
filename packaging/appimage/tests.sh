@@ -90,7 +90,7 @@ python3 - "$root" "$work/ocr-inputs" <<'INPUTS'
 import json, pathlib, sys
 root, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]); out.mkdir()
 lock=json.load(open(root/'packaging/appimage/inputs.lock.json'))
-for item in lock['rpms']+lock['tools']+lock['ocr']:
+for item in lock['rpms']+lock['tools']+lock['ocr']+lock['notices']+lock['srpms']+lock['static']:
     (out/item['file']).symlink_to(root/'target/appimage-inputs'/item['file'])
 INPUTS
 for name in tessdata-LICENSE eng.traineddata spa.traineddata cat.traineddata; do
@@ -101,7 +101,7 @@ for name in tessdata-LICENSE eng.traineddata spa.traineddata cat.traineddata; do
     rm "$work/ocr-inputs/$name"
     mv "$work/saved-link" "$work/ocr-inputs/$name"
 done
-python3 - "$work/AppDir" "$root/target/appimage-inputs" <<'PY'
+python3 - "$work/AppDir" "$root/target/appimage-inputs" "$root/packaging/appimage/inputs.lock.json" "$root/packaging/appimage/static-closures.json" <<'PY'
 import hashlib, pathlib, shutil, sys
 r = pathlib.Path(sys.argv[1])
 files = ['AppRun', 'AppRun.sh', 'sharun', 'dash', 'bin/addict', 'shared/bin/addict', 'bin/tesseract', 'shared/bin/tesseract',
@@ -127,6 +127,36 @@ for lang in ['eng','spa','cat']:
 entries=['lib/libtesseract.so.5.5','lib/libtesseract.so.5.5.0','bin/tesseract','shared/bin/tesseract','lib/libtesseract.so.5','lib/libleptonica.so.6','share/licenses/ocr/tessdata-LICENSE']
 (r/'share/ocr-components.sha256').write_text(''.join(hashlib.sha256((r/name).read_bytes()).hexdigest()+'  '+name+'\n' for name in entries))
 (r/'shared/bin/addict').write_bytes(b'\x7fELF\x02\x01'+b'\0'*12+b'\x3e\0')
+# A notices inventory over every fixture entry: a project, a copyleft RPM and the
+# runtime header with every library statically linked into it.
+import json, os
+lock = json.load(open(pathlib.Path(sys.argv[3])))
+pins = {i['file']: i for k in ('notices', 'srpms', 'static') for i in lock[k]}
+glibc = next(i for i in lock['srpms'] if i['file'].startswith('glibc-'))
+components = {
+    'addict': {'origin': 'project', 'license': 'MIT', 'license_files': ['share/licenses/addict/LICENSE', 'share/licenses/addict/crate-licenses.txt'], 'source': {'revision': 'fixture'}},
+    'glibc': {'origin': 'fedora-rpm', 'license': 'LGPL-2.1-or-later', 'license_files': ['share/licenses/glibc/COPYING.LIB'], 'source': {'files': [glibc]}},
+    'uruntime': {'origin': 'pinned-download', 'location': 'runtime header', 'license': 'MIT', 'license_files': ['share/licenses/uruntime/LICENSE'], 'source': {'files': [pins['uruntime-source.tar.gz']]}},
+    'dwarfs': {'origin': 'pinned-download', 'location': 'runtime header', 'license': 'MIT', 'license_files': ['share/licenses/dwarfs/LICENSE'], 'source': {'files': [pins['dwarfs-0.15.7.tar.xz']]}},
+    'anylinux-sharun': {'origin': 'pinned-download', 'license': 'MIT', 'license_files': ['share/licenses/anylinux-sharun/LICENSE'], 'source': {'files': [pins['anylinux-sharun-source.tar.gz']]}},
+    'dash': {'origin': 'pinned-download', 'license': 'BSD-3-Clause AND GPL-2.0-or-later', 'license_files': ['share/licenses/dash/LICENSE'], 'source': {'files': [pins['dash-0.5.13.5.tar.gz']]}}}
+# Every static closure: the runtime header's and those of sharun and dash.
+for name, entry in json.load(open(sys.argv[4]))['components'].items():
+    components[name] = {'origin': 'static', 'embedded_in': entry['in'], 'license': entry['license'],
+                        'license_files': ['share/licenses/'+name+'/LICENSE'], 'source': {'files': [pins[f] for f in entry['sources']]}}
+    if set(entry['in']) & {'uruntime', 'dwarfs'}:
+        components[name]['location'] = 'runtime header'
+for component in components.values():
+    for name in component['license_files']:
+        p = r/name; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'fixture notice')
+inventory = r/'share/licenses/components.json'
+inventory.write_text('{}')
+files = {}
+for directory, dirs, names in os.walk(r):
+    for name in names + [d for d in dirs if os.path.islink(os.path.join(directory, d))]:
+        rel = os.path.relpath(os.path.join(directory, name), r)
+        files[rel] = 'glibc' if rel.startswith('lib/libc.so') else 'anylinux-sharun' if rel == 'sharun' else 'dash' if rel == 'dash' else rel.split('/')[2] if rel.startswith('share/licenses/') and rel.count('/') >= 3 and rel.split('/')[2] in components else 'addict'
+inventory.write_text(json.dumps({'schema': 1, 'components': components, 'files': files}))
 PY
 check=("$root/scripts/check-appimage.sh" --appdir "$work/AppDir")
 "${check[@]}" > /dev/null
@@ -165,5 +195,55 @@ refuse 'escaping or broken symlink: escape' "${check[@]}"
 rm "$work/AppDir/escape"
 printf '\267' | dd of="$work/AppDir/shared/bin/addict" bs=1 seek=18 conv=notrunc status=none
 refuse 'unsupported ELF architecture:' "${check[@]}"
-echo 'PASS: input, architecture, missing-component, contamination and symlink refusals'
+printf '\076' | dd of="$work/AppDir/shared/bin/addict" bs=1 seek=18 conv=notrunc status=none
+# Notices: every row of the 5.4 matrix has a named refusal.
+inventory=$work/AppDir/share/licenses/components.json
+cp "$inventory" "$work/inventory"
+edit_inventory() { python3 -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); exec(sys.argv[2]); open(p,"w").write(json.dumps(d))' "$inventory" "$1"; }
+touch "$work/AppDir/share/stray"
+refuse 'file not in notices inventory: share/stray' "${check[@]}"
+rm "$work/AppDir/share/stray"
+mv "$work/AppDir/share/licenses/glibc/COPYING.LIB" "$work/saved-notice"
+refuse 'missing notice: glibc: share/licenses/glibc/COPYING.LIB' "${check[@]}"
+: > "$work/AppDir/share/licenses/glibc/COPYING.LIB"
+refuse 'missing notice: glibc: share/licenses/glibc/COPYING.LIB' "${check[@]}"
+mv "$work/saved-notice" "$work/AppDir/share/licenses/glibc/COPYING.LIB"
+edit_inventory 'd["components"]["glibc"]["source"]={}'
+refuse 'copyleft component without source: glibc' "${check[@]}"
+cp "$work/inventory" "$inventory"
+edit_inventory 'd["components"]["glibc"]["source"]["files"][0]["sha256"]="0"*64'
+refuse 'unpinned source record: glibc' "${check[@]}"
+cp "$work/inventory" "$inventory"
+edit_inventory 'd["components"]["glibc"]["source"]["files"]=[next(i for i in json.load(open("'"$root"'/packaging/appimage/inputs.lock.json"))["rpms"] if i["file"].startswith("glibc-"))]'
+refuse 'fedora component without source RPM: glibc' "${check[@]}"
+cp "$work/inventory" "$inventory"
+# The runtime header: uruntime, the DwarFS helper and each library linked into them.
+for name in uruntime dwarfs static-libfuse3-3.18.2 rust-crate-procfs-core-0.18.0; do
+    edit_inventory 'n="'"$name"'"; del d["components"][n]; d["files"]={k:("addict" if v==n else v) for k,v in d["files"].items()}'
+    refuse "missing notice: runtime header ($name)" "${check[@]}"
+    cp "$work/inventory" "$inventory"
+done
+# A tool in the AppDir brings its static closure: sharun without its crates is refused.
+edit_inventory 'n="rust-crate-goblin-0.8.2"; del d["components"][n]; d["files"]={k:("addict" if v==n else v) for k,v in d["files"].items()}'
+refuse 'missing notice: static closure of anylinux-sharun (rust-crate-goblin-0.8.2)' "${check[@]}"
+cp "$work/inventory" "$inventory"
+# A tool binary attributed elsewhere would skip its closure: refused, naming the path.
+edit_inventory 'd["files"]["sharun"]="addict"'
+refuse 'tool binary not attributed to anylinux-sharun: sharun (addict)' "${check[@]}"
+cp "$work/inventory" "$inventory"
+edit_inventory 'd["files"]["share/gone"]="addict"'
+refuse 'notices inventory names a missing file: share/gone' "${check[@]}"
+cp "$work/inventory" "$inventory"
+"${check[@]}" > /dev/null
+# Build-time attribution names a file that no RPM, tool or rule accounts for.
+# A fixture owner map stands in for the RPM database: no host rpm is needed.
+mkdir -p "$work/attribution/share/licenses/addict" "$work/attribution/lib"
+cp "$work/AppDir/sharun" "$work/attribution/"; cp "$work/AppDir/sharun" "$work/attribution/AppRun"; touch "$work/attribution/.DirIcon"
+touch "$work/attribution/share/licenses/addict/LICENSE" "$work/attribution/lib/libfixture.so.1"
+echo '{"/usr/lib64/libfixture.so.1": "fixture-libs"}' > "$work/owners.json"
+attribute=(python3 "$root/packaging/appimage/notices.py" --attribute-only "$work/attribution" "$work/owners.json")
+"${attribute[@]}" > /dev/null
+touch "$work/attribution/unowned-file"
+refuse 'unattributable file: unowned-file' "${attribute[@]}"
+echo 'PASS: input, architecture, missing-component, contamination, symlink and notices refusals'
 echo 'Desktop runtime acceptance is a separate manual check: see docs/appimage-build.md.'

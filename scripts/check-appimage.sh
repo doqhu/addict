@@ -45,8 +45,9 @@ PY
     appdir=$work/AppDir
     [[ -d $appdir ]] || { echo "missing extracted AppDir: $artifact" >&2; exit 1; }
 fi
-python3 - "$appdir" "$(dirname "${BASH_SOURCE[0]}")/../packaging/appimage/inputs.lock.json" <<'PY'
-import hashlib, json, os, pathlib, sys
+python3 - "$appdir" "$(dirname "${BASH_SOURCE[0]}")/../packaging/appimage/inputs.lock.json" "${artifact:-}" \
+    "$(dirname "${BASH_SOURCE[0]}")/../packaging/appimage/static-closures.json" <<'PY'
+import hashlib, json, os, pathlib, re, sys
 root = pathlib.Path(sys.argv[1]).resolve()
 def fail(message):
     raise SystemExit(message)
@@ -64,7 +65,8 @@ for pattern in ['AppRun', 'AppRun.sh', 'sharun', 'dash', 'bin/addict', 'shared/b
                 'share/glib-2.0/schemas/gschemas.compiled', 'etc/fonts/fonts.conf',
                 'share/fonts/**/*.ttf', 'share/icons/hicolor/*/apps/io.github.doqhu.Addict.png',
                 'share/icons/Adwaita/index.theme', 'lib/gio/modules/*.so',
-                'share/metainfo/io.github.doqhu.Addict.metainfo.xml', '*.desktop']:
+                'share/metainfo/io.github.doqhu.Addict.metainfo.xml', '*.desktop',
+                'share/licenses/addict/LICENSE', 'share/licenses/addict/crate-licenses.txt', 'share/licenses/components.json']:
     require(pattern)
 for name in ['AppRun', 'AppRun.sh', 'sharun', 'dash', 'bin/addict', 'shared/bin/addict', 'bin/tesseract', 'shared/bin/tesseract']:
     if not os.access(root/name, os.X_OK): fail('not executable: '+name)
@@ -109,5 +111,63 @@ for p in root.rglob('*'):
     if header[:4] == b'\x7fELF' and (header[4:6] != b'\x02\x01' or header[18:20] != b'\x3e\x00'):
         fail('unsupported ELF architecture: ' + rel)
     print(rel + (' -> ' + str(p.readlink()) if p.is_symlink() else ''))
-print('Validated: x86_64, GTK, libc, loader, schemas, fonts, icons, modules, pinned EN/ES/CA OCR and closure; no dictionary data')
+# Notices: the inventory is trusted only after each path it names is checked in the image.
+lock = json.load(open(sys.argv[2]))
+pins = {i['file']: i for k in ('rpms', 'tools', 'ocr', 'notices', 'srpms', 'static') for i in lock.get(k, [])}
+srpm_pins = {i['file'] for i in lock.get('srpms', [])}
+closures = json.load(open(sys.argv[4]))
+inventory = json.loads((root/'share/licenses/components.json').read_text())
+components, attributed = inventory['components'], inventory['files']
+present = []
+for directory, dirs, names in os.walk(root):
+    for name in names + [d for d in dirs if os.path.islink(os.path.join(directory, d))]:
+        present.append(os.path.relpath(os.path.join(directory, name), root))
+for name, component in sorted(components.items()):
+    if not component.get('license') or not component.get('license_files'):
+        fail('component without license: '+name)
+    for rel in component['license_files']:
+        path = root/rel
+        if not path.resolve().is_relative_to(root) or not path.is_file() or not path.stat().st_size or attributed.get(rel) is None:
+            fail('missing notice: '+name+': '+rel)
+    source = component.get('source') or {}
+    files = source.get('files', [])
+    if any(pins.get(item.get('file')) != item for item in files):
+        fail('unpinned source record: '+name)
+    if re.search(r'\b(AGPL|LGPL|GPL|MPL|EPL|EUPL|CDDL)-', component['license']) and not files \
+            and not (component.get('origin') == 'project' and source.get('revision')):
+        fail('copyleft component without source: '+name)
+    # A Fedora package's corresponding source is its pinned source RPM, not a binary RPM or a tool.
+    if component.get('origin') == 'fedora-rpm' and not any(item.get('file') in srpm_pins for item in files):
+        fail('fedora component without source RPM: '+name)
+    if not files and not (component.get('origin') == 'project' and source.get('revision')):
+        fail('component without source record: '+name)
+for rel in sorted(present):
+    if rel not in attributed: fail('file not in notices inventory: '+rel)
+for rel, name in sorted(attributed.items()):
+    if rel not in present: fail('notices inventory names a missing file: '+rel)
+    if name not in components: fail('file of unknown component: '+rel+' ('+name+')')
+# The pinned tools' binaries belong to their tools, whose static closures are checked below.
+for rel, name in sorted(attributed.items()):
+    owner = 'dash' if rel == 'dash' else 'anylinux-sharun' if rel == 'sharun' else \
+        ('cross-libc-dlopen' if rel.endswith('/cross-libc-dlopen.so') else 'anylinux-sharun') if rel.startswith('lib/sharun-preload/') else None
+    if owner and name != owner:
+        fail('tool binary not attributed to '+owner+': '+rel+' ('+name+')')
+runtime = sorted(n for n, c in components.items() if c.get('location') == 'runtime header')
+# The runtime header is uruntime with an embedded DwarFS helper; every library
+# statically linked into either is a component of its own.
+for name in ['uruntime', 'dwarfs'] + sorted(n for n, c in closures['components'].items() if set(c['in']) & {'uruntime', 'dwarfs'}):
+    if name not in runtime:
+        fail('missing notice: runtime header ('+name+')')
+# The static closures of the tools in the AppDir (sharun, dash) travel with them.
+for name, entry in sorted(closures['components'].items()):
+    hosts = sorted(set(entry['in']) & set(components) - {'uruntime', 'dwarfs'})
+    if hosts and name not in components:
+        fail('missing notice: static closure of '+hosts[0]+' ('+name+')')
+    if name in components and components[name].get('license') != entry['license']:
+        fail('static component license differs from static-closures.json: '+name)
+if sys.argv[3]:
+    with open(sys.argv[3], 'rb') as f:
+        if b'github.com/VHSgunzo/uruntime' not in f.read(4 << 20): fail('unrecognized runtime header: '+sys.argv[3])
+print('Notices: %d components (%d in the runtime header) cover %d files' % (len(components), len(runtime), len(attributed)))
+print('Validated: x86_64, GTK, libc, loader, schemas, fonts, icons, modules, pinned EN/ES/CA OCR and closure; notices; no dictionary data')
 PY

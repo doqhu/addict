@@ -11,7 +11,7 @@ import hashlib, json, pathlib, sys, urllib.request
 lock, directory, mode = json.load(open(sys.argv[1])), pathlib.Path(sys.argv[2]), sys.argv[3]
 directory.mkdir(parents=True, exist_ok=True)
 lines = []
-for item in lock['rpms'] + lock['tools'] + lock['ocr']:
+for item in lock['rpms'] + lock['tools'] + lock['ocr'] + lock['notices'] + lock['srpms'] + lock['static']:
     name, expected = item['file'], item['sha256']
     path = directory / name
     if not path.exists() and mode == 'fetch':
@@ -46,6 +46,7 @@ if [[ ${1:-} != --inside ]]; then
     mkdir -p -- "$out"
     # No old artifact or success metadata survives a failed attempt, from the first check on.
     find "$out" -maxdepth 1 \( -type f -o -type l \) -delete
+    find "$out" -mindepth 1 -maxdepth 1 -type d -name '*.sources*' -exec rm -rf -- {} +
     step=architecture
     "$0" --verify-arch "$(uname -m)"
     step=prerequisites
@@ -55,11 +56,22 @@ if [[ ${1:-} != --inside ]]; then
     step=inputs
     cache=$root/target/appimage-inputs
     verify_inputs "$cache" fetch
-    mkdir -p "$work/context/inputs" "$work/source" "$work/result"
+    mkdir -p "$work/context/inputs" "$work/srpms" "$work/static" "$work/source" "$work/result"
+    # Source RPMs and the static closures' sources are mounted at run time, not
+    # baked into the image: it installs every /inputs/*.rpm, and they are large.
+    declare -A static_input=()
+    while read -r file; do static_input[$file]=1; done < <(python3 -c 'import json, sys; print("\n".join(i["file"] for i in json.load(open(sys.argv[1]))["static"]))' "$lock")
     while read -r checksum file; do
-        cp -- "$cache/$file" "$work/context/inputs/"
+        if [[ $file == *.src.rpm ]]; then
+            cp -- "$cache/$file" "$work/srpms/"
+            echo "$checksum  $file" >> "$work/srpms/SHA256SUMS"
+        elif [[ -n ${static_input[$file]:-} ]]; then
+            cp -- "$cache/$file" "$work/static/"
+        else
+            cp -- "$cache/$file" "$work/context/inputs/"
+            echo "$checksum  $file" >> "$work/context/inputs/SHA256SUMS"
+        fi
     done < "$cache/SHA256SUMS"
-    cp -- "$cache/SHA256SUMS" "$work/context/inputs/"
     cp -- "$root/packaging/appimage/Containerfile" "$work/context/Containerfile"
     step=source-snapshot
     # Includes new source files for local development; never copies target or indexes.
@@ -76,11 +88,38 @@ if [[ ${1:-} != --inside ]]; then
     image=localhost/addict-appimage:$(sha256sum "$lock" | cut -c1-16)
     podman build --pull=missing --no-cache -t "$image" "$work/context"
     step=release-and-package
-    podman run --rm -v "$work/source:/build:Z" -v "$work/result:/out:Z" "$image"
+    podman run --rm -v "$work/source:/build:Z" -v "$work/result:/out:Z" -v "$work/srpms:/srpms:ro,Z" -v "$work/static:/static:ro,Z" "$image"
     step=artifact-validation
     artifact=$(find "$work/result" -maxdepth 1 -name '*.AppImage' -print -quit)
     "$root/scripts/check-appimage.sh" "${artifact:?no artifact produced}"
+    step=corresponding-source
+    # Every pinned source the inventory names, beside (not inside) the AppImage.
+    # Assembled under a temporary name and published last, after the artifact.
+    sources=$out/${artifact##*/}.sources
+    python3 - "$lock" "$artifact.notices.json" "$cache" "$sources.part" <<'PY'
+import json, pathlib, shutil, sys
+lock, inventory = json.load(open(sys.argv[1])), json.load(open(sys.argv[2]))
+cache, out = pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4])
+pins = {i['file']: i for k in ('rpms', 'tools', 'ocr', 'notices', 'srpms', 'static') for i in lock[k]}
+srpms = {i['file'] for i in lock['srpms']}
+out.mkdir()
+named = {}
+for name, component in inventory['components'].items():
+    for item in component['source'].get('files', []):
+        if item['file'] not in pins or pins[item['file']] != item:
+            raise SystemExit('unpinned source: ' + item['file'] + ' (component ' + name + ')')
+        named[item['file']] = item
+    if component['origin'] == 'fedora-rpm' and not any(i['file'] in srpms for i in component['source']['files']):
+        raise SystemExit('unpinned source package for component ' + name)
+for name in sorted(named):
+    shutil.copyfile(cache / name, out / name)
+(out / 'SHA256SUMS').write_text(''.join(named[n]['sha256'] + '  ' + n + '\n' for n in sorted(named)))
+print('Corresponding source: ' + str(len(named)) + ' files')
+PY
+    (cd "$sources.part" && sha256sum --check --strict --quiet SHA256SUMS)
+    step=publish
     cp -- "$work/result/"* "$out/"
+    mv -- "$sources.part" "$sources"
     echo "AppImage ready: $out/${artifact##*/}"
     exit 0
 fi
@@ -145,6 +184,9 @@ seen.update((root/'bin/tesseract', root/'share/licenses/ocr/tessdata-LICENSE'))
 manifest = root/'share/ocr-components.sha256'
 manifest.write_text(''.join(hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()+'  '+str(p.relative_to(root))+'\n' for p in sorted(seen | required_paths)))
 PY_OCR
+step=notices
+# Every AppDir entry and the runtime header belong to a component with notices and a source record.
+python3 packaging/appimage/notices.py "$APPDIR" packaging/appimage/inputs.lock.json /inputs /srpms /static /build
 step=validate-appdir
 scripts/check-appimage.sh --appdir "$APPDIR" > /build/layout.txt
 step=make-appimage
@@ -163,8 +205,9 @@ step=inventory
 cp packaging/appimage/inputs.lock.json "$OUTPATH/$name.inputs.lock.json"
 cp /inputs/installed-rpms.txt "$OUTPATH/$name.rpms.txt"
 cp /build/layout.txt "$OUTPATH/$name.layout.txt"
+cp "$APPDIR/share/licenses/components.json" "$OUTPATH/$name.notices.json"
 { cat source-revision.txt source-snapshot.sha256 source-status.txt; rustc -Vv; cargo -V; sha256sum Cargo.lock packaging/appimage/Containerfile; } > "$OUTPATH/$name.build.txt"
-# Full per-file content inventory is retained for story 5.4's notices work.
+# Full per-file content inventory; share/licenses/components.json attributes each file.
 (cd "$APPDIR" && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$OUTPATH/$name.components.sha256"
 (cd "$OUTPATH" && sha256sum "$name" > "$name.sha256")
 step=publish-local-outputs
