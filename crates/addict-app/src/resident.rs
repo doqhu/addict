@@ -1031,7 +1031,7 @@ impl Session {
             } else {
                 first_run::failed_text(why)
             };
-            offer.ended(&text);
+            offer.ended(first_run::FAILED_HEADING, &text, false);
             self.settings.render_download(false, &text);
             self.first_run = FirstRun::Ended { _offer: offer };
             return;
@@ -1125,7 +1125,11 @@ impl Session {
         } else {
             first_run::summary_text(&queue)
         };
-        offer.ended(&text);
+        offer.ended(
+            first_run::ended_heading(&queue),
+            &text,
+            first_run::is_complete(&queue),
+        );
         self.settings.render_download(false, &text);
         self.first_run = FirstRun::Ended { _offer: offer };
     }
@@ -1145,9 +1149,7 @@ impl Session {
             return;
         }
         queue.progress(name, received);
-        if let Some((published, state)) = queue.row(name) {
-            offer.show_row(name, state, published.size);
-        }
+        offer.show(queue);
     }
 
     /// Cancel was pressed on a row, or on the dialog: that index, or every

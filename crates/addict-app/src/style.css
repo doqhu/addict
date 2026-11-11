@@ -1038,3 +1038,215 @@ window.addict button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* The dialog that downloads the dictionaries: a serif heading over the
+ * offer, a card of figures or of progress, the sources grouped by
+ * language on one surface, and a card per language once all are in. */
+window.addict.first-run label.first-run-heading {
+  font-family: "Newsreader", "Source Serif 4", "Noto Serif", Georgia, serif;
+  font-size: 2em;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+window.addict.first-run label.first-run-lead {
+  color: var(--muted);
+}
+
+window.addict.first-run label.eyebrow.warn {
+  color: var(--warn);
+}
+
+window.addict.first-run label.eyebrow.accent {
+  color: var(--accent);
+}
+
+window.addict.first-run label.strong {
+  font-weight: 600;
+}
+
+window.addict.first-run .figures-tabular,
+window.addict.first-run .group-size,
+window.addict.first-run .row-status {
+  font-feature-settings: "tnum";
+}
+
+window.addict.first-run .first-run-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+window.addict.first-run .first-run-progress {
+  padding: 14px 16px;
+}
+
+window.addict.first-run .figure {
+  padding: 12px 16px;
+}
+
+window.addict.first-run .figure.divided {
+  border-left: 1px solid var(--line);
+}
+
+window.addict.first-run label.figure-value {
+  font-family: "Newsreader", "Source Serif 4", "Noto Serif", Georgia, serif;
+  font-size: 1.65em;
+  font-weight: 600;
+}
+
+window.addict.first-run progressbar.first-run-bar > trough,
+window.addict.first-run progressbar.row-bar > trough {
+  min-height: 6px;
+  border: none;
+  border-radius: 999px;
+  background: var(--chip);
+}
+
+window.addict.first-run progressbar.first-run-bar > trough > progress,
+window.addict.first-run progressbar.row-bar > trough > progress {
+  min-height: 6px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+window.addict.first-run progressbar.row-bar > trough,
+window.addict.first-run progressbar.row-bar > trough > progress {
+  min-height: 4px;
+}
+
+window.addict.first-run progressbar.row-bar {
+  min-width: 84px;
+}
+
+window.addict.first-run scrolledwindow.first-run-list {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+}
+
+window.addict.first-run .first-run-groups {
+  padding: 2px 6px 8px;
+}
+
+window.addict.first-run .group-head {
+  padding: 12px 12px 4px;
+}
+
+window.addict.first-run .first-run-row {
+  padding: 7px 12px;
+  border-radius: 10px;
+}
+
+window.addict.first-run .first-run-row.running {
+  background: var(--accent-soft);
+}
+
+window.addict.first-run label.row-name {
+  font-weight: 600;
+}
+
+window.addict.first-run label.row-sub,
+window.addict.first-run label.row-status {
+  color: var(--muted);
+  font-size: 0.9em;
+}
+
+window.addict.first-run label.row-sub.failed {
+  color: var(--warn);
+}
+
+window.addict.first-run label.row-status.running {
+  color: var(--accent);
+  font-weight: 600;
+  min-width: 34px;
+}
+
+window.addict.first-run label.row-status.good,
+window.addict.first-run image.row-check {
+  color: var(--good);
+  font-weight: 600;
+}
+
+window.addict.first-run label.row-status.failed {
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--warn-bg);
+  color: var(--warn);
+  font-weight: 600;
+}
+
+/* A row's Cancel shows on the running row, under the pointer and with the
+ * keyboard's focus; the others keep their place without drawing it. */
+window.addict.first-run button.row-cancel {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: none;
+  opacity: 0;
+}
+
+window.addict.first-run .first-run-row.running button.row-cancel,
+window.addict.first-run .first-run-row:hover button.row-cancel,
+window.addict.first-run button.row-cancel:focus-visible {
+  opacity: 1;
+}
+
+window.addict.first-run button.row-cancel:hover {
+  background: var(--chip);
+}
+
+window.addict.first-run button.first-run-button {
+  min-height: 44px;
+  padding: 0 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: none;
+  font-weight: 500;
+}
+
+window.addict.first-run button.first-run-button:hover {
+  background: var(--chip);
+}
+
+window.addict.first-run button.save {
+  padding: 0 20px;
+}
+
+window.addict.first-run .done-mark {
+  min-width: 56px;
+  min-height: 56px;
+  border-radius: 999px;
+  background: var(--good-bg);
+  color: var(--good);
+  margin-bottom: 4px;
+}
+
+window.addict.first-run .group-card {
+  padding: 14px 16px;
+}
+
+window.addict.first-run label.group-name {
+  font-family: "Newsreader", "Source Serif 4", "Noto Serif", Georgia, serif;
+  font-size: 1.35em;
+  font-weight: 600;
+}
+
+window.addict.first-run .group-check {
+  min-width: 26px;
+  min-height: 26px;
+  border-radius: 999px;
+  background: var(--good-bg);
+  color: var(--good);
+}
+
+window.addict.first-run .cancel-slot {
+  min-width: 26px;
+}
