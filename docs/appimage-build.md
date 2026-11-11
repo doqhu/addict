@@ -2,8 +2,8 @@
 
 This recipe packages the production `addict` executable with GTK 4.20 and
 libc. It leaves dictionary indexes in the normal shared application data
-path, `$XDG_DATA_HOME/addict` (default `~/.local/share/addict`). OCR, startup
-integration, updates, publication and complete dependency notices are later
+path, `$XDG_DATA_HOME/addict` (default `~/.local/share/addict`). OCR,
+updates, publication and complete dependency notices are later
 work. Do not distribute this experimental artifact as a finished release.
 The Flatpak recipe and application behavior are unchanged.
 
@@ -162,6 +162,125 @@ private bus, so end it with `kill -TERM <pid>` and then check that the
 `appimage_extracted_*` tree is gone.
 
 ## Verification record
+
+### Persistent launcher and login startup checks
+
+`addict install` is explicit: it installs a visible launcher pointing at the
+canonical persistent outer `APPIMAGE`, with no background flag. The Settings
+startup switch uses the same target with `--background` through the Background
+portal. Nothing automatically installs or repairs a launcher. Keep the image
+at that location. After moving it, run the image's `install` command from its
+new location, then turn startup off and on in Settings to replace the portal's
+saved command. Deleting or moving the image cannot automatically repair a
+command that already points to its old location. Disable and uninstall do not
+need to resolve the old image target.
+
+For a repeatable relaunch check on the disposable target desktop, Python 3
+with PyGObject/Gio must be available as verification tooling (they are not
+application dependencies):
+
+```sh
+packaging/appimage/tests.sh --relaunch IMAGE NEW_EVIDENCE_DIR
+```
+
+This copies the image into `images with spaces` under the new evidence
+directory, installs against disposable HOME/XDG directories and uses a private
+bus with no service activation directories. Its mock implements Registry and
+Background only; only that mock writes/removes the disposable autostart entry.
+It never contacts the desktop's actual portal. Follow the current instruction
+in `stage.json` or the terminal:
+
+1. Observe the normal window, dismiss the optional dictionary dialog, open
+   Settings and enable Start at login. The harness captures the real request.
+2. After it stops the resident and proves the extraction tree disappeared,
+   it launches the installed desktop entry again. Observe the normal window
+   and create `NEW_EVIDENCE_DIR/launcher-confirmed`.
+3. After another complete cleanup, it launches the portal-written desktop
+   command. Confirm that no app window appeared and create
+   `NEW_EVIDENCE_DIR/background-confirmed`.
+4. Open Settings (the app's `settings` action is available on its private bus),
+   turn startup off and on, and let the harness stop the resident and uninstall.
+
+To open Settings for the silent resident without first opening its main
+window, use the private bus address recorded by the harness:
+
+```sh
+DBUS_SESSION_BUS_ADDRESS="$(cat NEW_EVIDENCE_DIR/bus-address)" \
+  gdbus call --session --dest io.github.doqhu.Addict \
+  --object-path /io/github/doqhu/Addict \
+  --method org.gtk.Actions.Activate settings '[]' '{}'
+```
+
+Each observation is bounded to five minutes. `PASS` is written only after
+both commands have launched fresh bundled residents after cleanup, the
+Settings requests were true/false/true, and uninstall requested false before
+removing its launcher. Preserve screenshots for normal/silent observations,
+`portal.json`, `saved-command.json`, `cleanup.log`, the process traces and
+image checksum. This check uses an isolated mock portal; it does not certify
+the target desktop's actual login session or portal implementation.
+
+Persistent relaunch acceptance, recorded 2026-11-11:
+
+- Fresh pinned build from revision
+  `9fe8bc24e125a19326b1025d1e4c8f127f260c2a` plus the uncommitted 5.2 Rust
+  changes. Artifact SHA-256:
+  `c15a5292ca7802f3ddcaa945906265778b8f60cb64653928250e2795d8c39220`.
+  Source snapshot SHA-256:
+  `5e5013045ff30d43ad8487705a62f356d5c27ab16e849cff20b15aab375aba05`.
+  Extraction/layout checks and packaging refusal fixtures passed.
+- Disposable snapshot of the earlier Ubuntu 24.04.5 GNOME desktop, kernel
+  6.8.0-147-generic, no `/dev/fuse`. The new image was copied to
+  `/home/tester/relaunch-5.2/images with spaces/Addict-0.1.1-x86_64.AppImage`.
+  All HOME/XDG paths and the Registry/Background mock bus were private.
+- Explicit install saved the outer image, without flags. Desktop-entry
+  launch produced resident PID 2444 and a visible normal window. Settings
+  enable registered and sent the quoted outer image plus `--background`.
+  After SIGTERM, the resident and its
+  `/tmp/appimage_extracted_Addic1555832400808022495` tree disappeared.
+- Launching the installed desktop entry after cleanup produced fresh resident
+  PID 2734 and the visible normal main window. After another confirmed cleanup,
+  launching the portal-written entry produced PID 2935 with no app window.
+  The three process traces show the extracted executable and persistent
+  `APPIMAGE`; the reused extraction pathname had been absent between runs.
+- Settings off was confirmed as `disabled`; its portal command was empty.
+  The subsequent on request again named the persistent image. After final
+  resident/extraction cleanup, uninstall registered while the launcher still
+  existed, sent an empty disable command, and removed the launcher, icons and
+  saved state. Portal request sequence: true, false, true, false. Harness PASS.
+- Evidence: `target/appimage-relaunch-5.2/` contains the guest log and process
+  traces, portal payloads, three cleanup records, SHA-256/host records, and
+  screenshots of the initial window, launcher relaunch, silent background
+  relaunch and disabled switch. The final harness additionally retains a
+  launcher snapshot and waits for the final on state to be saved; those two
+  small verification improvements were added after this recorded run.
+- `scripts/check.sh`, focused startup/entries/install/uninstall tests,
+  `packaging/appimage/tests.sh`, shell/Python syntax and `git diff --check`
+  passed. Private-bus tests require running outside the restricted sandbox.
+  Real desktop login startup and real portal behavior were not exercised.
+
+Post-review final artifact, verified again on 2026-11-11:
+
+- Review found that a mode-bit check could accept an image the current user
+  could not execute (owner mode `0641`). The resolver now uses
+  `faccessat(X_OK, AT_EACCESS)`; the exact refusal case is covered by the
+  isolated installation test, preserving all existing profile files.
+- Rebuilt after that fix: artifact SHA-256
+  `76b159f838597f6ac32695fa6d3f5a7d303d4d9f9d1915ba43f063b0a279cfcb`;
+  source snapshot SHA-256
+  `80d1825b6baf32f65f951e0b1c8b58ddf093b3d11bd6aa1b78d572ca8bf4ed6e`.
+  `scripts/check.sh`, packaging refusals and extraction validation passed again.
+- Parent repeated the complete desktop harness with the final code and harness
+  on a new disposable Ubuntu snapshot. Explicit install used
+  `/home/tester/relaunch-5.2-final/images with spaces/Addict-0.1.1-x86_64.AppImage`.
+  Initial/launcher/background residents were PIDs 2427, 3074 and 3354.
+  `/tmp/appimage_extracted_Addic2048419049103469335` was confirmed absent after
+  each stop, before the next launch. The launcher opened a normal window;
+  the portal command launched silently. Settings off/on and uninstall passed,
+  with portal sequence true/false/true/false. Final harness result: PASS.
+- Evidence: `target/appimage-relaunch-5.2-final/`, including launcher text,
+  portal payloads, checksums, process traces, cleanup records and screenshots.
+  The VM was powered off. This final run retains the same private mock-portal
+  limitation: real desktop login and the system portal were not exercised.
 
 Desktop acceptance **passed** on 2026-11-10 on a disposable Ubuntu 24.04 GNOME
 VM (record below). Repeat it on the target desktop for each new artifact; do

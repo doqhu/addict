@@ -7,7 +7,9 @@
 //! [`save`].
 
 use std::{
+    ffi::CString,
     io,
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -118,7 +120,64 @@ pub fn relaunch_command() -> Result<Vec<String>, String> {
     if is_sandboxed() {
         return Ok(relaunch_in_sandbox());
     }
-    relaunch_of(&canonical_exe()?)
+    relaunch_of(&launch_target()?)
+}
+
+/// The persistent file to save in a launcher or login command. `APPIMAGE`
+/// names the outer image; `current_exe` names its disposable extraction.
+/// A broken runtime signal must therefore never fall back to this binary.
+pub fn launch_target() -> Result<PathBuf, String> {
+    if is_sandboxed() {
+        return canonical_exe();
+    }
+    let image = std::env::var_os("APPIMAGE");
+    let appdir = std::env::var_os("APPDIR");
+    if image.is_none() && appdir.is_none() {
+        return canonical_exe();
+    }
+    let resolve = || -> Result<PathBuf, String> {
+        let image = image.as_deref().ok_or("APPIMAGE is missing")?;
+        let image = Path::new(image);
+        if !image.is_absolute() {
+            return Err("APPIMAGE is empty or not absolute".to_owned());
+        }
+        quote_for_exec(image)?;
+        let target = image
+            .canonicalize()
+            .map_err(|e| format!("APPIMAGE {}: {e}", image.display()))?;
+        let metadata = target.metadata().map_err(|e| e.to_string())?;
+        let path = CString::new(target.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+        // SAFETY: `path` is a valid, NUL-terminated pathname. Use effective
+        // credentials, as exec does, including ACLs and the applicable class
+        // of permission bits rather than any execute bit on the file.
+        let executable = unsafe {
+            libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0
+        };
+        if !metadata.is_file() || !executable {
+            return Err(format!(
+                "APPIMAGE {} is not an executable regular file",
+                target.display()
+            ));
+        }
+        quote_for_exec(&target)?;
+        if let Some(appdir) = appdir.as_deref() {
+            let appdir = Path::new(appdir);
+            if !appdir.is_absolute() {
+                return Err("APPDIR is empty or not absolute".to_owned());
+            }
+            let appdir = appdir.canonicalize().map_err(|e| format!("APPDIR: {e}"))?;
+            if target.starts_with(appdir) {
+                return Err("APPIMAGE points inside the temporary APPDIR extraction".to_owned());
+            }
+        }
+        if target == canonical_exe()? {
+            return Err("APPIMAGE points to the running binary, not the outer image".to_owned());
+        }
+        Ok(target)
+    };
+    resolve().map_err(|reason| format!(
+        "cannot use the persistent outer AppImage: {reason}; launch the AppImage from its persistent location and run install again (turn login startup off and on to repair it)"
+    ))
 }
 
 /// The canonical path of this binary.

@@ -2,6 +2,10 @@
 # Refusal tests use disposable layout fixtures; these are never dictionary fixtures.
 set -Eeuo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+if [[ ${1:-} == --relaunch ]]; then
+    [[ $# == 3 ]] || { echo "usage: $0 --relaunch IMAGE NEW_EVIDENCE_DIR" >&2; exit 1; }
+    exec python3 "$root/packaging/appimage/relaunch.py" "$2" "$3"
+fi
 if [[ ${1:-} == --runtime ]]; then
     [[ $# == 3 ]] || { echo "usage: $0 --runtime IMAGE EVIDENCE_DIR" >&2; exit 1; }
     # This launches on the caller's display; target-distribution acceptance is manual.

@@ -113,7 +113,7 @@ fn checked_icons() -> Result<PathBuf, String> {
 /// autostart directory is not a target: only the Background portal may manage
 /// it.
 pub fn install_entries() -> Result<Vec<PathBuf>, String> {
-    let exec = startup::canonical_exe()?;
+    let exec = startup::launch_target()?;
     let applications = applications_dir()?;
     check_entry(&applications)?;
     let icons = checked_icons()?;
