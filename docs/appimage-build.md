@@ -379,3 +379,153 @@ Desktop acceptance, recorded 2026-11-10:
 - Raw evidence: `target/appimage-runtime-ubuntu24-desktop/` (screenshots,
   launch log, process trace, host record, exit record, release manifest and
   the guest's cloud-init configuration).
+
+## Bundled OCR and repeatable capture verification (5.3)
+
+The pinned Fedora 43 input set adds Tesseract 5.5.3-2.fc43, Leptonica
+1.87.0-1.fc43 and their resolved RPM dependencies (391 RPMs total). The three
+models and Apache license use the same tessdata_fast 4.1.0 URLs and SHA-256
+pins as the unchanged Flatpak manifest. The build verifies every RPM, tool,
+model and downloaded license before use, and installs with repositories and
+weak dependencies disabled. There is no mutable download fallback.
+
+Build and inspect with:
+
+```sh
+scripts/build-appimage.sh
+packaging/appimage/tests.sh
+scripts/check-appimage.sh target/appimage/Addict-0.1.1-x86_64.AppImage
+(cd target/appimage && sha256sum --check Addict-0.1.1-x86_64.AppImage.sha256)
+```
+
+The refusal fixtures require the verified input cache populated by the build.
+The final layout has executable `bin/tesseract` (the sibling launcher) and
+`shared/bin/tesseract` (engine), bundled `lib/libtesseract.so*`,
+`lib/libleptonica.so*` and their complete ELF dependency closure. Only
+`share/tessdata/{eng,spa,cat}.traineddata` are allowed anywhere in the image:
+
+| Model | SHA-256 |
+| --- | --- |
+| eng | `7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2` |
+| spa | `6f2e04d02774a18f01bed44b1111f2cd7f3ba7ac9dc4373cd3f898a40ea6b464` |
+| cat | `250db73cd5b380d2798581295dc12f20d0828cdb335a65d833d12dfdbf57117d` |
+
+Quick-sharun's implicitly copied `share/tesseract` and `share/tessdata`
+contents are replaced explicitly. `share/ocr-components.sha256` records the
+packaged engine and every recursively resolved ELF dependency; validation
+checks those contents as well as model pins and executable paths before build
+success metadata is emitted. The normal complete file/RPM inventories remain.
+Upstream engine, Leptonica, giflib and tessdata notices are retained under
+`share/licenses/ocr`. This is not the complete 5.4 notice audit.
+
+On a disposable Ubuntu 24.04 desktop **without host Tesseract, model trees or
+`/dev/fuse`**, install verification tooling only:
+
+```sh
+sudo apt-get install python3-gi python3-pyatspi at-spi2-core strace dbus-x11
+packaging/appimage/tests.sh --ocr /absolute/path/Addict-0.1.1-x86_64.AppImage \
+  /absolute/path/new-ocr-evidence
+```
+
+Use the desktop session's actual `DISPLAY` and `XAUTHORITY` (omit the latter
+assignment when inherited correctly); GNOME Xwayland is supported. Transfer
+`scripts/check-appimage.sh`, `packaging/appimage/{tests.sh,ocr.py,inputs.lock.json}`
+and `packaging/appimage/fixtures/*.png` with their relative repository paths.
+Python, Gio, AT-SPI, strace and D-Bus are verification tools, not application
+requirements. Missing tools and host OCR contamination produce named refusals.
+
+The harness first validates the supplied image. For each language it creates
+fresh HOME/XDG directories and a private session bus without system portal
+activation. Only its private Screenshot/Registry mock and the standard AT-SPI
+service are available. There are no OCR configuration overrides; the normal
+language preference selects EN, ES or CA. AT-SPI presses the production Capture
+button and reads the resulting GTK field. The production app receives the
+known PNG URI from Screenshot, performs the existing capture/OCR path, and
+removes the snapshot. The known texts, including Spanish and Catalan accents,
+are asserted exactly. It records successful model opens with strace and actual
+child executable/arguments/loaded-library paths through `/proc`, then bounds
+resident/extraction teardown. `PASS.json` appears only after all three outputs
+and cleanup succeed. A reused evidence directory is refused.
+
+Fixtures are verification resources and never enter the bundle. Regenerate
+with `python3 packaging/appimage/fixtures/generate.py` (Pillow and Liberation
+Sans 2.1.5; font SHA-256
+`76d04c18ea243f426b7de1f3ad208e927008f961dc5945e5aad352d0dfde8ee8`).
+The checked PNGs make repeated verification independent of renderer/font
+availability on the target machine.
+
+This verifies packaged capture and OCR with a deterministic Screenshot
+response. It does not exercise real area selection, the desktop's Screenshot
+portal implementation, or the final two-distribution acceptance of 5.7.
+
+Executed OCR verification, 2026-11-11:
+
+- Fresh production build from baseline revision
+  `48fdcd07baf26526bed4ddb46a72a111ff810827` with the 5.3 packaging changes;
+  source snapshot `98f039dcb1b6bc3ccb56af922d7cba41f46167fcbd087ba57cd7e5b715fc73e0`.
+  AppImage SHA-256:
+  `b65a029d4c2dd173a61b18fae9fc995d07548116a6fed47ce62476ea39d8317f`.
+  The final fixture/harness refinements are verification resources outside the
+  bundle. No Rust or Flatpak changes were needed.
+- Disposable overlay of the existing Ubuntu 24.04.5 GNOME desktop base,
+  kernel 6.8.0-147-generic. The base was not modified. Only verification
+  packages were added to the overlay; it had no host Tesseract, system
+  tessdata tree or `/dev/fuse`. Xwayland displayed the normal production UI.
+  Each launch log records failed FUSE followed by automatic extraction.
+- The final command, `tests.sh --ocr IMAGE /home/tester/ocr-5.3-verified`,
+  passed all three exact GTK field assertions:
+  `The bank is beside the river.`, `El niño está cerca del río.`, and
+  `El camí és a prop del riu.`. Actual OCR child PIDs were 5077, 5166 and
+  5320, each executing
+  `/tmp/appimage_extracted_Addic11528054946601516958/bin/tesseract` with
+  `--tessdata-dir .../bin/../share/tessdata` and its matching `-l eng/spa/cat`.
+  Successful model opens identify the canonical bundled model per language.
+  Every observed child shared-library mapping belonged to the extracted
+  bundle, including Tesseract, Leptonica and libc.
+- Each resident terminated and its extraction tree was confirmed absent
+  before the next language started. The runtime reused the same extraction
+  pathname only after that absence check. `PASS.json` was written after all
+  three cleanup checks; the VM was powered off after collecting evidence.
+- Earlier diagnostics are not acceptance: an AT-SPI startup-cache race timed
+  out before Capture, and the first Spanish fixture's `pingüino` was read as
+  `pinguino`. The harness now clears accessible-node caches; the final Spanish
+  fixture uses `niño` while retaining exact accented expectations. Those
+  failed runs emitted no PASS. Their logs are retained with the final evidence.
+- Evidence: `target/appimage-ocr-5.3/ocr-5.3-verified/` contains the image/host
+  records, private bus definition, each profile's actual text, production
+  application evidence, strace calls, child maps, fixture hashes and cleanup
+  records. The archive in its parent directory also retains diagnostic logs.
+  The checked PNGs were rendered with Pillow 12.3.0 and the font pin above.
+- Packaging refusal fixtures passed for missing/corrupt pinned inputs,
+  missing/corrupt engine/Leptonica/models, unexecutable launchers,
+  extra/relocated models, dictionary headers/extensions, symlink escapes and
+  wrong ELF architecture. Final artifact extraction validation and SHA-256
+  verification, shell/Python syntax, `git diff --check` and `reuse lint` passed.
+
+Post-review final artifact, independently verified 2026-11-11:
+
+- Review reproduced a missing-SONAME case: deleting `lib/libtesseract.so.5.5`
+  left its payload present and initially escaped validation. The OCR inventory
+  now retains required dependency pathnames as well as resolved files. Both
+  the refusal fixture and deletion from the real final extracted image fail
+  with `missing OCR dependency: lib/libtesseract.so.5.5`.
+- A fresh build after that correction passed all package checks. Artifact SHA-256
+  `e9873c9977296aeccae7ab131f3f0d097f92dffe47a25d2dee6db1e2ef6f6f56`;
+  source snapshot SHA-256
+  `cd03c52c34872e771ea13132c1f12937f71b17147aab91d06f1186ad65cad482`.
+- A rebooted VM exposed an accessibility-tool initialization race before
+  Capture. The unbundled harness now activates its private accessibility bus,
+  queries the Registry root and selects that explicit address before importing
+  pyatspi or launching the app. This uses no retry and preserves all assertions.
+- The parent rebooted the Ubuntu overlay again and reran the complete final
+  harness. English, Spanish and Catalan exactly matched the texts above;
+  actual OCR child PIDs were 2211, 2305 and 2469. Successful model opens and
+  child library maps belonged to
+  `/tmp/appimage_extracted_Addic15801695028444076955`; the extraction tree
+  was confirmed absent between all launches and after the last one.
+- Final evidence: `target/appimage-ocr-5.3/ocr-5.3-parent-reboot/` and its
+  `.tgz` archive, including `PASS.json`, image checksum, host record, traces,
+  actual UI text and cleanup. The VM was powered off. Shell/Python syntax,
+  refusal tests, final image extraction/checksum, whitespace and REUSE checks
+  passed. The deterministic Screenshot and two-distro acceptance limitations
+  remain as described above.

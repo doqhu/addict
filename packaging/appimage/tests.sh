@@ -2,6 +2,10 @@
 # Refusal tests use disposable layout fixtures; these are never dictionary fixtures.
 set -Eeuo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+if [[ ${1:-} == --ocr ]]; then
+    [[ $# == 3 ]] || { echo "usage: $0 --ocr IMAGE NEW_EVIDENCE_DIR" >&2; exit 1; }
+    exec python3 "$root/packaging/appimage/ocr.py" "$2" "$3"
+fi
 if [[ ${1:-} == --relaunch ]]; then
     [[ $# == 3 ]] || { echo "usage: $0 --relaunch IMAGE NEW_EVIDENCE_DIR" >&2; exit 1; }
     exec python3 "$root/packaging/appimage/relaunch.py" "$2" "$3"
@@ -80,10 +84,30 @@ refuse 'missing input:' "$root/scripts/build-appimage.sh" --verify-inputs "$work
 first=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rpms"][0]["file"])' "$root/packaging/appimage/inputs.lock.json")
 echo corrupt > "$work/inputs/$first"
 refuse 'checksum mismatch:' "$root/scripts/build-appimage.sh" --verify-inputs "$work/inputs"
-python3 - "$work/AppDir" <<'PY'
-import pathlib, sys
+# Every locked OCR download has named missing/corrupt refusals, after the
+# preceding pinned inputs have been satisfied. Symlinks avoid copying RPMs.
+python3 - "$root" "$work/ocr-inputs" <<'INPUTS'
+import json, pathlib, sys
+root, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]); out.mkdir()
+lock=json.load(open(root/'packaging/appimage/inputs.lock.json'))
+for item in lock['rpms']+lock['tools']+lock['ocr']:
+    (out/item['file']).symlink_to(root/'target/appimage-inputs'/item['file'])
+INPUTS
+for name in tessdata-LICENSE eng.traineddata spa.traineddata cat.traineddata; do
+    mv "$work/ocr-inputs/$name" "$work/saved-link"
+    refuse "missing input: $name" "$root/scripts/build-appimage.sh" --verify-inputs "$work/ocr-inputs"
+    echo corrupt > "$work/ocr-inputs/$name"
+    refuse "checksum mismatch: $name" "$root/scripts/build-appimage.sh" --verify-inputs "$work/ocr-inputs"
+    rm "$work/ocr-inputs/$name"
+    mv "$work/saved-link" "$work/ocr-inputs/$name"
+done
+python3 - "$work/AppDir" "$root/target/appimage-inputs" <<'PY'
+import hashlib, pathlib, shutil, sys
 r = pathlib.Path(sys.argv[1])
-files = ['AppRun', 'AppRun.sh', 'sharun', 'dash', 'bin/addict', 'shared/bin/addict',
+files = ['AppRun', 'AppRun.sh', 'sharun', 'dash', 'bin/addict', 'shared/bin/addict', 'bin/tesseract', 'shared/bin/tesseract',
+         'lib/libtesseract.so.5', 'lib/libleptonica.so.6',
+         'share/licenses/ocr/tesseract/LICENSE', 'share/licenses/ocr/leptonica/LICENSE',
+         'share/licenses/ocr/tessdata-LICENSE',
          'lib/libgtk-4.so.1', 'lib/libGLESv2.so.2', 'lib/libvulkan_lvp.so',
          'share/vulkan/icd.d/lvp_icd.x86_64.json', 'lib/libc.so.6', 'lib/ld-linux-x86-64.so.2',
          'share/glib-2.0/schemas/gschemas.compiled', 'etc/fonts/fonts.conf',
@@ -92,14 +116,43 @@ files = ['AppRun', 'AppRun.sh', 'sharun', 'dash', 'bin/addict', 'shared/bin/addi
          'share/metainfo/io.github.doqhu.Addict.metainfo.xml', 'addict.desktop']
 for name in files:
     p = r/name; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'fixture')
+for name in ['AppRun', 'AppRun.sh', 'sharun', 'dash', 'bin/addict', 'shared/bin/addict', 'bin/tesseract', 'shared/bin/tesseract']:
+    (r/name).chmod(0o755)
+for lang in ['eng','spa','cat']:
+    target=r/'share/tessdata'/(lang+'.traineddata'); target.parent.mkdir(parents=True,exist_ok=True)
+    shutil.copyfile(pathlib.Path(sys.argv[2])/(lang+'.traineddata'),target)
+# Keep another library payload present when the required SONAME alias goes away.
+(r/'lib/libtesseract.so.5.5.0').write_bytes(b'fixture')
+(r/'lib/libtesseract.so.5.5').symlink_to('libtesseract.so.5.5.0')
+entries=['lib/libtesseract.so.5.5','lib/libtesseract.so.5.5.0','bin/tesseract','shared/bin/tesseract','lib/libtesseract.so.5','lib/libleptonica.so.6','share/licenses/ocr/tessdata-LICENSE']
+(r/'share/ocr-components.sha256').write_text(''.join(hashlib.sha256((r/name).read_bytes()).hexdigest()+'  '+name+'\n' for name in entries))
 (r/'shared/bin/addict').write_bytes(b'\x7fELF\x02\x01'+b'\0'*12+b'\x3e\0')
 PY
 check=("$root/scripts/check-appimage.sh" --appdir "$work/AppDir")
 "${check[@]}" > /dev/null
-for path in lib/libgtk-4.so.1 lib/libGLESv2.so.2 lib/libvulkan_lvp.so lib/libc.so.6 lib/ld-linux-x86-64.so.2 share/glib-2.0/schemas/gschemas.compiled etc/fonts/fonts.conf; do
+for path in bin/tesseract shared/bin/tesseract lib/libtesseract.so.5 lib/libleptonica.so.6 share/tessdata/eng.traineddata share/tessdata/spa.traineddata share/tessdata/cat.traineddata lib/libgtk-4.so.1 lib/libGLESv2.so.2 lib/libvulkan_lvp.so lib/libc.so.6 lib/ld-linux-x86-64.so.2 share/glib-2.0/schemas/gschemas.compiled etc/fonts/fonts.conf; do
     mv "$work/AppDir/$path" "$work/removed"
-    refuse 'missing component:' "${check[@]}"
+    refuse 'missing \(component\|OCR dependency\):' "${check[@]}"
     mv "$work/removed" "$work/AppDir/$path"
+done
+# A remaining payload (and other matching aliases) must not mask a missing
+# SONAME link that the OCR engine's DT_NEEDED actually requires.
+mv "$work/AppDir/lib/libtesseract.so.5.5" "$work/removed-soname"
+refuse 'missing OCR dependency: lib/libtesseract.so.5.5' "${check[@]}"
+mv "$work/removed-soname" "$work/AppDir/lib/libtesseract.so.5.5"
+for path in shared/bin/tesseract lib/libtesseract.so.5 lib/libleptonica.so.6 share/tessdata/eng.traineddata share/tessdata/spa.traineddata share/tessdata/cat.traineddata; do
+    cp "$work/AppDir/$path" "$work/saved"
+    echo corrupt >> "$work/AppDir/$path"
+    refuse 'corrupt OCR' "${check[@]}"
+    cp "$work/saved" "$work/AppDir/$path"
+done
+chmod -x "$work/AppDir/bin/tesseract"
+refuse 'not executable: bin/tesseract' "${check[@]}"
+chmod +x "$work/AppDir/bin/tesseract"
+for path in share/tessdata/fra.traineddata eng.traineddata share/eng.traineddata; do
+    touch "$work/AppDir/$path"
+    refuse 'unexpected OCR model:' "${check[@]}"
+    rm "$work/AppDir/$path"
 done
 printf ADDICTIX > "$work/AppDir/hidden-data"
 refuse 'contamination: hidden-data' "${check[@]}"

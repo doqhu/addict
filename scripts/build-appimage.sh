@@ -11,7 +11,7 @@ import hashlib, json, pathlib, sys, urllib.request
 lock, directory, mode = json.load(open(sys.argv[1])), pathlib.Path(sys.argv[2]), sys.argv[3]
 directory.mkdir(parents=True, exist_ok=True)
 lines = []
-for item in lock['rpms'] + lock['tools']:
+for item in lock['rpms'] + lock['tools'] + lock['ocr']:
     name, expected = item['file'], item['sha256']
     path = directory / name
     if not path.exists() and mode == 'fetch':
@@ -107,13 +107,44 @@ export DESKTOP=$root/data/io.github.doqhu.Addict.desktop ICON=$root/crates/addic
 # Keep Fedora's checksummed Mesa/LLVM closure, including software rendering.
 export DEPLOY_GTK=1 DEPLOY_GLIBC=1 DEPLOY_GDK=1 STRACE_MODE=0 DEPLOY_OPENGL=1 DEPLOY_VULKAN=1 DEPLOY_VULKAN_ALL=1 I_WANT_FAT_APPIMAGE=1
 step=deploy-gtk-libc
-bash /inputs/quick-sharun.sh "$CARGO_TARGET_DIR/release/addict"
+bash /inputs/quick-sharun.sh "$CARGO_TARGET_DIR/release/addict" /usr/bin/tesseract
+# quick-sharun may copy host tessdata: replace it with the exact shared pins.
+rm -rf "$APPDIR/share/tessdata" "$APPDIR/share/tesseract"
+mkdir -p "$APPDIR/share/tessdata" "$APPDIR/share/licenses/ocr"
+install -m644 /inputs/{eng,spa,cat}.traineddata "$APPDIR/share/tessdata/"
+install -m644 /inputs/tessdata-LICENSE "$APPDIR/share/licenses/ocr/"
+# Preserve RPM-provided upstream engine and Leptonica notices.
+cp -a /usr/share/licenses/{tesseract,leptonica,giflib} "$APPDIR/share/licenses/ocr/"
+cp -a /usr/share/licenses/tesseract-tessdata* "$APPDIR/share/licenses/ocr/"
 # Preserve the application's native/Flatpak shared cache path as well as data/config.
 sed -i '/^set -e$/a export USE_HOST_XDG_CACHE_HOME=1' "$APPDIR/AppRun.sh"
 # Explicit fonts and icon resources; ELF dependencies/modules belong to quick-sharun.
 cp -a /usr/share/fonts "$APPDIR/share/"
 cp -aL /etc/fonts "$APPDIR/etc/"
 cp -a /usr/share/icons/Adwaita "$APPDIR/share/icons/"
+# Retain a content manifest of the deployed OCR binary/library closure. This
+# detects corruption before success metadata, including missing transitive libs.
+python3 - "$APPDIR" <<'PY_OCR'
+import hashlib, pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+seen, required_paths = set(), set()
+def visit(path):
+    # Keep the SONAME pathname the loader opens as well as its final contents.
+    required_paths.add(path)
+    path = path.resolve()
+    if path in seen: return
+    seen.add(path)
+    result = subprocess.run(['readelf', '-d', str(path)], check=True, capture_output=True, text=True)
+    import re
+    for name in re.findall(r'\(NEEDED\).*?\[(.*?)\]', result.stdout):
+        lib = root/'lib'/name
+        if not lib.is_file(): raise SystemExit('missing OCR dependency: '+name)
+        visit(lib)
+visit(root/'shared/bin/tesseract')
+seen.update((root/'bin/tesseract', root/'share/licenses/ocr/tessdata-LICENSE'))
+manifest = root/'share/ocr-components.sha256'
+manifest.write_text(''.join(hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()+'  '+str(p.relative_to(root))+'\n' for p in sorted(seen | required_paths)))
+PY_OCR
 step=validate-appdir
 scripts/check-appimage.sh --appdir "$APPDIR" > /build/layout.txt
 step=make-appimage

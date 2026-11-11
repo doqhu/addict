@@ -359,6 +359,11 @@
       "sha256": "9f3f3c1098c2e76c2ea88843a6abef9c25ed72f6d6c8bc65772df15b71f82280"
     },
     {
+      "file": "giflib-5.2.2-9.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/giflib/5.2.2/9.fc43/data/signed/31645531/x86_64/giflib-5.2.2-9.fc43.x86_64.rpm",
+      "sha256": "e02117f2e5d64b9fad2085f2809a6650c17926251dea6e56c40ee8ae712f15dd"
+    },
+    {
       "file": "git-2.56.0-1.fc43.x86_64.rpm",
       "url": "https://kojipkgs.fedoraproject.org/packages/git/2.56.0/1.fc43/data/signed/31645531/x86_64/git-2.56.0-1.fc43.x86_64.rpm",
       "sha256": "8df5fdeb2e19e958e265ebe6fd1a48c1ea832d72741e01d38221c1214fde73f2"
@@ -617,6 +622,11 @@
       "file": "lcms2-devel-2.16-6.fc43.x86_64.rpm",
       "url": "https://kojipkgs.fedoraproject.org/packages/lcms2/2.16/6.fc43/data/signed/31645531/x86_64/lcms2-devel-2.16-6.fc43.x86_64.rpm",
       "sha256": "a625741fa4036ea4153a9e4802c858ab3125a06569a0df229da1281ddbb2786f"
+    },
+    {
+      "file": "leptonica-1.87.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/leptonica/1.87.0/1.fc43/data/signed/31645531/x86_64/leptonica-1.87.0-1.fc43.x86_64.rpm",
+      "sha256": "e055f160be0d2724c9dfc00c451cc547e113bf809c24bb6b28f13c83136c08e6"
     },
     {
       "file": "less-710-1.fc43.x86_64.rpm",
@@ -1849,6 +1859,31 @@
       "sha256": "d4e530842729c64e37b270bb2098d8277606e6875605164a79f16265a7c8b544"
     },
     {
+      "file": "tesseract-5.5.3-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/data/signed/31645531/x86_64/tesseract-5.5.3-2.fc43.x86_64.rpm",
+      "sha256": "f6b887ffcab34360cf59ba2ff36dd61fb156eece723a36ba57e0ff2f55bc65b6"
+    },
+    {
+      "file": "tesseract-common-5.5.3-2.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/data/signed/31645531/noarch/tesseract-common-5.5.3-2.fc43.noarch.rpm",
+      "sha256": "380287bba39bff59161696ae96e522703869cedc29621f4ae4cc270d3beb18b8"
+    },
+    {
+      "file": "tesseract-langpack-eng-4.1.0-11.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract-tessdata/4.1.0/11.fc43/data/signed/31645531/noarch/tesseract-langpack-eng-4.1.0-11.fc43.noarch.rpm",
+      "sha256": "14288995c1db9699960da0b0cb6e36df500270d77a24c86b10605aaef57d2c6e"
+    },
+    {
+      "file": "tesseract-libs-5.5.3-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/data/signed/31645531/x86_64/tesseract-libs-5.5.3-2.fc43.x86_64.rpm",
+      "sha256": "3f05bcc2ec5666c8c1c65ba330e7cb439f3669f01f8fce54b85e4247c6b8dce1"
+    },
+    {
+      "file": "tesseract-tessdata-doc-4.1.0-11.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract-tessdata/4.1.0/11.fc43/data/signed/31645531/noarch/tesseract-tessdata-doc-4.1.0-11.fc43.noarch.rpm",
+      "sha256": "e11efe45e9504d19fa3a7f4f8dae7f9e04f5a4ff06bedaf5aebf4655fe453515"
+    },
+    {
       "file": "tzdata-2026f-1.fc43.noarch.rpm",
       "url": "https://kojipkgs.fedoraproject.org/packages/tzdata/2026f/1.fc43/data/signed/31645531/noarch/tzdata-2026f-1.fc43.noarch.rpm",
       "sha256": "c519e69c5e354af875f3c7c44172f3ce2ba86bccf834c88525f2c932cdfb97de"
@@ -1949,6 +1984,28 @@
       "file": "cross-libc-dlopen.tar",
       "url": "https://github.com/pkgforge-dev/cross-libc-dlopen/releases/download/v0.2.10/cross-libc-dlopen-x86_64.tar",
       "sha256": "dc620526e26d06d1f0cd4db72f02fbdc52a907f85dbd78b66a3222e654b9d4a2"
+    }
+  ],
+  "ocr": [
+    {
+      "file": "tessdata-LICENSE",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "file": "eng.traineddata",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/eng.traineddata",
+      "sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
+    },
+    {
+      "file": "spa.traineddata",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/spa.traineddata",
+      "sha256": "6f2e04d02774a18f01bed44b1111f2cd7f3ba7ac9dc4373cd3f898a40ea6b464"
+    },
+    {
+      "file": "cat.traineddata",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/cat.traineddata",
+      "sha256": "250db73cd5b380d2798581295dc12f20d0828cdb335a65d833d12dfdbf57117d"
     }
   ]
 }
