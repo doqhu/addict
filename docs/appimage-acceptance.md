@@ -138,9 +138,12 @@ El camí és a prop del riu.
 ## Results
 
 Run 2026-11-11, observer: Claude Code driving disposable QEMU/KVM GNOME
-sessions through QMP input, SSH and AT-SPI. **Acceptance is not complete:
-Debian 13 passed every applicable row except the optional shortcut; Ubuntu
-24.04 is blocked by missing portal support.**
+sessions through QMP input, SSH and AT-SPI. **Closed with accepted exceptions (decision 2026-11-11): Debian 13 passed
+every applicable row except the optional shortcut; Ubuntu 24.04 capture/OCR,
+cancellation and login-startup rows are accepted as `blocked` by that
+distribution's portal stack, not as passes.** Ubuntu's Background portal
+refuses without the host Registry, and its screenshot portal returns no file
+even to a client that is not Addict (see the re-run below).
 
 Artifact: CI run 43085196346, attempt 1, source commit
 `182def524355413b05578991ca5e127b966657de`, artifact
