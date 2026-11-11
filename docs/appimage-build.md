@@ -1,5 +1,8 @@
 # Building the x86_64 AppImage
 
+For the final two-distro checks and current results, use the
+[AppImage desktop acceptance record](appimage-acceptance.md).
+
 This recipe packages the production `addict` executable with GTK 4.20 and
 libc. It leaves dictionary indexes in the normal shared application data
 path, `$XDG_DATA_HOME/addict` (default `~/.local/share/addict`). OCR,
