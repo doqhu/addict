@@ -741,3 +741,92 @@ and a separate `scripts/check-appimage.sh` run on it reported the same 233
 components (62 in the runtime header) covering 2619 files; its 195 sources
 passed `sha256sum --check --strict`. `tests.sh` also passed the new
 misattributed-`sharun` refusal.
+
+## CI artifact handoff (5.5)
+
+The independent `appimage` job in `.github/workflows/ci.yml` runs on an
+Ubuntu 24.04 host. It preserves the other jobs and uses the same pinned Fedora
+build, verified input lock, fresh Cargo/build directories and production binary
+as the maintainer command. It removes unused runner SDKs to allow space for the
+temporary build and the roughly 2.5 GiB corresponding-source set; it does not
+cache `target`. Allow at least 20 GiB free for this job, including container
+storage, inputs, temporary copies, outputs and the final uncompressed tar.
+
+Run the same checks locally on an x86_64 Linux host with working rootless Podman:
+
+```sh
+scripts/build-appimage.sh
+packaging/appimage/tests.sh
+packaging/appimage/smoke-tests.sh
+version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+scripts/check-appimage-smoke.sh "target/appimage/Addict-$version-x86_64.AppImage" target/appimage-smoke
+scripts/archive-appimage.sh target/appimage-smoke target/appimage-handoff
+```
+
+Both new output directories must not already exist: use a new name for another
+attempt. The smoke builds `packaging/appimage/smoke.Containerfile` (Ubuntu 24.04
+at a fixed OCI digest; Ubuntu's verification-tool packages use its repositories).
+Only preparing this verification image uses network access. Execution uses
+private PID/IPC namespaces, `--network=none`, a read-only root and checkout/image
+mounts, a disposable executable `/tmp`, and a writable diagnostics mount. No
+host display socket, session/accessibility bus, engine/model directory or FUSE
+device is mounted. The existing `ocr.py` creates each language's private
+HOME/XDG paths and buses, uses Xvfb with X authentication and exercises the
+native Capture button and actual GTK field. It traces the bundled OCR child,
+models and libraries, checks exact EN/ES/CA output and waits for extraction
+cleanup after each language. Container exit removes any processes or temporary
+extraction even when the harness fails or times out.
+
+The container grants only `SYS_PTRACE` for strace and process evidence, retaining
+the default seccomp policy; an explicit ptrace probe fails before OCR if the
+runner disallows tracing. `container-build.log`, `container.log` and `ocr/`
+(including language logs, syscalls, UI results, bus configuration and cleanup)
+remain in diagnostics on failure. `ocr/PASS.json` is created only after all
+languages and cleanup pass. A failed command prevents handoff assembly/upload;
+Actions retains any smoke diagnostics as `appimage-smoke-failure-<attempt>` for
+seven days. The focused wrapper tests cover container build/run failure,
+missing success evidence, reused output directories and failed handoff.
+They also refuse missing/corrupt corresponding sources, including a source
+removed together with its checksum line.
+
+The version comes exclusively from `[workspace.package].version` in
+`Cargo.toml`. For version `0.1.1`, the Actions artifact is named
+`Addict-0.1.1-x86_64-handoff`, scoped to its workflow run/attempt and commit.
+It contains `Addict-0.1.1-x86_64-handoff.tar` and its relative `.tar.sha256`.
+The tar preserves executable mode, contains no enclosing directory, and holds:
+
+- `Addict-0.1.1-x86_64.AppImage` and `.AppImage.sha256` (relative image name);
+- `.AppImage.build.txt`, `.AppImage.inputs.lock.json`, `.AppImage.rpms.txt`,
+  `.AppImage.layout.txt`, `.AppImage.notices.json`, `.AppImage.components.sha256`;
+- `.AppImage.sources/`, the complete 5.4 corresponding-source set and its
+  relative `SHA256SUMS` (currently 195 source files).
+
+The assembler rechecks the image, package/license audit, sidecar notice inventory
+against the embedded one, bundled component checksums, input lock and every
+source against the pinned inventory. It rejects a missing output, a changed
+checksum/source/notice, or smoke evidence for a different image before writing
+the tar. Sources cannot be dropped by deleting their checksum line as well.
+The upload action uses an immutable revision, fails on missing files, and
+applies no additional compression to these already compressed payloads.
+
+Download the handoff artifact from the successful run and extract its Actions
+ZIP first. Verify and extract the contained tar in a fresh directory:
+
+```sh
+sha256sum --check --strict Addict-0.1.1-x86_64-handoff.tar.sha256
+mkdir unpacked
+tar -xf Addict-0.1.1-x86_64-handoff.tar -C unpacked
+cd unpacked
+test -x Addict-0.1.1-x86_64.AppImage
+sha256sum --check --strict Addict-0.1.1-x86_64.AppImage.sha256
+(cd Addict-0.1.1-x86_64.AppImage.sources && sha256sum --check --strict SHA256SUMS)
+```
+
+Epic 6 consumes these relative image, checksum, metadata and corresponding-source
+paths together, using `.build.txt` to identify the source revision/snapshot and
+the workflow run to identify CI provenance. Actions artifacts expire after seven
+days; this job creates no GitHub Release, publishes no release assets and
+uploads no dictionaries. Its deterministic Screenshot portal is a smoke test;
+real desktop screenshots, portal UX, dictionary downloads, typed translation,
+desktop/login and two-distribution human acceptance remain 5.7 work. Local
+runner-equivalent results are not evidence that hosted Actions has executed.

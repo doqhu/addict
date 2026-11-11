@@ -173,3 +173,58 @@ jobs:
 
       - name: Lint the repository
         run: flatpak-builder-lint repo ../flatpak-repo
+
+  appimage:
+    # Host job: the launcher runs its own pinned Fedora build container.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Prepare space and the container engine
+        run: |
+          # Source inputs, temporary build and corresponding sources need > 8 GiB
+          # in addition to Cargo/container storage; avoid target-wide caches.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends podman
+          df -h . /tmp
+
+      - name: Build with the fixed inputs and audit the package
+        run: scripts/build-appimage.sh
+
+      - name: Check packaging refusals
+        run: packaging/appimage/tests.sh
+
+      - name: Check wrapper failures
+        run: packaging/appimage/smoke-tests.sh
+
+      - name: Run isolated Ubuntu 24.04 production OCR
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          scripts/check-appimage-smoke.sh "target/appimage/Addict-$version-x86_64.AppImage" "$RUNNER_TEMP/appimage-smoke"
+
+      - name: Assemble the verified corresponding-source handoff
+        id: handoff
+        run: |
+          scripts/archive-appimage.sh "$RUNNER_TEMP/appimage-smoke" "$RUNNER_TEMP/appimage-handoff"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          echo "name=Addict-$version-x86_64-handoff" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the checked handoff
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.handoff.outputs.name }}
+          path: ${{ runner.temp }}/appimage-handoff/*
+          if-no-files-found: error
+          compression-level: 0 # The 2.5 GiB source set is already compressed.
+          retention-days: 7
+
+      - name: Retain smoke diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: appimage-smoke-failure-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/appimage-smoke
+          if-no-files-found: ignore
+          retention-days: 7
