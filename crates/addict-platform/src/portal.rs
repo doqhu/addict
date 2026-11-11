@@ -31,6 +31,30 @@ const ABSENT: &[&str] = &[
 /// any other portal call. In a sandbox the portal knows the app already and
 /// `ashpd` registers nothing.
 pub(crate) async fn registered_connection(app_id: &str) -> Result<zbus::Connection, PortalFailure> {
+    let (connection, registration) = connect_and_register(app_id).await?;
+    registration?;
+    Ok(connection)
+}
+
+/// Like [`registered_connection`], but a host Registry that is not there
+/// (older portals such as xdg-desktop-portal 1.18) is not a failure: the
+/// request goes on as an unregistered caller. Any other registration error
+/// still fails, as does having no bus.
+pub(crate) async fn connection_degrading_without_registry(
+    app_id: &str,
+) -> Result<zbus::Connection, PortalFailure> {
+    let (connection, registration) = connect_and_register(app_id).await?;
+    match registration {
+        Ok(()) | Err(PortalFailure::Unavailable) => Ok(connection),
+        Err(other) => Err(other),
+    }
+}
+
+/// The session connection, and what registering `app_id` on it gave. No bus is
+/// the outer error; the registration outcome is the inner one.
+async fn connect_and_register(
+    app_id: &str,
+) -> Result<(zbus::Connection, Result<(), PortalFailure>), PortalFailure> {
     // No connection is no bus, whichever error zbus gives for it.
     let connection = zbus::Connection::session()
         .await
@@ -38,10 +62,10 @@ pub(crate) async fn registered_connection(app_id: &str) -> Result<zbus::Connecti
     let parsed: AppID = app_id
         .parse()
         .map_err(|e: ashpd::Error| PortalFailure::Failed(format!("app id {app_id:?}: {e}")))?;
-    ashpd::register_host_app_with_connection(connection.clone(), parsed)
+    let registration = ashpd::register_host_app_with_connection(connection.clone(), parsed)
         .await
-        .map_err(|e| classify(&format!("host registration of {app_id:?}"), &e))?;
-    Ok(connection)
+        .map_err(|e| classify(&format!("host registration of {app_id:?}"), &e));
+    Ok((connection, registration))
 }
 
 /// The failure for a portal `error` met at `step`.

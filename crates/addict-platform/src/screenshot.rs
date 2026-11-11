@@ -41,9 +41,10 @@ impl From<PortalFailure> for CaptureFailure {
 }
 
 /// Asks the portal, as `app_id`, for one interactive screenshot and gives
-/// the local path of the image it made.
+/// the local path of the image it made. Where the portal has no host Registry
+/// the request is made unregistered, which the interactive picker allows.
 pub async fn capture(app_id: &str) -> Result<PathBuf, CaptureFailure> {
-    let connection = portal::registered_connection(app_id).await?;
+    let connection = portal::connection_degrading_without_registry(app_id).await?;
 
     let proxy = ScreenshotProxy::with_connection(connection)
         .await

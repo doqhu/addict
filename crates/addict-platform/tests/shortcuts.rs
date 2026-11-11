@@ -96,6 +96,9 @@ struct State {
     registered: Mutex<Option<String>>,
     registered_senders: Mutex<HashSet<String>>,
     refuse_register: bool,
+    /// The portal has no host Registry, like xdg-desktop-portal 1.18: the
+    /// interface is not served and an unregistered caller is let through.
+    no_registry: bool,
     silent_bind: bool,
     /// The answers of the next Screenshot calls; after them, success with
     /// [`shot_path`].
@@ -136,7 +139,7 @@ impl State {
     /// A portal call from a host app must follow its registration.
     fn check_registered(&self, header: &Header<'_>) -> zbus::fdo::Result<()> {
         let sender = header.sender().unwrap().to_string();
-        if self.registered_senders.lock().unwrap().contains(&sender) {
+        if self.no_registry || self.registered_senders.lock().unwrap().contains(&sender) {
             Ok(())
         } else {
             Err(zbus::fdo::Error::AccessDenied("not registered".to_owned()))
@@ -529,14 +532,16 @@ async fn portal_process(
     activate_during_bind: bool,
     replacing: bool,
 ) -> Connection {
-    zbus::connection::Builder::session()
+    let mut builder = zbus::connection::Builder::session()
         .unwrap()
         .allow_name_replacements(true)
         .replace_existing_names(replacing)
         .name(PORTAL)
-        .unwrap()
-        .serve_at(DESKTOP, Registry(state.clone()))
-        .unwrap()
+        .unwrap();
+    if !state.no_registry {
+        builder = builder.serve_at(DESKTOP, Registry(state.clone())).unwrap();
+    }
+    builder
         .serve_at(DESKTOP, Screenshot(state.clone()))
         .unwrap()
         .serve_at(
@@ -1791,6 +1796,31 @@ fn a_capture_registers_before_its_screenshot_also_after_a_restart() {
         Ok(shot.clone())
     );
     assert_eq!(portal.log(), ["Register", "Screenshot"]);
+    std::fs::remove_file(&shot).unwrap();
+}
+
+#[test]
+fn a_capture_without_a_host_registry_goes_on_unregistered() {
+    if !private("a_capture_without_a_host_registry_goes_on_unregistered") {
+        return;
+    }
+    let shot = shot_path();
+    std::fs::write(&shot, b"image").unwrap();
+    let mut portal = Mock::without_worker(vec![], 2, false);
+    portal.restart(
+        State {
+            no_registry: true,
+            ..State::default()
+        },
+        vec![],
+    );
+    assert_eq!(
+        portal.runtime.block_on(screenshot::capture(APP_ID)),
+        Ok(shot.clone())
+    );
+    // No registration happened, and the screenshot was still asked interactively.
+    assert_eq!(portal.log(), ["Screenshot"]);
+    assert_eq!(*portal.state.interactive.lock().unwrap(), [Some(true)]);
     std::fs::remove_file(&shot).unwrap();
 }
 
