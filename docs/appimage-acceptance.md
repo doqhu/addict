@@ -137,25 +137,51 @@ El camí és a prop del riu.
 
 ## Results
 
-Started 2026-11-11. **Acceptance pending; neither target has passed.**
+Run 2026-11-11, observer: Claude Code driving disposable QEMU/KVM GNOME
+sessions through QMP input, SSH and AT-SPI. **Acceptance is not complete:
+Debian 13 passed every applicable row except the optional shortcut; Ubuntu
+24.04 is blocked by missing portal support.**
+
+Artifact: CI run 43085196346, attempt 1, source commit
+`182def524355413b05578991ca5e127b966657de`, artifact
+`Addict-0.1.1-x86_64-handoff`; tar SHA-256
+`fd65ebd077dc01a162da61875c9cf5cf4e9c9a32d459d93ea6458d067aa8c43e`; image
+SHA-256 `7929354f94e83ca84d7000fd9efa265d2567694774eabb024c9f52e52e11d4b7`.
+Tar, image and every corresponding-source checksum verified; the same image
+checksum was confirmed on both targets. Image path on both:
+`/home/tester/AppImage acceptance/Addict-0.1.1-x86_64.AppImage`.
 
 | Evidence | Debian 13 | Ubuntu 24.04 LTS |
 |---|---|---|
-| CI run/attempt/full commit/image checksum | pending | pending |
-| Clean graphical account, OS/GNOME/session/kernel | pending | pending |
-| No FUSE/system engine/models/OCR overrides | pending | pending |
-| Real Background/Registry capabilities | pending | pending |
-| Ordinary visible launch and bundled GTK/libc/loader | pending | pending |
-| In-app download, index identity, typed Russian translation | pending | pending |
-| Complete embedded licenses and source checksums | pending | pending |
-| English real picker/OCR and child/model paths | pending | pending |
-| Spanish real picker/OCR and child/model paths | pending | pending |
-| Catalan real picker/OCR and child/model paths | pending | pending |
-| Repeated selection, cancellation and successful retry | pending | pending |
-| Shortcut capture, only where applicable | pending capability probe | pending capability probe |
-| Explicit launcher after process/extraction teardown | pending | pending |
-| Enable, new login, silent resident, visible grid launch | pending | pending |
-| Disable, new login, no resident | pending | pending |
+| CI run/attempt/full commit/image checksum | pass | pass |
+| Clean graphical account, OS/GNOME/session/kernel | pass: Debian 13.7, GNOME Shell 48.7, Wayland, 6.12.115 | pass: Ubuntu 24.04.5, GNOME Shell 46.0, Wayland, 6.8.0-147 |
+| No FUSE/system engine/models/OCR overrides | pass: no `/dev/fuse`, no tesseract; `fuse3`/`libfuse3` packages present | pass: no `/dev/fuse`, no tesseract; `fuse`/`libfuse2t64` packages present; both log automatic extraction |
+| Real Background/Registry capabilities | pass: Background and `host.portal.Registry` present | **blocked**: Background present, `host.portal.Registry` absent (xdg-desktop-portal 1.18.4) |
+| Ordinary visible launch and bundled GTK/libc/loader | pass | pass |
+| In-app download, index identity, typed Russian translation | pass: 13 indexes, `cat` -> кошка | pass: identical index checksums, `cat` -> кошка |
+| Complete embedded licenses and source checksums | pass (host audit, same checksum) | pass (same image) |
+| English real picker/OCR and child/model paths | pass, x3, strace: bundled tesseract/libs/`eng.traineddata` | **blocked**: Capture reports "Screen capture is not available here" |
+| Spanish real picker/OCR and child/model paths | pass, x3, `spa.traineddata` | **blocked** |
+| Catalan real picker/OCR and child/model paths | pass, x3, `cat.traineddata` | **blocked** |
+| Repeated selection, cancellation and successful retry | pass: Esc shows "No snapshot was taken", result kept, retry works in the same resident | **blocked** |
+| Shortcut capture, only where applicable | pending: GNOME 48 dialog opened; assignment attempts did not complete (bind reported "Portal request didn't succeed"); not a pass | not applicable (GNOME 46) |
+| Explicit launcher after process/extraction teardown | pass: quoted `Exec`, SIGTERM, tree gone, grid launch shows window | pass |
+| Enable, new login, silent resident, visible grid launch | pass: portal entry names image + `--background`; new login started `addict --background` with no window; grid showed it | **blocked**: "Startup was not changed: the Background portal is not available"; no entry written |
+| Disable, new login, no resident | pass: entry removed, new login started no resident | **blocked** (nothing to disable) |
+
+Evidence: `target/appimage-acceptance-5.7/{handoff-verified.txt,package-audit.txt}`
+and per-distro directories (screenshots, `trace-*`, `strace-*`,
+`autostart-*`, `login-*`, `dictionary-identity.txt`).
+
+Observations needing follow-up:
+
+- After exit, `/tmp` keeps an empty `appimage_extracted_*.lock` and two
+  dangling symlinks into the removed tree (created during `install`).
+- A first Catalan-model pass over the English line read "The bant is beside the
+  river." (an invalid capture caused by a helper error, not a Catalan result).
+- Ubuntu 24.04 ships xdg-desktop-portal 1.18.x without the host Registry,
+  so capture and login startup cannot pass there unless a newer portal is
+  accepted as a prerequisite or the app degrades without the Registry.
 
 Preparation observations, not target passes:
 
