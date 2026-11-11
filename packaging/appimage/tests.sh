@@ -78,6 +78,40 @@ refuse() {
     grep -q -- "$expected" "$work/log" || { cat "$work/log" >&2; exit 1; }
 }
 "$root/scripts/build-appimage.sh" --verify-arch x86_64
+python3 - "$root" <<'PROVENANCE'
+import copy, json, pathlib, runpy, sys
+root = pathlib.Path(sys.argv[1]); package = root/'packaging/appimage'
+check = runpy.run_path(str(package/'closures.py'))['check_sharun_provenance']
+lock = json.loads((package/'inputs.lock.json').read_text())
+components = json.loads((package/'static-closures.json').read_text())['components']
+cache = root/'target/appimage-inputs'
+check(lock, components, cache)
+def refuse(lock, components, message):
+    try: check(lock, components, cache)
+    except SystemExit as error:
+        assert message in str(error), str(error)
+    else: raise AssertionError('unexpected sharun provenance success')
+crate = next(k for k,c in components.items() if k.startswith('rust-crate-') and 'anylinux-sharun' in c['in'])
+changed = copy.deepcopy(components); changed[crate]['version'] = '0.0.0'
+refuse(lock, changed, 'crate versions mismatch')
+missing = copy.deepcopy(components); missing[crate]['in'].remove('anylinux-sharun')
+refuse(lock, missing, 'crate versions mismatch')
+for name in ('rust-std-nightly-2026-09-11', 'rust-compiler-builtins-nightly-2026-09-11'):
+    changed = copy.deepcopy(components); changed[name]['version'] = 'wrong-version'
+    refuse(lock, changed, 'toolchain components mismatch')
+    missing = copy.deepcopy(components); del missing[name]
+    refuse(lock, missing, 'toolchain components mismatch')
+changed = copy.deepcopy(components)
+changed['rust-std-nightly-2026-09-11']['sources'] = ['wrong-source.tar.xz']
+refuse(lock, changed, 'toolchain components mismatch')
+changed = copy.deepcopy(lock)
+next(i for i in changed['tools'] if i['file'] == 'sharun.tar')['sha256'] = '0'*64
+refuse(changed, components, 'input mismatch: sharun.tar')
+changed = copy.deepcopy(lock)
+next(i for i in changed['notices'] if i['file'] == 'anylinux-sharun-source.tar.gz')['url'] = 'https://invalid.test/source'
+refuse(changed, components, 'source revision mismatch')
+print('PASS: sharun provenance; changed/missing crate/toolchain components, archive and source identity refuse')
+PROVENANCE
 refuse 'unsupported architecture: aarch64' "$root/scripts/build-appimage.sh" --verify-arch aarch64
 mkdir "$work/inputs"
 refuse 'missing input:' "$root/scripts/build-appimage.sh" --verify-inputs "$work/inputs"

@@ -629,8 +629,23 @@ tools' nightly manifests) and network access; the build itself does not.
   it; the reasons are recorded in `static-closures.json`.
 - `sharun` 3.8.3: the pinned source has no `Cargo.lock`, so its crates are
   resolved with `cargo generate-lockfile --publish-time` at the time of the
-  3.8.3 release run; std from the pinned nightly-2026-09-11 `rust-src`; musl
+  3.8.3 release run and checked against its actual x86_64 compilation log;
+  std from the pinned nightly-2026-09-11 `rust-src`; musl
   and compiler_rt from Zig 0.16.0, which also builds the preload libraries.
+  [The upstream job](https://github.com/pkgforge-dev/Anylinux-sharun/actions/runs/41963279170/job/127034383534)
+  records the exact checkout, all 22 selected runtime crate versions, compiler,
+  archive checksum and binary checksum. Normalized evidence is committed in
+  `packaging/appimage/sharun-provenance.json`; its archive and binary hashes
+  match the pinned download. The log confirms only the eight-character
+  `userland-execve` git revision prefix; the full source revision remains
+  pinned in `inputs.lock.json`. Retrieve the raw log with
+  `gh api repos/pkgforge-dev/Anylinux-sharun/actions/jobs/127034383534/logs --allow-escape-sequences`
+  and compare its SHA-256 to the evidence record. The generator refuses to
+  write an inventory whose sharun crate versions or input identity disagree;
+  this includes both Rust toolchain components (`std` and compiler-builtins)
+  and their checksum-pinned nightly sources.
+  To recheck the committed inventory and cached inputs without network access:
+  `packaging/appimage/closures.py --check-sharun-provenance target/appimage-inputs`.
 - `dash` 0.5.13.5: musl and compiler_rt from Zig 0.16.0. dash names
   GPL-2.0-or-later (the bash-derived `mksignames.c` output) without its text;
   the GNU GPL-2.0 text is pinned from gnu.org and installed with its notice.
@@ -695,12 +710,14 @@ fixture for each case, plus build-time attribution of an unowned file.
 
 Known limits: the SPDX expressions of tool and DwarFS-library components are
 taken from their upstream license files and repositories, and the texts
-installed are the controlling ones. sharun's crate versions are a
-reconstruction (see above). The GCC start files linked into
+installed are the controlling ones. sharun's reconstructed crate versions
+are confirmed against the actual release build (see above). The GCC start files linked into
 cross-libc-dlopen (Debian's GCC 10) are not listed separately; they fall under
 the GCC runtime library exception.
-Shrinking the GStreamer, cdparanoia and bubblewrap obligations is left to
-5.6.
+The 5.6 sweep retains the GStreamer, cdparanoia and bubblewrap payload and
+its notices: removing dynamically loaded GTK/media helpers would require
+additional runtime acceptance. Their complete source/notices handoff remains
+part of this bundle.
 
 ### Executed verification, 2026-11-11
 
@@ -830,3 +847,45 @@ uploads no dictionaries. Its deterministic Screenshot portal is a smoke test;
 real desktop screenshots, portal UX, dictionary downloads, typed translation,
 desktop/login and two-distribution human acceptance remain 5.7 work. Local
 runner-equivalent results are not evidence that hosted Actions has executed.
+
+### Refactor sweep verification (5.6), 2026-11-11
+
+The exact upstream sharun job confirmed all 22 recorded runtime crate
+versions and the pinned archive/binary hashes. Regeneration retained every
+static component definition, source pin and byte of `inputs.lock.json`;
+only the host's determination text changed. Provenance refusal fixtures,
+existing package/wrapper refusals, Python/Bash syntax, REUSE and whitespace
+checks passed.
+
+A fresh pinned container/release build from the local source snapshot
+`b472f53eac0e93dcb04311ad5962756bbe28ab05b7ab5a5962b109b1504ae578`
+produced AppImage SHA-256
+`23a550ffdb5f930019b95ff58159ca1a6fe834c0705fcbbead51c563dd971a9a`.
+The build metadata records the working-tree changes over its baseline;
+this was a local source snapshot build. Package audits passed with 233
+components, 2619 files and 195 corresponding sources. Bundle membership,
+sharun, the Tesseract executable and all three models match final 5.5;
+byte-identical rebuilds are still not promised.
+
+Ubuntu 24.04.5 container smoke passed exact English/Spanish/Catalan output,
+bundled child/model/library paths and extraction cleanup with no host OCR,
+models or FUSE. Evidence: `target/appimage-smoke-5.6/ocr/`. The checked
+handoff is in `target/appimage-handoff-5.6/`; extraction preserved executable
+mode, and tar, image and all source checksums passed. Raw upstream evidence
+is retained at `target/appimage-provenance-5.6/upstream-job.log`.
+This is local verification; hosted Actions and 5.7 desktop/login acceptance
+remain unobserved by this sweep.
+
+After Quick review, the provenance check also requires the recorded std and
+compiler-builtins components and their exact pinned nightly sources.
+Changed/missing toolchain components and a wrong source now have executed
+refusal coverage. Regeneration and all checks passed again. A second full
+build produced final AppImage SHA-256
+`0092a70feb306953a28188d2113b06740de9e930971ba5991dab2c42541c7557`,
+source snapshot
+`ab2f0c4638d3596ef06f6a56e38ba4cbd476e6ecd95a8dc6a8f871e8a25af270`.
+Final package audit, three-language production OCR, bundled paths and
+cleanup passed. `target/appimage-handoff-5.6-final/` passed archive transfer,
+executable mode and every image/source checksum; smoke and transfer
+evidence are under `target/appimage-smoke-5.6-final/` and
+`target/appimage-unpacked-5.6-final/`.

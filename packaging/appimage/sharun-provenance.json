@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "job_url": "https://github.com/pkgforge-dev/Anylinux-sharun/actions/runs/41963279170/job/127034383534",
+  "log_api": "repos/pkgforge-dev/Anylinux-sharun/actions/jobs/127034383534/logs",
+  "log_sha256": "a45247f3f302c61b1033b2daff8280bb21afb47d9dd6ba48de983a56fb999c3a",
+  "source_revision": "2748a37bfaad6c379cb2ca124e84d14eab6ba3d9",
+  "inputs": {
+    "sharun.tar": "9f8009b558f443239d8314efb76c9e135ad78365bc211b82be69929f5c5c61c2",
+    "anylinux-sharun-source.tar.gz": "7de6b549eb8efb6a21e291a5214c492ceb16dbc80d1fa9ad3c428b5678469cec",
+    "rust-src-nightly-2026-09-11.tar.xz": "647a3cd89bb4479f40eb73cc5ee63fe4fb5c8463d1b80f210a252e6510f79151"
+  },
+  "binary_sha256": "8cad07cbb1e37eb7ffee8ff701859a61e38cdca1406bd906e74b5e2ba24dce5c",
+  "rustc": "1.100.0-nightly (67eda617e 2026-09-10)",
+  "git_dependency": {
+    "name": "userland-execve",
+    "version": "0.3.2",
+    "logged_revision_prefix": "d2b58d8b"
+  },
+  "selection": "Normal runtime dependencies from pinned manifests, plus nightly std crates; proc-macro/build-only crates excluded. Every selected name/version appears in the job Compiling lines. The log confirms only an eight-character git dependency revision prefix, not its full revision.",
+  "runtime_crates": {
+    "addr2line-0.27.1": "0.27.1",
+    "adler2-2.0.1": "2.0.1",
+    "bitflags-2.13.2": "2.13.2",
+    "cfg-if-1.0.4": "1.0.4",
+    "cfg-if-1.0.5": "1.0.5",
+    "gimli-0.34.0": "0.34.0",
+    "goblin-0.8.2": "0.8.2",
+    "hashbrown-0.17.1": "0.17.1",
+    "libc-0.2.189": "0.2.189",
+    "libc-0.2.191": "0.2.191",
+    "log-0.4.35": "0.4.35",
+    "memchr-2.8.3": "2.8.3",
+    "miniz_oxide-0.9.1": "0.9.1",
+    "nix-0.27.1": "0.27.1",
+    "nix-0.31.3": "0.31.3",
+    "object-0.39.1": "0.39.1",
+    "plain-0.2.3": "0.2.3",
+    "rustc-demangle-0.1.28": "0.1.28",
+    "same-file-1.0.6": "1.0.6",
+    "scroll-0.12.0": "0.12.0",
+    "userland-execve-0.3.2": "0.3.2",
+    "walkdir-2.5.0": "2.5.0"
+  },
+  "toolchain_date": "2026-09-11"
+}

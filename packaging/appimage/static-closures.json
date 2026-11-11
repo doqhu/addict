@@ -12,7 +12,7 @@
   },
   "anylinux-sharun": {
    "location": null,
-   "determined_by": "sharun 3.8.3 (Anylinux-sharun 2748a37, release run of 2026-11-05T03:42:31Z): the pinned source has no Cargo.lock, so the crates are resolved with cargo generate-lockfile --publish-time at that run, normal dependencies, target x86_64-unknown-linux-musl, proc-macro crates excluded. std from the pinned toolchain nightly-2026-09-11 (build-std = std, panic_abort). Linked by zig cc 0.16.0 (ci.yml, +crt-static, link-self-contained=no), which supplies musl and compiler_rt; the preload libraries are built with the same zig cc."
+   "determined_by": "sharun 3.8.3 (Anylinux-sharun 2748a37, resolution cutoff 2026-11-05T03:42:31Z): the pinned source has no Cargo.lock, so the crates are resolved with cargo generate-lockfile --publish-time at that cutoff and checked against the actual x86_64 compilation log (run 41963279170, job 127034383534; packaging/appimage/sharun-provenance.json), whose archive and binary SHA-256 match the pinned tar. Normal dependencies, target x86_64-unknown-linux-musl, proc-macro crates excluded. std from the pinned toolchain nightly-2026-09-11 (build-std = std, panic_abort). Linked by zig cc 0.16.0 (ci.yml, +crt-static, link-self-contained=no), which supplies musl and compiler_rt; the preload libraries are built with the same zig cc."
   },
   "dash": {
    "location": null,

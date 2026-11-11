@@ -52,9 +52,11 @@ HOSTS = {
     'anylinux-sharun': {
         'location': None,
         'determined_by': (
-            'sharun 3.8.3 (Anylinux-sharun 2748a37, release run of 2026-11-05T03:42:31Z): the pinned source has no '
-            'Cargo.lock, so the crates are resolved with cargo generate-lockfile --publish-time at that run, '
-            'normal dependencies, target x86_64-unknown-linux-musl, proc-macro crates excluded. std from the pinned '
+            'sharun 3.8.3 (Anylinux-sharun 2748a37, resolution cutoff 2026-11-05T03:42:31Z): the pinned source has no '
+            'Cargo.lock, so the crates are resolved with cargo generate-lockfile --publish-time at that cutoff '
+            'and checked against the actual x86_64 compilation log (run 41963279170, job 127034383534; '
+            'packaging/appimage/sharun-provenance.json), whose archive and binary SHA-256 match the pinned tar. '
+            'Normal dependencies, target x86_64-unknown-linux-musl, proc-macro crates excluded. std from the pinned '
             'toolchain nightly-2026-09-11 (build-std = std, panic_abort). Linked by zig cc 0.16.0 (ci.yml, '
             '+crt-static, link-self-contained=no), which supplies musl and compiler_rt; the preload libraries are '
             'built with the same zig cc.')},
@@ -153,7 +155,43 @@ def cargo_closure(manifest_dir, args):
     return [(packages[i], sums.get((packages[i]['name'], packages[i]['version']))) for i in sorted(seen)]
 
 
+def check_sharun_provenance(lock, components, cache):
+    evidence = json.loads((HERE / 'sharun-provenance.json').read_text())
+    pins = {i['file']: i for group in ('tools', 'notices', 'static') for i in lock[group]}
+    for name, expected in evidence['inputs'].items():
+        if pins[name]['sha256'] != expected or digest(cache / name) != expected:
+            raise SystemExit('sharun provenance input mismatch: ' + name)
+    if evidence['source_revision'] not in pins['anylinux-sharun-source.tar.gz']['url']:
+        raise SystemExit('sharun provenance source revision mismatch')
+    with tarfile.open(cache / 'sharun.tar') as archive:
+        actual = hashlib.file_digest(archive.extractfile('sharun'), 'sha256').hexdigest()
+    if actual != evidence['binary_sha256']:
+        raise SystemExit('sharun provenance binary mismatch')
+    actual = {name.removeprefix('rust-crate-'): c['version'] for name, c in components.items()
+              if name.startswith('rust-crate-') and 'anylinux-sharun' in c['in']}
+    if actual != evidence['runtime_crates']:
+        raise SystemExit('sharun provenance crate versions mismatch')
+    date = evidence['toolchain_date']
+    expected = {'rust-std-nightly-' + date: evidence['rustc'],
+                'rust-compiler-builtins-nightly-' + date: '0.1 (in-tree)'}
+    actual = {name: c['version'] for name, c in components.items()
+              if name.startswith(('rust-std-', 'rust-compiler-builtins-')) and 'anylinux-sharun' in c['in']}
+    if actual != expected or any(components[name]['sources'] != ['rust-src-nightly-' + date + '.tar.xz']
+                                 for name in actual):
+        raise SystemExit('sharun provenance toolchain components mismatch')
+
+
+def digest(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
+
+
 def main(argv):
+    if argv and argv[0] == '--check-sharun-provenance':
+        check_sharun_provenance(json.loads(LOCK.read_text()), json.loads(OUT.read_text())['components'],
+                                pathlib.Path(argv[1] if len(argv) > 1 else 'target/appimage-inputs'))
+        print('PASS: sharun release provenance, 22 runtime crate versions and Rust toolchain components')
+        return
     cache = pathlib.Path(argv[0] if argv else 'target/appimage-inputs').resolve()
     cache.mkdir(parents=True, exist_ok=True)
     lock = json.loads(LOCK.read_text())
@@ -273,6 +311,7 @@ def main(argv):
     for item in pins.values():
         if item['file'] in notices and notices[item['file']] != item:
             raise SystemExit('pin differs from the notices array: ' + item['file'])
+    check_sharun_provenance(lock, components, cache)
     lock['static'] = sorted((i for i in pins.values() if i['file'] not in notices), key=lambda i: i['file'])
     LOCK.write_text(json.dumps(lock, indent=2) + '\n')
     OUT.write_text(json.dumps({'schema': 1, 'generated_by': 'packaging/appimage/closures.py', 'hosts': HOSTS,
