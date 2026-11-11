@@ -173,6 +173,32 @@ Evidence: `target/appimage-acceptance-5.7/{handoff-verified.txt,package-audit.tx
 and per-distro directories (screenshots, `trace-*`, `strace-*`,
 `autostart-*`, `login-*`, `dictionary-identity.txt`).
 
+### Ubuntu re-run after the Registry degradation fix (2026-11-11)
+
+Artifact: CI run 43100480735, attempt 1, commit
+`46405b04fb479f9650ffffa1097628cf3467bd45`, image SHA-256
+`6def4e59fc8799a2c89e0c03b4b929beb884179fb4a4b93a3480d8ce3b2b03f8`; tar,
+image and all source checksums verified, installed explicitly on the same
+Ubuntu 24.04.5 session. The Capture button now reaches the real GNOME region
+picker (the earlier "Screen capture is not available here" is gone), and the
+shell writes a correct PNG of the selected region to `~/Pictures/Screenshots`.
+The capture still ends without text: the portal answers `Response (2, {})` and
+its log says `InteractiveScreenshot didn't return a file`. A plain Python
+client that knows nothing of Addict (`target/appimage-acceptance-5.7/portal-shot.py`)
+gets the identical answer after the same pick (`ubuntu/portal-probe-response.txt`),
+so this is the portal/shell stack of this VM, not the application. Addict
+reports it as "No snapshot was taken. Press Capture to try again." and
+logs `Capture(Ended)`. A fresh account also lacked
+`~/.local/share/recently-used.xbel`, which GNOME 46 logs as an error on each
+screenshot; an empty valid file was created and did not change the result.
+The VM has software rendering and no GPU acceleration, which was not ruled out as a cause.
+
+Ubuntu capture, OCR, cancellation/retry and login rows therefore stay
+**blocked** (now by the portal returning no file, plus the Background portal
+refusal for login startup), not passed. Debian's results are unchanged and
+were obtained with the earlier image (`7929354f...`); they have not been
+repeated on the newer image, which differs only in the capture-connection fix.
+
 Observations needing follow-up:
 
 - After exit, `/tmp` keeps an empty `appimage_extracted_*.lock` and two
