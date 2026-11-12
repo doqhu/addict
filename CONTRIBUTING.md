@@ -89,6 +89,14 @@ script (`scripts/release-tests.sh`), and builds the Flatpak and checks it with
 `flatpak-builder-lint`, but not the build without the test features or the
 GTK guard, so run `scripts/check.sh` yourself.
 
+To lint the Flatpak locally as CI and Flathub do, use the lint build and the
+`flatpak-builder-lint` commands in the header of
+`packaging/flatpak/io.github.doqhu.Addict.yml`, not its `--install` build.
+The lint build uses `--mirror-screenshots-url` and
+`--compose-url-policy=full`, as Flathub's build does; without them, the
+`builddir` and `repo` lints fail on `appstream-external-screenshot-url` and
+`appstream-remote-icon-not-mirrored`.
+
 The Flatpak build has no network, so it takes the crates from
 `packaging/flatpak/cargo-sources.json`. If your change touches `Cargo.lock`,
 regenerate that file with `scripts/flatpak-sources.sh` (it needs

@@ -8,24 +8,27 @@
 # The build has no network: the crates come from cargo-sources.json, which
 # scripts/flatpak-sources.sh regenerates from Cargo.lock.
 #
-# flatpak-builder-lint checks a build the way Flathub's build makes it: the
-# screenshots mirrored, with full URLs, and committed to their own ref.
+# flatpak-builder-lint checks a build the way Flathub's build makes it, with
+# the screenshot flags of Flathub's flathub-build: the screenshots mirrored
+# with full URLs (flatpak-builder commits them to the screenshots/<arch> ref
+# of the repo). Without --compose-url-policy=full the catalog holds relative
+# URLs and the builddir and repo lints fail on
+# appstream-external-screenshot-url and appstream-remote-icon-not-mirrored.
 #
 #   flatpak run org.flatpak.Builder --force-clean \
 #       --repo=.flatpak-builder/repo \
-#       --mirror-screenshots-url=https://dl.flathub.org/media/ \
+#       --mirror-screenshots-url=https://dl.flathub.org/media \
 #       --compose-url-policy=full \
 #       .flatpak-builder/build packaging/flatpak/io.github.doqhu.Addict.yml
-#   flatpak run --command=ostree org.flatpak.Builder commit \
-#       --repo=.flatpak-builder/repo \
-#       --canonical-permissions --branch=screenshots/$(uname -m) \
-#       .flatpak-builder/build/files/share/app-info/media
 #   flatpak run --command=flatpak-builder-lint org.flatpak.Builder \
 #       manifest packaging/flatpak/io.github.doqhu.Addict.yml
-#   (likewise builddir .flatpak-builder/build and repo .flatpak-builder/repo)
+#   flatpak run --command=flatpak-builder-lint org.flatpak.Builder \
+#       builddir .flatpak-builder/build
+#   flatpak run --command=flatpak-builder-lint org.flatpak.Builder \
+#       repo .flatpak-builder/repo
 id: io.github.doqhu.Addict
 runtime: org.gnome.Platform
-runtime-version: '50'
+runtime-version: '51'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable

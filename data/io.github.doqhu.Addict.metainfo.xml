@@ -43,6 +43,12 @@
 
   <content_rating type="oars-1.1"/>
 
+  <!-- The banner behind the icon on Flathub. -->
+  <branding>
+    <color type="primary" scheme_preference="light">#9cbfae</color>
+    <color type="primary" scheme_preference="dark">#2b4a43</color>
+  </branding>
+
   <screenshots>
     <screenshot type="default">
       <caption>The article of a Catalan word</caption>
