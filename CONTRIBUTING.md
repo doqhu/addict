@@ -36,7 +36,9 @@ pull request open: `fix` raises the patch version, `feat` the minor version,
 and, before 1.0, a breaking change (`feat!:`) the minor version too. The pull
 request sets the version in `Cargo.toml`, `Cargo.lock` and the MetaInfo, and
 writes `CHANGELOG.md`, so do not edit those by hand. Merging it tags the release
-and publishes it on GitHub.
+and publishes it on GitHub. The tag then starts the release workflow, which
+runs the CI checks and attaches the Flatpak bundle and its SHA-256 file to that
+release, as [docs/release.md](docs/release.md) describes.
 
 ### AI-assisted contributions
 
@@ -70,7 +72,8 @@ need `dbus-run-session` and `dbus-daemon` (`sudo dnf install dbus-daemon` on
 Fedora). They create isolated session buses and do not use your desktop portal.
 
 CI on GitHub runs the format and lint checks, the tests, `reuse lint`, a
-secret scan of the whole history, and builds the Flatpak and checks it with
+secret scan of the whole history, the tests of the release trigger and upload
+script (`scripts/release-tests.sh`), and builds the Flatpak and checks it with
 `flatpak-builder-lint`, but not the build without the test features or the
 GTK guard, so run `scripts/check.sh` yourself.
 
