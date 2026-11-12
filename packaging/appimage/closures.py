@@ -15,7 +15,7 @@ review the diff. Needs network access and cargo (RUSTC_BOOTSTRAP=1 lets a
 stable cargo read the tools' nightly manifests). How each closure is decided
 is written into the output, under `hosts`.
 """
-import hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, tomllib, urllib.request
+import hashlib, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile, time, tomllib, urllib.error, urllib.request
 
 HERE = pathlib.Path(__file__).resolve().parent
 LOCK = HERE / 'inputs.lock.json'
@@ -115,8 +115,16 @@ def fetch(cache, name, url):
     path = cache / name
     if not path.exists():
         print('Fetching ' + url, flush=True)
-        with urllib.request.urlopen(url, timeout=300) as src, open(str(path) + '.part', 'wb') as dst:
-            shutil.copyfileobj(src, dst)
+        for attempt in range(1, 5):
+            try:
+                with urllib.request.urlopen(url, timeout=300) as src, open(str(path) + '.part', 'wb') as dst:
+                    shutil.copyfileobj(src, dst)
+                break
+            except OSError as e:
+                if attempt == 4 or isinstance(e, urllib.error.HTTPError) and e.code in (403, 404, 410):
+                    raise
+                print(f'  attempt {attempt} failed ({e}); retrying', flush=True)
+                time.sleep(5 * 3 ** (attempt - 1))
         pathlib.Path(str(path) + '.part').replace(path)
     return {'file': name, 'url': url, 'sha256': hashlib.file_digest(open(path, 'rb'), 'sha256').hexdigest()}
 

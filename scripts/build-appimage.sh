@@ -7,7 +7,7 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 lock=$root/packaging/appimage/inputs.lock.json
 verify_inputs() {
     python3 - "$lock" "$1" "${2:-verify}" <<'PY'
-import hashlib, json, pathlib, sys, urllib.request
+import hashlib, json, pathlib, shutil, sys, time, urllib.error, urllib.request
 lock, directory, mode = json.load(open(sys.argv[1])), pathlib.Path(sys.argv[2]), sys.argv[3]
 directory.mkdir(parents=True, exist_ok=True)
 lines = []
@@ -16,13 +16,18 @@ for item in lock['rpms'] + lock['tools'] + lock['ocr'] + lock['notices'] + lock[
     path = directory / name
     if not path.exists() and mode == 'fetch':
         print('Fetching ' + name, flush=True)
-        try:
-            with urllib.request.urlopen(item['url'], timeout=120) as src, open(str(path)+'.part', 'wb') as dst:
-                import shutil
-                shutil.copyfileobj(src, dst)
-            pathlib.Path(str(path)+'.part').replace(path)
-        except Exception as e:
-            raise SystemExit(f'input {name}: {e}')
+        # One unresponsive host must not fail the build; the checksum below guards the result.
+        for attempt in range(1, 5):
+            try:
+                with urllib.request.urlopen(item['url'], timeout=60) as src, open(str(path)+'.part', 'wb') as dst:
+                    shutil.copyfileobj(src, dst)
+                pathlib.Path(str(path)+'.part').replace(path)
+                break
+            except Exception as e:
+                if attempt == 4 or isinstance(e, urllib.error.HTTPError) and e.code in (403, 404, 410):
+                    raise SystemExit(f'input {name}: {e}')
+                print(f'  attempt {attempt} failed ({e}); retrying', flush=True)
+                time.sleep(5 * 3 ** (attempt - 1))
     if not path.is_file():
         raise SystemExit(f'missing input: {name}')
     actual = hashlib.file_digest(open(path, 'rb'), 'sha256').hexdigest()
