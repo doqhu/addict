@@ -1,34 +1,46 @@
 #!/usr/bin/env bash
-# The upload of the release workflow: puts the Flatpak bundle and its SHA-256
-# file on a GitHub Release, replacing assets of the same name.
+# The upload of the release workflow: puts the given files on a GitHub
+# Release, replacing assets of the same name.
 #
-#   release-upload.sh RELEASE BUNDLE CHECKSUM
+#   release-upload.sh RELEASE FILE...
 #
+# The files are uploaded one at a time in the order given, each under its
+# base name, so the caller puts the AppImage and its checksum last and a
+# failed run never leaves the image on a Release without its sources.
 # RELEASE is a vX.Y.Z tag, whose Release must exist (release-please makes it;
 # it is never created here), or `dry-run`, the draft a dry run fills: it is
-# created when missing, refused when published, and keeps only this run's
-# two assets. Uses gh with GH_TOKEN and GH_REPO from the environment, and
+# created when missing, refused when published, and keeps exactly this
+# run's assets. Uses gh with GH_TOKEN and GH_REPO from the environment, and
 # GITHUB_SHA (plus GITHUB_REF_NAME, GITHUB_SERVER_URL, GITHUB_REPOSITORY and
 # GITHUB_RUN_ID for the draft's notes) as Actions sets them.
 # scripts/release-tests.sh tests it with a stub gh.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 
-if [[ $# != 3 ]]; then
-    echo "usage: $0 RELEASE BUNDLE CHECKSUM" >&2
+if [[ $# -lt 2 ]]; then
+    echo "usage: $0 RELEASE FILE..." >&2
     exit 2
 fi
-release=$1 bundle=$2 checksum=$3
+release=$1
+shift
+files=("$@")
 
 if [[ $release != dry-run ]] && ! "$root/scripts/release-ref.sh" "$release"; then
     echo "::error::$release is neither a vX.Y.Z tag nor dry-run: nothing is uploaded."
     exit 1
 fi
-for file in "$bundle" "$checksum"; do
+declare -A keep=()
+for file in "${files[@]}"; do
     if [[ ! -f $file ]]; then
         echo "::error::$file does not exist: nothing is uploaded."
         exit 1
     fi
+    base=$(basename -- "$file")
+    if [[ -n ${keep[$base]:-} ]]; then
+        echo "::error::Two files named $base: nothing is uploaded."
+        exit 1
+    fi
+    keep[$base]=1
 done
 
 err=$(mktemp)
@@ -54,15 +66,19 @@ else
     exit 1
 fi
 
-gh release upload "$release" --clobber "$bundle" "$checksum"
+# One call per file: gh uploads the files of one call concurrently, in no
+# fixed order.
+for file in "${files[@]}"; do
+    gh release upload "$release" --clobber "$file"
+done
 
-# After the upload, so a failed upload leaves the draft as it was: the draft
-# keeps only this run's bundle, and a dry run of another version leaves no
-# older bundle beside it.
+# After the upload, so a failed upload deletes nothing from the draft: the
+# draft keeps exactly this run's assets, and a dry run of another version
+# leaves no older asset beside them.
 if [[ $release == dry-run ]]; then
     names=$(gh release view dry-run --json assets --jq '.assets[].name')
     while IFS= read -r name; do
-        if [[ -n $name && $name != "$(basename -- "$bundle")" && $name != "$(basename -- "$checksum")" ]]; then
+        if [[ -n $name && -z ${keep[$name]:-} ]]; then
             gh release delete-asset dry-run "$name" --yes
         fi
     done <<< "$names"

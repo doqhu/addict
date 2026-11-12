@@ -7,7 +7,10 @@
 #   it, the upload job runs only after the guard and CI passed and is the only
 #   one that may write, and dry runs share one concurrency group;
 # - scripts/release-upload.sh against a stub gh that keeps its releases in a
-#   temporary directory and records its calls.
+#   temporary directory and records its calls;
+# - scripts/release-appimage-assets.sh on a small fixture handoff, and the
+#   upload job's own two steps, read from release.yml, run on that fixture
+#   against the stub gh.
 # Needs python3 with PyYAML.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
@@ -239,6 +242,160 @@ expect "view error: non-zero exit, the error shown, no upload" '[[ $code != 0 ]]
 stub indexes-v3:false
 upload indexes-v3
 expect "other name: refused before any gh call" '[[ $code != 0 ]] && [[ ! -s $GH_STUB/calls ]]'
+
+# Many files: one upload call per file, in the order given; a dry run keeps
+# exactly the given names.
+mkdir "$tmp/many"
+many=()
+for f in c.txt a.txt b.txt; do echo "$f" > "$tmp/many/$f"; many+=("$tmp/many/$f"); done
+stub dry-run:true:old.txt:a.txt
+code=0
+out=$(PATH="$tmp/bin:$PATH" GITHUB_SHA=0123abc "$root/scripts/release-upload.sh" dry-run "${many[@]}" 2>&1) || code=$?
+expect "many files: exit 0" '[[ $code == 0 ]]'
+expect "many files: one upload call per file, in the order given" '[[ $(grep "^release upload" "$GH_STUB/calls" | sed "s|.*/||" | tr "\n" " ") == "c.txt a.txt b.txt " ]]'
+expect "many files: the draft holds exactly the given names" '[[ $(assets_of dry-run) == "a.txt b.txt c.txt " ]] && [[ $(<"$GH_STUB/releases/dry-run/assets/a.txt") == a.txt ]]'
+stub dry-run:true
+code=0
+out=$(PATH="$tmp/bin:$PATH" GITHUB_SHA=0123abc "$root/scripts/release-upload.sh" dry-run "$tmp/many/a.txt" "$tmp/many/a.txt" 2>&1) || code=$?
+expect "many files: two files of one name are refused before any gh call" '[[ $code != 0 ]] && [[ $out == *"Two files named a.txt"* ]] && [[ ! -s $GH_STUB/calls ]]'
+
+# scripts/release-appimage-assets.sh on a fixture handoff: the layout of
+# scripts/archive-appimage.sh, with a tiny image, three sources and an
+# inventory in which two components share one source.
+version=0.2.0
+image=Addict-$version-x86_64.AppImage
+handoff_tar=Addict-$version-x86_64-handoff.tar
+metadata=(build.txt inputs.lock.json rpms.txt layout.txt notices.json components.sha256)
+
+# fixture DIR [MUTATION]: builds the handoff in DIR; MUTATION, a shell
+# command run in the unpacked tree before the tar is made, changes it.
+fixture() {
+    local dir=$1 mutation=${2:-} tree
+    tree=$(mktemp -d "$tmp/tree.XXXXXX")
+    mkdir -p "$dir" "$tree/$image.sources"
+    printf '#!/bin/sh\necho image\n' > "$tree/$image"
+    chmod +x "$tree/$image"
+    (cd "$tree" && sha256sum -- "$image" > "$image.sha256")
+    local m
+    for m in "${metadata[@]}"; do echo "$m of $image" > "$tree/$image.$m"; done
+    echo "source a" > "$tree/$image.sources/a-1.0.src.rpm"
+    echo "source b" > "$tree/$image.sources/b-2.0.tar.gz"
+    echo "source c" > "$tree/$image.sources/c-3.0.src.rpm"
+    (cd "$tree/$image.sources" && sha256sum -- * > SHA256SUMS)
+    python3 - "$tree/$image.sources" "$tree/$image.notices.json" <<'PY2'
+import hashlib, json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+item = lambda n: {'file': n, 'sha256': hashlib.sha256((d / n).read_bytes()).hexdigest(), 'url': 'https://example.org/' + n}
+inventory = {'schema': 1, 'files': {}, 'components': {
+    'a': {'source': {'files': [item('a-1.0.src.rpm')]}},
+    'a-libs': {'source': {'files': [item('a-1.0.src.rpm')]}},
+    'b': {'source': {'files': [item('b-2.0.tar.gz'), item('c-3.0.src.rpm')]}},
+    'own': {'source': {}},
+}}
+pathlib.Path(sys.argv[2]).write_text(json.dumps(inventory, indent=1))
+PY2
+    if [[ -n $mutation ]]; then (cd "$tree" && eval "$mutation"); fi
+    (cd "$tree" && tar -cf "$dir/$handoff_tar" -- *)
+    (cd "$dir" && sha256sum -- "$handoff_tar" > "$handoff_tar.sha256")
+    rm -rf -- "$tree"
+}
+
+# The upload job's steps, from release.yml, so the test runs the job's own
+# order of assets.
+python3 - "$root/.github/workflows/release.yml" "$tmp" <<'PY2'
+import pathlib, sys, yaml
+steps = yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())['jobs']['upload']['steps']
+named = {s.get('name'): s.get('run') for s in steps}
+pathlib.Path(sys.argv[2], 'assets-step.sh').write_text(named['Check the handoff and write the AppImage assets'])
+pathlib.Path(sys.argv[2], 'upload-step.sh').write_text(named['Upload to the release'])
+PY2
+mkdir "$tmp/bundle"
+cp -- "$bundle" "$checksum" "$tmp/bundle/"
+
+# publish RELEASE [MUTATION [TAR_MUTATION]]: a fresh fixture handoff, then
+# the two steps of the upload job as Actions runs them, from the checkout,
+# with RUNNER_TEMP. TAR_MUTATION, a shell command run in the handoff
+# directory, changes the built tar or its checksum.
+# Status in $code, output in $out.
+publish() {
+    runner=$(mktemp -d "$tmp/runner.XXXXXX")
+    cp -r -- "$tmp/bundle" "$runner/bundle"
+    fixture "$runner/handoff" "${2:-}"
+    if [[ -n ${3:-} ]]; then (cd "$runner/handoff" && eval "$3"); fi
+    code=0
+    out=$( (cd "$root" && export PATH="$tmp/bin:$PATH" RUNNER_TEMP=$runner RELEASE=$1 \
+        BUNDLE=$(basename -- "$bundle") IMAGE=$image GITHUB_SHA=0123abc ${PUBLISH_ENV:-} \
+        && bash --noprofile --norc -eo pipefail "$tmp/assets-step.sh" \
+        && bash --noprofile --norc -eo pipefail "$tmp/upload-step.sh") 2>&1) || code=$?
+}
+no_upload() { ! called "^release upload"; }
+
+all_assets="Addict-0.2.0-x86_64.AppImage Addict-0.2.0-x86_64.AppImage.build.txt Addict-0.2.0-x86_64.AppImage.components.sha256 Addict-0.2.0-x86_64.AppImage.inputs.lock.json Addict-0.2.0-x86_64.AppImage.layout.txt Addict-0.2.0-x86_64.AppImage.notices.json Addict-0.2.0-x86_64.AppImage.rpms.txt Addict-0.2.0-x86_64.AppImage.sha256 Addict-0.2.0-x86_64.AppImage.sources.tar.00 Addict-0.2.0-x86_64.AppImage.sources.tar.01 Addict-0.2.0-x86_64.AppImage.sources.tar.02 Addict-0.2.0-x86_64.AppImage.sources.tar.sha256 Addict-0.2.0-x86_64.flatpak Addict-0.2.0-x86_64.flatpak.sha256 "
+
+# Complete handoff. A part size of 4 KiB makes the fixture's source tar
+# (10 KiB) three parts.
+stub v0.2.0:false
+PUBLISH_ENV="PART_SIZE=4096" publish v0.2.0
+expect "complete handoff: exit 0" '[[ $code == 0 ]]'
+expect "complete handoff: every asset on the Release" '[[ $(assets_of v0.2.0) == "$all_assets" ]]'
+expect "complete handoff: the image and its checksum are uploaded last" '[[ $(grep "^release upload" "$GH_STUB/calls" | tail -2 | sed "s|.*/||" | tr "\n" " ") == "$image $image.sha256 " ]]'
+expect "complete handoff: the Flatpak and the sources come before the image" '[[ $(grep "^release upload" "$GH_STUB/calls" | head -6 | sed "s|.*/||" | tr "\n" " ") == "Addict-0.2.0-x86_64.flatpak Addict-0.2.0-x86_64.flatpak.sha256 $image.sources.tar.00 $image.sources.tar.01 $image.sources.tar.02 $image.sources.tar.sha256 " ]]'
+expect "complete handoff: every asset name is only A-Za-z0-9._- and under 2 GiB" '! ls -1 "$GH_STUB/releases/v0.2.0/assets" | grep -qv "^[A-Za-z0-9._-]*$" && [[ -z $(find "$GH_STUB/releases/v0.2.0/assets" -type f -size +2097151k) ]]'
+reassembled=$tmp/reassembled
+rm -rf -- "$reassembled"; mkdir "$reassembled"
+expect "complete handoff: the parts pass their .sha256, and the image its own" '(cd "$GH_STUB/releases/v0.2.0/assets" && sha256sum --check --strict --quiet "$image.sources.tar.sha256" && sha256sum --check --strict --quiet "$image.sha256")'
+expect "complete handoff: the reassembled source set passes SHA256SUMS with 3 files" '(cd "$GH_STUB/releases/v0.2.0/assets" && cat "$image".sources.tar.[0-9][0-9] | tar -x -C "$reassembled") && (cd "$reassembled/$image.sources" && sha256sum --check --strict --quiet SHA256SUMS && [[ $(ls | wc -l) == 4 ]])'
+expect "complete handoff: the handoff tar and the extracted tree are removed" '[[ ! -e $runner/handoff/$handoff_tar ]] && [[ -z $(find "$runner" -maxdepth 1 -name ".appimage-assets.*") ]]'
+
+# Second run: the assets are already on the Release.
+PUBLISH_ENV="PART_SIZE=4096" publish v0.2.0
+expect "second run with the AppImage: exit 0, the same assets once each" '[[ $code == 0 ]] && [[ $(assets_of v0.2.0) == "$all_assets" ]]'
+
+# Dry run after one of another version: only this run's assets remain.
+stub "dry-run:true:Addict-0.1.1-x86_64.AppImage:Addict-0.1.1-x86_64.AppImage.sources.tar.00:Addict-0.1.1-x86_64.flatpak"
+PUBLISH_ENV="PART_SIZE=4096" publish dry-run
+expect "dry run after an older one: only this run's assets remain" '[[ $code == 0 ]] && [[ $(assets_of dry-run) == "$all_assets" ]]'
+PUBLISH_ENV="PART_SIZE=4096" publish dry-run
+expect "second dry run: the same asset names once each" '[[ $code == 0 ]] && [[ $(assets_of dry-run) == "$all_assets" ]]'
+
+# The refusals: each uploads nothing, and the asset directory is removed.
+refuse() {
+    expect "$1: non-zero exit" '[[ $code != 0 ]]'
+    needle=$2
+    expect "$1: the message names $2" '[[ $out == *"$needle"* ]]'
+    expect "$1: the stub gh records no upload" 'no_upload'
+    expect "$1: no asset directory is left" '[[ ! -e $runner/appimage ]]'
+}
+stub v0.2.0:false
+publish v0.2.0 'rm "$image.sources/b-2.0.tar.gz"'
+refuse "source removed" "missing corresponding source: b-2.0.tar.gz"
+stub v0.2.0:false
+publish v0.2.0 'rm "$image.sources/b-2.0.tar.gz"; sed -i "/b-2.0.tar.gz/d" "$image.sources/SHA256SUMS"'
+refuse "source and its line removed" "differs from the inventory in $image.notices.json: missing b-2.0.tar.gz"
+stub v0.2.0:false
+publish v0.2.0 'echo extra > "$image.sources/d-4.0.src.rpm"; (cd "$image.sources" && sha256sum -- * | grep -v SHA256SUMS > SHA256SUMS.new && mv SHA256SUMS.new SHA256SUMS)'
+refuse "source not in the inventory" "not in the inventory: d-4.0.src.rpm"
+stub v0.2.0:false
+publish v0.2.0 'printf X | dd of="$image.sources/c-3.0.src.rpm" bs=1 seek=2 conv=notrunc status=none'
+refuse "corrupt source" "corrupt corresponding source: c-3.0.src.rpm"
+stub v0.2.0:false
+publish v0.2.0 'printf X | dd of="$image" bs=1 seek=3 conv=notrunc status=none'
+refuse "corrupt image" "the image does not match its checksum: $image"
+stub v0.2.0:false
+publish v0.2.0 'rm "$image.layout.txt"'
+refuse "metadata file missing" "missing from the handoff: $image.layout.txt"
+stub v0.2.0:false
+publish v0.2.0 '' 'printf X | dd of="$handoff_tar" bs=1 seek=600 conv=notrunc status=none'
+refuse "corrupt handoff tar" "$handoff_tar does not match $handoff_tar.sha256"
+expect "corrupt handoff tar: the tar is kept" '[[ -f $runner/handoff/$handoff_tar ]]'
+# Asset too large, with the limit lowered below the image's size (the parts
+# are 4 KiB, under it).
+stub v0.2.0:false
+PUBLISH_ENV="ASSET_LIMIT=4097 PART_SIZE=4096" publish v0.2.0 'head -c 5000 /dev/zero >> "$image"; sha256sum -- "$image" > "$image.sha256"'
+refuse "asset too large" "not under 4097: $image"
+stub v0.2.0:false
+PUBLISH_ENV="ASSET_LIMIT=4097 PART_SIZE=4096" publish v0.2.0 'head -c 4096 /dev/zero > "$image"; sha256sum -- "$image" > "$image.sha256"'
+expect "asset just under the limit: exit 0" '[[ $code == 0 ]]'
 
 if [[ $failures != 0 ]]; then
     echo "$failures release test(s) failed" >&2

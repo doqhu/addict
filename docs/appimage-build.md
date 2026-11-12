@@ -845,9 +845,11 @@ sha256sum --check --strict Addict-0.1.1-x86_64.AppImage.sha256
 Epic 6 consumes these relative image, checksum, metadata and corresponding-source
 paths together, using `.build.txt` to identify the source revision/snapshot and
 the workflow run to identify CI provenance. Actions artifacts expire after seven
-days; this job creates no GitHub Release, publishes no release assets and
-uploads no dictionaries. Its deterministic Screenshot portal is a smoke test;
-real desktop screenshots, portal UX, dictionary downloads, typed translation,
+days. The `appimage` job itself creates no GitHub Release, publishes no release
+assets and uploads no dictionaries; the release workflow publishes this
+handoff, checked again, as release assets, which [release.md](release.md)
+lists. Its deterministic Screenshot portal is a smoke test; real desktop
+screenshots, portal UX, dictionary downloads, typed translation,
 desktop/login and two-distribution human acceptance remain 5.7 work. Local
 runner-equivalent results are not evidence that hosted Actions has executed.
 
