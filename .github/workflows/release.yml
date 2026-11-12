@@ -1,0 +1,106 @@
+name: Release
+
+# Attaches the Flatpak bundle and its SHA-256 file to the GitHub Release of a
+# vX.Y.Z tag, after every CI job passed in the same run. Started by hand, it
+# is a dry run that fills the draft release `dry-run` instead. See
+# docs/release.md.
+on:
+  push:
+    # A glob: `+` repeats the character before it, `.` is literal, and the
+    # whole name must match. scripts/release-tests.sh checks this line.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Two runs that write the same release must not upload over each other: a run
+# waits for the running one, and GitHub keeps only one waiting run per group,
+# so a newer waiting run replaces (cancels) an older one. A tag run writes
+# its tag's Release; every dry run, from whatever branch, writes the one
+# draft `dry-run`, so all share one group.
+concurrency:
+  group: release-${{ github.event_name == 'push' && github.ref || 'dry-run' }}
+  cancel-in-progress: false
+
+jobs:
+  # The ref, checked again in the run, and the names the upload uses: the
+  # version from Cargo.toml and the release, the tag or the draft `dry-run`.
+  guard:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.ref.outputs.version }}
+      release: ${{ steps.ref.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check the ref
+        id: ref
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          if [ "$EVENT" = push ]; then
+            if [ "$REF_TYPE" != tag ] || ! scripts/release-ref.sh "$REF_NAME"; then
+              echo "::error::$REF_NAME is not a vX.Y.Z tag: nothing is released."
+              exit 1
+            fi
+            if [ "$REF_NAME" != "v$version" ]; then
+              echo "::error::The tag $REF_NAME does not match the version $version in Cargo.toml."
+              exit 1
+            fi
+            release=$REF_NAME
+          else
+            echo "Dry run of $REF_NAME: the assets go to the draft release dry-run."
+            release=dry-run
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+
+  # The CI jobs themselves; they report as `ci / test` and so on.
+  ci:
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  # Runs only when the guard and every CI job passed. The bundle is the
+  # artifact the `flatpak` job of this run built and linted.
+  upload:
+    needs: [guard, ci]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE: ${{ needs.guard.outputs.release }}
+      BUNDLE: Addict-${{ needs.guard.outputs.version }}-x86_64.flatpak
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: io.github.doqhu.Addict-x86_64.flatpak
+          path: ${{ runner.temp }}/bundle
+
+      - name: Name the bundle and write its checksum
+        run: |
+          cd "$RUNNER_TEMP/bundle"
+          shopt -s nullglob
+          found=(*.flatpak)
+          if [ "${#found[@]}" != 1 ]; then
+            echo "::error::The artifact holds ${#found[@]} .flatpak files, not one."
+            exit 1
+          fi
+          mv -- "${found[0]}" "$BUNDLE"
+          sha256sum -- "$BUNDLE" > "$BUNDLE.sha256"
+          cat "$BUNDLE.sha256"
+
+      # Needs the checkout for the script; scripts/release-tests.sh tests it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Upload to the release
+        run: >-
+          scripts/release-upload.sh "$RELEASE"
+          "$RUNNER_TEMP/bundle/$BUNDLE" "$RUNNER_TEMP/bundle/$BUNDLE.sha256"

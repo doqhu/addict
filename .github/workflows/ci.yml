@@ -1,8 +1,12 @@
 name: CI
 
+# Branches only: a tag starts no CI run. The release workflow runs these jobs
+# for a vX.Y.Z tag by calling this file (docs/release.md).
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -55,6 +59,21 @@ jobs:
 
       - name: Test the workspace
         run: runuser -u tester -- cargo test --locked --workspace
+
+  # The release trigger: the guard and the tag filters of the workflows.
+  workflows:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install PyYAML
+        run: |
+          python3 -m venv "$RUNNER_TEMP/yaml"
+          "$RUNNER_TEMP/yaml/bin/pip" install --quiet PyYAML==6.0.3
+          echo "$RUNNER_TEMP/yaml/bin" >> "$GITHUB_PATH"
+
+      - name: Test the release trigger
+        run: scripts/release-tests.sh
 
   reuse:
     runs-on: ubuntu-24.04
