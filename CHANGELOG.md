@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/doqhu/addict/compare/v0.1.1...v0.2.0) (2026-11-12)
+
+
+### Features
+
+* **appimage:** ship an x86_64 AppImage and redesign the download dialog ([#13](https://github.com/doqhu/addict/issues/13)) ([4fb85b9](https://github.com/doqhu/addict/commit/4fb85b90df85270982cb200018fe2213efbc46a1))
+
 ## [0.1.1](https://github.com/doqhu/addict/compare/v0.1.0...v0.1.1) (2026-11-08)
 
 
