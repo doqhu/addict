@@ -32,8 +32,8 @@ video, can be captured from the screen and read with Tesseract OCR.
 - Linux with GNOME 48 or later on Wayland, which has the GlobalShortcuts
   portal. KDE Plasma 6 may work but is not tested.
 - GTK 4.20 or later. On a distribution with older GTK, such as Debian 13 or
-  Ubuntu 24.04, the build from source fails; use the packages once they are
-  out (see Install).
+  Ubuntu 24.04, the build from source fails; use the AppImage or the Flatpak
+  bundle (see Install).
 - Tesseract, with the data of English, Spanish and Catalan, for Capture
   only.
 - A DeepL API key (the free plan is enough), for the online translations
@@ -43,8 +43,67 @@ video, can be captured from the screen and read with Tesseract OCR.
 
 ## Install
 
-Flathub and AppImage packages come with the first release. Until then, build
-addict from source.
+Each [release](https://github.com/doqhu/addict/releases) carries an AppImage
+and a Flatpak bundle for x86_64, each with a `.sha256` file; `<version>` below
+stands for the release's version, such as `0.2.0`. addict is not on Flathub
+yet. To build it yourself, see Build from source.
+
+### AppImage
+
+The AppImage was tried on GNOME with Debian 13 and Ubuntu 24.04. It needs no
+FUSE, and carries GTK and Tesseract, so it works where GTK is too old for a
+build from source.
+
+1. Download `Addict-<version>-x86_64.AppImage` and
+   `Addict-<version>-x86_64.AppImage.sha256` from the release, and check
+   the download:
+
+   ```sh
+   sha256sum --check Addict-<version>-x86_64.AppImage.sha256
+   ```
+
+2. Make it executable and start it:
+
+   ```sh
+   chmod +x Addict-<version>-x86_64.AppImage
+   ./Addict-<version>-x86_64.AppImage
+   ```
+
+3. To add it to the application menu, open the file with
+   [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) and let it
+   integrate the app, or run `./Addict-<version>-x86_64.AppImage install`,
+   which writes the same kind of desktop entry as a source build. Keep the
+   file where it is: the entry names its path, so after moving it run
+   `install` again.
+
+To update, download the new release's AppImage and use it in place of the old
+one. addict does not update itself. Settings, the dictionaries and the cache
+stay where they are.
+
+On Ubuntu 24.04, whose desktop portal is older, the AppImage starts and looks
+words up, but Capture gives no text and Start at login is unavailable.
+
+The release also carries what the AppImage's licenses require: its
+corresponding sources (`Addict-<version>-x86_64.AppImage.sources.tar.00`, ...)
+and the files of its build, described in
+[docs/release.md](docs/release.md).
+
+### Flatpak bundle
+
+Download `Addict-<version>-x86_64.flatpak` and its `.sha256` file, then:
+
+```sh
+sha256sum --check Addict-<version>-x86_64.flatpak.sha256
+flatpak install --user Addict-<version>-x86_64.flatpak
+flatpak run io.github.doqhu.Addict
+```
+
+The bundle needs the GNOME runtime, which Flatpak installs from a remote
+such as Flathub, so set that remote up first if you have not. A bundle does not update itself: install the next
+release's bundle the same way. Before you switch from a source build or an
+AppImage launcher, run `addict uninstall` (for an AppImage,
+`./Addict-<version>-x86_64.AppImage uninstall`) and quit the running addict;
+the note below says why.
 
 ## Build from source
 
