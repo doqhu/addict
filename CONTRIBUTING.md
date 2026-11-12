@@ -37,8 +37,20 @@ and, before 1.0, a breaking change (`feat!:`) the minor version too. The pull
 request sets the version in `Cargo.toml`, `Cargo.lock` and the MetaInfo, and
 writes `CHANGELOG.md`, so do not edit those by hand. Merging it tags the release
 and publishes it on GitHub. The tag then starts the release workflow, which
-runs the CI checks and attaches the Flatpak bundle and its SHA-256 file to that
-release, as [docs/release.md](docs/release.md) describes.
+runs the CI checks and, only when they pass, attaches these assets to that
+release (`<version>` is the version without the `v`; the names and checks are
+in [docs/release.md](docs/release.md)):
+
+- `Addict-<version>-x86_64.flatpak` and its `.sha256`: the Flatpak bundle;
+- `Addict-<version>-x86_64.AppImage` and its `.sha256`, with the build files
+  `.build.txt`, `.inputs.lock.json`, `.rpms.txt`, `.layout.txt`,
+  `.notices.json` and `.components.sha256`, and the corresponding sources of
+  the AppImage's components as `.sources.tar.00`, `.sources.tar.01`, ... with
+  `.sources.tar.sha256`;
+- `addict-<version>-vendored.tar.xz` and its `.sha256`: the tagged tree with
+  its crates vendored, for building offline.
+
+The README's install steps use these names, so change them together.
 
 ### AI-assisted contributions
 
@@ -76,6 +88,14 @@ secret scan of the whole history, the tests of the release trigger and upload
 script (`scripts/release-tests.sh`), and builds the Flatpak and checks it with
 `flatpak-builder-lint`, but not the build without the test features or the
 GTK guard, so run `scripts/check.sh` yourself.
+
+To lint the Flatpak locally as CI and Flathub do, use the lint build and the
+`flatpak-builder-lint` commands in the header of
+`packaging/flatpak/io.github.doqhu.Addict.yml`, not its `--install` build.
+The lint build uses `--mirror-screenshots-url` and
+`--compose-url-policy=full`, as Flathub's build does; without them, the
+`builddir` and `repo` lints fail on `appstream-external-screenshot-url` and
+`appstream-remote-icon-not-mirrored`.
 
 The Flatpak build has no network, so it takes the crates from
 `packaging/flatpak/cargo-sources.json`. If your change touches `Cargo.lock`,

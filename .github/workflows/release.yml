@@ -1,6 +1,7 @@
 name: Release
 
-# Attaches the Flatpak bundle and its SHA-256 file, and the AppImage with its
+# Attaches the Flatpak bundle and its SHA-256 file, the source tarball with
+# the crates vendored and its SHA-256 file, and the AppImage with its
 # checksum, its metadata and its corresponding-source set, to the GitHub
 # Release of a vX.Y.Z tag, after every CI job passed in the same run. Started
 # by hand, it is a dry run that fills the draft release `dry-run` instead.
@@ -67,12 +68,38 @@ jobs:
     permissions:
       contents: read
 
-  # Runs only when the guard and every CI job passed. The bundle is the
-  # artifact the `flatpak` job of this run built and linted; the AppImage
-  # assets come from the handoff the `appimage` job of this run built and
-  # checked. Nothing is built a second time.
+  # The tree of the run's commit with every crate vendored, as one
+  # reproducible tar.xz and its checksum; the script checks that cargo
+  # resolves it offline before anything is handed to the upload job.
+  source:
+    needs: guard
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and check the source tarball
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: scripts/release-source.sh "$VERSION" "$RUNNER_TEMP/source"
+
+      - name: Hand the source tarball to the upload job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: addict-${{ needs.guard.outputs.version }}-vendored
+          path: ${{ runner.temp }}/source/*
+          if-no-files-found: error
+          compression-level: 0 # Already xz.
+          retention-days: 7
+
+  # Runs only when the guard, every CI job and the source job passed. The
+  # bundle is the artifact the `flatpak` job of this run built and linted;
+  # the source tarball is the one the `source` job of this run built and
+  # checked; the AppImage assets come from the handoff the `appimage` job of
+  # this run built and checked. Nothing is built a second time.
   upload:
-    needs: [guard, ci]
+    needs: [guard, ci, source]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -82,6 +109,7 @@ jobs:
       RELEASE: ${{ needs.guard.outputs.release }}
       BUNDLE: Addict-${{ needs.guard.outputs.version }}-x86_64.flatpak
       IMAGE: Addict-${{ needs.guard.outputs.version }}-x86_64.AppImage
+      SOURCE: addict-${{ needs.guard.outputs.version }}-vendored.tar.xz
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -101,6 +129,12 @@ jobs:
           sha256sum -- "$BUNDLE" > "$BUNDLE.sha256"
           cat "$BUNDLE.sha256"
 
+      # The source tarball and its checksum.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: addict-${{ needs.guard.outputs.version }}-vendored
+          path: ${{ runner.temp }}/source
+
       # The handoff tar (2.8 GiB) and its checksum.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -118,13 +152,17 @@ jobs:
           df -h "$RUNNER_TEMP"
           scripts/release-appimage-assets.sh "$RUNNER_TEMP/handoff" "$RUNNER_TEMP/appimage"
 
-      # The order is the upload order: the AppImage and its checksum go last,
-      # so a failed run never leaves the image without its sources.
+      # The source tarball is checked against its checksum first; a mismatch
+      # stops the job before any upload. The order is the upload order: the
+      # AppImage and its checksum go last, so a failed run never leaves the
+      # image without its sources.
       - name: Upload to the release
         run: |
+          (cd "$RUNNER_TEMP/source" && sha256sum --check --strict -- "$SOURCE.sha256")
           a=$RUNNER_TEMP/appimage
           scripts/release-upload.sh "$RELEASE" \
             "$RUNNER_TEMP/bundle/$BUNDLE" "$RUNNER_TEMP/bundle/$BUNDLE.sha256" \
+            "$RUNNER_TEMP/source/$SOURCE" "$RUNNER_TEMP/source/$SOURCE.sha256" \
             "$a/$IMAGE".sources.tar.[0-9][0-9] "$a/$IMAGE.sources.tar.sha256" \
             "$a/$IMAGE".{build.txt,inputs.lock.json,rpms.txt,layout.txt,notices.json,components.sha256} \
             "$a/$IMAGE" "$a/$IMAGE.sha256"
