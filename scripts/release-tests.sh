@@ -8,10 +8,13 @@
 #   one that may write, and dry runs share one concurrency group;
 # - scripts/release-upload.sh against a stub gh that keeps its releases in a
 #   temporary directory and records its calls;
+# - scripts/release-source.sh on a fixture git repository, with a stub cargo
+#   whose `vendor` writes one fake crate and whose `metadata` records where
+#   and with which CARGO_HOME it ran;
 # - scripts/release-appimage-assets.sh on a small fixture handoff, and the
 #   upload job's own two steps, read from release.yml, run on that fixture
-#   against the stub gh.
-# Needs python3 with PyYAML.
+#   and a fixture source tarball against the stub gh.
+# Needs python3 with PyYAML, git and xz.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 failures=0
@@ -76,8 +79,15 @@ jobs = doc.get("jobs") or {}
 upload = jobs.get("upload") or {}
 needs = upload.get("needs") or []
 needs = [needs] if isinstance(needs, str) else needs
-check({"guard", "ci"} <= set(needs),
-      "the upload job needs both guard and ci (found %r)" % (needs,))
+check({"guard", "ci", "source"} <= set(needs),
+      "the upload job needs guard, ci and source (found %r)" % (needs,))
+source = jobs.get("source") or {}
+check(source.get("needs") in ("guard", ["guard"]),
+      "the source job needs the guard (found %r)" % (source.get("needs"),))
+check(source.get("permissions") == {"contents": "read"},
+      "the source job has contents: read and nothing else (found %r)" % (source.get("permissions"),))
+check("if" not in source,
+      "the source job has no if:, so a failed guard skips it")
 check("if" not in upload,
       "the upload job has no if:, so a failed or skipped need skips it")
 def writes(perms):
@@ -176,7 +186,7 @@ upload() {
     out=$(PATH="$tmp/bin:$PATH" GITHUB_SHA=0123abc GITHUB_REF_NAME=topic \
         "$root/scripts/release-upload.sh" "$1" "$bundle" "$checksum" 2>&1) || code=$?
 }
-assets_of() { ls -1 "$GH_STUB/releases/$1/assets" | tr '\n' ' '; }
+assets_of() { LC_ALL=C ls -1 "$GH_STUB/releases/$1/assets" | tr '\n' ' '; }
 called() { grep -qE "$1" "$GH_STUB/calls"; }
 expect() { if eval "$2"; then pass "$1"; else fail "$1"; echo "  output: $out"; echo "  calls:"; sed 's/^/    /' "$GH_STUB/calls"; fi; }
 new_assets="Addict-0.2.0-x86_64.flatpak Addict-0.2.0-x86_64.flatpak.sha256 "
@@ -259,6 +269,160 @@ code=0
 out=$(PATH="$tmp/bin:$PATH" GITHUB_SHA=0123abc "$root/scripts/release-upload.sh" dry-run "$tmp/many/a.txt" "$tmp/many/a.txt" 2>&1) || code=$?
 expect "many files: two files of one name are refused before any gh call" '[[ $code != 0 ]] && [[ $out == *"Two files named a.txt"* ]] && [[ ! -s $GH_STUB/calls ]]'
 
+# scripts/release-source.sh on a fixture git repository with one crate that
+# depends on one crates.io crate, and a stub cargo: `vendor` writes that
+# crate into vendor/ and prints a configuration with an absolute path, as
+# cargo does; `metadata` records its working directory, its CARGO_HOME and
+# what that holds in $CARGO_STUB/metadata, and fails with the content of
+# $CARGO_STUB/metadata-error if it exists, or when the crate is missing.
+cat > "$tmp/bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >> "$CARGO_STUB/calls"
+case ${1:-} in
+    vendor)
+        [[ "$*" == "vendor --locked --quiet vendor" ]] || { echo "stub cargo: unexpected call: $*" >&2; exit 99; }
+        [[ -f Cargo.lock ]] || { echo "stub cargo: no Cargo.lock" >&2; exit 99; }
+        mkdir -p vendor/fake-1.0.0/src
+        printf '[package]\nname = "fake"\nversion = "1.0.0"\n' > vendor/fake-1.0.0/Cargo.toml
+        echo 'pub fn fake() {}' > vendor/fake-1.0.0/src/lib.rs
+        echo '{"files":{},"package":"00"}' > vendor/fake-1.0.0/.cargo-checksum.json
+        printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "%s/vendor"\n' "$PWD" ;;
+    metadata)
+        { echo "cwd=$PWD"; echo "home=${CARGO_HOME:-}"; echo "home_entries=$(ls -A -- "${CARGO_HOME:-/nonexistent}" 2>/dev/null | wc -l)"
+          echo "args=$*"; } > "$CARGO_STUB/metadata"
+        if [[ -f $CARGO_STUB/metadata-error ]]; then cat "$CARGO_STUB/metadata-error" >&2; exit 101; fi
+        [[ -f vendor/fake-1.0.0/Cargo.toml && -f .cargo/config.toml ]] \
+            || { echo "error: no matching package named \`fake\` found" >&2; exit 101; }
+        echo '{}' ;;
+    *) echo "stub cargo: unexpected call: $*" >&2; exit 99 ;;
+esac
+STUB
+chmod +x "$tmp/bin/cargo"
+
+# Git with no user or system configuration, so no signing or hook applies.
+fixture_git() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git "$@"; }
+commit_time=1767225600 # 2026-01-01T00:00:00Z
+
+# source_repo DIR [MUTATION]: a fresh repository in DIR with one commit;
+# MUTATION, a shell command run in DIR before the commit, changes it. An
+# untracked file is left beside the commit.
+source_repo() {
+    local dir=$1
+    mkdir -p "$dir/src" "$dir/scripts"
+    printf '[package]\nname = "app"\nversion = "0.2.0"\nedition = "2021"\n\n[dependencies]\nfake = "1"\n' > "$dir/Cargo.toml"
+    cat > "$dir/Cargo.lock" <<'LOCK'
+version = 4
+
+[[package]]
+name = "app"
+version = "0.2.0"
+dependencies = [
+ "fake",
+]
+
+[[package]]
+name = "fake"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0000000000000000000000000000000000000000000000000000000000000000"
+LOCK
+    echo 'pub fn app() {}' > "$dir/src/lib.rs"
+    printf '#!/bin/sh\necho tool\n' > "$dir/scripts/tool.sh"
+    chmod +x "$dir/scripts/tool.sh"
+    if [[ -n ${2:-} ]]; then (cd "$dir" && eval "$2"); fi
+    (cd "$dir" && fixture_git init -q && fixture_git add -A \
+        && GIT_AUTHOR_DATE="@$commit_time +0000" GIT_COMMITTER_DATE="@$commit_time +0000" \
+           fixture_git -c user.name=Test -c user.email=test@example.org commit -q -m fixture)
+    echo untracked > "$dir/untracked.txt"
+}
+
+# make_source REPO OUT: runs the script in REPO; status in $code, output in
+# $out, a fresh stub state in $CARGO_STUB.
+make_source() {
+    export CARGO_STUB
+    CARGO_STUB=$(mktemp -d "$tmp/cargo-stub.XXXXXX")
+    code=0
+    out=$( (cd "$1" && PATH="$tmp/bin:$PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+        CARGO_HOME=$tmp/user-cargo-home "$root/scripts/release-source.sh" 0.2.0 "$2") 2>&1) || code=$?
+}
+source_name=addict-0.2.0-vendored.tar.xz
+written() { [[ -e $1 && -n $(ls -A -- "$1") ]]; }
+expect_source() { if eval "$2"; then pass "$1"; else fail "$1"; echo "  output: $out"; echo "  cargo calls:"; sed 's/^/    /' "$CARGO_STUB/calls" 2>/dev/null || true; fi; }
+
+# Tagged tree.
+source_repo "$tmp/repo"
+mkdir "$tmp/user-cargo-home"; echo full > "$tmp/user-cargo-home/config.toml"
+make_source "$tmp/repo" "$tmp/source-out"
+expect_source "source tarball: exit 0" '[[ $code == 0 ]]'
+expect_source "source tarball: the tarball and its .sha256, nothing else" '[[ $(ls -1 "$tmp/source-out" | tr "\n" " ") == "$source_name $source_name.sha256 " ]]'
+expect_source "source tarball: the checksum passes" '(cd "$tmp/source-out" && sha256sum --check --strict --quiet "$source_name.sha256")'
+python3 - "$tmp/source-out/$source_name" "$commit_time" > "$tmp/source-listing" <<'PY2'
+import sys, tarfile
+with tarfile.open(sys.argv[1], 'r:xz') as t:
+    members = t.getmembers()
+    print('tops=' + ' '.join(sorted({m.name.split('/')[0] for m in members})))
+    print('owners=' + ' '.join(sorted({'%d:%d' % (m.uid, m.gid) for m in members})))
+    print('mtimes=' + ' '.join(sorted({str(int(m.mtime)) for m in members})))
+    for m in members:
+        print('member=%s %o' % (m.name, m.mode))
+    print('config=' + t.extractfile('addict-0.2.0/.cargo/config.toml').read().decode().replace('\n', '|'))
+PY2
+listing() { grep -q -- "$1" "$tmp/source-listing"; }
+expect_source "source tarball: one top directory addict-0.2.0" 'listing "^tops=addict-0.2.0$"'
+expect_source "source tarball: owner 0 and the commit time on every member" 'listing "^owners=0:0$" && listing "^mtimes=$commit_time$"'
+expect_source "source tarball: the tracked tree, the executable kept" 'listing "^member=addict-0.2.0/Cargo.lock 644$" && listing "^member=addict-0.2.0/src/lib.rs 644$" && listing "^member=addict-0.2.0/scripts/tool.sh 755$"'
+expect_source "source tarball: no untracked file" '! listing "untracked.txt"'
+expect_source "source tarball: the crate in vendor/" 'listing "^member=addict-0.2.0/vendor/fake-1.0.0/Cargo.toml " && listing "^member=addict-0.2.0/vendor/fake-1.0.0/.cargo-checksum.json "'
+expect_source "source tarball: .cargo/config.toml replaces crates-io with the relative directory vendor" 'listing "^config=.*\[source.crates-io\]|replace-with = \"vendored-sources\"|.*\[source.vendored-sources\]|directory = \"vendor\"|$" && ! listing "^config=.*$tmp"'
+expect_source "source tarball: the offline check ran in the unpacked tarball, not the checkout" 'grep -q "^cwd=.*/addict-0.2.0$" "$CARGO_STUB/metadata" && ! grep -q "^cwd=$tmp/repo" "$CARGO_STUB/metadata"'
+expect_source "source tarball: the offline check ran with an empty CARGO_HOME of its own" 'grep -q "^home_entries=0$" "$CARGO_STUB/metadata" && ! grep -q "^home=$tmp/user-cargo-home$" "$CARGO_STUB/metadata" && ! grep -q "^home=$" "$CARGO_STUB/metadata"'
+expect_source "source tarball: the offline check is cargo metadata --offline --locked" 'grep -q "^args=metadata --offline --locked" "$CARGO_STUB/metadata"'
+
+# Same commit twice, the second time with another umask: the same bytes.
+(umask 077 && make_source "$tmp/repo" "$tmp/source-out-2"; echo "$code" > "$tmp/source-code-2")
+expect_source "same commit twice: identical bytes" '[[ $(<"$tmp/source-code-2") == 0 ]] && cmp -s "$tmp/source-out/$source_name" "$tmp/source-out-2/$source_name" && cmp -s "$tmp/source-out/$source_name.sha256" "$tmp/source-out-2/$source_name.sha256"'
+
+# The refusals: each writes nothing.
+refuse_source() {
+    expect_source "$1: non-zero exit" '[[ $code != 0 ]]'
+    needle=$2 dest=$3
+    expect_source "$1: the message names $2" '[[ $out == *"$needle"* ]]'
+    expect_source "$1: nothing written" '! written "$dest"'
+}
+git_lock='printf "\n[[package]]\nname = \"dep\"\nversion = \"0.1.0\"\nsource = \"git+https://example.org/dep.git#0123abc\"\n" >> Cargo.lock'
+source_repo "$tmp/repo-git" "$git_lock"
+make_source "$tmp/repo-git" "$tmp/source-out-git"
+refuse_source "git source" "git+https://example.org/dep.git#0123abc" "$tmp/source-out-git"
+expect_source "git source: no cargo vendor" '! grep -q "^vendor" "$CARGO_STUB/calls" 2>/dev/null'
+source_repo "$tmp/repo-config" 'mkdir .cargo && echo "[net]" > .cargo/config.toml'
+make_source "$tmp/repo-config" "$tmp/source-out-config"
+refuse_source "config in tree" "the tree already has .cargo/config.toml" "$tmp/source-out-config"
+source_repo "$tmp/repo-vendor" 'mkdir vendor && echo x > vendor/x'
+make_source "$tmp/repo-vendor" "$tmp/source-out-vendor"
+refuse_source "vendor/ in tree" "the tree already has vendor" "$tmp/source-out-vendor"
+source_repo "$tmp/repo-old-config" 'mkdir .cargo && echo "[net]" > .cargo/config'
+make_source "$tmp/repo-old-config" "$tmp/source-out-old-config"
+refuse_source "old config name in tree" "the tree already has .cargo/config:" "$tmp/source-out-old-config"
+# The sparse crates.io index is crates.io too.
+source_repo "$tmp/repo-sparse" 'sed -i "s|registry+https://github.com/rust-lang/crates.io-index|sparse+https://index.crates.io/|" Cargo.lock'
+make_source "$tmp/repo-sparse" "$tmp/source-out-sparse"
+expect_source "sparse crates.io source: exit 0, the tarball written" '[[ $code == 0 ]] && grep -q "^source = \"sparse+https://index.crates.io/\"$" "$tmp/repo-sparse/Cargo.lock" && (cd "$tmp/source-out-sparse" && sha256sum --check --strict --quiet "$source_name.sha256")'
+# The offline check fails: an existing, empty OUT_DIR stays empty.
+mkdir "$tmp/source-out-offline"
+CARGO_STUB_ERROR="error: no matching package named \`fake\` found"
+make_source_failing() {
+    export CARGO_STUB
+    CARGO_STUB=$(mktemp -d "$tmp/cargo-stub.XXXXXX")
+    echo "$CARGO_STUB_ERROR" > "$CARGO_STUB/metadata-error"
+    code=0
+    out=$( (cd "$1" && PATH="$tmp/bin:$PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+        "$root/scripts/release-source.sh" 0.2.0 "$2") 2>&1) || code=$?
+}
+make_source_failing "$tmp/repo" "$tmp/source-out-offline"
+refuse_source "offline check fails" "$CARGO_STUB_ERROR" "$tmp/source-out-offline"
+expect_source "offline check fails: the empty OUT_DIR is kept" '[[ -d $tmp/source-out-offline ]]'
+
 # scripts/release-appimage-assets.sh on a fixture handoff: the layout of
 # scripts/archive-appimage.sh, with a tiny image, three sources and an
 # inventory in which two components share one source.
@@ -312,25 +476,29 @@ PY2
 mkdir "$tmp/bundle"
 cp -- "$bundle" "$checksum" "$tmp/bundle/"
 
-# publish RELEASE [MUTATION [TAR_MUTATION]]: a fresh fixture handoff, then
-# the two steps of the upload job as Actions runs them, from the checkout,
-# with RUNNER_TEMP. TAR_MUTATION, a shell command run in the handoff
-# directory, changes the built tar or its checksum.
+# publish RELEASE [MUTATION [TAR_MUTATION [SOURCE_MUTATION]]]: the bundle,
+# the fixture source tarball and a fresh fixture handoff, then the two steps
+# of the upload job as Actions runs them, from the checkout, with
+# RUNNER_TEMP. TAR_MUTATION, a shell command run in the handoff directory,
+# changes the built tar or its checksum; SOURCE_MUTATION, run in the source
+# directory, changes the source tarball or its checksum.
 # Status in $code, output in $out.
 publish() {
     runner=$(mktemp -d "$tmp/runner.XXXXXX")
     cp -r -- "$tmp/bundle" "$runner/bundle"
+    cp -r -- "$tmp/source-out" "$runner/source"
     fixture "$runner/handoff" "${2:-}"
     if [[ -n ${3:-} ]]; then (cd "$runner/handoff" && eval "$3"); fi
+    if [[ -n ${4:-} ]]; then (cd "$runner/source" && eval "$4"); fi
     code=0
     out=$( (cd "$root" && export PATH="$tmp/bin:$PATH" RUNNER_TEMP=$runner RELEASE=$1 \
-        BUNDLE=$(basename -- "$bundle") IMAGE=$image GITHUB_SHA=0123abc ${PUBLISH_ENV:-} \
+        BUNDLE=$(basename -- "$bundle") IMAGE=$image SOURCE=$source_name GITHUB_SHA=0123abc ${PUBLISH_ENV:-} \
         && bash --noprofile --norc -eo pipefail "$tmp/assets-step.sh" \
         && bash --noprofile --norc -eo pipefail "$tmp/upload-step.sh") 2>&1) || code=$?
 }
 no_upload() { ! called "^release upload"; }
 
-all_assets="Addict-0.2.0-x86_64.AppImage Addict-0.2.0-x86_64.AppImage.build.txt Addict-0.2.0-x86_64.AppImage.components.sha256 Addict-0.2.0-x86_64.AppImage.inputs.lock.json Addict-0.2.0-x86_64.AppImage.layout.txt Addict-0.2.0-x86_64.AppImage.notices.json Addict-0.2.0-x86_64.AppImage.rpms.txt Addict-0.2.0-x86_64.AppImage.sha256 Addict-0.2.0-x86_64.AppImage.sources.tar.00 Addict-0.2.0-x86_64.AppImage.sources.tar.01 Addict-0.2.0-x86_64.AppImage.sources.tar.02 Addict-0.2.0-x86_64.AppImage.sources.tar.sha256 Addict-0.2.0-x86_64.flatpak Addict-0.2.0-x86_64.flatpak.sha256 "
+all_assets="Addict-0.2.0-x86_64.AppImage Addict-0.2.0-x86_64.AppImage.build.txt Addict-0.2.0-x86_64.AppImage.components.sha256 Addict-0.2.0-x86_64.AppImage.inputs.lock.json Addict-0.2.0-x86_64.AppImage.layout.txt Addict-0.2.0-x86_64.AppImage.notices.json Addict-0.2.0-x86_64.AppImage.rpms.txt Addict-0.2.0-x86_64.AppImage.sha256 Addict-0.2.0-x86_64.AppImage.sources.tar.00 Addict-0.2.0-x86_64.AppImage.sources.tar.01 Addict-0.2.0-x86_64.AppImage.sources.tar.02 Addict-0.2.0-x86_64.AppImage.sources.tar.sha256 Addict-0.2.0-x86_64.flatpak Addict-0.2.0-x86_64.flatpak.sha256 $source_name $source_name.sha256 "
 
 # Complete handoff. A part size of 4 KiB makes the fixture's source tar
 # (10 KiB) three parts.
@@ -339,7 +507,8 @@ PUBLISH_ENV="PART_SIZE=4096" publish v0.2.0
 expect "complete handoff: exit 0" '[[ $code == 0 ]]'
 expect "complete handoff: every asset on the Release" '[[ $(assets_of v0.2.0) == "$all_assets" ]]'
 expect "complete handoff: the image and its checksum are uploaded last" '[[ $(grep "^release upload" "$GH_STUB/calls" | tail -2 | sed "s|.*/||" | tr "\n" " ") == "$image $image.sha256 " ]]'
-expect "complete handoff: the Flatpak and the sources come before the image" '[[ $(grep "^release upload" "$GH_STUB/calls" | head -6 | sed "s|.*/||" | tr "\n" " ") == "Addict-0.2.0-x86_64.flatpak Addict-0.2.0-x86_64.flatpak.sha256 $image.sources.tar.00 $image.sources.tar.01 $image.sources.tar.02 $image.sources.tar.sha256 " ]]'
+expect "complete handoff: the Flatpak, the source tarball and the sources come before the image" '[[ $(grep "^release upload" "$GH_STUB/calls" | head -8 | sed "s|.*/||" | tr "\n" " ") == "Addict-0.2.0-x86_64.flatpak Addict-0.2.0-x86_64.flatpak.sha256 $source_name $source_name.sha256 $image.sources.tar.00 $image.sources.tar.01 $image.sources.tar.02 $image.sources.tar.sha256 " ]]'
+expect "complete handoff: the source tarball on the Release is the one handed off, and passes its .sha256" 'cmp -s "$tmp/source-out/$source_name" "$GH_STUB/releases/v0.2.0/assets/$source_name" && (cd "$GH_STUB/releases/v0.2.0/assets" && sha256sum --check --strict --quiet "$source_name.sha256")'
 expect "complete handoff: every asset name is only A-Za-z0-9._- and under 2 GiB" '! ls -1 "$GH_STUB/releases/v0.2.0/assets" | grep -qv "^[A-Za-z0-9._-]*$" && [[ -z $(find "$GH_STUB/releases/v0.2.0/assets" -type f -size +2097151k) ]]'
 reassembled=$tmp/reassembled
 rm -rf -- "$reassembled"; mkdir "$reassembled"
@@ -388,6 +557,11 @@ stub v0.2.0:false
 publish v0.2.0 '' 'printf X | dd of="$handoff_tar" bs=1 seek=600 conv=notrunc status=none'
 refuse "corrupt handoff tar" "$handoff_tar does not match $handoff_tar.sha256"
 expect "corrupt handoff tar: the tar is kept" '[[ -f $runner/handoff/$handoff_tar ]]'
+stub v0.2.0:false
+publish v0.2.0 '' '' 'printf X | dd of="$source_name" bs=1 seek=600 conv=notrunc status=none'
+expect "corrupt source tarball: non-zero exit" '[[ $code != 0 ]]'
+expect "corrupt source tarball: the checksum failure is shown" '[[ $out == *"$source_name: FAILED"* ]]'
+expect "corrupt source tarball: the stub gh records no upload" 'no_upload'
 # Asset too large, with the limit lowered below the image's size (the parts
 # are 4 KiB, under it).
 stub v0.2.0:false
