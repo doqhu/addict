@@ -306,7 +306,7 @@ CC BY-SA 4.0 instead (see `REUSE.toml`).
 
 addict was built with heavy use of generative AI. Below is each part of the
 project, with how much of it AI wrote. The figures come from the git history
-at commit `ef8e84b` (12 November 2026); `scripts/ai-figures.sh ef8e84b`
+at commit `f59cf7e` (12 November 2026); `scripts/ai-figures.sh f59cf7e`
 reproduces them.
 
 ### Code
