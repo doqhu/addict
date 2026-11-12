@@ -1,0 +1,3049 @@
+{
+  "schema": 1,
+  "architecture": "x86_64",
+  "base": "registry.fedoraproject.org/fedora@sha256:1965dd267a1be0f695534e132de7719e50b142389528226d49288a8866dbe5ad",
+  "resolved": "2026-11-10",
+  "rpm_resolution": "Fedora 43; dnf download --resolve --alldeps; install_weak_deps=False; exclude=*.i686; complete closure including base packages; Mesa Vulkan driver closure included for GTK runtime; libglvnd-gles for dynamically loaded libGLESv2; URLs are the build's signed copies on Fedora Koji (kojipkgs), which keep superseded builds, except openh264 from Cisco's codec host",
+  "rust": "1.99.1-2.fc43",
+  "quick_sharun_revision": "ce344325ab1db718a7ad4ce9868a92a38d4af12a",
+  "embedded_runtime": "uruntime 0.8.1 / DwarFS; patch URUNTIME_EXTRACT=3 to =2",
+  "notices_resolution": "5.4: srpms are the Koji source RPMs of every Fedora package that contributes an AppDir file (packages/NAME/VERSION/RELEASE/src); notices are license texts and source archives of non-Fedora components at pinned revisions: uruntime v0.8.1 (6ec68e6), DwarFS v0.15.7 (3945d23), Anylinux-sharun 3.8.3 (2748a37), dash 0.5.13.5 (Debian orig, sha512 per Anylinux-sharun tools/build-dash.sh), Anylinux-AppImages ce34432, cross-libc-dlopen v0.2.10 (741c506)",
+  "static_resolution": "5.4: static are the sources and license texts of the libraries statically linked into the runtime header (uruntime and its DwarFS helper), sharun and dash, as packaging/appimage/closures.py records them in static-closures.json: crates.io .crate files (sha256 = Cargo.lock checksum), git dependency archives, rust-src of the toolchains, Zig 0.16.0, the DwarFS static build libraries, the GNU GPL-2.0 text for dash and SPDX license-list-data v3.29.0 texts for packages without one; mounted read-only at /static during the build",
+  "rpms": [
+    {
+      "file": "abattis-cantarell-vf-fonts-0.301-15.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/abattis-cantarell-fonts/0.301/15.fc43/data/signed/31645531/noarch/abattis-cantarell-vf-fonts-0.301-15.fc43.noarch.rpm",
+      "sha256": "828bb6d780a009decf09e6c079eaf2d428245d6ad311f9ce5a59c894083eb1da"
+    },
+    {
+      "file": "adwaita-cursor-theme-49.0-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/adwaita-icon-theme/49.0/1.fc43/data/signed/31645531/noarch/adwaita-cursor-theme-49.0-1.fc43.noarch.rpm",
+      "sha256": "f78f501108ca63e0971706b1f543a460f2f2f97dedaeaadd47fedc9d060511fb"
+    },
+    {
+      "file": "adwaita-icon-theme-49.0-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/adwaita-icon-theme/49.0/1.fc43/data/signed/31645531/noarch/adwaita-icon-theme-49.0-1.fc43.noarch.rpm",
+      "sha256": "632f211750b0944ad782fbbb4f839bf0f72417ca3ebccd556ab5b90dcb8d84fb"
+    },
+    {
+      "file": "adwaita-icon-theme-legacy-46.2-4.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/adwaita-icon-theme-legacy/46.2/4.fc43/data/signed/31645531/noarch/adwaita-icon-theme-legacy-46.2-4.fc43.noarch.rpm",
+      "sha256": "c93ed3b4d1c7a0cac08d16dbf9874680f89da10e5df928c6406e61dfc15e861e"
+    },
+    {
+      "file": "alsa-lib-1.2.16.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/alsa-lib/1.2.16.1/1.fc43/data/signed/31645531/x86_64/alsa-lib-1.2.16.1-1.fc43.x86_64.rpm",
+      "sha256": "70fcdffad9b076cb942e3dc9ab16ae9c7e0b06ec93d4077c196bcfb29463add0"
+    },
+    {
+      "file": "alternatives-1.33-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/chkconfig/1.33/3.fc43/data/signed/31645531/x86_64/alternatives-1.33-3.fc43.x86_64.rpm",
+      "sha256": "cef71f413b915453384711db020d657edcbc0b37187f577fb4e24e27532a3436"
+    },
+    {
+      "file": "audit-libs-4.2.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/audit/4.2.1/1.fc43/data/signed/31645531/x86_64/audit-libs-4.2.1-1.fc43.x86_64.rpm",
+      "sha256": "2e37311608b35ebeede8bb981c6a69ba413d000716f2db3ec733cfe974bfe674"
+    },
+    {
+      "file": "avahi-glib-0.9~rc2-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/avahi/0.9~rc2/6.fc43/data/signed/31645531/x86_64/avahi-glib-0.9~rc2-6.fc43.x86_64.rpm",
+      "sha256": "e27130d900bc262a7125c5e46a0b68839da8e04eb62361b155498fa8c800318d"
+    },
+    {
+      "file": "avahi-libs-0.9~rc2-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/avahi/0.9~rc2/6.fc43/data/signed/31645531/x86_64/avahi-libs-0.9~rc2-6.fc43.x86_64.rpm",
+      "sha256": "83fb199c438397b684b65cda02f3ce2c30fae59e91b5d1e28a3165e9cde9ec1e"
+    },
+    {
+      "file": "bash-5.3.0-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/bash/5.3.0/2.fc43/data/signed/31645531/x86_64/bash-5.3.0-2.fc43.x86_64.rpm",
+      "sha256": "3bc67c3e77f983738721bec3816d43864d01835f00e12a734951e273d58f4919"
+    },
+    {
+      "file": "binutils-2.45.1-5.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/binutils/2.45.1/5.fc43/data/signed/31645531/x86_64/binutils-2.45.1-5.fc43.x86_64.rpm",
+      "sha256": "2969b12d59c8956487814f76d620d7f2c94b981cf6005d871b809e6218a88f75"
+    },
+    {
+      "file": "brotli-1.2.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/brotli/1.2.1/1.fc43/data/signed/31645531/x86_64/brotli-1.2.1-1.fc43.x86_64.rpm",
+      "sha256": "c41f472aae886021fc80e27e4f20868ef7cd0c36afa051eb623239937f2d760b"
+    },
+    {
+      "file": "brotli-devel-1.2.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/brotli/1.2.1/1.fc43/data/signed/31645531/x86_64/brotli-devel-1.2.1-1.fc43.x86_64.rpm",
+      "sha256": "37283528f75fe7b8a75967c31edf800ca67c88801911c001518afb605cc2a016"
+    },
+    {
+      "file": "bubblewrap-0.12.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/bubblewrap/0.12.0/1.fc43/data/signed/31645531/x86_64/bubblewrap-0.12.0-1.fc43.x86_64.rpm",
+      "sha256": "444fe6b304a51f40f16b3e4fcecf4e34a5a34966b009d80cb8ec59d8392c2e7e"
+    },
+    {
+      "file": "bzip2-devel-1.0.8-21.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/bzip2/1.0.8/21.fc43/data/signed/31645531/x86_64/bzip2-devel-1.0.8-21.fc43.x86_64.rpm",
+      "sha256": "453e9e56d2e472f14dc5158a2582334fc1f4db6acbf1ede964d3819ebf89baeb"
+    },
+    {
+      "file": "bzip2-libs-1.0.8-21.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/bzip2/1.0.8/21.fc43/data/signed/31645531/x86_64/bzip2-libs-1.0.8-21.fc43.x86_64.rpm",
+      "sha256": "9e265caa72afcbbbe062c173928d1857cfd320a9bfba5027770103078a506fc5"
+    },
+    {
+      "file": "ca-certificates-2026.2.92_v9.0.319-2.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/ca-certificates/2026.2.92_v9.0.319/2.fc43/data/signed/31645531/noarch/ca-certificates-2026.2.92_v9.0.319-2.fc43.noarch.rpm",
+      "sha256": "11c9da07d0a8e0535452da34dab20b93652f2277686e8d64397771fc9bb95121"
+    },
+    {
+      "file": "cairo-1.18.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cairo/1.18.6/1.fc43/data/signed/31645531/x86_64/cairo-1.18.6-1.fc43.x86_64.rpm",
+      "sha256": "0cd8e4e9f2b223542257a95639e528a3434a87e79c69e4a1d48e6bd5d2153679"
+    },
+    {
+      "file": "cairo-devel-1.18.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cairo/1.18.6/1.fc43/data/signed/31645531/x86_64/cairo-devel-1.18.6-1.fc43.x86_64.rpm",
+      "sha256": "59db1522196c3de1d0fe44db64f1ea918f7711f9a3802a409e9e36ff48dc3c01"
+    },
+    {
+      "file": "cairo-gobject-1.18.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cairo/1.18.6/1.fc43/data/signed/31645531/x86_64/cairo-gobject-1.18.6-1.fc43.x86_64.rpm",
+      "sha256": "c3af1cd02e69bcd62406982317d171ee58a9b8e850f213ebdc587e66ecf40490"
+    },
+    {
+      "file": "cairo-gobject-devel-1.18.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cairo/1.18.6/1.fc43/data/signed/31645531/x86_64/cairo-gobject-devel-1.18.6-1.fc43.x86_64.rpm",
+      "sha256": "903489912375e45a4ffda5334178f461d899e2b2b72b779599881a3d87db99ed"
+    },
+    {
+      "file": "cargo-1.99.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/rust/1.99.1/2.fc43/data/signed/31645531/x86_64/cargo-1.99.1-2.fc43.x86_64.rpm",
+      "sha256": "6f4ecef5035fad38b377a3af462204ffaa524e917177259d5aace900135bb355"
+    },
+    {
+      "file": "cdparanoia-libs-10.2-48.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cdparanoia/10.2/48.fc43/data/signed/31645531/x86_64/cdparanoia-libs-10.2-48.fc43.x86_64.rpm",
+      "sha256": "5fed123f1c3362125e16b47d0f5bdc54716d446496850a0ce73ef047cef495cf"
+    },
+    {
+      "file": "cmake-filesystem-3.31.11-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cmake/3.31.11/1.fc43/data/signed/31645531/x86_64/cmake-filesystem-3.31.11-1.fc43.x86_64.rpm",
+      "sha256": "a645873054c9cd01e6bfca6f9434ca0e14f6c32b003eaa02c3bc1ebcc9f6f144"
+    },
+    {
+      "file": "colord-libs-1.4.8-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/colord/1.4.8/2.fc43/data/signed/31645531/x86_64/colord-libs-1.4.8-2.fc43.x86_64.rpm",
+      "sha256": "605b288a1b679c4bba5ff8496c95b60c41ec733e64538ff23fe4c966af95a8da"
+    },
+    {
+      "file": "coreutils-9.7-10.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/coreutils/9.7/10.fc43/data/signed/31645531/x86_64/coreutils-9.7-10.fc43.x86_64.rpm",
+      "sha256": "2b8402267a99124d065b9e12471942def288716136cfc1574ad1d5a20478ae48"
+    },
+    {
+      "file": "coreutils-common-9.7-10.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/coreutils/9.7/10.fc43/data/signed/31645531/x86_64/coreutils-common-9.7-10.fc43.x86_64.rpm",
+      "sha256": "8f885b9c9379c00bd1b9f335a04f49edec8b9682895427661a7093a6dfd9f2f8"
+    },
+    {
+      "file": "cpp-15.3.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gcc/15.3.1/1.fc43/data/signed/31645531/x86_64/cpp-15.3.1-1.fc43.x86_64.rpm",
+      "sha256": "dda7e77b4003f5dd9bf1d68497aa4db35c9052b6aa4fc47e7c0ad908c6e0dd4f"
+    },
+    {
+      "file": "crypto-policies-20251125-1.git63291f8.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/crypto-policies/20251125/1.git63291f8.fc43/data/signed/31645531/noarch/crypto-policies-20251125-1.git63291f8.fc43.noarch.rpm",
+      "sha256": "032a02a0e20f1ea0ebaaf811426f9c6906f4bf85e3b3456d64bc06e36d2bf3b3"
+    },
+    {
+      "file": "cups-filesystem-2.4.19-3.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cups/2.4.19/3.fc43/data/signed/31645531/noarch/cups-filesystem-2.4.19-3.fc43.noarch.rpm",
+      "sha256": "a49a39a0b329c7d27753db10d5e0b552234e57a72858a327191af7457a059751"
+    },
+    {
+      "file": "cups-libs-2.4.19-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cups/2.4.19/3.fc43/data/signed/31645531/x86_64/cups-libs-2.4.19-3.fc43.x86_64.rpm",
+      "sha256": "ede9aae20bf745c17f5b77aa218d4d9709494969b69b2a0f8cf8d4ba97fd1947"
+    },
+    {
+      "file": "curl-8.15.0-12.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/curl/8.15.0/12.fc43/data/signed/31645531/x86_64/curl-8.15.0-12.fc43.x86_64.rpm",
+      "sha256": "edb77c8dd8390ec39cbd66e076ec9db3a565ebc6a2fdfc5be5b916a8bee33700"
+    },
+    {
+      "file": "cyrus-sasl-lib-2.1.28-33.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cyrus-sasl/2.1.28/33.fc43/data/signed/31645531/x86_64/cyrus-sasl-lib-2.1.28-33.fc43.x86_64.rpm",
+      "sha256": "9d8db24e85241d430e69d5f4086e1319cf457f872624a47ab54a16e5421496b0"
+    },
+    {
+      "file": "dbus-1.16.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dbus/1.16.2/1.fc43/data/signed/31645531/x86_64/dbus-1.16.2-1.fc43.x86_64.rpm",
+      "sha256": "ab01ecf74dffed104a83dc1adc2a39fdccdee3efe1b9c42bd11bbe5d460546ae"
+    },
+    {
+      "file": "dbus-common-1.16.2-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dbus/1.16.2/1.fc43/data/signed/31645531/noarch/dbus-common-1.16.2-1.fc43.noarch.rpm",
+      "sha256": "2b2a1ec2d308f6462ca4762f696edb117f05790dacb5d74ad016fd0c07039ce6"
+    },
+    {
+      "file": "dbus-daemon-1.16.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dbus/1.16.2/1.fc43/data/signed/31645531/x86_64/dbus-daemon-1.16.2-1.fc43.x86_64.rpm",
+      "sha256": "0c4ba7f7c6263fba83bd38be145f861f570be5c5cde61f109400ca147072cddf"
+    },
+    {
+      "file": "dbus-libs-1.16.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dbus/1.16.2/1.fc43/data/signed/31645531/x86_64/dbus-libs-1.16.2-1.fc43.x86_64.rpm",
+      "sha256": "a0f5928e9605b395fb1b2ae575806b243ead9bd161fd96edc540214116662ecc"
+    },
+    {
+      "file": "dbus-tools-1.16.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dbus/1.16.2/1.fc43/data/signed/31645531/x86_64/dbus-tools-1.16.2-1.fc43.x86_64.rpm",
+      "sha256": "3ab1f16e9ee5afad0a6c1a3782acd3f6282cf9b83d1fe51de2d2f5e9fafca845"
+    },
+    {
+      "file": "dconf-0.49.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dconf/0.49.0/1.fc43/data/signed/31645531/x86_64/dconf-0.49.0-1.fc43.x86_64.rpm",
+      "sha256": "0b581e0969fd5eb9b1352b5d9541f1f8a00efee8d206517ce3eb8e7411da07a7"
+    },
+    {
+      "file": "default-fonts-core-sans-4.2-5.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/langpacks/4.2/5.fc43/data/signed/31645531/noarch/default-fonts-core-sans-4.2-5.fc43.noarch.rpm",
+      "sha256": "6c00a017628518bf62593e6e82cb47647a2e7994cc47a65a7905a79f04b4dca3"
+    },
+    {
+      "file": "dejavu-sans-fonts-2.37-26.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dejavu-fonts/2.37/26.fc43/data/signed/31645531/noarch/dejavu-sans-fonts-2.37-26.fc43.noarch.rpm",
+      "sha256": "6be2cfaa460d4600e3e7ffca27ba40b43e2167194d6131551ae94d8389fcb5ac"
+    },
+    {
+      "file": "elfutils-debuginfod-client-0.197-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/elfutils/0.197/1.fc43/data/signed/31645531/x86_64/elfutils-debuginfod-client-0.197-1.fc43.x86_64.rpm",
+      "sha256": "171902af02666d64ca978bdd89719c3d2a420b1b7027477a3fe322f2b5ce6cbf"
+    },
+    {
+      "file": "elfutils-default-yama-scope-0.197-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/elfutils/0.197/1.fc43/data/signed/31645531/noarch/elfutils-default-yama-scope-0.197-1.fc43.noarch.rpm",
+      "sha256": "cbf0de3991c8fff020d9b020b7b2bc08d688d69627b84782019c07e3f39ceb14"
+    },
+    {
+      "file": "elfutils-libelf-0.197-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/elfutils/0.197/1.fc43/data/signed/31645531/x86_64/elfutils-libelf-0.197-1.fc43.x86_64.rpm",
+      "sha256": "30aa54d2ec05168db452b14557ea9fc162b6b453ba3b42499fe519e45874099a"
+    },
+    {
+      "file": "elfutils-libs-0.197-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/elfutils/0.197/1.fc43/data/signed/31645531/x86_64/elfutils-libs-0.197-1.fc43.x86_64.rpm",
+      "sha256": "003957fada0a75c40350bff523950dce2953ee7a59cf6f3218a8bc9ba91ef220"
+    },
+    {
+      "file": "expat-2.9.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/expat/2.9.0/1.fc43/data/signed/31645531/x86_64/expat-2.9.0-1.fc43.x86_64.rpm",
+      "sha256": "bcd653e070124a0bd97be1218ff92823361f645a3c17de25bed13c7356b82c5a"
+    },
+    {
+      "file": "fedora-gpg-keys-43-2.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fedora-repos/43/2/data/signed/31645531/noarch/fedora-gpg-keys-43-2.noarch.rpm",
+      "sha256": "618a66577f7581a7ca34f52394767b00d02b3620fda7d22727c76a1ee4b2ffe2"
+    },
+    {
+      "file": "fedora-release-43-27.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fedora-release/43/27/data/signed/31645531/noarch/fedora-release-43-27.noarch.rpm",
+      "sha256": "073a3343f000400e685c2ed5d089915aae5097fa914bf4b1a985f554d14a0c27"
+    },
+    {
+      "file": "fedora-release-common-43-27.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fedora-release/43/27/data/signed/31645531/noarch/fedora-release-common-43-27.noarch.rpm",
+      "sha256": "44c323b3ce960391c9c6b55e1fe4fe35dfd7e843d1c1adbfb1866c543ba3cc33"
+    },
+    {
+      "file": "fedora-release-identity-basic-43-27.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fedora-release/43/27/data/signed/31645531/noarch/fedora-release-identity-basic-43-27.noarch.rpm",
+      "sha256": "ff40ab155af643862eefa867c88b4e7b0f2d33bf2b5c98a55ed7ce0595b9e48e"
+    },
+    {
+      "file": "fedora-repos-43-2.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fedora-repos/43/2/data/signed/31645531/noarch/fedora-repos-43-2.noarch.rpm",
+      "sha256": "fc631d34ec7519ea70d39ac8b6c1caedcbe9e14207c16db78d23da9302f831cc"
+    },
+    {
+      "file": "file-5.46-9.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/file/5.46/9.fc43/data/signed/31645531/x86_64/file-5.46-9.fc43.x86_64.rpm",
+      "sha256": "a23eb11f5d367bb538f1a2cfb723eabc8434b0a6ec6a1c4353a7f4e9ed9b0a6d"
+    },
+    {
+      "file": "file-libs-5.46-9.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/file/5.46/9.fc43/data/signed/31645531/x86_64/file-libs-5.46-9.fc43.x86_64.rpm",
+      "sha256": "007e60b4d3de58d2f4657e67facc05795b5e3188ee2fb9c3e90c81c64b916863"
+    },
+    {
+      "file": "filesystem-3.18-50.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/filesystem/3.18/50.fc43/data/signed/31645531/x86_64/filesystem-3.18-50.fc43.x86_64.rpm",
+      "sha256": "1d6978716676cc87a2f89fcb27bbb5972e7c8309d260a247181bf031a6a760a7"
+    },
+    {
+      "file": "findutils-4.10.0-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/findutils/4.10.0/6.fc43/data/signed/31645531/x86_64/findutils-4.10.0-6.fc43.x86_64.rpm",
+      "sha256": "b672fbb874d6fa3bbdf7b3a3b99c64bb8294ad505cd879b9b9203024bf2d5c05"
+    },
+    {
+      "file": "fontconfig-2.17.0-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fontconfig/2.17.0/3.fc43/data/signed/31645531/x86_64/fontconfig-2.17.0-3.fc43.x86_64.rpm",
+      "sha256": "7d5be52c813b4ed0e2bf7c2ebc6d77cdba793ab238561d3c8c028bcaf89ee482"
+    },
+    {
+      "file": "fontconfig-devel-2.17.0-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fontconfig/2.17.0/3.fc43/data/signed/31645531/x86_64/fontconfig-devel-2.17.0-3.fc43.x86_64.rpm",
+      "sha256": "fbb33f20214ba98e015922462ccf76997025b4abc2d0cdba67e22fc0c043f821"
+    },
+    {
+      "file": "fonts-filesystem-2.0.5-23.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fonts-rpm-macros/2.0.5/23.fc43/data/signed/31645531/noarch/fonts-filesystem-2.0.5-23.fc43.noarch.rpm",
+      "sha256": "78d8f4f8bbb25206e3b1c89fbf9ac3737805631e32b225cd670aba749e3b72bd"
+    },
+    {
+      "file": "freetype-2.13.3-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/freetype/2.13.3/4.fc43/data/signed/31645531/x86_64/freetype-2.13.3-4.fc43.x86_64.rpm",
+      "sha256": "536c8a4f242a0c0f7aa1cbf8170bc0231602c3110f3dfe3f5a833b9046a7baa7"
+    },
+    {
+      "file": "freetype-devel-2.13.3-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/freetype/2.13.3/4.fc43/data/signed/31645531/x86_64/freetype-devel-2.13.3-4.fc43.x86_64.rpm",
+      "sha256": "31062a396b1d6f54e9b7dff58563d1b65c1c422e855b65df781ff01cc83bcd9d"
+    },
+    {
+      "file": "fribidi-1.0.16-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fribidi/1.0.16/3.fc43/data/signed/31645531/x86_64/fribidi-1.0.16-3.fc43.x86_64.rpm",
+      "sha256": "199f38ce380bd991b36616973a24213db0d94ac880c01a43a95ce39174c4f3b9"
+    },
+    {
+      "file": "fribidi-devel-1.0.16-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fribidi/1.0.16/3.fc43/data/signed/31645531/x86_64/fribidi-devel-1.0.16-3.fc43.x86_64.rpm",
+      "sha256": "d4bdf520f4851c0d36a43ebe53d353e44f9cb40db353626a18357c515b9fa345"
+    },
+    {
+      "file": "gcc-15.3.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gcc/15.3.1/1.fc43/data/signed/31645531/x86_64/gcc-15.3.1-1.fc43.x86_64.rpm",
+      "sha256": "da3cf12f62c4037e89b5fb76d185a002aa68aa2b6431e8d4d700ea86d7fa2103"
+    },
+    {
+      "file": "gdbm-libs-1.23-10.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gdbm/1.23/10.fc43/data/signed/31645531/x86_64/gdbm-libs-1.23-10.fc43.x86_64.rpm",
+      "sha256": "876eeef2aab4cb29d9b27b65c8ff881abbe48452da76fc101cb3203e8ede6e52"
+    },
+    {
+      "file": "gdk-pixbuf2-2.44.6^really2.44.4-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gdk-pixbuf2/2.44.6^really2.44.4/3.fc43/data/signed/31645531/x86_64/gdk-pixbuf2-2.44.6^really2.44.4-3.fc43.x86_64.rpm",
+      "sha256": "95be3607ee80c73b860fe73a089f9b0974437a8bdb80a8d3818c803ebb673ac3"
+    },
+    {
+      "file": "gdk-pixbuf2-devel-2.44.6^really2.44.4-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gdk-pixbuf2/2.44.6^really2.44.4/3.fc43/data/signed/31645531/x86_64/gdk-pixbuf2-devel-2.44.6^really2.44.4-3.fc43.x86_64.rpm",
+      "sha256": "67c2f2f3c10a4094dfcd6b2cd2e2927df7229ff374c9edfae0e6d3076fe433db"
+    },
+    {
+      "file": "gettext-0.25.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gettext/0.25.1/2.fc43/data/signed/31645531/x86_64/gettext-0.25.1-2.fc43.x86_64.rpm",
+      "sha256": "b6214121016aa0a74bfa2b9264bd8d16314214390c41639a87dc070fdb0bcb7e"
+    },
+    {
+      "file": "gettext-envsubst-0.25.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gettext/0.25.1/2.fc43/data/signed/31645531/x86_64/gettext-envsubst-0.25.1-2.fc43.x86_64.rpm",
+      "sha256": "5bef9e4d207eb0c42c98af6a93f1a9e430137876bcd16af0a0a6f459cdf5c1b0"
+    },
+    {
+      "file": "gettext-libs-0.25.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gettext/0.25.1/2.fc43/data/signed/31645531/x86_64/gettext-libs-0.25.1-2.fc43.x86_64.rpm",
+      "sha256": "a1dabb738fef8022549e594d2876d41921369ab920057da468e0565603ebeaf6"
+    },
+    {
+      "file": "gettext-runtime-0.25.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gettext/0.25.1/2.fc43/data/signed/31645531/x86_64/gettext-runtime-0.25.1-2.fc43.x86_64.rpm",
+      "sha256": "9f3f3c1098c2e76c2ea88843a6abef9c25ed72f6d6c8bc65772df15b71f82280"
+    },
+    {
+      "file": "giflib-5.2.2-9.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/giflib/5.2.2/9.fc43/data/signed/31645531/x86_64/giflib-5.2.2-9.fc43.x86_64.rpm",
+      "sha256": "e02117f2e5d64b9fad2085f2809a6650c17926251dea6e56c40ee8ae712f15dd"
+    },
+    {
+      "file": "git-2.56.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/git/2.56.0/1.fc43/data/signed/31645531/x86_64/git-2.56.0-1.fc43.x86_64.rpm",
+      "sha256": "8df5fdeb2e19e958e265ebe6fd1a48c1ea832d72741e01d38221c1214fde73f2"
+    },
+    {
+      "file": "git-core-2.56.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/git/2.56.0/1.fc43/data/signed/31645531/x86_64/git-core-2.56.0-1.fc43.x86_64.rpm",
+      "sha256": "6aa10d035b4cd3e431983fe2ee2d6438346e98751c08537571f6fa42fbc8b318"
+    },
+    {
+      "file": "git-core-doc-2.56.0-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/git/2.56.0/1.fc43/data/signed/31645531/noarch/git-core-doc-2.56.0-1.fc43.noarch.rpm",
+      "sha256": "9e0ed1144f5e2957ecccca983bba5b52ea7b452d885388b471e4c54156561348"
+    },
+    {
+      "file": "glib2-2.86.5-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glib2/2.86.5/1.fc43/data/signed/31645531/x86_64/glib2-2.86.5-1.fc43.x86_64.rpm",
+      "sha256": "1808d03a1e34d95226b9a424d5fec0b22a6be200633934bb8bf1c39fece75a6a"
+    },
+    {
+      "file": "glib2-devel-2.86.5-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glib2/2.86.5/1.fc43/data/signed/31645531/x86_64/glib2-devel-2.86.5-1.fc43.x86_64.rpm",
+      "sha256": "215dabbe419afc69e2aad31276c86ec9cf635c941c534c94351a23a06161a2b7"
+    },
+    {
+      "file": "glibc-2.42-17.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glibc/2.42/17.fc43/data/signed/31645531/x86_64/glibc-2.42-17.fc43.x86_64.rpm",
+      "sha256": "4b5ac405e71688ca1a0d38c2df9de06eb3f90c5a66b1d80202b305564603b405"
+    },
+    {
+      "file": "glibc-common-2.42-17.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glibc/2.42/17.fc43/data/signed/31645531/x86_64/glibc-common-2.42-17.fc43.x86_64.rpm",
+      "sha256": "5c0f0c22ff5030585bf1e75ff47035fc379be74d9a62e8909cba8f33e3325f0c"
+    },
+    {
+      "file": "glibc-devel-2.42-17.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glibc/2.42/17.fc43/data/signed/31645531/x86_64/glibc-devel-2.42-17.fc43.x86_64.rpm",
+      "sha256": "1f6e97cc834f6d693633acb58ad0f231f584150cc08c84eedae9a9a7327d350e"
+    },
+    {
+      "file": "glibc-langpack-en-2.42-17.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glibc/2.42/17.fc43/data/signed/31645531/x86_64/glibc-langpack-en-2.42-17.fc43.x86_64.rpm",
+      "sha256": "072095815d6993532719df6371eadd4bc21daac375f3d2707de3c00f04350b27"
+    },
+    {
+      "file": "glibc-minimal-langpack-2.42-17.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glibc/2.42/17.fc43/data/signed/31645531/x86_64/glibc-minimal-langpack-2.42-17.fc43.x86_64.rpm",
+      "sha256": "1467bea8f97ea266133d3614fd6ac9387b4c9af362b2d08587b961db8d129135"
+    },
+    {
+      "file": "glycin-devel-2.0.8-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glycin/2.0.8/1.fc43/data/signed/31645531/x86_64/glycin-devel-2.0.8-1.fc43.x86_64.rpm",
+      "sha256": "7c851176cdd4b94053d78b10e72353aa87264900ca4610ce3476d36c45c4138a"
+    },
+    {
+      "file": "glycin-libs-2.0.8-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glycin/2.0.8/1.fc43/data/signed/31645531/x86_64/glycin-libs-2.0.8-1.fc43.x86_64.rpm",
+      "sha256": "b235c9cd65858993f8225056c25adcdc2db70bcf7ca22ac865ddb1a0e55d516f"
+    },
+    {
+      "file": "glycin-loaders-2.0.8-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glycin/2.0.8/1.fc43/data/signed/31645531/x86_64/glycin-loaders-2.0.8-1.fc43.x86_64.rpm",
+      "sha256": "a3800b59d36170ecc912fa7a1bd730c707883a1dd3404ea0e703eda98915f591"
+    },
+    {
+      "file": "gmp-6.3.0-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gmp/6.3.0/4.fc43/data/signed/31645531/x86_64/gmp-6.3.0-4.fc43.x86_64.rpm",
+      "sha256": "ecc121a45b8ced27da3f5a6faccaf9e789b7b6f2d2419d2f0b416ada93ea0cfd"
+    },
+    {
+      "file": "gnulib-l10n-20241231-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gnulib-l10n/20241231/1.fc43/data/signed/31645531/noarch/gnulib-l10n-20241231-1.fc43.noarch.rpm",
+      "sha256": "43fa7f5069c30fe7c2a0d71f926d16483208733285ff7c3227c4fbd9ff59127b"
+    },
+    {
+      "file": "gnutls-3.8.13-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gnutls/3.8.13/1.fc43/data/signed/31645531/x86_64/gnutls-3.8.13-1.fc43.x86_64.rpm",
+      "sha256": "869732107491080cf332ddcddf6427cf4f84acba5fb6d3b2aa9e92459087ec31"
+    },
+    {
+      "file": "google-noto-fonts-common-20251101-2.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/google-noto-fonts/20251101/2.fc43/data/signed/31645531/noarch/google-noto-fonts-common-20251101-2.fc43.noarch.rpm",
+      "sha256": "c8d8d950378b22e1a3b16f1783766af681ec698fb13ed50ed9293dddaf48a5a8"
+    },
+    {
+      "file": "google-noto-sans-vf-fonts-20251101-2.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/google-noto-fonts/20251101/2.fc43/data/signed/31645531/noarch/google-noto-sans-vf-fonts-20251101-2.fc43.noarch.rpm",
+      "sha256": "ba0041702812dbe3a237b90df1f6c250257747beec832a359f9d1bca867645ae"
+    },
+    {
+      "file": "graphene-1.10.8-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/graphene/1.10.8/2.fc43/data/signed/31645531/x86_64/graphene-1.10.8-2.fc43.x86_64.rpm",
+      "sha256": "36a74c2109a7fda07e021d87232ce32d8af2fc7b0b908daad696ef3ed320c6cc"
+    },
+    {
+      "file": "graphene-devel-1.10.8-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/graphene/1.10.8/2.fc43/data/signed/31645531/x86_64/graphene-devel-1.10.8-2.fc43.x86_64.rpm",
+      "sha256": "ac39b90349d7d8d9bec35e1c0829019f0c31feec1f6a2957ef6058acc0c1c88a"
+    },
+    {
+      "file": "graphite2-1.3.14-19.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/graphite2/1.3.14/19.fc43/data/signed/31645531/x86_64/graphite2-1.3.14-19.fc43.x86_64.rpm",
+      "sha256": "548cd424761648d2384735a970d14949c283bce0fdafaf1a4cd0947a6a0d317a"
+    },
+    {
+      "file": "graphite2-devel-1.3.14-19.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/graphite2/1.3.14/19.fc43/data/signed/31645531/x86_64/graphite2-devel-1.3.14-19.fc43.x86_64.rpm",
+      "sha256": "2acd57a992dbf55db49a8bf1d7e7715ef86768dc947f9a184cfbc02862833dfe"
+    },
+    {
+      "file": "grep-3.12-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/grep/3.12/2.fc43/data/signed/31645531/x86_64/grep-3.12-2.fc43.x86_64.rpm",
+      "sha256": "c66587d6b52b5624db70ae431312298cdadb024e6061aebfbc2f409d2aa6b728"
+    },
+    {
+      "file": "groff-base-1.23.0-11.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/groff/1.23.0/11.fc43/data/signed/31645531/x86_64/groff-base-1.23.0-11.fc43.x86_64.rpm",
+      "sha256": "5a3d020224bac53572bce86ab0ed54d3bd0cc44beadcd6a4670da374c0eba199"
+    },
+    {
+      "file": "gsettings-desktop-schemas-49.1-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gsettings-desktop-schemas/49.1/3.fc43/data/signed/31645531/x86_64/gsettings-desktop-schemas-49.1-3.fc43.x86_64.rpm",
+      "sha256": "64462cf981f8e15f57063eda239faa09ebe1fb030e2054a76bf589cefd5911db"
+    },
+    {
+      "file": "gssdp-1.6.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gssdp/1.6.6/1.fc43/data/signed/31645531/x86_64/gssdp-1.6.6-1.fc43.x86_64.rpm",
+      "sha256": "33f51cf7f5f2f1549dc24584aaf962d48d9b0d6bc548b91d0e026786feeb5335"
+    },
+    {
+      "file": "gstreamer1-1.26.11-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gstreamer1/1.26.11/1.fc43/data/signed/31645531/x86_64/gstreamer1-1.26.11-1.fc43.x86_64.rpm",
+      "sha256": "6d37ded1d813833de528f8100e60def493940c8bdd47b1f1dbdb8fc45f469f59"
+    },
+    {
+      "file": "gstreamer1-plugins-bad-free-libs-1.26.11-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gstreamer1-plugins-bad-free/1.26.11/1.fc43/data/signed/31645531/x86_64/gstreamer1-plugins-bad-free-libs-1.26.11-1.fc43.x86_64.rpm",
+      "sha256": "697949f03fa9d766e4543bd0f27373b5a5b278866f57844f3642f98784703314"
+    },
+    {
+      "file": "gstreamer1-plugins-base-1.26.11-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gstreamer1-plugins-base/1.26.11/1.fc43/data/signed/31645531/x86_64/gstreamer1-plugins-base-1.26.11-1.fc43.x86_64.rpm",
+      "sha256": "8f4d9c3b793dbab89f8a769038f468c3a17fa894987cfed9e5018105b1b38a50"
+    },
+    {
+      "file": "gtk-update-icon-cache-3.24.52-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gtk3/3.24.52/1.fc43/data/signed/31645531/x86_64/gtk-update-icon-cache-3.24.52-1.fc43.x86_64.rpm",
+      "sha256": "001fe8e3f3f3338e53e2dd16339b0fedecb2abb85f9b1b318e31dd2bb1455fdb"
+    },
+    {
+      "file": "gtk4-4.20.4-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gtk4/4.20.4/1.fc43/data/signed/31645531/x86_64/gtk4-4.20.4-1.fc43.x86_64.rpm",
+      "sha256": "4ee418eb324a91183b99578673bdbfa46c75861511b76ec6c56a30e9655ce9c3"
+    },
+    {
+      "file": "gtk4-devel-4.20.4-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gtk4/4.20.4/1.fc43/data/signed/31645531/x86_64/gtk4-devel-4.20.4-1.fc43.x86_64.rpm",
+      "sha256": "ed0a359a01394fa691e87b5dc7aa76f3cb10c600950191044de87e2f8f11ba6a"
+    },
+    {
+      "file": "gupnp-1.6.10-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gupnp/1.6.10/1.fc43/data/signed/31645531/x86_64/gupnp-1.6.10-1.fc43.x86_64.rpm",
+      "sha256": "27ab35ed07eff89b905099c70a066a33f7c88766f7a8f4cbd1dc529821b8758e"
+    },
+    {
+      "file": "gupnp-igd-1.6.0-7.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gupnp-igd/1.6.0/7.fc43/data/signed/31645531/x86_64/gupnp-igd-1.6.0-7.fc43.x86_64.rpm",
+      "sha256": "42f398bca0155ff568bee7d950619410850db6bfec144290eae264c3cd554307"
+    },
+    {
+      "file": "gzip-1.13-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gzip/1.13/4.fc43/data/signed/31645531/x86_64/gzip-1.13-4.fc43.x86_64.rpm",
+      "sha256": "83c6ace309f92ebde843c41a25b8b24ee6f21b68c1f2d81deebbcefd6113dce6"
+    },
+    {
+      "file": "harfbuzz-11.5.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/harfbuzz/11.5.1/2.fc43/data/signed/31645531/x86_64/harfbuzz-11.5.1-2.fc43.x86_64.rpm",
+      "sha256": "1d571a00adde3050c3a6861b816cfc583b9a162dddf24f4f863360e070bbb99c"
+    },
+    {
+      "file": "harfbuzz-cairo-11.5.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/harfbuzz/11.5.1/2.fc43/data/signed/31645531/x86_64/harfbuzz-cairo-11.5.1-2.fc43.x86_64.rpm",
+      "sha256": "39fe4b44a1426da166604a9018c41765c2a83a27629fc487ccb86e1a62de156c"
+    },
+    {
+      "file": "harfbuzz-devel-11.5.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/harfbuzz/11.5.1/2.fc43/data/signed/31645531/x86_64/harfbuzz-devel-11.5.1-2.fc43.x86_64.rpm",
+      "sha256": "988c7967fbefd7fb94c2a658dd53662bd290b91163cb0f3bb442250c584cc76e"
+    },
+    {
+      "file": "harfbuzz-icu-11.5.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/harfbuzz/11.5.1/2.fc43/data/signed/31645531/x86_64/harfbuzz-icu-11.5.1-2.fc43.x86_64.rpm",
+      "sha256": "c678be4976c812f9b6e4ba3fe0d3dda7f4122dbb4cb6c119a1ec9c312dc9d89e"
+    },
+    {
+      "file": "hicolor-icon-theme-0.18-2.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/hicolor-icon-theme/0.18/2.fc43/data/signed/31645531/noarch/hicolor-icon-theme-0.18-2.fc43.noarch.rpm",
+      "sha256": "a3e5a12417fcc998739742c54321b248cc6a89bc3c0a9e017da0f23364de9639"
+    },
+    {
+      "file": "highway-1.3.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/highway/1.3.0/1.fc43/data/signed/31645531/x86_64/highway-1.3.0-1.fc43.x86_64.rpm",
+      "sha256": "189963507c8473c8dc16d730dbcb81d4baf40504f9c11fa7e7dcd0adae981143"
+    },
+    {
+      "file": "hwdata-0.412-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/hwdata/0.412/1.fc43/data/signed/31645531/noarch/hwdata-0.412-1.fc43.noarch.rpm",
+      "sha256": "d8ded886442f004592f687942cd3eaeaf92e1b81ad8a779259fe7429330d8cab"
+    },
+    {
+      "file": "iso-codes-4.18.0-2.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/iso-codes/4.18.0/2.fc43/data/signed/31645531/noarch/iso-codes-4.18.0-2.fc43.noarch.rpm",
+      "sha256": "da2f0475920c9ba17bd2b4b2f0f83b0b2e4b0e145e3ca08ce79fc8cf642388e3"
+    },
+    {
+      "file": "jansson-2.14-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/jansson/2.14/3.fc43/data/signed/31645531/x86_64/jansson-2.14-3.fc43.x86_64.rpm",
+      "sha256": "921b0dae9b5d23da9abb7caa726b507a61b639eaa048e94f80cca3747f2ca459"
+    },
+    {
+      "file": "jbigkit-libs-2.1-32.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/jbigkit/2.1/32.fc43/data/signed/31645531/x86_64/jbigkit-libs-2.1-32.fc43.x86_64.rpm",
+      "sha256": "600b4c1452a75b719b788d58c554e6586ae2177532afb83442332c338348742d"
+    },
+    {
+      "file": "json-c-0.18-7.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/json-c/0.18/7.fc43/data/signed/31645531/x86_64/json-c-0.18-7.fc43.x86_64.rpm",
+      "sha256": "7ea12ec1eea5e42d4ead2fab1ec300922c06d57989ee7cf5bfbdfe540f24b617"
+    },
+    {
+      "file": "json-glib-1.10.8-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/json-glib/1.10.8/4.fc43/data/signed/31645531/x86_64/json-glib-1.10.8-4.fc43.x86_64.rpm",
+      "sha256": "132adce135b30320fcb5e851745bca6ee5b92fd62524d7f2f7435dbc5f18ca21"
+    },
+    {
+      "file": "kernel-headers-7.3.3-100.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/kernel-headers/7.3.3/100.fc43/data/signed/31645531/x86_64/kernel-headers-7.3.3-100.fc43.x86_64.rpm",
+      "sha256": "7a66d983494ce71db040853ffd99a43d76d421a8111f40bc0c3ee49d47b23571"
+    },
+    {
+      "file": "keyutils-libs-1.6.3-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/keyutils/1.6.3/6.fc43/data/signed/31645531/x86_64/keyutils-libs-1.6.3-6.fc43.x86_64.rpm",
+      "sha256": "8452cd1ca9f6e5bf92f6bc2b0a7a7f706493237bab2ee69127676919b5aa5bfa"
+    },
+    {
+      "file": "krb5-libs-1.22.2-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/krb5/1.22.2/4.fc43/data/signed/31645531/x86_64/krb5-libs-1.22.2-4.fc43.x86_64.rpm",
+      "sha256": "7ac237bbc4e629369aa5680118f186445958d9435509c5d3cfcac6d4e50f1888"
+    },
+    {
+      "file": "lcms2-2.16-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/lcms2/2.16/6.fc43/data/signed/31645531/x86_64/lcms2-2.16-6.fc43.x86_64.rpm",
+      "sha256": "d122b34e9d4a7854e837389a0b79a114b5f7e0b83bbaf2ee771e94cd7e4aa7a7"
+    },
+    {
+      "file": "lcms2-devel-2.16-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/lcms2/2.16/6.fc43/data/signed/31645531/x86_64/lcms2-devel-2.16-6.fc43.x86_64.rpm",
+      "sha256": "a625741fa4036ea4153a9e4802c858ab3125a06569a0df229da1281ddbb2786f"
+    },
+    {
+      "file": "leptonica-1.87.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/leptonica/1.87.0/1.fc43/data/signed/31645531/x86_64/leptonica-1.87.0-1.fc43.x86_64.rpm",
+      "sha256": "e055f160be0d2724c9dfc00c451cc547e113bf809c24bb6b28f13c83136c08e6"
+    },
+    {
+      "file": "less-710-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/less/710/1.fc43/data/signed/31645531/x86_64/less-710-1.fc43.x86_64.rpm",
+      "sha256": "bd3959bd08e33e1739c429037e6585de5052a1fbf2c0867d7f1bbef9cc184f93"
+    },
+    {
+      "file": "libX11-1.8.13-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libX11/1.8.13/1.fc43/data/signed/31645531/x86_64/libX11-1.8.13-1.fc43.x86_64.rpm",
+      "sha256": "a5f241bbfd1984d96d98a9caea9ee1794b612026d56abdb37a45c901a920f535"
+    },
+    {
+      "file": "libX11-common-1.8.13-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libX11/1.8.13/1.fc43/data/signed/31645531/noarch/libX11-common-1.8.13-1.fc43.noarch.rpm",
+      "sha256": "dc20bb1e7b3952ca6039f34aaeaca76a47013b2fb4c873ce34e8e10ff83fd7d1"
+    },
+    {
+      "file": "libX11-devel-1.8.13-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libX11/1.8.13/1.fc43/data/signed/31645531/x86_64/libX11-devel-1.8.13-1.fc43.x86_64.rpm",
+      "sha256": "4b2ae15b82f09d31e948d05fd24e618fd191a36fa10ee5c7368136983c239df9"
+    },
+    {
+      "file": "libX11-xcb-1.8.13-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libX11/1.8.13/1.fc43/data/signed/31645531/x86_64/libX11-xcb-1.8.13-1.fc43.x86_64.rpm",
+      "sha256": "d28caa60f9b4e9fcddad2335fba6b527fccccd5776798f7fe09f76526e7f9b3e"
+    },
+    {
+      "file": "libXau-1.0.12-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXau/1.0.12/3.fc43/data/signed/31645531/x86_64/libXau-1.0.12-3.fc43.x86_64.rpm",
+      "sha256": "14ffd5dde17120c85d9e5583c80a419dc5f8a7aa5bda1242be356e95e3dfac47"
+    },
+    {
+      "file": "libXau-devel-1.0.12-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXau/1.0.12/3.fc43/data/signed/31645531/x86_64/libXau-devel-1.0.12-3.fc43.x86_64.rpm",
+      "sha256": "65b4a479a1f6ef75a71a6dbdb016f14c8eee1227dc5e560e1c5180b6af62bbd0"
+    },
+    {
+      "file": "libXcursor-1.2.3-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXcursor/1.2.3/3.fc43/data/signed/31645531/x86_64/libXcursor-1.2.3-3.fc43.x86_64.rpm",
+      "sha256": "aaf396013d4d7ec95624d9a25d80254c53e7bdc14158ca6c1205b45267a3ecaf"
+    },
+    {
+      "file": "libXdamage-1.1.6-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXdamage/1.1.6/6.fc43/data/signed/31645531/x86_64/libXdamage-1.1.6-6.fc43.x86_64.rpm",
+      "sha256": "fa4c723f24ef215a0c0319f86280af51665bec2f109c22d8e7c46e25a11256ab"
+    },
+    {
+      "file": "libXext-1.3.6-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXext/1.3.6/4.fc43/data/signed/31645531/x86_64/libXext-1.3.6-4.fc43.x86_64.rpm",
+      "sha256": "bceba5d8269d8ca6c391d2e07fb21be68b5d1e96a279cb4e6dfa6cf2dd9cfee1"
+    },
+    {
+      "file": "libXext-devel-1.3.6-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXext/1.3.6/4.fc43/data/signed/31645531/x86_64/libXext-devel-1.3.6-4.fc43.x86_64.rpm",
+      "sha256": "cc7ea5a3d7a158364ddd4a1a97a7da1aeb977006a822c236ed628b6ca7973e80"
+    },
+    {
+      "file": "libXfixes-6.0.1-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXfixes/6.0.1/6.fc43/data/signed/31645531/x86_64/libXfixes-6.0.1-6.fc43.x86_64.rpm",
+      "sha256": "99637513068c58969303a2e8f321481a01ff2065f5e4d5ce48a004b7b041a50a"
+    },
+    {
+      "file": "libXft-2.3.8-9.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXft/2.3.8/9.fc43/data/signed/31645531/x86_64/libXft-2.3.8-9.fc43.x86_64.rpm",
+      "sha256": "4dc52bb07bdfd47b94eb53c7a385e0845f6eac59bc6ed43f38c73869b8520529"
+    },
+    {
+      "file": "libXft-devel-2.3.8-9.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXft/2.3.8/9.fc43/data/signed/31645531/x86_64/libXft-devel-2.3.8-9.fc43.x86_64.rpm",
+      "sha256": "f105e793bc157dee0036de83d2a44309032dbaf05e36b7c3e099a612412e8099"
+    },
+    {
+      "file": "libXi-1.8.2-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXi/1.8.2/3.fc43/data/signed/31645531/x86_64/libXi-1.8.2-3.fc43.x86_64.rpm",
+      "sha256": "e1393b13ea921566e5d263f9ba09ff1e3728da29852c25cec0cae9e70fc8dd3c"
+    },
+    {
+      "file": "libXinerama-1.1.5-9.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXinerama/1.1.5/9.fc43/data/signed/31645531/x86_64/libXinerama-1.1.5-9.fc43.x86_64.rpm",
+      "sha256": "15f40299561bf600410240e1c5f6c5266249f8bbf021b9ddac5b6e87ef8329aa"
+    },
+    {
+      "file": "libXrandr-1.5.4-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXrandr/1.5.4/6.fc43/data/signed/31645531/x86_64/libXrandr-1.5.4-6.fc43.x86_64.rpm",
+      "sha256": "1756df795cadba75326e962df484dbbefdf8fe16db21123f8fdd2636e86603cf"
+    },
+    {
+      "file": "libXrender-0.9.12-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXrender/0.9.12/3.fc43/data/signed/31645531/x86_64/libXrender-0.9.12-3.fc43.x86_64.rpm",
+      "sha256": "8ae1f8265e52ed9e5660dad4fc9532e7e1e5c671eb3f1d2d6057f3ca6e5a497d"
+    },
+    {
+      "file": "libXrender-devel-0.9.12-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXrender/0.9.12/3.fc43/data/signed/31645531/x86_64/libXrender-devel-0.9.12-3.fc43.x86_64.rpm",
+      "sha256": "02fc74612affd3ddbd80ed878765e80f609d85c9e404be349baf27d107d33235"
+    },
+    {
+      "file": "libXv-1.0.13-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXv/1.0.13/3.fc43/data/signed/31645531/x86_64/libXv-1.0.13-3.fc43.x86_64.rpm",
+      "sha256": "e6fd7b2ec64193b7ecc8d08928b226b9bbee0695b3570b46301ece5728eae910"
+    },
+    {
+      "file": "libXxf86vm-1.1.6-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXxf86vm/1.1.6/3.fc43/data/signed/31645531/x86_64/libXxf86vm-1.1.6-3.fc43.x86_64.rpm",
+      "sha256": "462d0ca29665dec1816bdbba38d9cb52553f6ce54f2926d4f3d04324dd191fe0"
+    },
+    {
+      "file": "libacl-2.4.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/acl/2.4.0/1.fc43/data/signed/31645531/x86_64/libacl-2.4.0-1.fc43.x86_64.rpm",
+      "sha256": "942fa1f926548271b4a7879ed1f123e0af6cac7d04aa5886826374b6e1bf9d38"
+    },
+    {
+      "file": "libaom-3.15.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/aom/3.15.2/1.fc43/data/signed/31645531/x86_64/libaom-3.15.2-1.fc43.x86_64.rpm",
+      "sha256": "4f1c1de71bd9eb8849b0f240dfee67e9bd80a7d532956761f6e5c3f3085e43a6"
+    },
+    {
+      "file": "libattr-2.6.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/attr/2.6.0/1.fc43/data/signed/31645531/x86_64/libattr-2.6.0-1.fc43.x86_64.rpm",
+      "sha256": "e152262ac9206ec6d97604a4d2372a21b2f1890f9de9a934f36f3891e7668f61"
+    },
+    {
+      "file": "libblkid-2.41.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/data/signed/31645531/x86_64/libblkid-2.41.6-1.fc43.x86_64.rpm",
+      "sha256": "c0d22ec59a418dcfdf25fea3f8b16343d27d8c8c79eba961d5192fbf11c72435"
+    },
+    {
+      "file": "libblkid-devel-2.41.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/data/signed/31645531/x86_64/libblkid-devel-2.41.6-1.fc43.x86_64.rpm",
+      "sha256": "530c0f1fd377951f64926c1f205443503350011fe088a4208d50a639641ef8b0"
+    },
+    {
+      "file": "libbrotli-1.2.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/brotli/1.2.1/1.fc43/data/signed/31645531/x86_64/libbrotli-1.2.1-1.fc43.x86_64.rpm",
+      "sha256": "a0cc5dd046d5470f4256ff8c12209812834127244e691a7508d31f2e6dbb4167"
+    },
+    {
+      "file": "libcap-2.76-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libcap/2.76/4.fc43/data/signed/31645531/x86_64/libcap-2.76-4.fc43.x86_64.rpm",
+      "sha256": "2a231aeecab0b2bb5c46a811b2607fb935c90ab6c2d2e789dec7d32ab453cbba"
+    },
+    {
+      "file": "libcap-ng-0.9.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libcap-ng/0.9.6/1.fc43/data/signed/31645531/x86_64/libcap-ng-0.9.6-1.fc43.x86_64.rpm",
+      "sha256": "4647341f44a72e2d874f9b43433c737a78a81d06a2abc86fe060183fdf4b28ed"
+    },
+    {
+      "file": "libcbor-0.12.0-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libcbor/0.12.0/6.fc43/data/signed/31645531/x86_64/libcbor-0.12.0-6.fc43.x86_64.rpm",
+      "sha256": "0cdabd5c8220186eb77a1768b87418112d34794277fb24453a8432f2fb5bfaf7"
+    },
+    {
+      "file": "libcom_err-1.47.3-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/e2fsprogs/1.47.3/2.fc43/data/signed/31645531/x86_64/libcom_err-1.47.3-2.fc43.x86_64.rpm",
+      "sha256": "e7a9ee0e80f58da6beedbdaa65f67e7a5ee7fadb0f0e5a346bbb6342c4871cc2"
+    },
+    {
+      "file": "libcurl-8.15.0-12.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/curl/8.15.0/12.fc43/data/signed/31645531/x86_64/libcurl-8.15.0-12.fc43.x86_64.rpm",
+      "sha256": "6d684023df9aa1612a63988b72867fae9ff624139648858401349c07876197ee"
+    },
+    {
+      "file": "libdatrie-0.2.13-12.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libdatrie/0.2.13/12.fc43/data/signed/31645531/x86_64/libdatrie-0.2.13-12.fc43.x86_64.rpm",
+      "sha256": "5fbaf1c9e8e0899cb07b378627d1b1b596aa4bc229672a2a327b1866da952777"
+    },
+    {
+      "file": "libdatrie-devel-0.2.13-12.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libdatrie/0.2.13/12.fc43/data/signed/31645531/x86_64/libdatrie-devel-0.2.13-12.fc43.x86_64.rpm",
+      "sha256": "4b6c951ca172e305020d27ef9db5de8afd8a56d61a1f3ce43379e07116ec823c"
+    },
+    {
+      "file": "libdav1d-1.5.4-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dav1d/1.5.4/1.fc43/data/signed/31645531/x86_64/libdav1d-1.5.4-1.fc43.x86_64.rpm",
+      "sha256": "8e3da604b9d2f1ff3678f99bc3c5942669d3cf8c2a678916cb8696fcefede302"
+    },
+    {
+      "file": "libdisplay-info-0.2.0-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libdisplay-info/0.2.0/4.fc43/data/signed/31645531/x86_64/libdisplay-info-0.2.0-4.fc43.x86_64.rpm",
+      "sha256": "d06990f63cc9936ac66103cb7a5bb7859fb837750bebd770e9bd4441c8e7c3d0"
+    },
+    {
+      "file": "libdrm-2.4.134-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libdrm/2.4.134/1.fc43/data/signed/31645531/x86_64/libdrm-2.4.134-1.fc43.x86_64.rpm",
+      "sha256": "ca4950f829749de9d76d6d8c44cd401b1be03a3bbaf833fbac8fa05a1bd2f301"
+    },
+    {
+      "file": "libeconf-0.7.9-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libeconf/0.7.9/2.fc43/data/signed/31645531/x86_64/libeconf-0.7.9-2.fc43.x86_64.rpm",
+      "sha256": "b1f98216ff13fdab6815fdebf0ddfc6f5679d077492a878458cdd92fd16f02a8"
+    },
+    {
+      "file": "libedit-3.1-58.20260512cvs.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libedit/3.1/58.20260512cvs.fc43/data/signed/31645531/x86_64/libedit-3.1-58.20260512cvs.fc43.x86_64.rpm",
+      "sha256": "f194ddf604b629de9cec615f0fe01782e248b3b96406a0bf0808c860b829b657"
+    },
+    {
+      "file": "libepoxy-1.5.10-11.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libepoxy/1.5.10/11.fc43/data/signed/31645531/x86_64/libepoxy-1.5.10-11.fc43.x86_64.rpm",
+      "sha256": "4cea112797bd6a37fff8e0b5cd6654b6a3be4cbdc54ebf3d5d759c9991b38633"
+    },
+    {
+      "file": "libevent-2.1.13-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libevent/2.1.13/1.fc43/data/signed/31645531/x86_64/libevent-2.1.13-1.fc43.x86_64.rpm",
+      "sha256": "53a159da3905327476c10efd05a3b4d38020be5dee99a45e45078aaa147af7f7"
+    },
+    {
+      "file": "libfdisk-2.41.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/data/signed/31645531/x86_64/libfdisk-2.41.6-1.fc43.x86_64.rpm",
+      "sha256": "59ae2579323a917dc4707157d26a8aaeadee4f7ae9d6e46d0b1cb78676ff27e2"
+    },
+    {
+      "file": "libffi-3.5.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libffi/3.5.2/1.fc43/data/signed/31645531/x86_64/libffi-3.5.2-1.fc43.x86_64.rpm",
+      "sha256": "6b72acc9a66a4c108024ca0935820111913acd7d40a7311577c3a2ada480b45b"
+    },
+    {
+      "file": "libffi-devel-3.5.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libffi/3.5.2/1.fc43/data/signed/31645531/x86_64/libffi-devel-3.5.2-1.fc43.x86_64.rpm",
+      "sha256": "3e1bc13776c8f0d052722bf28d431dc0326346027afee2d0d19f32d220a988c3"
+    },
+    {
+      "file": "libfido2-1.16.0-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libfido2/1.16.0/3.fc43/data/signed/31645531/x86_64/libfido2-1.16.0-3.fc43.x86_64.rpm",
+      "sha256": "e9ca30655b9837a8539357954ab9c0ebfe8c165f9f05ad50d07af1546daaea34"
+    },
+    {
+      "file": "libgcc-15.3.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gcc/15.3.1/1.fc43/data/signed/31645531/x86_64/libgcc-15.3.1-1.fc43.x86_64.rpm",
+      "sha256": "08b2e6131208e83dd20d34d8ff66566c696565d0d0411dd35468e6b7547e3782"
+    },
+    {
+      "file": "libgit2-1.9.7-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libgit2/1.9.7/1.fc43/data/signed/31645531/x86_64/libgit2-1.9.7-1.fc43.x86_64.rpm",
+      "sha256": "1a86cf089fd85805f382e908807daf2074eef923896dae2bcf8766741b45652a"
+    },
+    {
+      "file": "libglvnd-1.7.0-8.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libglvnd/1.7.0/8.fc43/data/signed/31645531/x86_64/libglvnd-1.7.0-8.fc43.x86_64.rpm",
+      "sha256": "0a0f6f43b18046949bdc4f4acc923548819073c2afb49c66fa95e20fa11abff0"
+    },
+    {
+      "file": "libglvnd-egl-1.7.0-8.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libglvnd/1.7.0/8.fc43/data/signed/31645531/x86_64/libglvnd-egl-1.7.0-8.fc43.x86_64.rpm",
+      "sha256": "55696b5601811336e49ac6c3429d54da96e37ab9b60c7b3f36a00eeed5c2006e"
+    },
+    {
+      "file": "libglvnd-gles-1.7.0-8.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libglvnd/1.7.0/8.fc43/data/signed/31645531/x86_64/libglvnd-gles-1.7.0-8.fc43.x86_64.rpm",
+      "sha256": "f6c7720b473cedf6c811f63f8b2c9b6fcbe31e497c62545e2245912dd5206ead"
+    },
+    {
+      "file": "libglvnd-glx-1.7.0-8.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libglvnd/1.7.0/8.fc43/data/signed/31645531/x86_64/libglvnd-glx-1.7.0-8.fc43.x86_64.rpm",
+      "sha256": "79708bf412235cbc34cdd8b8f4de2e593f325e4def391b197e95f8c4c4c084cc"
+    },
+    {
+      "file": "libgomp-15.3.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gcc/15.3.1/1.fc43/data/signed/31645531/x86_64/libgomp-15.3.1-1.fc43.x86_64.rpm",
+      "sha256": "93102feb675e4ae6dee4fc07174cb6cca6fd2a7cd97f259afc7c73d0ae82b720"
+    },
+    {
+      "file": "libgudev-238-8.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libgudev/238/8.fc43/data/signed/31645531/x86_64/libgudev-238-8.fc43.x86_64.rpm",
+      "sha256": "053e2cf06f967fc48a33388cf507a5b262a2418908a0e6fa64c0b639a2487d97"
+    },
+    {
+      "file": "libgusb-0.4.9-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libgusb/0.4.9/4.fc43/data/signed/31645531/x86_64/libgusb-0.4.9-4.fc43.x86_64.rpm",
+      "sha256": "720343e06f3ec95707a8a98072e3cb11b684a3322bac13da80a0af239effc18d"
+    },
+    {
+      "file": "libheif-1.23.7-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libheif/1.23.7/1.fc43/data/signed/31645531/x86_64/libheif-1.23.7-1.fc43.x86_64.rpm",
+      "sha256": "a4d2caaaccf6c11055503b3fb1be2886e34fc6e414e4b3e217642d0fe0333839"
+    },
+    {
+      "file": "libicu-77.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/icu/77.1/1.fc43/data/signed/31645531/x86_64/libicu-77.1-1.fc43.x86_64.rpm",
+      "sha256": "c8f072ab3f3913bd5ffbd0048343f11b8fe7b570866bb76ca9069d1767a2e4ff"
+    },
+    {
+      "file": "libicu-devel-77.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/icu/77.1/1.fc43/data/signed/31645531/x86_64/libicu-devel-77.1-1.fc43.x86_64.rpm",
+      "sha256": "b5952405cb813c87069b0f036553ee9f7a320d81ee7601a0ad4ab3467f49d8ee"
+    },
+    {
+      "file": "libidn2-2.3.8-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libidn2/2.3.8/2.fc43/data/signed/31645531/x86_64/libidn2-2.3.8-2.fc43.x86_64.rpm",
+      "sha256": "162fdc035a7c92082d4d8d67fc5efdff95358faa2723c1fb69bfaac40641efea"
+    },
+    {
+      "file": "libjpeg-turbo-3.1.3-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libjpeg-turbo/3.1.3/1.fc43/data/signed/31645531/x86_64/libjpeg-turbo-3.1.3-1.fc43.x86_64.rpm",
+      "sha256": "b56e24bc54183d61bc5b64a2d2d4136c63e574d794bf5573e0882249a1f16ca5"
+    },
+    {
+      "file": "libjxl-0.11.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/jpegxl/0.11.2/1.fc43/data/signed/31645531/x86_64/libjxl-0.11.2-1.fc43.x86_64.rpm",
+      "sha256": "663e5aecead02eef52886e50b030d7d22938f2e35ea1069ee74b9c7a61ae29fe"
+    },
+    {
+      "file": "liblastlog2-2.41.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/data/signed/31645531/x86_64/liblastlog2-2.41.6-1.fc43.x86_64.rpm",
+      "sha256": "47ba5e2a0ca9222e7346d7603fd3a36dac5bcc1dae8bc31f1fd084572fb365ce"
+    },
+    {
+      "file": "liblerc-4.0.0-9.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/liblerc/4.0.0/9.fc43/data/signed/31645531/x86_64/liblerc-4.0.0-9.fc43.x86_64.rpm",
+      "sha256": "c9fa1004a1302a110e111d73cc18bff9162c726ea7469352ab8c4d585656b60f"
+    },
+    {
+      "file": "libmount-2.41.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/data/signed/31645531/x86_64/libmount-2.41.6-1.fc43.x86_64.rpm",
+      "sha256": "974a95d405a43a2f74a7e2d8e4cdf68477a3b1a6ff3a1be4b7aac3617e9ab270"
+    },
+    {
+      "file": "libmount-devel-2.41.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/data/signed/31645531/x86_64/libmount-devel-2.41.6-1.fc43.x86_64.rpm",
+      "sha256": "ab7cbb0763c245bf18c832b6c56b51227d13c2671585181cc6ac9435c9861733"
+    },
+    {
+      "file": "libmpc-1.3.1-8.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libmpc/1.3.1/8.fc43/data/signed/31645531/x86_64/libmpc-1.3.1-8.fc43.x86_64.rpm",
+      "sha256": "0e939f8c2f76c15fdf67bd734ea7d17cff8cb413964593021cedf2cf893cc650"
+    },
+    {
+      "file": "libnghttp2-1.66.0-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/nghttp2/1.66.0/3.fc43/data/signed/31645531/x86_64/libnghttp2-1.66.0-3.fc43.x86_64.rpm",
+      "sha256": "5aeaea1fc6afbe132971c29d19e39c8e5dc0dbad63279a4a70ff66278680f4f1"
+    },
+    {
+      "file": "libnice-0.1.22-8.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libnice/0.1.22/8.fc43/data/signed/31645531/x86_64/libnice-0.1.22-8.fc43.x86_64.rpm",
+      "sha256": "d7ce4d08751912e3b08c70be6f70b3daa567db27dacc148a9e002b9127402961"
+    },
+    {
+      "file": "libogg-1.3.6-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libogg/1.3.6/2.fc43/data/signed/31645531/x86_64/libogg-1.3.6-2.fc43.x86_64.rpm",
+      "sha256": "55d3b3eaa10b2dfe6319e391d2cbdb8d751a66c8464f9d7fcb7a200c4f838f23"
+    },
+    {
+      "file": "libopenjph-0.22.0-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/openjph/0.22.0/2.fc43/data/signed/31645531/x86_64/libopenjph-0.22.0-2.fc43.x86_64.rpm",
+      "sha256": "b899ef6aa305271b20a925b32a9cd71122d5c3c764700888a405c5875ed754e2"
+    },
+    {
+      "file": "libpciaccess-0.16-16.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libpciaccess/0.16/16.fc43/data/signed/31645531/x86_64/libpciaccess-0.16-16.fc43.x86_64.rpm",
+      "sha256": "75b5dd312254a3b37deefe4adb362b81711d8a1b995bdf7f3e47ac0dd572b003"
+    },
+    {
+      "file": "libpkgconf-2.3.0-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pkgconf/2.3.0/3.fc43/data/signed/31645531/x86_64/libpkgconf-2.3.0-3.fc43.x86_64.rpm",
+      "sha256": "cfcd48adc62fab0575792b9b3e974dbe04f1896d9584e016d8730ee7d4816365"
+    },
+    {
+      "file": "libpng-1.6.58-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libpng/1.6.58/1.fc43/data/signed/31645531/x86_64/libpng-1.6.58-1.fc43.x86_64.rpm",
+      "sha256": "043d4bee72435bcca077c0fee7ac5974b31bc11ab10ef92ffe8bef713381dd77"
+    },
+    {
+      "file": "libpng-devel-1.6.58-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libpng/1.6.58/1.fc43/data/signed/31645531/x86_64/libpng-devel-1.6.58-1.fc43.x86_64.rpm",
+      "sha256": "ff01a39b132bb5b06d9f4db61f938f32e8d428b59bba67f13fd9415396fe81aa"
+    },
+    {
+      "file": "libpsl-0.21.5-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libpsl/0.21.5/6.fc43/data/signed/31645531/x86_64/libpsl-0.21.5-6.fc43.x86_64.rpm",
+      "sha256": "6a95315add28de830715d894d06a9b01e0a7695f7461ef0aa441877442b608a0"
+    },
+    {
+      "file": "librsvg2-2.61.5-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/librsvg2/2.61.5/1.fc43/data/signed/31645531/x86_64/librsvg2-2.61.5-1.fc43.x86_64.rpm",
+      "sha256": "5b25081ddc14d1c7db022698ee389576c1cb9a51d63300e3e4e09d77d95707a7"
+    },
+    {
+      "file": "libseccomp-2.6.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libseccomp/2.6.1/2.fc43/data/signed/31645531/x86_64/libseccomp-2.6.1-2.fc43.x86_64.rpm",
+      "sha256": "a53a8b3c7eef71adafae6b691075f197fd80641cc87aaef5ad092f1505f6963b"
+    },
+    {
+      "file": "libseccomp-devel-2.6.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libseccomp/2.6.1/2.fc43/data/signed/31645531/x86_64/libseccomp-devel-2.6.1-2.fc43.x86_64.rpm",
+      "sha256": "8a98fb58087ce9cba6d93472d5a8a3499189fbbbad1286fac10dd597bc107010"
+    },
+    {
+      "file": "libselinux-3.9-5.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libselinux/3.9/5.fc43/data/signed/31645531/x86_64/libselinux-3.9-5.fc43.x86_64.rpm",
+      "sha256": "0d7af1c6399820aaa5a38762ef77c9b9e710f0bc086bbe92a3ea91aecbbc36c2"
+    },
+    {
+      "file": "libselinux-devel-3.9-5.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libselinux/3.9/5.fc43/data/signed/31645531/x86_64/libselinux-devel-3.9-5.fc43.x86_64.rpm",
+      "sha256": "b15b03212fa85effe941f4feec9bbc052f93552fa976eaa517f02778e69eef33"
+    },
+    {
+      "file": "libsepol-3.9-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libsepol/3.9/2.fc43/data/signed/31645531/x86_64/libsepol-3.9-2.fc43.x86_64.rpm",
+      "sha256": "3424360ca4131ddd79b80dfd4dd0fb33981f9d136f49aea13890867d705d6382"
+    },
+    {
+      "file": "libsepol-devel-3.9-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libsepol/3.9/2.fc43/data/signed/31645531/x86_64/libsepol-devel-3.9-2.fc43.x86_64.rpm",
+      "sha256": "0f0870cb93c245318a5a7b90f4f4873d42707a1580f6e4da1ded3ec31ce830f4"
+    },
+    {
+      "file": "libsmartcols-2.41.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/data/signed/31645531/x86_64/libsmartcols-2.41.6-1.fc43.x86_64.rpm",
+      "sha256": "81431f1ec8efd1226d6fdc4741116a70d0c84663b0824b037160bd723d31b8fc"
+    },
+    {
+      "file": "libsoup3-3.6.6-5.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libsoup3/3.6.6/5.fc43/data/signed/31645531/x86_64/libsoup3-3.6.6-5.fc43.x86_64.rpm",
+      "sha256": "80e28270dafd44738839dc31e582b6ed239fb6e983aa664ced1aebfed8f2a003"
+    },
+    {
+      "file": "libssh-0.11.5-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libssh/0.11.5/1.fc43/data/signed/31645531/x86_64/libssh-0.11.5-1.fc43.x86_64.rpm",
+      "sha256": "71477bc695f5150d14e0a081bdb66e51248889046ab841bc9a7fb5a2faccb310"
+    },
+    {
+      "file": "libssh-config-0.11.5-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libssh/0.11.5/1.fc43/data/signed/31645531/noarch/libssh-config-0.11.5-1.fc43.noarch.rpm",
+      "sha256": "bfbbe018998c6c553b772c74702f81782da0d5f2d2f14aaa4e2a53180fcd8cf1"
+    },
+    {
+      "file": "libssh2-1.11.1-9.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libssh2/1.11.1/9.fc43/data/signed/31645531/x86_64/libssh2-1.11.1-9.fc43.x86_64.rpm",
+      "sha256": "b791bf11d91d1228adc14f8a56abc0340a9157091a699056050c6c2d989b85dd"
+    },
+    {
+      "file": "libstdc++-15.3.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gcc/15.3.1/1.fc43/data/signed/31645531/x86_64/libstdc++-15.3.1-1.fc43.x86_64.rpm",
+      "sha256": "da2054fdf4c057427045a623f96931322081c0c0c50ff51994b43e06ca219c37"
+    },
+    {
+      "file": "libstemmer-3.0.1-8.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/snowball/3.0.1/8.fc43/data/signed/31645531/x86_64/libstemmer-3.0.1-8.fc43.x86_64.rpm",
+      "sha256": "3ccaf12a92f06257a4281dc46b71bfc82345319c6cbdc480ab8a587314c569dd"
+    },
+    {
+      "file": "libtasn1-4.21.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libtasn1/4.21.0/1.fc43/data/signed/31645531/x86_64/libtasn1-4.21.0-1.fc43.x86_64.rpm",
+      "sha256": "16c45c22faa5e4b760121e515eff492de864c3a654f9dcb333cdefc9608d9878"
+    },
+    {
+      "file": "libtextstyle-0.25.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gettext/0.25.1/2.fc43/data/signed/31645531/x86_64/libtextstyle-0.25.1-2.fc43.x86_64.rpm",
+      "sha256": "b5018d6526894149b48aa061114f1140e05cb2d5f1b2b24d5618e78b921e1de2"
+    },
+    {
+      "file": "libthai-0.1.29-11.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libthai/0.1.29/11.fc43/data/signed/31645531/x86_64/libthai-0.1.29-11.fc43.x86_64.rpm",
+      "sha256": "b85891bc896b60c1ebe68ebcf777f785844dcfce69a954104c81518ccff9eabe"
+    },
+    {
+      "file": "libthai-devel-0.1.29-11.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libthai/0.1.29/11.fc43/data/signed/31645531/x86_64/libthai-devel-0.1.29-11.fc43.x86_64.rpm",
+      "sha256": "51a189b98158edaeea0a8d6c8f45cab3938c73d6988714b51688d464d3225c47"
+    },
+    {
+      "file": "libtheora-1.1.1-40.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libtheora/1.1.1/40.fc43/data/signed/31645531/x86_64/libtheora-1.1.1-40.fc43.x86_64.rpm",
+      "sha256": "bf8d942e2741ccf1d3fe70fd756191b0a60a6e64a03c492bca944112ddc8102d"
+    },
+    {
+      "file": "libtiff-4.7.2-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libtiff/4.7.2/3.fc43/data/signed/31645531/x86_64/libtiff-4.7.2-3.fc43.x86_64.rpm",
+      "sha256": "59e166bfb0ddb933bde6d6b1c1c375581e2ac259233e7525d7798872f8e631cd"
+    },
+    {
+      "file": "libtinysparql-3.10.1-5.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tinysparql/3.10.1/5.fc43/data/signed/31645531/x86_64/libtinysparql-3.10.1-5.fc43.x86_64.rpm",
+      "sha256": "ee5f15e013dbf7593c38d4560a11301c9a32220ee3ecdfabce7e87133fec417a"
+    },
+    {
+      "file": "libtool-ltdl-2.5.4-8.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libtool/2.5.4/8.fc43/data/signed/31645531/x86_64/libtool-ltdl-2.5.4-8.fc43.x86_64.rpm",
+      "sha256": "77826202d31a040158c114e43aee30fd1bd99fbe6fe8ed3859ef4aad11815f0e"
+    },
+    {
+      "file": "libunistring-1.1-10.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libunistring/1.1/10.fc43/data/signed/31645531/x86_64/libunistring-1.1-10.fc43.x86_64.rpm",
+      "sha256": "6bfbd536ef01d497d4fe700d0b518c04f54439314264a62011b634f93adca8a0"
+    },
+    {
+      "file": "libunwind-1.8.3-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libunwind/1.8.3/4.fc43/data/signed/31645531/x86_64/libunwind-1.8.3-4.fc43.x86_64.rpm",
+      "sha256": "5dd389acfb95cb94f8f5edbde46d2a80854f3742f3a734946d5541026f42a6fd"
+    },
+    {
+      "file": "libusb1-1.0.30-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libusb1/1.0.30/1.fc43/data/signed/31645531/x86_64/libusb1-1.0.30-1.fc43.x86_64.rpm",
+      "sha256": "b9e335f63ec2d7f4bb74993bcce1bd2c611d4d7b4b71089a807bf790ec3e4387"
+    },
+    {
+      "file": "libuuid-2.41.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/data/signed/31645531/x86_64/libuuid-2.41.6-1.fc43.x86_64.rpm",
+      "sha256": "f44d3a21605cbdb17c74dec8d2a66f3e9e6ed936fa98fbcbccda18cc48928597"
+    },
+    {
+      "file": "libva-2.22.0-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libva/2.22.0/6.fc43/data/signed/31645531/x86_64/libva-2.22.0-6.fc43.x86_64.rpm",
+      "sha256": "cd85cc2bf93771bc2df96c18819a7ebc15a45e8f6c492181560cbdf9eed44e1e"
+    },
+    {
+      "file": "libverto-0.3.2-11.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libverto/0.3.2/11.fc43/data/signed/31645531/x86_64/libverto-0.3.2-11.fc43.x86_64.rpm",
+      "sha256": "168a54fc1cf667e572f8d788eb4bb6a226da85a7477cc56b13353ea2ad11e4a2"
+    },
+    {
+      "file": "libvisual-0.4.2-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libvisual/0.4.2/3.fc43/data/signed/31645531/x86_64/libvisual-0.4.2-3.fc43.x86_64.rpm",
+      "sha256": "0b79f3bf6d8fa6370156f3f5d1afcc52e5b6dee88b9a0f7ed3b89159dc865a19"
+    },
+    {
+      "file": "libvmaf-3.0.0-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/vmaf/3.0.0/4.fc43/data/signed/31645531/x86_64/libvmaf-3.0.0-4.fc43.x86_64.rpm",
+      "sha256": "24eb009304f8a643d4403407ce1a72cd3e9d80b172ca358e4c5608f51b0e6805"
+    },
+    {
+      "file": "libvorbis-1.3.7-13.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libvorbis/1.3.7/13.fc43/data/signed/31645531/x86_64/libvorbis-1.3.7-13.fc43.x86_64.rpm",
+      "sha256": "45f0511bf14199890cceadd6d5133fe19f00f674d347ab678312f0aedc3058b6"
+    },
+    {
+      "file": "libwayland-client-1.26.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/wayland/1.26.0/1.fc43/data/signed/31645531/x86_64/libwayland-client-1.26.0-1.fc43.x86_64.rpm",
+      "sha256": "bc4fcc722e6305af9a377af2dd9bdd1043104b3bb0ae3a7ca3515523b92b3173"
+    },
+    {
+      "file": "libwayland-cursor-1.26.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/wayland/1.26.0/1.fc43/data/signed/31645531/x86_64/libwayland-cursor-1.26.0-1.fc43.x86_64.rpm",
+      "sha256": "322e6f3fd0ceba49171ada62987ce7dffd5f337446b1bddff544d515e8dcbe53"
+    },
+    {
+      "file": "libwayland-egl-1.26.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/wayland/1.26.0/1.fc43/data/signed/31645531/x86_64/libwayland-egl-1.26.0-1.fc43.x86_64.rpm",
+      "sha256": "4415388f28cd2f75a7b3a0e0c47110248d33314df1eda6500251c23200a573e5"
+    },
+    {
+      "file": "libwayland-server-1.26.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/wayland/1.26.0/1.fc43/data/signed/31645531/x86_64/libwayland-server-1.26.0-1.fc43.x86_64.rpm",
+      "sha256": "4d6e1273a611c919c363fd67ac22f2029ee3a57da0090298d9377112c92431c8"
+    },
+    {
+      "file": "libwebp-1.6.0-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libwebp/1.6.0/2.fc43/data/signed/31645531/x86_64/libwebp-1.6.0-2.fc43.x86_64.rpm",
+      "sha256": "a1fd7b6f96b39fc192545e6747514b3d04f5dc3b0ae30d520dd0b80c76742674"
+    },
+    {
+      "file": "libxcb-1.17.0-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxcb/1.17.0/6.fc43/data/signed/31645531/x86_64/libxcb-1.17.0-6.fc43.x86_64.rpm",
+      "sha256": "833bf0fc6e9bb014ba07c7fbf702f6ffe0af7fa2117b91ed472924d8cfd37705"
+    },
+    {
+      "file": "libxcb-devel-1.17.0-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxcb/1.17.0/6.fc43/data/signed/31645531/x86_64/libxcb-devel-1.17.0-6.fc43.x86_64.rpm",
+      "sha256": "593c02a3ba5b5027fc48ff8eab603fabc8e33c2457e945485b7f7e80aa799762"
+    },
+    {
+      "file": "libxcrypt-4.5.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxcrypt/4.5.2/1.fc43/data/signed/31645531/x86_64/libxcrypt-4.5.2-1.fc43.x86_64.rpm",
+      "sha256": "f050c17cd86490d0ede0b22284d31fa707e92e93d538f397b406e51d7eba8f2b"
+    },
+    {
+      "file": "libxcrypt-devel-4.5.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxcrypt/4.5.2/1.fc43/data/signed/31645531/x86_64/libxcrypt-devel-4.5.2-1.fc43.x86_64.rpm",
+      "sha256": "000fa7b8513510f2c858526d2921fa59006fb75c0b6c3c1c002ba8cbbc44d2ca"
+    },
+    {
+      "file": "libxkbcommon-1.11.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxkbcommon/1.11.0/1.fc43/data/signed/31645531/x86_64/libxkbcommon-1.11.0-1.fc43.x86_64.rpm",
+      "sha256": "24bde8d0c4ba23ac0a04afb7d8a81b2eb1831f6182e0f7ffed8e3a53f769f22a"
+    },
+    {
+      "file": "libxml2-2.12.10-5.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxml2/2.12.10/5.fc43/data/signed/31645531/x86_64/libxml2-2.12.10-5.fc43.x86_64.rpm",
+      "sha256": "9518f2c768e6d0d5c53681c66eaa24976d052c2451a5818a151700f72fbc8299"
+    },
+    {
+      "file": "libxml2-devel-2.12.10-5.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxml2/2.12.10/5.fc43/data/signed/31645531/x86_64/libxml2-devel-2.12.10-5.fc43.x86_64.rpm",
+      "sha256": "4a60092ea27434b260d7fc4e4ce6f852d8643d2dd7b42ee02deb0150c428410c"
+    },
+    {
+      "file": "libxshmfence-1.3.2-7.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxshmfence/1.3.2/7.fc43/data/signed/31645531/x86_64/libxshmfence-1.3.2-7.fc43.x86_64.rpm",
+      "sha256": "41fee08cdf69df3a27196ab2027a0cc9a4eabe5e34329878ca6b2597dcaac6d9"
+    },
+    {
+      "file": "libzstd-1.5.7-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/zstd/1.5.7/2.fc43/data/signed/31645531/x86_64/libzstd-1.5.7-2.fc43.x86_64.rpm",
+      "sha256": "337b8fc6ed66d00e7e423916cdc132d3ebe6b0a79543e328f2a56e88c2c99249"
+    },
+    {
+      "file": "llhttp-9.3.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/llhttp/9.3.1/1.fc43/data/signed/31645531/x86_64/llhttp-9.3.1-1.fc43.x86_64.rpm",
+      "sha256": "1a8b86941350bad87c4a12f2495dccdd51233a6b9efffad21c7cdfa1d934b947"
+    },
+    {
+      "file": "llvm-filesystem-21.1.8-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/llvm/21.1.8/6.fc43/data/signed/31645531/x86_64/llvm-filesystem-21.1.8-6.fc43.x86_64.rpm",
+      "sha256": "1dc5962d6b093a089fea339d6d14b700b018642ab1fd6ac380d258fc730701f0"
+    },
+    {
+      "file": "llvm-libs-21.1.8-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/llvm/21.1.8/6.fc43/data/signed/31645531/x86_64/llvm-libs-21.1.8-6.fc43.x86_64.rpm",
+      "sha256": "1371a4c462a12ee55c1889054facfd3ed2cf533ebf5087f2d566da36afc8f06a"
+    },
+    {
+      "file": "lm_sensors-libs-3.6.0-23.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/lm_sensors/3.6.0/23.fc43/data/signed/31645531/x86_64/lm_sensors-libs-3.6.0-23.fc43.x86_64.rpm",
+      "sha256": "9bba620aee1bd2a4ff7779f71ab868e6f3f02b9506d18c409780f61685222c71"
+    },
+    {
+      "file": "lz4-libs-1.10.0-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/lz4/1.10.0/3.fc43/data/signed/31645531/x86_64/lz4-libs-1.10.0-3.fc43.x86_64.rpm",
+      "sha256": "06c341f3e73f7ac4d92bc08c54b97884e35c3ef2dfdaa874c878742e4f3514fd"
+    },
+    {
+      "file": "lzo-2.10-15.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/lzo/2.10/15.fc43/data/signed/31645531/x86_64/lzo-2.10-15.fc43.x86_64.rpm",
+      "sha256": "f894657345bb319c13bd99133ecd1d340bef4257a47ced15a5d20a85e98c3ffd"
+    },
+    {
+      "file": "lzo-devel-2.10-15.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/lzo/2.10/15.fc43/data/signed/31645531/x86_64/lzo-devel-2.10-15.fc43.x86_64.rpm",
+      "sha256": "c8af1ec411f3b25dcd740fc4b0383df58eca0b3bb7c37d51b820754a4008174e"
+    },
+    {
+      "file": "lzo-minilzo-2.10-15.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/lzo/2.10/15.fc43/data/signed/31645531/x86_64/lzo-minilzo-2.10-15.fc43.x86_64.rpm",
+      "sha256": "cbfab54e28a16bf2365275c42fa2cf84e9459a19e19d04bcf53411f2a741256a"
+    },
+    {
+      "file": "make-4.4.1-11.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/make/4.4.1/11.fc43/data/signed/31645531/x86_64/make-4.4.1-11.fc43.x86_64.rpm",
+      "sha256": "8d62ba58e275f36aac56364993768583a4b7ecaa0719ecb804d46a0df2c91bba"
+    },
+    {
+      "file": "mesa-dri-drivers-25.3.6-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/mesa/25.3.6/3.fc43/data/signed/31645531/x86_64/mesa-dri-drivers-25.3.6-3.fc43.x86_64.rpm",
+      "sha256": "337776c1f1819dad5b6a17bcf7feee992e8397a6ef302335a7fe1756679ed2d0"
+    },
+    {
+      "file": "mesa-filesystem-25.3.6-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/mesa/25.3.6/3.fc43/data/signed/31645531/x86_64/mesa-filesystem-25.3.6-3.fc43.x86_64.rpm",
+      "sha256": "36b5fc2fe2c36ac87a731c1547d7bcdc05e97860c454d6d137036b22c5f8c716"
+    },
+    {
+      "file": "mesa-libEGL-25.3.6-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/mesa/25.3.6/3.fc43/data/signed/31645531/x86_64/mesa-libEGL-25.3.6-3.fc43.x86_64.rpm",
+      "sha256": "e883807ec1b6c8a84215435c85c25813a93f6595c3e0b843e3abe4d3c2edf936"
+    },
+    {
+      "file": "mesa-libGL-25.3.6-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/mesa/25.3.6/3.fc43/data/signed/31645531/x86_64/mesa-libGL-25.3.6-3.fc43.x86_64.rpm",
+      "sha256": "eb82bc35555b105e55ebad60e81556bb8ee97ac9828aafad7925fc18359f6b94"
+    },
+    {
+      "file": "mesa-libgbm-25.3.6-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/mesa/25.3.6/3.fc43/data/signed/31645531/x86_64/mesa-libgbm-25.3.6-3.fc43.x86_64.rpm",
+      "sha256": "6d0230169733009ece28ed46edc605f292868f488409b04bb49bd851d6a03897"
+    },
+    {
+      "file": "mesa-vulkan-drivers-25.3.6-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/mesa/25.3.6/3.fc43/data/signed/31645531/x86_64/mesa-vulkan-drivers-25.3.6-3.fc43.x86_64.rpm",
+      "sha256": "a69e49319c4e15c2fe468204995958b904c07347caa878f8b4bdc0ff1446879e"
+    },
+    {
+      "file": "mpdecimal-4.0.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/mpdecimal/4.0.1/2.fc43/data/signed/31645531/x86_64/mpdecimal-4.0.1-2.fc43.x86_64.rpm",
+      "sha256": "2e0113c2e1c6edacdd9b548419036cfb1bdb0df6bfca7cd6717c00c80f365ca9"
+    },
+    {
+      "file": "mpfr-4.2.2-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/mpfr/4.2.2/2.fc43/data/signed/31645531/x86_64/mpfr-4.2.2-2.fc43.x86_64.rpm",
+      "sha256": "cd4e395b90cd6bcb7a87c010e781d9311289514664e7cb071d5283e87239dd76"
+    },
+    {
+      "file": "ncurses-6.5-7.20250614.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/ncurses/6.5/7.20250614.fc43/data/signed/31645531/x86_64/ncurses-6.5-7.20250614.fc43.x86_64.rpm",
+      "sha256": "d9aa581f2240c040a71c4a1850a2aac5865f18f1c52ef7bd9f925fc83464ab81"
+    },
+    {
+      "file": "ncurses-base-6.5-7.20250614.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/ncurses/6.5/7.20250614.fc43/data/signed/31645531/noarch/ncurses-base-6.5-7.20250614.fc43.noarch.rpm",
+      "sha256": "3d91177f40ae6e713d41106585c2a5e2afd9cd8aa0da431a8852371866d3777b"
+    },
+    {
+      "file": "ncurses-libs-6.5-7.20250614.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/ncurses/6.5/7.20250614.fc43/data/signed/31645531/x86_64/ncurses-libs-6.5-7.20250614.fc43.x86_64.rpm",
+      "sha256": "744ca03cba966b11fa6b2b42563216c4509f63c2266a4c8756cbacbdf6f9c104"
+    },
+    {
+      "file": "nettle-3.10.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/nettle/3.10.1/2.fc43/data/signed/31645531/x86_64/nettle-3.10.1-2.fc43.x86_64.rpm",
+      "sha256": "040bf4210f47f4cbaca0611382affdee38a291a8086d9de0e2345666b54fa57c"
+    },
+    {
+      "file": "openh264-2.6.0-2.fc43.x86_64.rpm",
+      "url": "https://codecs.fedoraproject.org/openh264/43/x86_64/Packages/o/openh264-2.6.0-2.fc43.x86_64.rpm",
+      "sha256": "7c5d518a29ff89d40b9c017dbce501141b3ee47906061689964d144df3373ba7"
+    },
+    {
+      "file": "openjpeg-2.5.4-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/openjpeg/2.5.4/1.fc43/data/signed/31645531/x86_64/openjpeg-2.5.4-1.fc43.x86_64.rpm",
+      "sha256": "bfd108d97f316c3e6f1ab63de275af560fb3ed5883973afdaee35f80eecb2b71"
+    },
+    {
+      "file": "openldap-2.6.15-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/openldap/2.6.15/1.fc43/data/signed/31645531/x86_64/openldap-2.6.15-1.fc43.x86_64.rpm",
+      "sha256": "56820f4a507ee2b1968e55ea1f28e135c02667304bb57660d73e9ab69889483e"
+    },
+    {
+      "file": "openssh-10.0p1-14.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/openssh/10.0p1/14.fc43/data/signed/31645531/x86_64/openssh-10.0p1-14.fc43.x86_64.rpm",
+      "sha256": "7e1bca628ed7f3097727e302cf9db01e561534b90245f980f9d6642bf124f44a"
+    },
+    {
+      "file": "openssh-clients-10.0p1-14.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/openssh/10.0p1/14.fc43/data/signed/31645531/x86_64/openssh-clients-10.0p1-14.fc43.x86_64.rpm",
+      "sha256": "4bf39ae0d35a9b1f34e5445570180518a65370e5bb8085586100830d75d148b7"
+    },
+    {
+      "file": "openssl-libs-3.5.9-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/openssl/3.5.9/1.fc43/data/signed/31645531/x86_64/openssl-libs-3.5.9-1.fc43.x86_64.rpm",
+      "sha256": "455c759718a7a6618a7632dc88ebcb0afb30c1d68a247a3814a1e5b02efc10c8"
+    },
+    {
+      "file": "opus-1.5.2-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/opus/1.5.2/3.fc43/data/signed/31645531/x86_64/opus-1.5.2-3.fc43.x86_64.rpm",
+      "sha256": "9619a67769262f13bee024bbff869c211651b131af0dd3bb1b3d466e047102d2"
+    },
+    {
+      "file": "orc-0.4.41-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/orc/0.4.41/2.fc43/data/signed/31645531/x86_64/orc-0.4.41-2.fc43.x86_64.rpm",
+      "sha256": "979cf0d25b7defd5a3e39a5981cf1ccf9b31aceb71a243cff6166dbbdd74a039"
+    },
+    {
+      "file": "p11-kit-0.26.5-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/p11-kit/0.26.5/1.fc43/data/signed/31645531/x86_64/p11-kit-0.26.5-1.fc43.x86_64.rpm",
+      "sha256": "530489f18ff703ceff6b9be73a158566d4a525a1a57c56cfbc4fbf0bebbb0403"
+    },
+    {
+      "file": "p11-kit-trust-0.26.5-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/p11-kit/0.26.5/1.fc43/data/signed/31645531/x86_64/p11-kit-trust-0.26.5-1.fc43.x86_64.rpm",
+      "sha256": "c8a686bfc5bcd182cb1ede6ea3ab0dcff0e95766507151efd43cb26cae99e636"
+    },
+    {
+      "file": "pam-libs-1.7.1-5.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pam/1.7.1/5.fc43/data/signed/31645531/x86_64/pam-libs-1.7.1-5.fc43.x86_64.rpm",
+      "sha256": "129f6e403def83847f729f817f0106a123c6098a71f7fbc29b18d6315a92f0b8"
+    },
+    {
+      "file": "pango-1.57.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pango/1.57.1/1.fc43/data/signed/31645531/x86_64/pango-1.57.1-1.fc43.x86_64.rpm",
+      "sha256": "f0451fe7ff654f8c74d987563b777fba1a689f94cadcc0e5a6cc66ef27677c2d"
+    },
+    {
+      "file": "pango-devel-1.57.1-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pango/1.57.1/1.fc43/data/signed/31645531/x86_64/pango-devel-1.57.1-1.fc43.x86_64.rpm",
+      "sha256": "b021cdb0480d05bbf14f8c81279f6bae4414f34c543ec2c464b21379a08e1196"
+    },
+    {
+      "file": "patchelf-0.18.0-9.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/patchelf/0.18.0/9.fc43/data/signed/31645531/x86_64/patchelf-0.18.0-9.fc43.x86_64.rpm",
+      "sha256": "669bd7a04e50bdd9b23845755a7efa23b946e2a5312b5516dd91d138274168f4"
+    },
+    {
+      "file": "pcre2-10.47-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pcre2/10.47/1.fc43/data/signed/31645531/x86_64/pcre2-10.47-1.fc43.x86_64.rpm",
+      "sha256": "378b00aaebb8d9aaf9501197c1f1b3480237aab410430b25901166b9fdbc70f1"
+    },
+    {
+      "file": "pcre2-devel-10.47-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pcre2/10.47/1.fc43/data/signed/31645531/x86_64/pcre2-devel-10.47-1.fc43.x86_64.rpm",
+      "sha256": "3448f14eba2127b6537cb5ef880d3c95d4045b1c195146e78fec833b7c95ec14"
+    },
+    {
+      "file": "pcre2-syntax-10.47-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pcre2/10.47/1.fc43/data/signed/31645531/noarch/pcre2-syntax-10.47-1.fc43.noarch.rpm",
+      "sha256": "1ec76a05cde0c6aa7dd2cb4dc30c4b56bf9fa4e96def2e7190db4d8ab4647ff1"
+    },
+    {
+      "file": "pcre2-utf16-10.47-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pcre2/10.47/1.fc43/data/signed/31645531/x86_64/pcre2-utf16-10.47-1.fc43.x86_64.rpm",
+      "sha256": "cf1345b65048504c654bf4caf282c6c49f40ae25eb283dbff36bacd046735126"
+    },
+    {
+      "file": "pcre2-utf32-10.47-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pcre2/10.47/1.fc43/data/signed/31645531/x86_64/pcre2-utf32-10.47-1.fc43.x86_64.rpm",
+      "sha256": "fef3590e3140c2e5a59288e6e98332b38d27825ebfaf6131b62249143d078748"
+    },
+    {
+      "file": "perl-AutoLoader-5.74-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-AutoLoader-5.74-524.fc43.noarch.rpm",
+      "sha256": "e528ec14f81f13476fba59cbcf19eb50cd8c2e9359e2aee104a4ba5cf6b1858f"
+    },
+    {
+      "file": "perl-B-1.89-524.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/x86_64/perl-B-1.89-524.fc43.x86_64.rpm",
+      "sha256": "d94ab6a9f8e11c785c3de400d6e02c4f3682bd1bde6941518ac861bcf910776f"
+    },
+    {
+      "file": "perl-Carp-1.54-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Carp/1.54/520.fc43/data/signed/31645531/noarch/perl-Carp-1.54-520.fc43.noarch.rpm",
+      "sha256": "86d0fcc60243334524e712aeb4156cda6bf0b53ed63bf8fe7d74bf383b964db2"
+    },
+    {
+      "file": "perl-Class-Struct-0.68-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-Class-Struct-0.68-524.fc43.noarch.rpm",
+      "sha256": "197d9d2c85cea9a41318f7e4003318bb7bd108ffb901b1c7b38ad2ed1925fb3d"
+    },
+    {
+      "file": "perl-Data-Dumper-2.192-522.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Data-Dumper/2.192/522.fc43/data/signed/31645531/x86_64/perl-Data-Dumper-2.192-522.fc43.x86_64.rpm",
+      "sha256": "808479ea66f8ce835d1224b92658613b86fda6f04e9f69591a652d9c9b2c3557"
+    },
+    {
+      "file": "perl-Digest-1.20-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Digest/1.20/520.fc43/data/signed/31645531/noarch/perl-Digest-1.20-520.fc43.noarch.rpm",
+      "sha256": "12f571634e3ce8c3f0d8559b9f5396f971c458334f28414b68594289d503c8d9"
+    },
+    {
+      "file": "perl-Digest-MD5-2.59-520.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Digest-MD5/2.59/520.fc43/data/signed/31645531/x86_64/perl-Digest-MD5-2.59-520.fc43.x86_64.rpm",
+      "sha256": "2db1c971ef2869807c7720030fbe224650b57b44cd49fd9d6bfd0e696c75e694"
+    },
+    {
+      "file": "perl-DynaLoader-1.57-524.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/x86_64/perl-DynaLoader-1.57-524.fc43.x86_64.rpm",
+      "sha256": "fe46e2a9aa2cac3df3758a25a13407fceec6da513232d4f620973caa2796d15f"
+    },
+    {
+      "file": "perl-Encode-3.21-520.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Encode/3.21/520.fc43/data/signed/31645531/x86_64/perl-Encode-3.21-520.fc43.x86_64.rpm",
+      "sha256": "c79569dca0dedb28a9748ea107d58dcd84701e783de53be30b56ee81592debcf"
+    },
+    {
+      "file": "perl-Errno-1.38-524.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/x86_64/perl-Errno-1.38-524.fc43.x86_64.rpm",
+      "sha256": "14919d7fe25e41cb91374b44a265892dc8e76cc734e1faca20f890d64a06eaf6"
+    },
+    {
+      "file": "perl-Error-0.17030-2.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Error/0.17030/2.fc43/data/signed/31645531/noarch/perl-Error-0.17030-2.fc43.noarch.rpm",
+      "sha256": "0fb85b81dbaf0d82f3ce7f8854c503b959601c64b07d41a01673e3bcc813dfb6"
+    },
+    {
+      "file": "perl-Exporter-5.79-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Exporter/5.79/520.fc43/data/signed/31645531/noarch/perl-Exporter-5.79-520.fc43.noarch.rpm",
+      "sha256": "cc53f6517505f5ea7954b9ac839298d1bce2714bd4a49b7b1cf905fc39a6655d"
+    },
+    {
+      "file": "perl-Fcntl-1.20-524.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/x86_64/perl-Fcntl-1.20-524.fc43.x86_64.rpm",
+      "sha256": "0a971775759e843335d782602ae23746f422d60e641aa46bfd9c1d8feea4510e"
+    },
+    {
+      "file": "perl-File-Basename-2.86-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-File-Basename-2.86-524.fc43.noarch.rpm",
+      "sha256": "87694504162a29d94c5d1a49a2610f374bf5b0b1a02702ff4369fe90eac9387b"
+    },
+    {
+      "file": "perl-File-Path-2.18-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-File-Path/2.18/520.fc43/data/signed/31645531/noarch/perl-File-Path-2.18-520.fc43.noarch.rpm",
+      "sha256": "2e1f5f7bad27aa20cc6c6e66bd65e6f8f23a559c770f3db1ae9e3fdadecca1f3"
+    },
+    {
+      "file": "perl-File-Temp-0.231.100-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-File-Temp/0.231.100/520.fc43/data/signed/31645531/noarch/perl-File-Temp-0.231.100-520.fc43.noarch.rpm",
+      "sha256": "4032851b6945afbf5e67c18a0eaff83d8f5dfdd8aaa177a7fb3e113d6a79976c"
+    },
+    {
+      "file": "perl-File-stat-1.14-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-File-stat-1.14-524.fc43.noarch.rpm",
+      "sha256": "2d557aa026ca52a490f3b6a0cbf168e04fc4b9ce14b3b977edc522fd49f730d9"
+    },
+    {
+      "file": "perl-FileHandle-2.05-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-FileHandle-2.05-524.fc43.noarch.rpm",
+      "sha256": "1fcffa9a011a0a87ee97b1b315d1a81793b7e9c9ce6f660988cbaee747f84fed"
+    },
+    {
+      "file": "perl-Getopt-Long-2.58-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Getopt-Long/2.58/520.fc43/data/signed/31645531/noarch/perl-Getopt-Long-2.58-520.fc43.noarch.rpm",
+      "sha256": "9d006fb2fd884058ea885de08e44470525dd899428821ac6af986a074f357a5b"
+    },
+    {
+      "file": "perl-Getopt-Std-1.14-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-Getopt-Std-1.14-524.fc43.noarch.rpm",
+      "sha256": "8e7d1ab71cd50632f81299651c3e14a3185790d4cf72ed777b9926195545f391"
+    },
+    {
+      "file": "perl-Git-2.56.0-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/git/2.56.0/1.fc43/data/signed/31645531/noarch/perl-Git-2.56.0-1.fc43.noarch.rpm",
+      "sha256": "bcaecfd36df81c3d549059d837846260c1411268a95c5388165b1c32e6331f82"
+    },
+    {
+      "file": "perl-HTTP-Tiny-0.096-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-HTTP-Tiny/0.096/1.fc43/data/signed/31645531/noarch/perl-HTTP-Tiny-0.096-1.fc43.noarch.rpm",
+      "sha256": "a3cda2b041ada11225e10d866ec007b135dd4460d023aa7f327d21ced86f96ce"
+    },
+    {
+      "file": "perl-IO-1.55-524.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/x86_64/perl-IO-1.55-524.fc43.x86_64.rpm",
+      "sha256": "10a6d10c70db1880d6aa173aa74c863fa71c2718ccf683719e2a30acfa254e63"
+    },
+    {
+      "file": "perl-IO-Socket-IP-0.43-521.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-IO-Socket-IP/0.43/521.fc43/data/signed/31645531/noarch/perl-IO-Socket-IP-0.43-521.fc43.noarch.rpm",
+      "sha256": "bfea0670221affc2544f0bb67dea688b2ba8abbc4cffd6471b0ffe68d4381720"
+    },
+    {
+      "file": "perl-IO-Socket-SSL-2.095-2.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-IO-Socket-SSL/2.095/2.fc43/data/signed/31645531/noarch/perl-IO-Socket-SSL-2.095-2.fc43.noarch.rpm",
+      "sha256": "c1dfea56d329ec3785d8c1395d35747dfe76091d3d8f5e74c731e30ad982cbb7"
+    },
+    {
+      "file": "perl-IPC-Open3-1.24-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-IPC-Open3-1.24-524.fc43.noarch.rpm",
+      "sha256": "88f6177aa572026ce35abed4a4641a7d93b65abb20e11ba9626268f12aa9e86e"
+    },
+    {
+      "file": "perl-MIME-Base32-1.303-24.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-MIME-Base32/1.303/24.fc43/data/signed/31645531/noarch/perl-MIME-Base32-1.303-24.fc43.noarch.rpm",
+      "sha256": "ec2745769beaa0cf8ff62ad0d6daf65dde28306b9688fc8259d5a965f1152bd9"
+    },
+    {
+      "file": "perl-MIME-Base64-3.16-520.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-MIME-Base64/3.16/520.fc43/data/signed/31645531/x86_64/perl-MIME-Base64-3.16-520.fc43.x86_64.rpm",
+      "sha256": "9ea83665644af9945ebb62e44a31432e3f8cabb4d1d840832caeb24d39be7de3"
+    },
+    {
+      "file": "perl-Net-SSLeay-1.94-11.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Net-SSLeay/1.94/11.fc43/data/signed/31645531/x86_64/perl-Net-SSLeay-1.94-11.fc43.x86_64.rpm",
+      "sha256": "ba1d4bfec6d5625a005b47f105873cbce9467a9bdc55246589bb2f8e2f4c2671"
+    },
+    {
+      "file": "perl-POSIX-2.23-524.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/x86_64/perl-POSIX-2.23-524.fc43.x86_64.rpm",
+      "sha256": "55035b8f1928f4457f39519771c1e42e942378756bb3229259ab8d8e5d38ac4a"
+    },
+    {
+      "file": "perl-PathTools-3.94-520.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-PathTools/3.94/520.fc43/data/signed/31645531/x86_64/perl-PathTools-3.94-520.fc43.x86_64.rpm",
+      "sha256": "a716f1e6c8f2d29059590c91a13e7843b83bda356acc80dc4cd5a0cf0d8e9273"
+    },
+    {
+      "file": "perl-Pod-Escapes-1.07-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Pod-Escapes/1.07/520.fc43/data/signed/31645531/noarch/perl-Pod-Escapes-1.07-520.fc43.noarch.rpm",
+      "sha256": "62351597026d6fff763eb8720a4587b7ac552bf1e8b7556be0069ea89e924e88"
+    },
+    {
+      "file": "perl-Pod-Perldoc-3.28.01-521.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Pod-Perldoc/3.28.01/521.fc43/data/signed/31645531/noarch/perl-Pod-Perldoc-3.28.01-521.fc43.noarch.rpm",
+      "sha256": "491d9c1bec868ae83b49b817f009540f948bd34324ced0ed3556b7356bbbd9a6"
+    },
+    {
+      "file": "perl-Pod-Simple-3.47-3.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Pod-Simple/3.47/3.fc43/data/signed/31645531/noarch/perl-Pod-Simple-3.47-3.fc43.noarch.rpm",
+      "sha256": "33d9173214801928594958ab65a50a2b3e7d4bbf2a8ba8b587be967aad690441"
+    },
+    {
+      "file": "perl-Pod-Usage-2.05-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Pod-Usage/2.05/520.fc43/data/signed/31645531/noarch/perl-Pod-Usage-2.05-520.fc43.noarch.rpm",
+      "sha256": "7b0abe2cf023923e6e717ddb47deeef3612b00e20543797d1c03c1b4df84db47"
+    },
+    {
+      "file": "perl-Scalar-List-Utils-1.70-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Scalar-List-Utils/1.70/1.fc43/data/signed/31645531/x86_64/perl-Scalar-List-Utils-1.70-1.fc43.x86_64.rpm",
+      "sha256": "db80bb3d0288f8bb67458ba46b8a9be340588f8fe512b2864efdbc20f95503fd"
+    },
+    {
+      "file": "perl-SelectSaver-1.02-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-SelectSaver-1.02-524.fc43.noarch.rpm",
+      "sha256": "5a085a500c3bd59c9b9b7c7c6b6f17aeb9023373afd61cc04377772b1b57931b"
+    },
+    {
+      "file": "perl-Socket-2.043-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Socket/2.043/1.fc43/data/signed/31645531/x86_64/perl-Socket-2.043-1.fc43.x86_64.rpm",
+      "sha256": "791ac0f2a89015d981b09f453595fc7c03bc0c01178402af68f864549f2e5306"
+    },
+    {
+      "file": "perl-Storable-3.37-521.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Storable/3.37/521.fc43/data/signed/31645531/x86_64/perl-Storable-3.37-521.fc43.x86_64.rpm",
+      "sha256": "f08a63546a639243ac8a7bd36067cb5418c4771491eda81d4738122d189ccb24"
+    },
+    {
+      "file": "perl-Symbol-1.09-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-Symbol-1.09-524.fc43.noarch.rpm",
+      "sha256": "bf0f003d13b5ee2529a2170aa58ef6f4a3e39af30d4f40071681a737b80c24b7"
+    },
+    {
+      "file": "perl-Term-ANSIColor-5.01-521.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Term-ANSIColor/5.01/521.fc43/data/signed/31645531/noarch/perl-Term-ANSIColor-5.01-521.fc43.noarch.rpm",
+      "sha256": "c64db2443f116e0ae36706181105d71a01416ef6d40c33d4356bce1f7acf7265"
+    },
+    {
+      "file": "perl-Term-Cap-1.18-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Term-Cap/1.18/520.fc43/data/signed/31645531/noarch/perl-Term-Cap-1.18-520.fc43.noarch.rpm",
+      "sha256": "0824eba9dbd381b3b43a68f446b3658158e0855cafce167ae042263aa48b8cd7"
+    },
+    {
+      "file": "perl-TermReadKey-2.38-26.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-TermReadKey/2.38/26.fc43/data/signed/31645531/x86_64/perl-TermReadKey-2.38-26.fc43.x86_64.rpm",
+      "sha256": "fae275433479c1cb63c390ecf72a8167548a2ec6e64c6db67ece213c15fedb5c"
+    },
+    {
+      "file": "perl-Text-ParseWords-3.31-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Text-ParseWords/3.31/520.fc43/data/signed/31645531/noarch/perl-Text-ParseWords-3.31-520.fc43.noarch.rpm",
+      "sha256": "6ec28e803da09539acb8284ba699711a343cc99571c3b0a570828c8ecdf50c3a"
+    },
+    {
+      "file": "perl-Text-Tabs+Wrap-2024.001-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Text-Tabs+Wrap/2024.001/520.fc43/data/signed/31645531/noarch/perl-Text-Tabs+Wrap-2024.001-520.fc43.noarch.rpm",
+      "sha256": "c7252d531f726bd658ffd2615bf1990691385226e700b165bf11e64150f11ba0"
+    },
+    {
+      "file": "perl-Time-HiRes-1.9778-520.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Time-HiRes/1.9778/520.fc43/data/signed/31645531/x86_64/perl-Time-HiRes-1.9778-520.fc43.x86_64.rpm",
+      "sha256": "46b42f7355ab819e88cde252b45e82e8404a3b03b64e1b93d7b0b1b8f1e465f7"
+    },
+    {
+      "file": "perl-Time-Local-1.350-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Time-Local/1.350/520.fc43/data/signed/31645531/noarch/perl-Time-Local-1.350-520.fc43.noarch.rpm",
+      "sha256": "8303f238618222780478d5f6252d217935429b3d75befee6679833a22f476f2f"
+    },
+    {
+      "file": "perl-URI-5.36-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-URI/5.36/1.fc43/data/signed/31645531/noarch/perl-URI-5.36-1.fc43.noarch.rpm",
+      "sha256": "16742a56380ebb9174fa212a5bf7b0ebdaafdd44ff9a07892ad671d3be1f814b"
+    },
+    {
+      "file": "perl-Unicode-Normalize-1.32-520.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-Unicode-Normalize/1.32/520.fc43/data/signed/31645531/x86_64/perl-Unicode-Normalize-1.32-520.fc43.x86_64.rpm",
+      "sha256": "b0f4e9bd9dff4ae00eef4ceedd94640961cb5cbc4485dd2ee2eefcaaa2010102"
+    },
+    {
+      "file": "perl-base-2.27-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-base-2.27-524.fc43.noarch.rpm",
+      "sha256": "3b756151084b2fa1897a7c26da09a8d7dd7d823f044d4f5f7bbba51306c8cec3"
+    },
+    {
+      "file": "perl-constant-1.33-521.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-constant/1.33/521.fc43/data/signed/31645531/noarch/perl-constant-1.33-521.fc43.noarch.rpm",
+      "sha256": "8852b4bf81b0fb52d3439a2ea7914a33bbc67939f48bf09a9d563e8608d4259a"
+    },
+    {
+      "file": "perl-if-0.61.000-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-if-0.61.000-524.fc43.noarch.rpm",
+      "sha256": "507b4df5c73ed7e16f4c8de44d2930468a172c2eb5993789e914a0603c0d9f6b"
+    },
+    {
+      "file": "perl-interpreter-5.42.3-524.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/x86_64/perl-interpreter-5.42.3-524.fc43.x86_64.rpm",
+      "sha256": "28b933e2138d19d534dc3dcf72449ee0e25d695cd259fa5d8f20a7baf71f6b91"
+    },
+    {
+      "file": "perl-lib-0.65-524.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/x86_64/perl-lib-0.65-524.fc43.x86_64.rpm",
+      "sha256": "5c48ead75d9e4c397023f2c619aaee635101d8b4858d588c2b88524b27a83a91"
+    },
+    {
+      "file": "perl-libnet-3.15-521.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-libnet/3.15/521.fc43/data/signed/31645531/noarch/perl-libnet-3.15-521.fc43.noarch.rpm",
+      "sha256": "ec13ac69ba31f0162412e1bb9a0887803abaae263cf56f9bb4a0ee81007490d6"
+    },
+    {
+      "file": "perl-libs-5.42.3-524.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/x86_64/perl-libs-5.42.3-524.fc43.x86_64.rpm",
+      "sha256": "20a699a3c3702520a805a8c8d57b7e79bb3ee9564b59ca22fcbdeaf249f86da4"
+    },
+    {
+      "file": "perl-locale-1.13-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-locale-1.13-524.fc43.noarch.rpm",
+      "sha256": "88447c76476b9049f250823568c99924c5854b0e36a1cdcab46903ded7fec741"
+    },
+    {
+      "file": "perl-mro-1.29-524.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/x86_64/perl-mro-1.29-524.fc43.x86_64.rpm",
+      "sha256": "1d7b490e5c4f92f21e39805c519c06d753c6f990944868fb412e48906238996a"
+    },
+    {
+      "file": "perl-overload-1.40-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-overload-1.40-524.fc43.noarch.rpm",
+      "sha256": "04b665b45320d163d63ce3553adc3613b9a306931b728bbd41176d2ebade75ab"
+    },
+    {
+      "file": "perl-overloading-0.02-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-overloading-0.02-524.fc43.noarch.rpm",
+      "sha256": "8e625efc7a2a418c19121b0fc5ac5e8047cd2fe15d49ce906c52f8dd3113a7ca"
+    },
+    {
+      "file": "perl-parent-0.244-520.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-parent/0.244/520.fc43/data/signed/31645531/noarch/perl-parent-0.244-520.fc43.noarch.rpm",
+      "sha256": "d800119dea64cba7caec5b85c828e967d965b4e01ea5f323e642077054b2f1f0"
+    },
+    {
+      "file": "perl-podlators-6.0.2-521.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl-podlators/6.0.2/521.fc43/data/signed/31645531/noarch/perl-podlators-6.0.2-521.fc43.noarch.rpm",
+      "sha256": "16009d6006d4513958bd944ba4423e6c93bd31a734785ce89b16d9ad76b76aa0"
+    },
+    {
+      "file": "perl-vars-1.05-524.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/perl/5.42.3/524.fc43/data/signed/31645531/noarch/perl-vars-1.05-524.fc43.noarch.rpm",
+      "sha256": "ae646429e7836017d030fdc38cc538337a5f9bc4ae6d2d3b8f415a246143c2c6"
+    },
+    {
+      "file": "pixman-0.46.2-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pixman/0.46.2/2.fc43/data/signed/31645531/x86_64/pixman-0.46.2-2.fc43.x86_64.rpm",
+      "sha256": "b4d44642eeac3fb6dad21c367c63c5f88a41c76f2446bf7cce6a5f3b8c95a89e"
+    },
+    {
+      "file": "pixman-devel-0.46.2-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pixman/0.46.2/2.fc43/data/signed/31645531/x86_64/pixman-devel-0.46.2-2.fc43.x86_64.rpm",
+      "sha256": "c4835ee26700f0df2827c5f8f0317a695f011d3441a22ca3753a9705f07e98a1"
+    },
+    {
+      "file": "pkgconf-2.3.0-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pkgconf/2.3.0/3.fc43/data/signed/31645531/x86_64/pkgconf-2.3.0-3.fc43.x86_64.rpm",
+      "sha256": "9e313348d39f6e592fe4652426512cdfdcbf7bd35e180743312028ba6e46869d"
+    },
+    {
+      "file": "pkgconf-m4-2.3.0-3.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pkgconf/2.3.0/3.fc43/data/signed/31645531/noarch/pkgconf-m4-2.3.0-3.fc43.noarch.rpm",
+      "sha256": "650e3ca57119ea154ccb0476d8950e3a833ac8fcdc568ac6a0f5732c537d6891"
+    },
+    {
+      "file": "pkgconf-pkg-config-2.3.0-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pkgconf/2.3.0/3.fc43/data/signed/31645531/x86_64/pkgconf-pkg-config-2.3.0-3.fc43.x86_64.rpm",
+      "sha256": "4ae294440b9d8e8ae7477ee1ae0ff6e0f7faec4ec307fdef082004795aedae78"
+    },
+    {
+      "file": "publicsuffix-list-dafsa-20260116-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/publicsuffix-list/20260116/1.fc43/data/signed/31645531/noarch/publicsuffix-list-dafsa-20260116-1.fc43.noarch.rpm",
+      "sha256": "c04394ce65ce6ba4eed59b6869337f11de94ed4f8fc1c3a503e3eccef508b78d"
+    },
+    {
+      "file": "python-pip-wheel-25.1.1-19.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/python-pip/25.1.1/19.fc43/data/signed/31645531/noarch/python-pip-wheel-25.1.1-19.fc43.noarch.rpm",
+      "sha256": "89412371b52d49564857ebbd913883f0bd423f0d3cb257fa74972adf7067d165"
+    },
+    {
+      "file": "python3-3.14.10-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/python3.14/3.14.10/1.fc43/data/signed/31645531/x86_64/python3-3.14.10-1.fc43.x86_64.rpm",
+      "sha256": "b3bfe85b359672c3eba7ef7fe0e479635e187b2c0134da98e1889cdde1b4eed4"
+    },
+    {
+      "file": "python3-libs-3.14.10-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/python3.14/3.14.10/1.fc43/data/signed/31645531/x86_64/python3-libs-3.14.10-1.fc43.x86_64.rpm",
+      "sha256": "c091f8e534c04b6fdb68d7e534fa280bd3f1e909a1265171e23c62650d33d229"
+    },
+    {
+      "file": "python3-packaging-25.0-7.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/python-packaging/25.0/7.fc43/data/signed/31645531/noarch/python3-packaging-25.0-7.fc43.noarch.rpm",
+      "sha256": "5b8490af8ccc720d6fa364459d247e9317a29edf4afe37f51353a242be3655f1"
+    },
+    {
+      "file": "rav1e-libs-0.8.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/rust-rav1e/0.8.1/2.fc43/data/signed/31645531/x86_64/rav1e-libs-0.8.1-2.fc43.x86_64.rpm",
+      "sha256": "66cf350c4d50ca2af9a5392243cf6d46d849cd68c7e1109777eb3b66197a9332"
+    },
+    {
+      "file": "readline-8.3-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/readline/8.3/2.fc43/data/signed/31645531/x86_64/readline-8.3-2.fc43.x86_64.rpm",
+      "sha256": "b9a1ce9bde9e00dff41b1c3c9d8d0bb9c97b9e900d1efb3ecd0fc742cbf85929"
+    },
+    {
+      "file": "rust-1.99.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/rust/1.99.1/2.fc43/data/signed/31645531/x86_64/rust-1.99.1-2.fc43.x86_64.rpm",
+      "sha256": "0f5e85cef5b2bf137d41ac24781ee02c182ff4118db2a70f1f6f56379839bdd2"
+    },
+    {
+      "file": "rust-std-static-1.99.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/rust/1.99.1/2.fc43/data/signed/31645531/x86_64/rust-std-static-1.99.1-2.fc43.x86_64.rpm",
+      "sha256": "9478f1431d5312c087264012196c67d6e05ddaf6cf03cf10c83d948bcac40777"
+    },
+    {
+      "file": "sed-4.9-5.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/sed/4.9/5.fc43/data/signed/31645531/x86_64/sed-4.9-5.fc43.x86_64.rpm",
+      "sha256": "d21b29b3420401d733549b0256e6e41d85c3040e3f802303425d68534673d890"
+    },
+    {
+      "file": "setup-2.15.0-26.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/setup/2.15.0/26.fc43/data/signed/31645531/noarch/setup-2.15.0-26.fc43.noarch.rpm",
+      "sha256": "bb26bf98322cc2e6df6e9bd543cd0f7a61a6e71f66cb0fde33fc3a3a6295acda"
+    },
+    {
+      "file": "shared-mime-info-2.4-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/shared-mime-info/2.4/2.fc43/data/signed/31645531/x86_64/shared-mime-info-2.4-2.fc43.x86_64.rpm",
+      "sha256": "7fd1cde3590d8779834a364e12f9c38f2b01904b269b2ae33b22a31a7e6695c7"
+    },
+    {
+      "file": "spirv-tools-libs-2026.1-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/spirv-tools/2026.1/2.fc43/data/signed/31645531/x86_64/spirv-tools-libs-2026.1-2.fc43.x86_64.rpm",
+      "sha256": "ca0a7a2a60414ed847779f88cc2fb3271adf5d600bb2b13dabcdfac0671ca4c7"
+    },
+    {
+      "file": "sqlite-libs-3.50.2-3.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/sqlite/3.50.2/3.fc43/data/signed/31645531/x86_64/sqlite-libs-3.50.2-3.fc43.x86_64.rpm",
+      "sha256": "abb93704015abf54b10c3cdda2f4678667b7365b3f16b627c3916963170721db"
+    },
+    {
+      "file": "strace-7.3-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/strace/7.3/1.fc43/data/signed/31645531/x86_64/strace-7.3-1.fc43.x86_64.rpm",
+      "sha256": "bde3ec00d3eba0837eaceefaae34fd6f24eda4e7bd175ffff5ba541f8b2376a9"
+    },
+    {
+      "file": "svt-av1-libs-3.1.2-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/svt-av1/3.1.2/1.fc43/data/signed/31645531/x86_64/svt-av1-libs-3.1.2-1.fc43.x86_64.rpm",
+      "sha256": "bb61a0162f0bf07f5b283ecf5c82c80e8dfaaf9673101950c2cdfdff9ddc656b"
+    },
+    {
+      "file": "sysprof-capture-devel-49.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/sysprof/49.0/1.fc43/data/signed/31645531/x86_64/sysprof-capture-devel-49.0-1.fc43.x86_64.rpm",
+      "sha256": "54b019bce8b951a50d97d26d8ba4f3695ec6bb9b1e75755f6f7bc58428abcb3e"
+    },
+    {
+      "file": "systemd-libs-258.11-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/systemd/258.11/1.fc43/data/signed/31645531/x86_64/systemd-libs-258.11-1.fc43.x86_64.rpm",
+      "sha256": "178447913d4585c909d5376ab378798e430b8ab248d21bd1c6f325ab485da684"
+    },
+    {
+      "file": "tar-1.35-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tar/1.35/6.fc43/data/signed/31645531/x86_64/tar-1.35-6.fc43.x86_64.rpm",
+      "sha256": "d4e530842729c64e37b270bb2098d8277606e6875605164a79f16265a7c8b544"
+    },
+    {
+      "file": "tesseract-5.5.3-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/data/signed/31645531/x86_64/tesseract-5.5.3-2.fc43.x86_64.rpm",
+      "sha256": "f6b887ffcab34360cf59ba2ff36dd61fb156eece723a36ba57e0ff2f55bc65b6"
+    },
+    {
+      "file": "tesseract-common-5.5.3-2.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/data/signed/31645531/noarch/tesseract-common-5.5.3-2.fc43.noarch.rpm",
+      "sha256": "380287bba39bff59161696ae96e522703869cedc29621f4ae4cc270d3beb18b8"
+    },
+    {
+      "file": "tesseract-langpack-eng-4.1.0-11.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract-tessdata/4.1.0/11.fc43/data/signed/31645531/noarch/tesseract-langpack-eng-4.1.0-11.fc43.noarch.rpm",
+      "sha256": "14288995c1db9699960da0b0cb6e36df500270d77a24c86b10605aaef57d2c6e"
+    },
+    {
+      "file": "tesseract-libs-5.5.3-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/data/signed/31645531/x86_64/tesseract-libs-5.5.3-2.fc43.x86_64.rpm",
+      "sha256": "3f05bcc2ec5666c8c1c65ba330e7cb439f3669f01f8fce54b85e4247c6b8dce1"
+    },
+    {
+      "file": "tesseract-tessdata-doc-4.1.0-11.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract-tessdata/4.1.0/11.fc43/data/signed/31645531/noarch/tesseract-tessdata-doc-4.1.0-11.fc43.noarch.rpm",
+      "sha256": "e11efe45e9504d19fa3a7f4f8dae7f9e04f5a4ff06bedaf5aebf4655fe453515"
+    },
+    {
+      "file": "tzdata-2026f-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tzdata/2026f/1.fc43/data/signed/31645531/noarch/tzdata-2026f-1.fc43.noarch.rpm",
+      "sha256": "c519e69c5e354af875f3c7c44172f3ce2ba86bccf834c88525f2c932cdfb97de"
+    },
+    {
+      "file": "util-linux-2.41.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/data/signed/31645531/x86_64/util-linux-2.41.6-1.fc43.x86_64.rpm",
+      "sha256": "d9a7554b32a063c78ad646b828244fd1c2e450fb410feae30004174c7658735f"
+    },
+    {
+      "file": "util-linux-core-2.41.6-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/data/signed/31645531/x86_64/util-linux-core-2.41.6-1.fc43.x86_64.rpm",
+      "sha256": "0c83b25539e4fb9481c0b2c56ea074957325b47c1fa55525ae4dc150f6758c15"
+    },
+    {
+      "file": "vulkan-headers-1.4.341.0-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/vulkan-headers/1.4.341.0/1.fc43/data/signed/31645531/noarch/vulkan-headers-1.4.341.0-1.fc43.noarch.rpm",
+      "sha256": "0323b79321aabe8d349c51c2742b99ce4f1ab4e1046fa7bbcafc0d02ed6ade69"
+    },
+    {
+      "file": "vulkan-loader-1.4.341.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/vulkan-loader/1.4.341.0/1.fc43/data/signed/31645531/x86_64/vulkan-loader-1.4.341.0-1.fc43.x86_64.rpm",
+      "sha256": "40409101457967872d37363ffc5062a8132fb9f74bd68841f3957e0735471045"
+    },
+    {
+      "file": "vulkan-loader-devel-1.4.341.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/vulkan-loader/1.4.341.0/1.fc43/data/signed/31645531/x86_64/vulkan-loader-devel-1.4.341.0-1.fc43.x86_64.rpm",
+      "sha256": "b112835c1a498151ca4c8b05c0eac0cff5fd7fe39ee6d7bcc912ee52bd618943"
+    },
+    {
+      "file": "wayland-devel-1.26.0-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/wayland/1.26.0/1.fc43/data/signed/31645531/x86_64/wayland-devel-1.26.0-1.fc43.x86_64.rpm",
+      "sha256": "15ffe71a768a4542b0cba18fb2f09060413609ac8594847e6410d7028ef0152c"
+    },
+    {
+      "file": "xkeyboard-config-2.46-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/xkeyboard-config/2.46/1.fc43/data/signed/31645531/noarch/xkeyboard-config-2.46-1.fc43.noarch.rpm",
+      "sha256": "e462a179bfb47bba638dbcadf92ca3d051c98512469b1adde058609c1bb2cf93"
+    },
+    {
+      "file": "xml-common-0.6.3-67.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/sgml-common/0.6.3/67.fc43/data/signed/31645531/noarch/xml-common-0.6.3-67.fc43.noarch.rpm",
+      "sha256": "0d9557643104ddb05ee0945e2812b602261f08cf4612e6001ffc44cde0043bc8"
+    },
+    {
+      "file": "xorg-x11-proto-devel-2024.1-5.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/xorg-x11-proto-devel/2024.1/5.fc43/data/signed/31645531/noarch/xorg-x11-proto-devel-2024.1-5.fc43.noarch.rpm",
+      "sha256": "c75288e4cf4a5d30ce993e3bc6c7afe7c74169ffcbd225ffa511ee8d8e94fe5c"
+    },
+    {
+      "file": "xz-5.8.1-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/xz/5.8.1/4.fc43/data/signed/31645531/x86_64/xz-5.8.1-4.fc43.x86_64.rpm",
+      "sha256": "e5e07f25f6b8a0c28f0844990ab4ab295090e75cbd66be5b155822064c741a45"
+    },
+    {
+      "file": "xz-devel-5.8.1-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/xz/5.8.1/4.fc43/data/signed/31645531/x86_64/xz-devel-5.8.1-4.fc43.x86_64.rpm",
+      "sha256": "ce865cb5278d99043c3844bee3fbe2774f4bd008a7ec480b6b2e2ec1b56def94"
+    },
+    {
+      "file": "xz-libs-5.8.1-4.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/xz/5.8.1/4.fc43/data/signed/31645531/x86_64/xz-libs-5.8.1-4.fc43.x86_64.rpm",
+      "sha256": "247683c96f5ad433c1924d932795da7fff872b71c4e830ad1a7c211db0f3b807"
+    },
+    {
+      "file": "zlib-ng-compat-2.3.3-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/zlib-ng/2.3.3/2.fc43/data/signed/31645531/x86_64/zlib-ng-compat-2.3.3-2.fc43.x86_64.rpm",
+      "sha256": "a4d552c73a22a0ba8f735e168717c670acecc0a874e7e53a6335aba0ea9672a6"
+    },
+    {
+      "file": "zlib-ng-compat-devel-2.3.3-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/zlib-ng/2.3.3/2.fc43/data/signed/31645531/x86_64/zlib-ng-compat-devel-2.3.3-2.fc43.x86_64.rpm",
+      "sha256": "f637f5c3c930923bc8cc55f836fee606a3d064060f73ded47a4a4a8bec725434"
+    },
+    {
+      "file": "zstd-1.5.7-2.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/zstd/1.5.7/2.fc43/data/signed/31645531/x86_64/zstd-1.5.7-2.fc43.x86_64.rpm",
+      "sha256": "7ad6c36ce16a7c071a5574491775762b412203f821cd0704ecf043175e493ed3"
+    }
+  ],
+  "tools": [
+    {
+      "file": "quick-sharun.sh",
+      "url": "https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/ce344325ab1db718a7ad4ce9868a92a38d4af12a/useful-tools/quick-sharun.sh",
+      "sha256": "0329d9d6742d741a8cecf1c09d825016c8c5d911b316c3bdabf0cca993fd5b10"
+    },
+    {
+      "file": "sharun.tar",
+      "url": "https://github.com/pkgforge-dev/Anylinux-sharun/releases/download/3.8.3/sharun+helper-libs-x86_64.tar",
+      "sha256": "9f8009b558f443239d8314efb76c9e135ad78365bc211b82be69929f5c5c61c2"
+    },
+    {
+      "file": "appimagetool",
+      "url": "https://github.com/pkgforge-dev/appimagetool/releases/download/0.5.6/appimagetool-full-x86_64-linux",
+      "sha256": "a92214d831d234d1be31699657c572799e5c8417c9abf129e2f748cc9c612f85"
+    },
+    {
+      "file": "cross-libc-dlopen.tar",
+      "url": "https://github.com/pkgforge-dev/cross-libc-dlopen/releases/download/v0.2.10/cross-libc-dlopen-x86_64.tar",
+      "sha256": "dc620526e26d06d1f0cd4db72f02fbdc52a907f85dbd78b66a3222e654b9d4a2"
+    }
+  ],
+  "ocr": [
+    {
+      "file": "tessdata-LICENSE",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "file": "eng.traineddata",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/eng.traineddata",
+      "sha256": "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
+    },
+    {
+      "file": "spa.traineddata",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/spa.traineddata",
+      "sha256": "6f2e04d02774a18f01bed44b1111f2cd7f3ba7ac9dc4373cd3f898a40ea6b464"
+    },
+    {
+      "file": "cat.traineddata",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/cat.traineddata",
+      "sha256": "250db73cd5b380d2798581295dc12f20d0828cdb335a65d833d12dfdbf57117d"
+    }
+  ],
+  "notices": [
+    {
+      "file": "uruntime-LICENSE",
+      "url": "https://raw.githubusercontent.com/VHSgunzo/uruntime/6ec68e66782d632f22666ba2c661b3afd7c3a565/LICENSE",
+      "sha256": "c4b670b0607ef626e670733093c9e4304b3bacc5076742de826d45f83e12e9d3"
+    },
+    {
+      "file": "uruntime-source.tar.gz",
+      "url": "https://github.com/VHSgunzo/uruntime/archive/6ec68e66782d632f22666ba2c661b3afd7c3a565.tar.gz",
+      "sha256": "0cb935051fbeae7d202a6d17f7298a35e7d7456aa5019d648d8390c1a53b63f8"
+    },
+    {
+      "file": "dwarfs-LICENSE",
+      "url": "https://raw.githubusercontent.com/mhx/dwarfs/3945d234619504bc149da18cfb208218779c477d/LICENSE",
+      "sha256": "01aacaeaa55c6d58fe8e78f1bc9904397e3428e9a381b8ca7e3352f85d52c2c7"
+    },
+    {
+      "file": "dwarfs-LICENSES-0BSD.txt",
+      "url": "https://raw.githubusercontent.com/mhx/dwarfs/3945d234619504bc149da18cfb208218779c477d/LICENSES/0BSD.txt",
+      "sha256": "e3f18c71e10d673590eb9856c1d79dd3b4b0d65404efb5e8584dbede7edd608b"
+    },
+    {
+      "file": "dwarfs-LICENSES-Apache-2.0.txt",
+      "url": "https://raw.githubusercontent.com/mhx/dwarfs/3945d234619504bc149da18cfb208218779c477d/LICENSES/Apache-2.0.txt",
+      "sha256": "074e6e32c86a4c0ef8b3ed25b721ca23aca83df277cd88106ef7177c354615ff"
+    },
+    {
+      "file": "dwarfs-LICENSES-BSD-3-Clause.txt",
+      "url": "https://raw.githubusercontent.com/mhx/dwarfs/3945d234619504bc149da18cfb208218779c477d/LICENSES/BSD-3-Clause.txt",
+      "sha256": "5a93d5831e1297ab10fe643e1a631e83be392896da14ee2951285a79012df69d"
+    },
+    {
+      "file": "dwarfs-LICENSES-BSL-1.0.txt",
+      "url": "https://raw.githubusercontent.com/mhx/dwarfs/3945d234619504bc149da18cfb208218779c477d/LICENSES/BSL-1.0.txt",
+      "sha256": "84c6ef3ea9e3254a54d0acf5d3e0c61ae011b8fef7dd6940591cf060e6380a8f"
+    },
+    {
+      "file": "dwarfs-LICENSES-CC0-1.0.txt",
+      "url": "https://raw.githubusercontent.com/mhx/dwarfs/3945d234619504bc149da18cfb208218779c477d/LICENSES/CC0-1.0.txt",
+      "sha256": "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+    },
+    {
+      "file": "dwarfs-LICENSES-GPL-2.0-only.txt",
+      "url": "https://raw.githubusercontent.com/mhx/dwarfs/3945d234619504bc149da18cfb208218779c477d/LICENSES/GPL-2.0-only.txt",
+      "sha256": "aaf135472f81c5b4a0dca9367e5bb5e9750032b5bebe5442b36e4c0a47430df3"
+    },
+    {
+      "file": "dwarfs-LICENSES-GPL-3.0-or-later.txt",
+      "url": "https://raw.githubusercontent.com/mhx/dwarfs/3945d234619504bc149da18cfb208218779c477d/LICENSES/GPL-3.0-or-later.txt",
+      "sha256": "fb981668c18a279e285fc4d83fba1e836cc84dd4daa73c9697d3cfd2d8aca6e0"
+    },
+    {
+      "file": "dwarfs-LICENSES-MIT.txt",
+      "url": "https://raw.githubusercontent.com/mhx/dwarfs/3945d234619504bc149da18cfb208218779c477d/LICENSES/MIT.txt",
+      "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5"
+    },
+    {
+      "file": "dwarfs-LICENSES-Unlicense.txt",
+      "url": "https://raw.githubusercontent.com/mhx/dwarfs/3945d234619504bc149da18cfb208218779c477d/LICENSES/Unlicense.txt",
+      "sha256": "0bdebfeda07d45dada625ae1317c6f833186e798b171d0db640bcf32e92a8240"
+    },
+    {
+      "file": "dwarfs-0.15.7.tar.xz",
+      "url": "https://github.com/mhx/dwarfs/releases/download/v0.15.7/dwarfs-0.15.7.tar.xz",
+      "sha256": "363c7fdbf7bad490a6b8d63186da8643c1aeb17ca54cce1193d7b0ebc57bc6bd"
+    },
+    {
+      "file": "anylinux-sharun-LICENSE",
+      "url": "https://raw.githubusercontent.com/pkgforge-dev/Anylinux-sharun/2748a37bfaad6c379cb2ca124e84d14eab6ba3d9/LICENSE",
+      "sha256": "ed1795c447be9b4ae96262f583b559f733a82f627b0265f860f22488c7f8b2ff"
+    },
+    {
+      "file": "anylinux-sharun-source.tar.gz",
+      "url": "https://github.com/pkgforge-dev/Anylinux-sharun/archive/2748a37bfaad6c379cb2ca124e84d14eab6ba3d9.tar.gz",
+      "sha256": "7de6b549eb8efb6a21e291a5214c492ceb16dbc80d1fa9ad3c428b5678469cec"
+    },
+    {
+      "file": "dash-0.5.13.5.tar.gz",
+      "url": "https://deb.debian.org/debian/pool/main/d/dash/dash_0.5.13.5.orig.tar.gz",
+      "sha256": "40090101a2a491f13e901d3d48e90414f26634628b9bfff35ff540363c227a7d"
+    },
+    {
+      "file": "anylinux-appimages-LICENSE",
+      "url": "https://raw.githubusercontent.com/pkgforge-dev/Anylinux-AppImages/ce344325ab1db718a7ad4ce9868a92a38d4af12a/LICENSE",
+      "sha256": "78a983481f226ae0ee56d72fb73a027ce51f72ff40ec8ab3b55e8866ca9f2f7f"
+    },
+    {
+      "file": "cross-libc-dlopen-source.tar.gz",
+      "url": "https://github.com/pkgforge-dev/cross-libc-dlopen/archive/741c506442c53216aa667faa72f64687ad254ea1.tar.gz",
+      "sha256": "53df452170aaef6928348b69c59622ab64c9c032a15a6d0529e5c9781cb84c40"
+    }
+  ],
+  "srpms": [
+    {
+      "file": "abattis-cantarell-fonts-0.301-15.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/abattis-cantarell-fonts/0.301/15.fc43/src/abattis-cantarell-fonts-0.301-15.fc43.src.rpm",
+      "sha256": "b18fa9e82c037143a161bc2155239f7c19bc6b2b9a808f9f6d3cd674acd2b260"
+    },
+    {
+      "file": "adwaita-icon-theme-49.0-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/adwaita-icon-theme/49.0/1.fc43/src/adwaita-icon-theme-49.0-1.fc43.src.rpm",
+      "sha256": "30912d35b9f2c6a215219dad305177784c96d57cc06318b703974f8077804681"
+    },
+    {
+      "file": "alsa-lib-1.2.16.1-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/alsa-lib/1.2.16.1/1.fc43/src/alsa-lib-1.2.16.1-1.fc43.src.rpm",
+      "sha256": "7becbb903739fb6e81df49edf66ff4051e1974d0c659fba313e34fbe7d17a86b"
+    },
+    {
+      "file": "avahi-0.9~rc2-6.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/avahi/0.9~rc2/6.fc43/src/avahi-0.9~rc2-6.fc43.src.rpm",
+      "sha256": "14138dbe580343618df79be346b6b5800036998b079e6dd17def3bb76db199b9"
+    },
+    {
+      "file": "brotli-1.2.1-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/brotli/1.2.1/1.fc43/src/brotli-1.2.1-1.fc43.src.rpm",
+      "sha256": "dbeb18557e667aa2b831425ac9f7cee53b3d634d70f45fd9f920373614db4fb5"
+    },
+    {
+      "file": "bubblewrap-0.12.0-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/bubblewrap/0.12.0/1.fc43/src/bubblewrap-0.12.0-1.fc43.src.rpm",
+      "sha256": "7790995bbc8409f944fb6dab86bb34c4cf2f3f802b3ec3de41b8b077884ef3fe"
+    },
+    {
+      "file": "bzip2-1.0.8-21.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/bzip2/1.0.8/21.fc43/src/bzip2-1.0.8-21.fc43.src.rpm",
+      "sha256": "2a11ab60cbd5527701e17510be7054370f3533328a968c8a6f63e1c12317b1d8"
+    },
+    {
+      "file": "ca-certificates-2026.2.92_v9.0.319-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/ca-certificates/2026.2.92_v9.0.319/2.fc43/src/ca-certificates-2026.2.92_v9.0.319-2.fc43.src.rpm",
+      "sha256": "fde0235407b4960f0bdccd56a169a0af0587088b22132885abd01fc51ab5b7a6"
+    },
+    {
+      "file": "cairo-1.18.6-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cairo/1.18.6/1.fc43/src/cairo-1.18.6-1.fc43.src.rpm",
+      "sha256": "a395e63e823bf5a296125c9b8d4eb3eae42070779a300c8e062a2bc0b4677cb0"
+    },
+    {
+      "file": "cdparanoia-10.2-48.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cdparanoia/10.2/48.fc43/src/cdparanoia-10.2-48.fc43.src.rpm",
+      "sha256": "6338f3d2855ceda85cc465c160b5e90285cb501aa9a7356e07cf21595c9a475e"
+    },
+    {
+      "file": "colord-1.4.8-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/colord/1.4.8/2.fc43/src/colord-1.4.8-2.fc43.src.rpm",
+      "sha256": "cabf0afd989ab0622193c09837e2dd94053f17806a84f543a51e1e98c6836f30"
+    },
+    {
+      "file": "cups-2.4.19-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cups/2.4.19/3.fc43/src/cups-2.4.19-3.fc43.src.rpm",
+      "sha256": "dbe510c74db2cdc8f4c4ef4aa30f6b1a905877c77dc55b8e209a5ff051387844"
+    },
+    {
+      "file": "curl-8.15.0-12.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/curl/8.15.0/12.fc43/src/curl-8.15.0-12.fc43.src.rpm",
+      "sha256": "f42bc045fc6f962c31e34ea7d924a5d58604f15f19f2fcc0ed3ad484ebb7d149"
+    },
+    {
+      "file": "cyrus-sasl-2.1.28-33.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/cyrus-sasl/2.1.28/33.fc43/src/cyrus-sasl-2.1.28-33.fc43.src.rpm",
+      "sha256": "48c94d34aad270f931fed6119e7f68fa17cad4221bb93db5f2255070b4d05805"
+    },
+    {
+      "file": "dav1d-1.5.4-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dav1d/1.5.4/1.fc43/src/dav1d-1.5.4-1.fc43.src.rpm",
+      "sha256": "af3e90e3f821da73052efb4a9fd8bb30f9d884e44f0c359b0bfb97b989ed9b04"
+    },
+    {
+      "file": "dbus-1.16.2-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dbus/1.16.2/1.fc43/src/dbus-1.16.2-1.fc43.src.rpm",
+      "sha256": "678f6703c41b7721739b71d796ea8eb42c02d8ece4c2c21b3247b142967a3304"
+    },
+    {
+      "file": "dconf-0.49.0-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dconf/0.49.0/1.fc43/src/dconf-0.49.0-1.fc43.src.rpm",
+      "sha256": "592bd0fc7052a9ec4e58e78c9498b0c742a3a790a0d6ef26f5ef0dce097e8d33"
+    },
+    {
+      "file": "dejavu-fonts-2.37-26.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/dejavu-fonts/2.37/26.fc43/src/dejavu-fonts-2.37-26.fc43.src.rpm",
+      "sha256": "1b6fc6fe3ed0c847f60b9733654d90cdf67fe430f3ca6b9a4cdba6fb4d98c74d"
+    },
+    {
+      "file": "e2fsprogs-1.47.3-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/e2fsprogs/1.47.3/2.fc43/src/e2fsprogs-1.47.3-2.fc43.src.rpm",
+      "sha256": "6cd178259886703e82cd016d2bb788c029f07afedcf67879b07ac8701e21973c"
+    },
+    {
+      "file": "elfutils-0.197-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/elfutils/0.197/1.fc43/src/elfutils-0.197-1.fc43.src.rpm",
+      "sha256": "5dde4797c5ba2405fb1ca1f0dafa6c2207324609218ead2048e813acec110840"
+    },
+    {
+      "file": "expat-2.9.0-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/expat/2.9.0/1.fc43/src/expat-2.9.0-1.fc43.src.rpm",
+      "sha256": "3ceec241fe01e689a7c853061b82fab2fcf39c5acb294589a64ffa3c3eeb7a81"
+    },
+    {
+      "file": "fontconfig-2.17.0-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fontconfig/2.17.0/3.fc43/src/fontconfig-2.17.0-3.fc43.src.rpm",
+      "sha256": "8b6826dd22a61766e43ea2c521742b53b6ddae10db221c02cbfbc10755098fbf"
+    },
+    {
+      "file": "freetype-2.13.3-4.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/freetype/2.13.3/4.fc43/src/freetype-2.13.3-4.fc43.src.rpm",
+      "sha256": "3dd07bc87f984ea7e79a85f855ec20233cb0f4c6db895a48d1398e57006099cc"
+    },
+    {
+      "file": "fribidi-1.0.16-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/fribidi/1.0.16/3.fc43/src/fribidi-1.0.16-3.fc43.src.rpm",
+      "sha256": "3f08630b456f7a5e82cccd8b8e6e19d649e122e7acf128212c42d7ff77af37c4"
+    },
+    {
+      "file": "gcc-15.3.1-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gcc/15.3.1/1.fc43/src/gcc-15.3.1-1.fc43.src.rpm",
+      "sha256": "5853460c32bfab87aabf36a4cd7cac3d7c58a33ea052a2b9a6f243f838907a15"
+    },
+    {
+      "file": "gdk-pixbuf2-2.44.6^really2.44.4-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gdk-pixbuf2/2.44.6%5Ereally2.44.4/3.fc43/src/gdk-pixbuf2-2.44.6%5Ereally2.44.4-3.fc43.src.rpm",
+      "sha256": "a8c450cf81d00064fd20b8bd78ce7d5610bc5d8e469789fc69640dde68c0963e"
+    },
+    {
+      "file": "giflib-5.2.2-9.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/giflib/5.2.2/9.fc43/src/giflib-5.2.2-9.fc43.src.rpm",
+      "sha256": "aff6f99197a410be8243b41d0f9f325a307c0816daf4ffd6105ed4f95f955317"
+    },
+    {
+      "file": "glib2-2.86.5-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glib2/2.86.5/1.fc43/src/glib2-2.86.5-1.fc43.src.rpm",
+      "sha256": "66086f70dcc71c9d9c6cf197841907ff788546c24eab7dd00ef30c713fa7c24e"
+    },
+    {
+      "file": "glibc-2.42-17.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glibc/2.42/17.fc43/src/glibc-2.42-17.fc43.src.rpm",
+      "sha256": "ca9e654a43cd3555b09f2d0c3711e3cf5dc11ac1d985053feb030a28e3675268"
+    },
+    {
+      "file": "glycin-2.0.8-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/glycin/2.0.8/1.fc43/src/glycin-2.0.8-1.fc43.src.rpm",
+      "sha256": "7d13589098ab9d5a7282c915989ec408c3bf8d0488da91fba639f365cc27bcd7"
+    },
+    {
+      "file": "gmp-6.3.0-4.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gmp/6.3.0/4.fc43/src/gmp-6.3.0-4.fc43.src.rpm",
+      "sha256": "4bab84719f1759c636ab4e84a40877d664e8463a0e1f6bdf4012081833905939"
+    },
+    {
+      "file": "gnutls-3.8.13-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gnutls/3.8.13/1.fc43/src/gnutls-3.8.13-1.fc43.src.rpm",
+      "sha256": "61d85d998312959e985ecaabd4fee0724cd09f1b2ab35e58b34e69646cf72475"
+    },
+    {
+      "file": "google-noto-fonts-20251101-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/google-noto-fonts/20251101/2.fc43/src/google-noto-fonts-20251101-2.fc43.src.rpm",
+      "sha256": "01300f8ef28ca3a44809fe453bd3e9aaa2e5826a00ebafd7826ab7c4074de85a"
+    },
+    {
+      "file": "graphene-1.10.8-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/graphene/1.10.8/2.fc43/src/graphene-1.10.8-2.fc43.src.rpm",
+      "sha256": "f9d618183b51595d9627fc3d8e07a2410fe0353934051e2381017904308c511e"
+    },
+    {
+      "file": "graphite2-1.3.14-19.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/graphite2/1.3.14/19.fc43/src/graphite2-1.3.14-19.fc43.src.rpm",
+      "sha256": "43c0fda0c4df24c42a38cca509a5760f371c15f74ac065e68c930ba79f43cb79"
+    },
+    {
+      "file": "gsettings-desktop-schemas-49.1-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gsettings-desktop-schemas/49.1/3.fc43/src/gsettings-desktop-schemas-49.1-3.fc43.src.rpm",
+      "sha256": "368c497107e927d37e52fc5c7b8761b9f06ec5e2adfdca86730b931b15181010"
+    },
+    {
+      "file": "gstreamer1-1.26.11-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gstreamer1/1.26.11/1.fc43/src/gstreamer1-1.26.11-1.fc43.src.rpm",
+      "sha256": "d4bf6777b6b7eff09d07e2629f571239d0fbd356ed733bb881d13476af51d878"
+    },
+    {
+      "file": "gstreamer1-plugins-bad-free-1.26.11-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gstreamer1-plugins-bad-free/1.26.11/1.fc43/src/gstreamer1-plugins-bad-free-1.26.11-1.fc43.src.rpm",
+      "sha256": "338add5ff5c901d25b60f63930cbf6a209ea945d11d5201f03035d007624ab6a"
+    },
+    {
+      "file": "gstreamer1-plugins-base-1.26.11-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gstreamer1-plugins-base/1.26.11/1.fc43/src/gstreamer1-plugins-base-1.26.11-1.fc43.src.rpm",
+      "sha256": "c0b11bca626cdda6113e15fd086a8f7d281088d6d7c09f459fd315220e493414"
+    },
+    {
+      "file": "gtk4-4.20.4-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/gtk4/4.20.4/1.fc43/src/gtk4-4.20.4-1.fc43.src.rpm",
+      "sha256": "594560fa5d1bd108a37fb55bc9a0d114a7bd21edd18391cd1532ae237c8e48d3"
+    },
+    {
+      "file": "harfbuzz-11.5.1-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/harfbuzz/11.5.1/2.fc43/src/harfbuzz-11.5.1-2.fc43.src.rpm",
+      "sha256": "6e682de5165c1cf88adf8b17e6b27d48f8520762c4404b3accc8cd1e1c942518"
+    },
+    {
+      "file": "hicolor-icon-theme-0.18-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/hicolor-icon-theme/0.18/2.fc43/src/hicolor-icon-theme-0.18-2.fc43.src.rpm",
+      "sha256": "9573d322f000d525384e793f62d82bf2fad0f88f55599d0f088c0397bfe19f55"
+    },
+    {
+      "file": "jbigkit-2.1-32.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/jbigkit/2.1/32.fc43/src/jbigkit-2.1-32.fc43.src.rpm",
+      "sha256": "75c7fb31a0606ebb39bdc7631fd48c1b57ced3a270553971a441556e582506bb"
+    },
+    {
+      "file": "json-glib-1.10.8-4.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/json-glib/1.10.8/4.fc43/src/json-glib-1.10.8-4.fc43.src.rpm",
+      "sha256": "86ca7401ffa2b5fe1f29f718a013495feefce62e2387d3b56c4a08eb545968da"
+    },
+    {
+      "file": "keyutils-1.6.3-6.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/keyutils/1.6.3/6.fc43/src/keyutils-1.6.3-6.fc43.src.rpm",
+      "sha256": "9cffc0bb58b6c5b9f3157f974c25b2d604d7f982f9841f279e882660b056f07e"
+    },
+    {
+      "file": "krb5-1.22.2-4.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/krb5/1.22.2/4.fc43/src/krb5-1.22.2-4.fc43.src.rpm",
+      "sha256": "af5a085dc09e203edb4f7b5a833ef9fec24cb0619593b5f6d78b18f22fb42806"
+    },
+    {
+      "file": "lcms2-2.16-6.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/lcms2/2.16/6.fc43/src/lcms2-2.16-6.fc43.src.rpm",
+      "sha256": "adc7a81d1dc0c679ef4fa16789a3efa91784c7a488acd1c3d7b0358f224140c2"
+    },
+    {
+      "file": "leptonica-1.87.0-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/leptonica/1.87.0/1.fc43/src/leptonica-1.87.0-1.fc43.src.rpm",
+      "sha256": "6e571902d8b419ffa98bb025b9bf52cdd58e3c0b5e95fb449365cf597a578c57"
+    },
+    {
+      "file": "libX11-1.8.13-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libX11/1.8.13/1.fc43/src/libX11-1.8.13-1.fc43.src.rpm",
+      "sha256": "49ae69729b8ec969ec2dd74691a6dd538c11ea148f807eeb42c38a8bb6570e05"
+    },
+    {
+      "file": "libXau-1.0.12-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXau/1.0.12/3.fc43/src/libXau-1.0.12-3.fc43.src.rpm",
+      "sha256": "23b8d968847d137f58029e8371f7581afaca75dac99b1b3f21b0f6f4b2e116fe"
+    },
+    {
+      "file": "libXcursor-1.2.3-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXcursor/1.2.3/3.fc43/src/libXcursor-1.2.3-3.fc43.src.rpm",
+      "sha256": "0e733b270a2ea5e18f78cdf7fb08b1f37912bf1f75d7bac0f1891eb48e052ac3"
+    },
+    {
+      "file": "libXdamage-1.1.6-6.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXdamage/1.1.6/6.fc43/src/libXdamage-1.1.6-6.fc43.src.rpm",
+      "sha256": "2dfda2d229317f1344f05c38ba06e74e254db79ca9c7967006a383dccf730163"
+    },
+    {
+      "file": "libXext-1.3.6-4.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXext/1.3.6/4.fc43/src/libXext-1.3.6-4.fc43.src.rpm",
+      "sha256": "6d01682d2551988ca4ac178a1a7d9c55bad72ed1d775cedc025b5bbf4e7e96a6"
+    },
+    {
+      "file": "libXfixes-6.0.1-6.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXfixes/6.0.1/6.fc43/src/libXfixes-6.0.1-6.fc43.src.rpm",
+      "sha256": "42dee7c4eaac9f7603458d81669b81266d3fda9dc52a354f556fed4297bb1920"
+    },
+    {
+      "file": "libXi-1.8.2-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXi/1.8.2/3.fc43/src/libXi-1.8.2-3.fc43.src.rpm",
+      "sha256": "70945c86071ffe42574c7e13e938420a0f36dda05177fb0e8e8a6afbd1e6abb5"
+    },
+    {
+      "file": "libXinerama-1.1.5-9.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXinerama/1.1.5/9.fc43/src/libXinerama-1.1.5-9.fc43.src.rpm",
+      "sha256": "8edb62b51dbfb98bcb01b1eec3efe8287b00e3b984586536f4e0d7d8dfde5748"
+    },
+    {
+      "file": "libXrandr-1.5.4-6.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXrandr/1.5.4/6.fc43/src/libXrandr-1.5.4-6.fc43.src.rpm",
+      "sha256": "430f41528ebff0f63ac924115b2e9ed24259a0a48cb26675ca88ed5de5bba27f"
+    },
+    {
+      "file": "libXrender-0.9.12-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXrender/0.9.12/3.fc43/src/libXrender-0.9.12-3.fc43.src.rpm",
+      "sha256": "fd951afd2aa3fc81c61cc64431bb2a99b22aedd7cc8d4c5fa1c697febfb29113"
+    },
+    {
+      "file": "libXv-1.0.13-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXv/1.0.13/3.fc43/src/libXv-1.0.13-3.fc43.src.rpm",
+      "sha256": "c38b448673436ef87e9662e101378e9ee37baaf51385055a3e83bc57c28929af"
+    },
+    {
+      "file": "libXxf86vm-1.1.6-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libXxf86vm/1.1.6/3.fc43/src/libXxf86vm-1.1.6-3.fc43.src.rpm",
+      "sha256": "0f130ba3658ae58e34abdb6f8959c64f9eb838275e0d5392abb9321f6e7ee32a"
+    },
+    {
+      "file": "libcap-2.76-4.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libcap/2.76/4.fc43/src/libcap-2.76-4.fc43.src.rpm",
+      "sha256": "f33c4a375b110acdd77aace72f55df78077f9696221e1d22e969e1d33d93f6d6"
+    },
+    {
+      "file": "libdatrie-0.2.13-12.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libdatrie/0.2.13/12.fc43/src/libdatrie-0.2.13-12.fc43.src.rpm",
+      "sha256": "76e0ccf2c0b04a49ec9cdf7e7050c5518dab69a5ac8236a9139f06a135f0461b"
+    },
+    {
+      "file": "libdisplay-info-0.2.0-4.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libdisplay-info/0.2.0/4.fc43/src/libdisplay-info-0.2.0-4.fc43.src.rpm",
+      "sha256": "c9a1fd783f82e7900be789d2fbe77607babfa658b67f71ac7a5c89be5890d10c"
+    },
+    {
+      "file": "libdrm-2.4.134-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libdrm/2.4.134/1.fc43/src/libdrm-2.4.134-1.fc43.src.rpm",
+      "sha256": "422d39426acc620790d4fd0f85f93f6c499bc82dfc27afd1f8032f59dc4e4b5c"
+    },
+    {
+      "file": "libedit-3.1-58.20260512cvs.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libedit/3.1/58.20260512cvs.fc43/src/libedit-3.1-58.20260512cvs.fc43.src.rpm",
+      "sha256": "97f5a07ab825e3d118bbe1c0362b2b9083b9963b146b521479aabe94354ae247"
+    },
+    {
+      "file": "libepoxy-1.5.10-11.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libepoxy/1.5.10/11.fc43/src/libepoxy-1.5.10-11.fc43.src.rpm",
+      "sha256": "8be58dba4bb343d8a0466b179c9add3355c5d7e3a28dff4f20ddca91a60c6730"
+    },
+    {
+      "file": "libevent-2.1.13-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libevent/2.1.13/1.fc43/src/libevent-2.1.13-1.fc43.src.rpm",
+      "sha256": "20cc328097598f57ccba92bccb35fd40a6efe47866ceecd8de83c3b37735be1e"
+    },
+    {
+      "file": "libffi-3.5.2-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libffi/3.5.2/1.fc43/src/libffi-3.5.2-1.fc43.src.rpm",
+      "sha256": "6a4745f0d6b63b0cd3ca75258630662e252c816ebba40b7e9ce7e8b42f894fcc"
+    },
+    {
+      "file": "libglvnd-1.7.0-8.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libglvnd/1.7.0/8.fc43/src/libglvnd-1.7.0-8.fc43.src.rpm",
+      "sha256": "fb8adf9f607e06d6fc59aae4b49db334c78dbdc884aa270630b6263a4ad8a9f0"
+    },
+    {
+      "file": "libgudev-238-8.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libgudev/238/8.fc43/src/libgudev-238-8.fc43.src.rpm",
+      "sha256": "c7acd1a07555391f69f8ed5e4bcdee2fc6146476cfa6edc0e707aab85441d056"
+    },
+    {
+      "file": "libidn2-2.3.8-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libidn2/2.3.8/2.fc43/src/libidn2-2.3.8-2.fc43.src.rpm",
+      "sha256": "568b219e525d5d75101de12db0c043539a661a679de473ebcb39451237cac1b0"
+    },
+    {
+      "file": "libjpeg-turbo-3.1.3-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libjpeg-turbo/3.1.3/1.fc43/src/libjpeg-turbo-3.1.3-1.fc43.src.rpm",
+      "sha256": "3f518bc8937ca880e351f78ac9b39ec89dc1a1d37466f45a0f4a60296037fd05"
+    },
+    {
+      "file": "liblerc-4.0.0-9.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/liblerc/4.0.0/9.fc43/src/liblerc-4.0.0-9.fc43.src.rpm",
+      "sha256": "94ee3e54f2ed373f7bb830c1bcd51c715fffc2b488f620b0db841a9a1c8811f8"
+    },
+    {
+      "file": "libogg-1.3.6-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libogg/1.3.6/2.fc43/src/libogg-1.3.6-2.fc43.src.rpm",
+      "sha256": "46428dff8ee60ea3f0307b8ced9fefff45e2fcc1d1896070746c1d64b61e9b52"
+    },
+    {
+      "file": "libpciaccess-0.16-16.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libpciaccess/0.16/16.fc43/src/libpciaccess-0.16-16.fc43.src.rpm",
+      "sha256": "b799df903e702232b51e9f60602445719d550f37d41a96a7f5239df7c6749fd7"
+    },
+    {
+      "file": "libpng-1.6.58-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libpng/1.6.58/1.fc43/src/libpng-1.6.58-1.fc43.src.rpm",
+      "sha256": "92a44491ca23445788af4eb2a3e71a4aed8296920462e53456641c9546ec781a"
+    },
+    {
+      "file": "libpsl-0.21.5-6.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libpsl/0.21.5/6.fc43/src/libpsl-0.21.5-6.fc43.src.rpm",
+      "sha256": "34a33c399c302d7204d0ad618a2b7bb6bd75b00457e394b773e1c574c44df909"
+    },
+    {
+      "file": "librsvg2-2.61.5-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/librsvg2/2.61.5/1.fc43/src/librsvg2-2.61.5-1.fc43.src.rpm",
+      "sha256": "937ab9c23d484fac2d27dba7b493b98fc529c40975522abf689ac3d2ec1ef9cf"
+    },
+    {
+      "file": "libseccomp-2.6.1-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libseccomp/2.6.1/2.fc43/src/libseccomp-2.6.1-2.fc43.src.rpm",
+      "sha256": "d8d8dd36468ab0a72ab854d443e9729eff3492e1a37e7d1440b18065fa5d8f5b"
+    },
+    {
+      "file": "libselinux-3.9-5.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libselinux/3.9/5.fc43/src/libselinux-3.9-5.fc43.src.rpm",
+      "sha256": "d86765e48b036e33b6b61be6e5ff0eaa41670eb34e87588ddbae8929a4f0ba71"
+    },
+    {
+      "file": "libssh-0.11.5-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libssh/0.11.5/1.fc43/src/libssh-0.11.5-1.fc43.src.rpm",
+      "sha256": "3968ff73cf50604b7192d2acfe92a1f22739598049ef4291b2a451a884fdc2bb"
+    },
+    {
+      "file": "libtasn1-4.21.0-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libtasn1/4.21.0/1.fc43/src/libtasn1-4.21.0-1.fc43.src.rpm",
+      "sha256": "66d6f1c967ada68b464e9e7dbea28a66e19791b7dd53c3afcc2605d6bb32a543"
+    },
+    {
+      "file": "libthai-0.1.29-11.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libthai/0.1.29/11.fc43/src/libthai-0.1.29-11.fc43.src.rpm",
+      "sha256": "13b3d9ce16371baccf42ea0ebd72abd8a0f559f79f9f9346ff592a1ee28cf9b6"
+    },
+    {
+      "file": "libtheora-1.1.1-40.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libtheora/1.1.1/40.fc43/src/libtheora-1.1.1-40.fc43.src.rpm",
+      "sha256": "b68d6074b7e43d96d6bf246ce8af01c331e061cdf2eeaf91bd67429fd06a942c"
+    },
+    {
+      "file": "libtiff-4.7.2-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libtiff/4.7.2/3.fc43/src/libtiff-4.7.2-3.fc43.src.rpm",
+      "sha256": "7d6e477e16dee7ab1b92d0830b4e433dc83cc2ba723f90f9914b4dcc57e45628"
+    },
+    {
+      "file": "libunistring-1.1-10.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libunistring/1.1/10.fc43/src/libunistring-1.1-10.fc43.src.rpm",
+      "sha256": "8b8554ad5ce238544c9d8e3f9e09dfe4651d766ddc9a2bd2c079045e9677548b"
+    },
+    {
+      "file": "libunwind-1.8.3-4.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libunwind/1.8.3/4.fc43/src/libunwind-1.8.3-4.fc43.src.rpm",
+      "sha256": "b49a7ab4b30fb7b0651b256e0d01e3517acdbe1e1e14ad02ab02ffc29043bbe0"
+    },
+    {
+      "file": "libva-2.22.0-6.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libva/2.22.0/6.fc43/src/libva-2.22.0-6.fc43.src.rpm",
+      "sha256": "6b7f2672e65e9d111ab1fe44bad1b1ee9ff880b2789b88a525bfdd10f510b1ad"
+    },
+    {
+      "file": "libvisual-0.4.2-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libvisual/0.4.2/3.fc43/src/libvisual-0.4.2-3.fc43.src.rpm",
+      "sha256": "4bb1d1972f5408f74116506fa04825f59617985eebc4ce62e6ffcf98952d015e"
+    },
+    {
+      "file": "libvorbis-1.3.7-13.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libvorbis/1.3.7/13.fc43/src/libvorbis-1.3.7-13.fc43.src.rpm",
+      "sha256": "e1081bf61c5b698be892116398929a939d23538e76bf188bdab7fc33c58dd9ec"
+    },
+    {
+      "file": "libwebp-1.6.0-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libwebp/1.6.0/2.fc43/src/libwebp-1.6.0-2.fc43.src.rpm",
+      "sha256": "78105d41ec15695fbd926e71b1eb153ccdbb8b9e7c3fbb85fd08a588857650ad"
+    },
+    {
+      "file": "libxcb-1.17.0-6.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxcb/1.17.0/6.fc43/src/libxcb-1.17.0-6.fc43.src.rpm",
+      "sha256": "21b78018ec0c9d6a4ef8dc68d9cace2885920e121142b6f4c9a83c283ab9d31c"
+    },
+    {
+      "file": "libxcrypt-4.5.2-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxcrypt/4.5.2/1.fc43/src/libxcrypt-4.5.2-1.fc43.src.rpm",
+      "sha256": "efb532ad9a643539c3fe4b852219f001873cb7b1229ec3b9dcfa1df527bccfc4"
+    },
+    {
+      "file": "libxkbcommon-1.11.0-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxkbcommon/1.11.0/1.fc43/src/libxkbcommon-1.11.0-1.fc43.src.rpm",
+      "sha256": "b78b55d1fbcf6c6fd8beefba41b851c3e338d14a6feb6f1c67bd6c954dfa7677"
+    },
+    {
+      "file": "libxml2-2.12.10-5.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxml2/2.12.10/5.fc43/src/libxml2-2.12.10-5.fc43.src.rpm",
+      "sha256": "fdaf46c7497fe1ba58242a3f557aef8a238cd822afbf73fde5fb6a07fc4240d5"
+    },
+    {
+      "file": "libxshmfence-1.3.2-7.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libxshmfence/1.3.2/7.fc43/src/libxshmfence-1.3.2-7.fc43.src.rpm",
+      "sha256": "974a6816c94325d082e48edd38df0a5e8fecb87b91437d0a055ecba163162688"
+    },
+    {
+      "file": "llvm-21.1.8-6.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/llvm/21.1.8/6.fc43/src/llvm-21.1.8-6.fc43.src.rpm",
+      "sha256": "53f74518d3a851f024a60b08ba8c1e31542c94996cdda9a9e11b71452fbae6c8"
+    },
+    {
+      "file": "lm_sensors-3.6.0-23.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/lm_sensors/3.6.0/23.fc43/src/lm_sensors-3.6.0-23.fc43.src.rpm",
+      "sha256": "2b1139871a987e3bfde4db3fe9dea1d685925b1023f0e8e06acad24993394693"
+    },
+    {
+      "file": "lzo-2.10-15.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/lzo/2.10/15.fc43/src/lzo-2.10-15.fc43.src.rpm",
+      "sha256": "f4bd6690c7fb54663d5a8c417aa8e859752779bf21a431823e5974616dd39606"
+    },
+    {
+      "file": "mesa-25.3.6-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/mesa/25.3.6/3.fc43/src/mesa-25.3.6-3.fc43.src.rpm",
+      "sha256": "5d7a3a2a290a1c528017c6c5cb6f252413065b5efe06f7ff32a7c4f394383cf6"
+    },
+    {
+      "file": "ncurses-6.5-7.20250614.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/ncurses/6.5/7.20250614.fc43/src/ncurses-6.5-7.20250614.fc43.src.rpm",
+      "sha256": "346e115233293d2b4bf66a8e4851d036756af64675b0515374a4798ed1a46204"
+    },
+    {
+      "file": "nettle-3.10.1-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/nettle/3.10.1/2.fc43/src/nettle-3.10.1-2.fc43.src.rpm",
+      "sha256": "2c286113f28d478479a355665827cfec09db3bb4bb32de4a933360bb3962cb7f"
+    },
+    {
+      "file": "nghttp2-1.66.0-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/nghttp2/1.66.0/3.fc43/src/nghttp2-1.66.0-3.fc43.src.rpm",
+      "sha256": "210e200c2b886dc5f1d70d749538488152cdb71a42f2c129e4773eb4aeaf7438"
+    },
+    {
+      "file": "openldap-2.6.15-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/openldap/2.6.15/1.fc43/src/openldap-2.6.15-1.fc43.src.rpm",
+      "sha256": "d0d5f9a51b52eb4c67d90c8b427b2dceb40374038ce75442c3a8b9ca3fb16a92"
+    },
+    {
+      "file": "openssl-3.5.9-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/openssl/3.5.9/1.fc43/src/openssl-3.5.9-1.fc43.src.rpm",
+      "sha256": "fe379ffea60248e33150d688b851873d4c30a53049513d4e22999d0baf7b679f"
+    },
+    {
+      "file": "opus-1.5.2-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/opus/1.5.2/3.fc43/src/opus-1.5.2-3.fc43.src.rpm",
+      "sha256": "6624abf92a260f43f5465a44eab262834f427693eaca29ebe96d0fa6d0f3a7ff"
+    },
+    {
+      "file": "orc-0.4.41-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/orc/0.4.41/2.fc43/src/orc-0.4.41-2.fc43.src.rpm",
+      "sha256": "2373efc0f24205ba263e4ce24626957851762e8d44823799af6bb2221b6897d8"
+    },
+    {
+      "file": "p11-kit-0.26.5-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/p11-kit/0.26.5/1.fc43/src/p11-kit-0.26.5-1.fc43.src.rpm",
+      "sha256": "8532d8ea09dbb27a94f49c375a4d906a07e935cad713ab6ff646db2600f2ad28"
+    },
+    {
+      "file": "pango-1.57.1-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pango/1.57.1/1.fc43/src/pango-1.57.1-1.fc43.src.rpm",
+      "sha256": "2b9e2af8b8fd7423e6bb887446c41f8c55030ee0814f44376c1fb3ae5324b620"
+    },
+    {
+      "file": "pcre2-10.47-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pcre2/10.47/1.fc43/src/pcre2-10.47-1.fc43.src.rpm",
+      "sha256": "a69a3f976f7a4fb08afb1dde1fe22c74d78c0e298a34fe5899e770835f40b633"
+    },
+    {
+      "file": "pixman-0.46.2-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/pixman/0.46.2/2.fc43/src/pixman-0.46.2-2.fc43.src.rpm",
+      "sha256": "12a60b58c431065acc6f20b8cd6e4d5be0ab2eddee4045ac90240b3b91b79187"
+    },
+    {
+      "file": "shared-mime-info-2.4-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/shared-mime-info/2.4/2.fc43/src/shared-mime-info-2.4-2.fc43.src.rpm",
+      "sha256": "84accd681ba0307962775629c5650cf060d4a46639f58c2ac57b41f8cd6042b6"
+    },
+    {
+      "file": "spirv-tools-2026.1-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/spirv-tools/2026.1/2.fc43/src/spirv-tools-2026.1-2.fc43.src.rpm",
+      "sha256": "a6989fe2c666992de61f77b4ada096da85c5b6af9e0aa9bb49f4d66477e99b50"
+    },
+    {
+      "file": "sqlite-3.50.2-3.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/sqlite/3.50.2/3.fc43/src/sqlite-3.50.2-3.fc43.src.rpm",
+      "sha256": "ad5c9252518743745cb9e15604b7a46be5f0e041851ea2da7c8ceff95d9f1633"
+    },
+    {
+      "file": "systemd-258.11-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/systemd/258.11/1.fc43/src/systemd-258.11-1.fc43.src.rpm",
+      "sha256": "438f483d45e49a29e53141864708907d0444b648e2b1e47341e42e5b904425e5"
+    },
+    {
+      "file": "tesseract-5.5.3-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/src/tesseract-5.5.3-2.fc43.src.rpm",
+      "sha256": "a8424b3a7a6bc622cc06d4b67a75ae189da886fcaa66d8f6331bee894ab9840b"
+    },
+    {
+      "file": "tesseract-tessdata-4.1.0-11.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract-tessdata/4.1.0/11.fc43/src/tesseract-tessdata-4.1.0-11.fc43.src.rpm",
+      "sha256": "1271d3c32b054abbeb353b90702729f1ac68b03fc7a0dc31e58237fce8408f07"
+    },
+    {
+      "file": "tinysparql-3.10.1-5.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tinysparql/3.10.1/5.fc43/src/tinysparql-3.10.1-5.fc43.src.rpm",
+      "sha256": "8fdc305c9cda10927852f0b09c1f0135d97c787ee7615fd552550ae724892708"
+    },
+    {
+      "file": "util-linux-2.41.6-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/util-linux/2.41.6/1.fc43/src/util-linux-2.41.6-1.fc43.src.rpm",
+      "sha256": "a0d4a3404067dd5d7d060304a92d2f7776b9f1a1fa56beac9bebe20d17cacc46"
+    },
+    {
+      "file": "vulkan-loader-1.4.341.0-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/vulkan-loader/1.4.341.0/1.fc43/src/vulkan-loader-1.4.341.0-1.fc43.src.rpm",
+      "sha256": "6cd073e07d717a4e3983beebe54c24f9696d947934f183f5076ca20656c8f427"
+    },
+    {
+      "file": "wayland-1.26.0-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/wayland/1.26.0/1.fc43/src/wayland-1.26.0-1.fc43.src.rpm",
+      "sha256": "a6a40de075bd1c2f677ed6922760d7fc432bc1121c91d6f11280f2ddc4f37d84"
+    },
+    {
+      "file": "xkeyboard-config-2.46-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/xkeyboard-config/2.46/1.fc43/src/xkeyboard-config-2.46-1.fc43.src.rpm",
+      "sha256": "d30849ce927dd4ee044cbf60020396f58f68a6096d2c1b522a42cac044fb78fb"
+    },
+    {
+      "file": "xz-5.8.1-4.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/xz/5.8.1/4.fc43/src/xz-5.8.1-4.fc43.src.rpm",
+      "sha256": "119a8571ed31b6258aedb7958edea94c82b7b49a0d2964dc52f1836e8d98af35"
+    },
+    {
+      "file": "zlib-ng-2.3.3-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/zlib-ng/2.3.3/2.fc43/src/zlib-ng-2.3.3-2.fc43.src.rpm",
+      "sha256": "7905e630192fb6ed0689e523b9583ac90f582515f209b39bfc7d632ce5cede86"
+    },
+    {
+      "file": "zstd-1.5.7-2.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/zstd/1.5.7/2.fc43/src/zstd-1.5.7-2.fc43.src.rpm",
+      "sha256": "d2a0bc57b786c9a1873e4687fcb3155c2014710b5cd94e86b719571792f91e7a"
+    }
+  ],
+  "static": [
+    {
+      "file": "boost-1.91.0-1-cmake.tar.xz",
+      "url": "https://github.com/boostorg/boost/releases/download/boost-1.91.0-1/boost-1.91.0-1-cmake.tar.xz",
+      "sha256": "cc5dc5006ecbdf0051f90979be31b4eee5987d9ae14ae9fb9c03cfa43fa3cdad"
+    },
+    {
+      "file": "crate-adler2-2.0.1.crate",
+      "url": "https://static.crates.io/crates/adler2/adler2-2.0.1.crate",
+      "sha256": "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+    },
+    {
+      "file": "crate-bitflags-2.13.2.crate",
+      "url": "https://static.crates.io/crates/bitflags/bitflags-2.13.2.crate",
+      "sha256": "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
+    },
+    {
+      "file": "crate-cfg-if-1.0.5.crate",
+      "url": "https://static.crates.io/crates/cfg-if/cfg-if-1.0.5.crate",
+      "sha256": "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+    },
+    {
+      "file": "crate-chrono-0.4.45.crate",
+      "url": "https://static.crates.io/crates/chrono/chrono-0.4.45.crate",
+      "sha256": "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
+    },
+    {
+      "file": "crate-crc32fast-1.5.2.crate",
+      "url": "https://static.crates.io/crates/crc32fast/crc32fast-1.5.2.crate",
+      "sha256": "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
+    },
+    {
+      "file": "crate-errno-0.3.14.crate",
+      "url": "https://static.crates.io/crates/errno/errno-0.3.14.crate",
+      "sha256": "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+    },
+    {
+      "file": "crate-flate2-1.1.10.crate",
+      "url": "https://static.crates.io/crates/flate2/flate2-1.1.10.crate",
+      "sha256": "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
+    },
+    {
+      "file": "crate-goblin-0.10.7.crate",
+      "url": "https://static.crates.io/crates/goblin/goblin-0.10.7.crate",
+      "sha256": "17582616a7718cca54cec18e534a76c7c4aec11a8b9a85695712f262fd15a4c8"
+    },
+    {
+      "file": "crate-goblin-0.8.2.crate",
+      "url": "https://static.crates.io/crates/goblin/goblin-0.8.2.crate",
+      "sha256": "1b363a30c165f666402fe6a3024d3bec7ebc898f96a4a23bd1c99f8dbf3f4f47"
+    },
+    {
+      "file": "crate-hex-0.4.3.crate",
+      "url": "https://static.crates.io/crates/hex/hex-0.4.3.crate",
+      "sha256": "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+    },
+    {
+      "file": "crate-iana-time-zone-0.1.65.crate",
+      "url": "https://static.crates.io/crates/iana-time-zone/iana-time-zone-0.1.65.crate",
+      "sha256": "e31bc9ad994ba00e440a8aa5c9ef0ec67d5cb5e5cb0cc7f8b744a35b389cc470"
+    },
+    {
+      "file": "crate-libc-0.2.189.crate",
+      "url": "https://static.crates.io/crates/libc/libc-0.2.189.crate",
+      "sha256": "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+    },
+    {
+      "file": "crate-libc-0.2.191.crate",
+      "url": "https://static.crates.io/crates/libc/libc-0.2.191.crate",
+      "sha256": "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+    },
+    {
+      "file": "crate-linux-raw-sys-0.12.1.crate",
+      "url": "https://static.crates.io/crates/linux-raw-sys/linux-raw-sys-0.12.1.crate",
+      "sha256": "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+    },
+    {
+      "file": "crate-log-0.4.34.crate",
+      "url": "https://static.crates.io/crates/log/log-0.4.34.crate",
+      "sha256": "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+    },
+    {
+      "file": "crate-log-0.4.35.crate",
+      "url": "https://static.crates.io/crates/log/log-0.4.35.crate",
+      "sha256": "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
+    },
+    {
+      "file": "crate-miniz_oxide-0.9.1.crate",
+      "url": "https://static.crates.io/crates/miniz_oxide/miniz_oxide-0.9.1.crate",
+      "sha256": "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
+    },
+    {
+      "file": "crate-nix-0.27.1.crate",
+      "url": "https://static.crates.io/crates/nix/nix-0.27.1.crate",
+      "sha256": "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+    },
+    {
+      "file": "crate-nix-0.31.3.crate",
+      "url": "https://static.crates.io/crates/nix/nix-0.31.3.crate",
+      "sha256": "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+    },
+    {
+      "file": "crate-num-traits-0.2.19.crate",
+      "url": "https://static.crates.io/crates/num-traits/num-traits-0.2.19.crate",
+      "sha256": "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
+    },
+    {
+      "file": "crate-num_cpus-1.17.0.crate",
+      "url": "https://static.crates.io/crates/num_cpus/num_cpus-1.17.0.crate",
+      "sha256": "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+    },
+    {
+      "file": "crate-plain-0.2.3.crate",
+      "url": "https://static.crates.io/crates/plain/plain-0.2.3.crate",
+      "sha256": "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+    },
+    {
+      "file": "crate-procfs-0.18.0.crate",
+      "url": "https://static.crates.io/crates/procfs/procfs-0.18.0.crate",
+      "sha256": "25485360a54d6861439d60facef26de713b1e126bf015ec8f98239467a2b82f7"
+    },
+    {
+      "file": "crate-procfs-core-0.18.0.crate",
+      "url": "https://static.crates.io/crates/procfs-core/procfs-core-0.18.0.crate",
+      "sha256": "e6401bf7b6af22f78b563665d15a22e9aef27775b79b149a66ca022468a4e405"
+    },
+    {
+      "file": "crate-rustix-1.1.5.crate",
+      "url": "https://static.crates.io/crates/rustix/rustix-1.1.5.crate",
+      "sha256": "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+    },
+    {
+      "file": "crate-same-file-1.0.6.crate",
+      "url": "https://static.crates.io/crates/same-file/same-file-1.0.6.crate",
+      "sha256": "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+    },
+    {
+      "file": "crate-scroll-0.12.0.crate",
+      "url": "https://static.crates.io/crates/scroll/scroll-0.12.0.crate",
+      "sha256": "6ab8598aa408498679922eff7fa985c25d58a90771bd6be794434c5277eab1a6"
+    },
+    {
+      "file": "crate-scroll-0.13.0.crate",
+      "url": "https://static.crates.io/crates/scroll/scroll-0.13.0.crate",
+      "sha256": "c1257cd4248b4132760d6524d6dda4e053bc648c9070b960929bf50cfb1e7add"
+    },
+    {
+      "file": "crate-signal-hook-0.4.4.crate",
+      "url": "https://static.crates.io/crates/signal-hook/signal-hook-0.4.4.crate",
+      "sha256": "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
+    },
+    {
+      "file": "crate-signal-hook-registry-1.4.8.crate",
+      "url": "https://static.crates.io/crates/signal-hook-registry/signal-hook-registry-1.4.8.crate",
+      "sha256": "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+    },
+    {
+      "file": "crate-simd-adler32-0.3.10.crate",
+      "url": "https://static.crates.io/crates/simd-adler32/simd-adler32-0.3.10.crate",
+      "sha256": "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+    },
+    {
+      "file": "crate-walkdir-2.5.0.crate",
+      "url": "https://static.crates.io/crates/walkdir/walkdir-2.5.0.crate",
+      "sha256": "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
+    },
+    {
+      "file": "crate-which-8.0.6.crate",
+      "url": "https://static.crates.io/crates/which/which-8.0.6.crate",
+      "sha256": "bae2f2b2b816647a1cab1acc91f5bd20812d53cb344382635ec2181940c8034f"
+    },
+    {
+      "file": "crate-xxhash-rust-0.8.18.crate",
+      "url": "https://static.crates.io/crates/xxhash-rust/xxhash-rust-0.8.18.crate",
+      "sha256": "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
+    },
+    {
+      "file": "crate-zlib-rs-0.6.8.crate",
+      "url": "https://static.crates.io/crates/zlib-rs/zlib-rs-0.6.8.crate",
+      "sha256": "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
+    },
+    {
+      "file": "crate-zstd-0.13.3.crate",
+      "url": "https://static.crates.io/crates/zstd/zstd-0.13.3.crate",
+      "sha256": "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+    },
+    {
+      "file": "crate-zstd-safe-7.3.0.crate",
+      "url": "https://static.crates.io/crates/zstd-safe/zstd-safe-7.3.0.crate",
+      "sha256": "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+    },
+    {
+      "file": "crate-zstd-sys-2.1.0+zstd.1.5.7.crate",
+      "url": "https://static.crates.io/crates/zstd-sys/zstd-sys-2.1.0+zstd.1.5.7.crate",
+      "sha256": "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
+    },
+    {
+      "file": "dwarfs-source.tar.gz",
+      "url": "https://github.com/mhx/dwarfs/archive/3945d234619504bc149da18cfb208218779c477d.tar.gz",
+      "sha256": "310cef9b1a136b823038c6fc9422e06043f60195e92e15b827010a712194e14a"
+    },
+    {
+      "file": "fmt-12.2.0.tar.gz",
+      "url": "https://github.com/fmtlib/fmt/archive/refs/tags/12.2.0.tar.gz",
+      "sha256": "8b852bb5aa6e7d8564f9e81394055395dd1d1936d38dfd3a17792a02bebd7af0"
+    },
+    {
+      "file": "fuse-3.18.2.tar.gz",
+      "url": "https://github.com/libfuse/libfuse/releases/download/fuse-3.18.2/fuse-3.18.2.tar.gz",
+      "sha256": "f01de85717e20adf5f98aff324acd85dd73d61a5ca3834d573dcf0bd6e54a298"
+    },
+    {
+      "file": "gcc-16.1.0.tar.xz",
+      "url": "https://ftp.gnu.org/gnu/gcc/gcc-16.1.0/gcc-16.1.0.tar.xz",
+      "sha256": "50efb4d94c3397aff3b0d61a5abd748b4dd31d9d3f2ab7be05b171d36a510f79"
+    },
+    {
+      "file": "git-dotenv-367085af80a8.tar.gz",
+      "url": "https://github.com/VHSgunzo/dotenv/archive/367085af80a8d29d2241c85cbfc25736486230c5.tar.gz",
+      "sha256": "9d31b0d23ef6e1e5851b61feda9a95d4b8ef321af1a7ee737909742d1fcfddd7"
+    },
+    {
+      "file": "git-memfd-exec-2decf7d1cec3.tar.gz",
+      "url": "https://github.com/VHSgunzo/memfd-exec/archive/2decf7d1cec3d183e55000526abd2e5bb6df40c5.tar.gz",
+      "sha256": "2a0771116e5e9e5acd09b4df7cc88571865d44c7c75fee58447b4b1f81d08492"
+    },
+    {
+      "file": "git-userland-execve-d2b58d8b5164.tar.gz",
+      "url": "https://github.com/pkgforge-dev/userland-execve-rust/archive/d2b58d8b5164b8c815c3f504eb3ddfff47f31556.tar.gz",
+      "sha256": "5770922eabbdca1c31c04c30c7327d8ce820678cf0e57909fbe46aaa56f55873"
+    },
+    {
+      "file": "gnu-gpl-2.0.txt",
+      "url": "https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt",
+      "sha256": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6"
+    },
+    {
+      "file": "jemalloc-5.3.1.tar.bz2",
+      "url": "https://github.com/jemalloc/jemalloc/releases/download/5.3.1/jemalloc-5.3.1.tar.bz2",
+      "sha256": "3826bc80232f22ed5c4662f3034f799ca316e819103bdc7bb99018a421706f92"
+    },
+    {
+      "file": "libarchive-3.8.8.tar.xz",
+      "url": "https://github.com/libarchive/libarchive/releases/download/v3.8.8/libarchive-3.8.8.tar.xz",
+      "sha256": "3873a88801da067d0528a989af06877710529d50ee8fe6f3970cbb4302efb918"
+    },
+    {
+      "file": "libressl-4.3.1.tar.gz",
+      "url": "https://github.com/libressl/portable/releases/download/v4.3.1/libressl-4.3.1.tar.gz",
+      "sha256": "c2db42ace14e7d5419826fab35a742ec6e4d12725a051a51d0cea3c10ba0fa50"
+    },
+    {
+      "file": "musl-1.2.6.tar.gz",
+      "url": "https://musl.libc.org/releases/musl-1.2.6.tar.gz",
+      "sha256": "d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a"
+    },
+    {
+      "file": "nlohmann-json-3.12.0-LICENSE.MIT",
+      "url": "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT",
+      "sha256": "46a65cffd1ea955132d95a8dd921640714a8d6b537d2e4e482d31145ae95b603"
+    },
+    {
+      "file": "nlohmann-json-3.12.0.hpp",
+      "url": "https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp",
+      "sha256": "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63"
+    },
+    {
+      "file": "parallel-hashmap-2.0.0.tar.gz",
+      "url": "https://github.com/greg7mdp/parallel-hashmap/archive/refs/tags/v2.0.0.tar.gz",
+      "sha256": "4f462f51a3468166ea4cf87c80e001dc1999093264cf55cbda3492ca39a7730b"
+    },
+    {
+      "file": "range-v3-0.12.0.tar.gz",
+      "url": "https://github.com/ericniebler/range-v3/archive/refs/tags/0.12.0.tar.gz",
+      "sha256": "015adb2300a98edfceaf0725beec3337f542af4915cec4d0b89fa0886f4ba9cb"
+    },
+    {
+      "file": "rust-src-nightly-2026-09-11.tar.xz",
+      "url": "https://static.rust-lang.org/dist/2026-09-11/rust-src-nightly.tar.xz",
+      "sha256": "647a3cd89bb4479f40eb73cc5ee63fe4fb5c8463d1b80f210a252e6510f79151"
+    },
+    {
+      "file": "rust-src-nightly-2026-09-24.tar.xz",
+      "url": "https://static.rust-lang.org/dist/2026-09-24/rust-src-nightly.tar.xz",
+      "sha256": "2dd288734762bb7e541237fd9de6c79e78c86bd0df045257fc4276994f193c80"
+    },
+    {
+      "file": "spdx-MIT.txt",
+      "url": "https://raw.githubusercontent.com/spdx/license-list-data/31ba1a50e5397e00a304dbadc76531740e89ee48/text/MIT.txt",
+      "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5"
+    },
+    {
+      "file": "utfcpp-4.1.1.tar.gz",
+      "url": "https://github.com/nemtrif/utfcpp/archive/refs/tags/v4.1.1.tar.gz",
+      "sha256": "1ca68016f0abc24172998e39ce0d8f8e2b7a26f7579a0ff85d4e1b9a7aea56f8"
+    },
+    {
+      "file": "xxHash-0.8.3.tar.gz",
+      "url": "https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.3.tar.gz",
+      "sha256": "aae608dfe8213dfd05d909a57718ef82f30722c392344583d3f39050c7f29a80"
+    },
+    {
+      "file": "xz-5.8.3.tar.xz",
+      "url": "https://github.com/tukaani-project/xz/releases/download/v5.8.3/xz-5.8.3.tar.xz",
+      "sha256": "fff1ffcf2b0da84d308a14de513a1aa23d4e9aa3464d17e64b9714bfdd0bbfb6"
+    },
+    {
+      "file": "zig-0.16.0.tar.xz",
+      "url": "https://ziglang.org/download/0.16.0/zig-0.16.0.tar.xz",
+      "sha256": "43186959edc87d5c7a1be7b7d2a25efffd22ce5807c7af99067f86f99641bfdf"
+    },
+    {
+      "file": "zstd-1.5.7.tar.gz",
+      "url": "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz",
+      "sha256": "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3"
+    }
+  ]
+}

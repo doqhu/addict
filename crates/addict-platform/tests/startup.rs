@@ -258,6 +258,77 @@ fn a_disable_needs_no_command() {
 }
 
 #[test]
+fn appimage_command_reaches_the_portal_with_exec_escaping() {
+    const TEST: &str = "appimage_command_reaches_the_portal_with_exec_escaping";
+    if std::env::var_os("ADDICT_TEST_IMAGE_CHILD").is_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("addict-image-command-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("extracted")).unwrap();
+        let image = dir.join("outer \"$`\\100%.AppImage");
+        std::fs::write(&image, b"fixture").unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = dir.join("bus.conf");
+        common::write_bus_config(&config, None);
+        common::run_private_bus_with_config(
+            TEST,
+            &config,
+            WAIT,
+            &[
+                ("ADDICT_TEST_IMAGE_CHILD", OsStr::new("1")),
+                ("APPIMAGE", image.as_os_str()),
+                ("APPDIR", dir.join("extracted").as_os_str()),
+            ],
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    let mock = Mock::start(Answer::Success(true));
+    let command = startup::relaunch_command().unwrap();
+    let parent = std::path::PathBuf::from(std::env::var_os("APPIMAGE").unwrap());
+    let expected = format!(
+        "\"{}/outer \\\"\\$\\`\\\\100%%.AppImage\"",
+        parent.parent().unwrap().display()
+    );
+    assert_eq!(command, [expected, "--background".to_owned()]);
+    assert_eq!(
+        startup::request_blocking(APP_ID, true, &command, WAIT),
+        Ok(())
+    );
+    assert_eq!(mock.state.asked.lock().unwrap()[0].command, command);
+}
+
+#[test]
+fn an_invalid_appimage_stops_enable_but_does_not_prevent_disable() {
+    const TEST: &str = "an_invalid_appimage_stops_enable_but_does_not_prevent_disable";
+    if std::env::var_os("ADDICT_TEST_INVALID_IMAGE_CHILD").is_none() {
+        let dir = std::env::temp_dir().join(format!("addict-invalid-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = dir.join("bus.conf");
+        common::write_bus_config(&config, None);
+        common::run_private_bus_with_config(
+            TEST,
+            &config,
+            WAIT,
+            &[
+                ("ADDICT_TEST_INVALID_IMAGE_CHILD", OsStr::new("1")),
+                ("APPIMAGE", OsStr::new("/nonexistent/moved.AppImage")),
+            ],
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    }
+    let mock = Mock::start(Answer::Success(false));
+    assert!(
+        startup::relaunch_command()
+            .unwrap_err()
+            .contains("persistent outer AppImage")
+    );
+    assert!(mock.state.asked.lock().unwrap().is_empty());
+    assert_eq!(startup::request_blocking(APP_ID, false, &[], WAIT), Ok(()));
+    assert!(mock.state.asked.lock().unwrap()[0].command.is_empty());
+}
+
+#[test]
 fn success_without_autostart_refuses_an_enable() {
     if !private("success_without_autostart_refuses_an_enable") {
         return;

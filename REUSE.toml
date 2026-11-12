@@ -68,3 +68,12 @@ path = "crates/addict-dictionary/examples/WNDB_License.txt"
 precedence = "override"
 SPDX-FileCopyrightText = "2006 Princeton University"
 SPDX-License-Identifier = "LicenseRef-WordNet"
+
+# The record of the libraries statically linked into the AppImage's prebuilt
+# tools; data, not third-party text.
+[[annotations]]
+path = "packaging/appimage/static-closures.json"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Ilia Gordeev <ilya.tanat@gmail.com>"
+SPDX-License-Identifier = "MIT"
+SPDX-FileComment = "Generated from the pinned tool sources by packaging/appimage/closures.py."

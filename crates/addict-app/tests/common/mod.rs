@@ -120,13 +120,15 @@ impl Homes {
     }
 
     /// `addict <subcommand>` with no display.
-    fn command(&self, subcommand: &str) -> Command {
+    pub fn command(&self, subcommand: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_addict"));
         command
             .arg(subcommand)
             .env("HOME", &self.home)
             .env("XDG_DATA_HOME", &self.data_home)
             .env("XDG_CONFIG_HOME", &self.config_home)
+            .env_remove("APPIMAGE")
+            .env_remove("APPDIR")
             .env_remove("WAYLAND_DISPLAY")
             .env_remove("DISPLAY");
         command

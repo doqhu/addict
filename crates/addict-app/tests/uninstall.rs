@@ -272,6 +272,26 @@ fn the_portal_is_registered_with_before_it_is_asked() {
     mock.assert_asked_to_disable();
 }
 
+#[test]
+fn uninstall_disables_through_the_portal_even_when_the_image_is_gone() {
+    if !on_private_bus("uninstall_disables_through_the_portal_even_when_the_image_is_gone") {
+        return;
+    }
+    let temp = TempDir::new("uninstall-missing-image");
+    let homes = Homes::inside(temp.path());
+    let mock = Mock::start(&homes.autostart_entry(), Answer::Disable);
+    installed_with_login_entry(&homes, FROM_PORTAL);
+    let mut command = homes.command("uninstall");
+    command
+        .env("APPIMAGE", "/nonexistent/moved.AppImage")
+        .env("APPDIR", "/nonexistent/extraction");
+    let output = common::run_with_timeout(command).unwrap();
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    mock.assert_asked_to_disable();
+    assert!(!homes.applications_entry().exists());
+    assert!(!homes.autostart_entry().exists());
+}
+
 fn assert_refused_keeping_all(homes: &Homes, output: &std::process::Output) {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
