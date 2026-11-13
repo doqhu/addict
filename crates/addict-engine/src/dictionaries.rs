@@ -224,7 +224,7 @@ pub trait Articles: Send + Sync {
     /// What the source says about `word`, read first in the `chosen`
     /// language, with the language that answered. The chosen language's
     /// errors and missing indexes come first. A miss or an answer that is
-    /// [`Answer::metadata_only`] asks the other languages in [`FALLBACK`]
+    /// `Answer::metadata_only` asks the other languages in [`FALLBACK`]
     /// order for one with content; when none has it, the first metadata-only
     /// answer is given, or the chosen miss, with the latest index states.
     fn look_up_first(&self, chosen: Language, word: &str) -> (Language, Looked) {

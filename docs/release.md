@@ -13,7 +13,8 @@ describes; this workflow never touches it.
 
 - **Trigger:** only a tag that matches `v[0-9]+.[0-9]+.[0-9]+`, such as
   `v0.2.0`. `indexes-v3`, `v0.2.0-rc1` or `v1.2` start no run, and no tag
-  starts CI (`ci.yml` runs on branch pushes and pull requests only). A guard
+  starts CI (`ci.yml` runs on pull requests, pushes to `main` and manual runs
+  only). A guard
   job checks the tag again with `scripts/release-ref.sh`, and checks that it
   is `v` followed by the version in `Cargo.toml`.
 - **Checks:** the run calls `ci.yml`, so every CI job runs on the tag's

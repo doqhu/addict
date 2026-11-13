@@ -1,12 +1,21 @@
 name: CI
 
-# Branches only: a tag starts no CI run. The release workflow runs these jobs
-# for a vX.Y.Z tag by calling this file (docs/release.md).
+# One run per commit: pull requests, and main after a merge. A push to another
+# branch starts none, so a PR commit is not tested twice; "Run workflow" tests
+# a branch without a PR. A tag starts no CI run: the release workflow runs
+# these jobs for a vX.Y.Z tag by calling this file (docs/release.md).
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
+  workflow_dispatch:
   workflow_call:
+
+# A new commit on a PR cancels the PR's older run; runs on main and manual
+# runs are never cancelled, so every merge commit gets a full run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read

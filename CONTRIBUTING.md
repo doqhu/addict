@@ -87,7 +87,10 @@ CI on GitHub runs the format and lint checks, the tests, `reuse lint`, a
 secret scan of the whole history, the tests of the release trigger and upload
 script (`scripts/release-tests.sh`), and builds the Flatpak and checks it with
 `flatpak-builder-lint`, but not the build without the test features or the
-GTK guard, so run `scripts/check.sh` yourself.
+GTK guard, so run `scripts/check.sh` yourself. CI runs once for each commit
+of a pull request and for each commit on `main`; a push to another branch
+without a pull request starts no run, but "Run workflow" on the CI workflow's
+Actions page tests any branch.
 
 To lint the Flatpak locally as CI and Flathub do, use the lint build and the
 `flatpak-builder-lint` commands in the header of
@@ -123,6 +126,11 @@ that an artifact works on a target distribution.
 - `crates/addict-dictionary` -- the dictionary index format, its reader and
   the importers of each dictionary source.
 - `crates/addict-deepl` -- the DeepL client and its key file.
+- `crates/addict-engine` -- the logic of the program without its widgets:
+  the texts of the window, the manual path, lookups, online requests,
+  downloads, the cache, the history and the evidence. It must not depend on
+  GTK, GDK, gio or glib; `scripts/check.sh` guards it, so a second frontend
+  can reuse it.
 - `crates/addict-app` -- the `addict` program: the resident process, the
   window and the commands.
 

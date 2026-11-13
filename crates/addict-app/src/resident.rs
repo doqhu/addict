@@ -164,7 +164,7 @@ use crate::{
     capture::{self, Capture, Captured, Failure, Timing},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     download::{self, Downloader},
-    entries, evidence, file_import,
+    entries, evidence,
     first_run::{self, Offer},
     history::History,
     language,
@@ -970,7 +970,7 @@ impl Session {
         let job = work.run(
             download::DOWNLOAD_LIMIT,
             async move {
-                first_run::recovery_manifest(&Downloader::new(), dir)
+                download::recovery_manifest(&Downloader::new(), dir)
                     .await
                     .map_err(|error| error.to_string())
             },
@@ -2780,7 +2780,7 @@ async fn refresh_import(
     let generation = generation
         .await
         .map_err(|_| "The resident is no longer available.".to_owned())?;
-    let indexes = file_import::blocking(move || articles.indexes()).await?;
+    let indexes = download::blocking(move || articles.indexes()).await?;
     let (ready, received) = oneshot::channel();
     sender
         .unbounded_send(Event::Imported(ImportCompletion {
@@ -3417,11 +3417,9 @@ mod tests {
     async fn downloaded_dictionaries_refresh_even_when_cancelled_after_commit_before_refresh() {
         use crate::{
             dictionaries::{Answer, Articles, Dictionaries, State},
-            download::{
-                Downloader,
-                stub::{Route, Stub},
-            },
+            download::Downloader,
             manual,
+            stub::{Route, Stub},
         };
         use addict_dictionary::{
             format::{self, Contents, Headword},

@@ -2,7 +2,7 @@
 //! judges the evidence `addict --evidence` writes and appends the samples the
 //! application cannot take of itself. Not shipped: an example of `addict-app`.
 //!
-//! The evidence tests of `addict-app` include `format.rs`, `metrics.rs` and
+//! The evidence tests of `addict-engine` include `format.rs`, `metrics.rs` and
 //! `environment.rs`, so the rules here are the ones those tests check.
 mod environment;
 mod format;

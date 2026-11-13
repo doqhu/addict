@@ -29,7 +29,7 @@
 //! outcome; [`check_indexes`] asks on the runner where the dictionary indexes
 //! stand. The online requests about the input are
 //! [`translate`](crate::translate)'s. Putting any of it on the screen is
-//! [`resident`](crate::resident)'s.
+//! `resident`'s.
 
 use std::{ops::Range, sync::Arc, time::Duration};
 
@@ -53,7 +53,7 @@ pub(crate) const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
 /// The most characters a selected or copied text may have, as one line, to
 /// become the field's text: the most whose sentence is still sent for
 /// translation, so a copied file or log does not pass.
-pub(crate) const CLIPBOARD_MAX_CHARS: usize = SENTENCE_LIMIT;
+pub const CLIPBOARD_MAX_CHARS: usize = SENTENCE_LIMIT;
 
 /// Why a selected or copied text gives no line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

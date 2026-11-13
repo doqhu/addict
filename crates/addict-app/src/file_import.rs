@@ -3,8 +3,7 @@
 
 use std::{cell::RefCell, future::Future, path::PathBuf, rc::Rc};
 
-use addict_dictionary::import::{self, Imported, Origin};
-use futures_channel::oneshot;
+use addict_dictionary::import::{self, Imported};
 use gtk::{gio, prelude::*};
 
 use crate::{download, settings::label};
@@ -89,7 +88,7 @@ impl Action {
             return;
         };
         self.set(State::Importing);
-        match import_file(path, dir).await {
+        match download::import_file(path, dir).await {
             Ok(done) => match on_imported().await {
                 Ok(()) => self.set(State::Imported(done)),
                 Err(message) => self.set(State::Failed(format!(
@@ -99,33 +98,6 @@ impl Action {
             Err(message) => self.set(State::Failed(message)),
         }
     }
-}
-
-pub(crate) async fn import_file(path: PathBuf, dir: PathBuf) -> Result<Imported, String> {
-    let permit = download::installation_permit().await;
-    blocking(move || {
-        // Keep it on the worker even if the UI task disappears.
-        let _permit = permit;
-        import::import(&path, &dir, Origin::Manual).map_err(|error| error.to_string())
-    })
-    .await?
-}
-
-/// No Tokio runtime is needed on the GTK thread. A panic or failure to
-/// start the worker also ends with a visible, retryable failure.
-pub(crate) async fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, String> {
-    let (send, receive) = oneshot::channel();
-    std::thread::Builder::new()
-        .name("addict-file-import".to_owned())
-        .spawn(move || {
-            let _ = send.send(work());
-        })
-        .map_err(|error| format!("Cannot start dictionary work: {error}"))?;
-    receive
-        .await
-        .map_err(|_| "The dictionary worker stopped before finishing.".to_owned())
 }
 
 fn selected_path(file: gio::File) -> Result<Option<PathBuf>, String> {
@@ -230,6 +202,7 @@ mod tests {
     };
 
     use addict_dictionary::Index;
+    use futures_channel::oneshot;
     use futures_util::{pin_mut, poll};
 
     use super::*;

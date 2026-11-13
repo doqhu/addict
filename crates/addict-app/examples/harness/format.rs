@@ -1,5 +1,6 @@
 //! The evidence format: one JSON line per fact. The application writes it
-//! (`src/evidence.rs`); the harness reads it and appends its own samples.
+//! (`src/evidence.rs` of `addict-engine`); the harness reads it and appends
+//! its own samples.
 //!
 //! The labels are those of the EXP-4 comparison the format comes from: the
 //! product is its GTK4 resident cell, so evidence holds no other backend or

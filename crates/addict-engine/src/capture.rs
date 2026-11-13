@@ -9,7 +9,7 @@
 //! produced a file, whatever the recognition gave, and also when the job is
 //! cancelled, stopped at its deadline or dropped: the guard that deletes it
 //! lives inside the job. What the window does with the text is
-//! [`resident`](crate::resident)'s.
+//! `resident`'s.
 //!
 //! Which Tesseract runs is decided in the job, before each recognition, by
 //! [`tesseract`]: the files `tesseract`, a program path, and `tessdata`, a

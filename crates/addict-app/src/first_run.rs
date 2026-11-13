@@ -24,7 +24,6 @@ use std::{
 };
 
 use addict_dictionary::{
-    Index, import,
     release::{self, Manifest, Published},
     sources,
 };
@@ -209,44 +208,6 @@ pub async fn offered_manifest(
         });
     }
     Ok(Some(manifest))
-}
-
-/// Fetches a fresh manifest for explicit recovery, independent of the
-/// remembered first-run choice, then checks each source off the UI thread.
-pub async fn recovery_manifest(
-    downloader: &Downloader,
-    dir: PathBuf,
-) -> Result<Manifest, DownloadError> {
-    // The manifest keeps its own deadline; the health scan of every
-    // installed index that follows can take longer on a slow disk.
-    let manifest = tokio::time::timeout(crate::download::MANIFEST_LIMIT, downloader.manifest())
-        .await
-        .map_err(|_| DownloadError::Manifest {
-            cause: "it did not come in time".to_owned(),
-        })??;
-    if manifest.indexes.is_empty() {
-        return Err(DownloadError::Manifest {
-            cause: "it lists no index".to_owned(),
-        });
-    }
-    tokio::task::spawn_blocking(move || needed_indexes(manifest, &dir))
-        .await
-        .map_err(|_| DownloadError::Manifest {
-            cause: "the index check stopped".to_owned(),
-        })
-}
-
-/// Retains manifest order and unknown names, whose normal download refusal
-/// names them. Valid local editions are never compared to release editions.
-fn needed_indexes(mut manifest: Manifest, dir: &Path) -> Manifest {
-    manifest.indexes.retain(|published| {
-        release::source_of(&published.name).is_none_or(|source| {
-            Index::open(&import::index_path(dir, source))
-                .and_then(|index| index.validate())
-                .is_err()
-        })
-    });
-    manifest
 }
 
 /// A recovery offer must not claim that every dictionary is absent.
@@ -1247,7 +1208,10 @@ impl Drop for Offer {
 mod tests {
     use std::path::PathBuf;
 
+    use addict_dictionary::Index;
+
     use super::*;
+    use crate::download::recovery_manifest;
 
     /// A directory of one test, removed when the test ends.
     struct TempDir(PathBuf);
@@ -1285,7 +1249,7 @@ mod tests {
     async fn the_offer_needs_the_manifest_and_asks_it_only_when_due() {
         use std::collections::HashMap;
 
-        use crate::download::stub::{Route, Stub};
+        use crate::stub::{Route, Stub};
 
         let manifest_path = format!("/{}/manifest.json", addict_dictionary::release::tag());
         let empty = Stub::start(HashMap::new()).expect("the stub");
@@ -1376,8 +1340,8 @@ mod tests {
         .unwrap()
     }
 
-    fn recovery_stub(indexes: Vec<Published>, asset: &[u8]) -> crate::download::stub::Stub {
-        use crate::download::stub::{Route, Stub};
+    fn recovery_stub(indexes: Vec<Published>, asset: &[u8]) -> crate::stub::Stub {
+        use crate::stub::{Route, Stub};
         let tag = release::tag();
         let manifest = Manifest {
             format: addict_dictionary::format::VERSION,
@@ -1552,7 +1516,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_manifest_failures_leave_installed_files_unchanged_and_can_retry() {
-        use crate::download::stub::{Route, Stub};
+        use crate::stub::{Route, Stub};
         let dir = TempDir::new("recovery-manifests");
         let good = recovery_index("manual");
         fs::write(dir.0.join("oewn.index"), &good).unwrap();
@@ -1947,7 +1911,7 @@ mod tests {
             format::{Contents, Headword, SenseRecord, VERSION, encode},
         };
 
-        use crate::download::stub::{Route, Stub};
+        use crate::stub::{Route, Stub};
 
         fn xz_of(bytes: &[u8]) -> Vec<u8> {
             let mut packed = Vec::new();

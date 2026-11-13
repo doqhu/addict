@@ -919,10 +919,6 @@ pub(crate) mod tests {
         assert_eq!(store.footprint().rows, 2);
         assert_eq!(store.clear(), Ok(()));
         assert_eq!(store.footprint().rows, 0);
-        assert_eq!(
-            crate::settings::cache_text(crate::settings::CacheState::Read(store.footprint())),
-            "The cache is empty."
-        );
         let _ = ready(translator.translate(bank(RIVER)));
         assert_eq!(translator.inner().asked().len(), 3);
     }

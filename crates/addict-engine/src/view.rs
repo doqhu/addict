@@ -20,7 +20,7 @@
 //! [`choice_texts`] and [`online_rows`] are pure, and
 //! so is [`Shown`], the result with the sense chosen in it; they are tested
 //! without a display. This module owns no
-//! widget: [`View`](crate::widgets::View) puts the results into its own.
+//! widget: `View` puts the results into its own.
 
 use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 
@@ -126,7 +126,7 @@ pub fn binding_texts(binding: &Binding) -> Option<BindingTexts<'_>> {
 }
 
 /// What the button of the binding row says.
-pub(crate) const RETRY_LABEL: &str = "Retry";
+pub const RETRY_LABEL: &str = "Retry";
 
 /// Reinstalls only the published indexes that are missing or unreadable.
 const DOWNLOAD_ACTION: &str = "Settings → Download dictionaries";
@@ -188,12 +188,12 @@ fn unreadable_text(file: IndexFile) -> String {
 }
 
 /// What the empty field says.
-pub(crate) const FIELD_PLACEHOLDER: &str = "Type or paste a word, or a sentence to click a word in";
+pub const FIELD_PLACEHOLDER: &str = "Type or paste a word, or a sentence to click a word in";
 
 /// What the button of `language` in the switch beside the field says. No
 /// wildcard arm: a new language does not compile until it is given its
 /// label.
-pub(crate) fn language_label(language: Language) -> &'static str {
+pub fn language_label(language: Language) -> &'static str {
     match language {
         Language::En => "EN",
         Language::Es => "ES",
@@ -202,19 +202,19 @@ pub(crate) fn language_label(language: Language) -> &'static str {
 }
 
 /// The tooltip of the switch of the reading language.
-pub(crate) const LANGUAGE_TOOLTIP: &str = "The language of the text you read";
+pub const LANGUAGE_TOOLTIP: &str = "The language of the text you read";
 
 /// What the button beside the field says: it takes a screen capture and
 /// puts the text recognized in it into the field.
-pub(crate) const CAPTURE_LABEL: &str = "Capture";
+pub const CAPTURE_LABEL: &str = "Capture";
 
 /// The tooltip of the button left of the field that puts the text before
 /// into it, naming its hotkey.
-pub(crate) const BACK_TOOLTIP: &str = "Back (Alt+Left)";
+pub const BACK_TOOLTIP: &str = "Back (Alt+Left)";
 
 /// The tooltip of the button left of the field that puts the text after
 /// into it, naming its hotkey.
-pub(crate) const FORWARD_TOOLTIP: &str = "Forward (Alt+Right)";
+pub const FORWARD_TOOLTIP: &str = "Forward (Alt+Right)";
 
 /// The package of the Tesseract data of `language`. No wildcard arm: a new
 /// language does not compile until it is given its package.
@@ -236,12 +236,12 @@ fn ocr_language(language: Language) -> &'static str {
 }
 
 /// The command that installs Tesseract with the data of `language`.
-pub(crate) fn install_tesseract(language: Language) -> String {
+pub fn install_tesseract(language: Language) -> String {
     format!("sudo dnf install tesseract {}", ocr_package(language))
 }
 
 /// The command that installs the Tesseract data of `language`.
-pub(crate) fn install_language(language: Language) -> String {
+pub fn install_language(language: Language) -> String {
     format!("sudo dnf install {}", ocr_package(language))
 }
 
@@ -306,15 +306,15 @@ pub const NOTHING_SELECTED_TEXT: &str =
 
 /// What the button beside a source line that names a command says: it puts
 /// that command on the clipboard.
-pub(crate) const COPY_LABEL: &str = "Copy";
+pub const COPY_LABEL: &str = "Copy";
 
 /// What that button says once pressed, until the line changes.
-pub(crate) const COPIED_LABEL: &str = "Copied";
+pub const COPIED_LABEL: &str = "Copied";
 
 /// The runnable command `line` names, built by the same functions that
 /// wrote it into the line: the install of Tesseract for a language, then the
 /// install of a language's data. `None` for a line that names none.
-pub(crate) fn command_in(line: &str) -> Option<String> {
+pub fn command_in(line: &str) -> Option<String> {
     let tesseract = Language::ALL.into_iter().map(install_tesseract);
     let data = Language::ALL.into_iter().map(install_language);
     tesseract
@@ -489,7 +489,7 @@ const EXPLANATION_MARK: &str = "Short explanation — the dictionary definition 
      it is not checked against the sentence:";
 
 /// What the button that sends the definition of the chosen sense says.
-pub(crate) const DEFINITION_ACTION: &str = "Translate definition into Russian";
+pub const DEFINITION_ACTION: &str = "Translate definition into Russian";
 
 /// What stands above the online translation of the definition of the chosen
 /// sense.
@@ -535,7 +535,7 @@ const NO_TRANSLATION: &str = "The dictionary has no Russian translation of this 
 const NO_DEFINITIONS: &str = "The dictionary has no English definitions of this word.";
 
 /// What stands above the list of senses.
-pub(crate) const SENSES_LABEL: &str = "English definitions";
+pub const SENSES_LABEL: &str = "English definitions";
 
 /// What stands above the list of senses of an article from the definitions
 /// index of `language`: the kind and the language. No wildcard arm: a new
@@ -917,11 +917,11 @@ impl SynonymTexts<'_> {
     }
 }
 
-pub(crate) const SYNONYM_PREVIEW: usize = 6;
-pub(crate) const SHOW_LESS: &str = "Show less";
+pub const SYNONYM_PREVIEW: usize = 6;
+pub const SHOW_LESS: &str = "Show less";
 
 /// What the toggle says while `hidden` items stand behind it.
-pub(crate) fn show_more(hidden: usize) -> String {
+pub fn show_more(hidden: usize) -> String {
     format!("{hidden} more")
 }
 
@@ -949,9 +949,7 @@ fn meanings_count(count: usize, beside_senses: bool) -> String {
 
 /// The grammatical class of a synonym meaning, from its source's label
 /// only; `None` when the source gives none.
-pub(crate) fn synonym_class(
-    group: &addict_dictionary::index::SynonymGroup,
-) -> Option<&'static str> {
+pub fn synonym_class(group: &addict_dictionary::index::SynonymGroup) -> Option<&'static str> {
     use addict_dictionary::format::GrammaticalClass;
     match group.metadata.as_ref()?.class()? {
         GrammaticalClass::Verb => Some("verb"),
@@ -962,7 +960,7 @@ pub(crate) fn synonym_class(
 }
 
 /// What the source says a synonym meaning is, when it says anything.
-pub(crate) fn synonym_description(group: &addict_dictionary::index::SynonymGroup) -> Option<&str> {
+pub fn synonym_description(group: &addict_dictionary::index::SynonymGroup) -> Option<&str> {
     group
         .metadata
         .as_ref()
@@ -1090,18 +1088,18 @@ pub struct ResultTexts<'a> {
 
 /// How many pronunciations stand beside the headword, before the toggle
 /// that shows the others.
-pub(crate) const PRONUNCIATION_PREVIEW: usize = 1;
+pub const PRONUNCIATION_PREVIEW: usize = 1;
 
 /// The tooltip of the toggle that shows the pronunciations past
 /// [`PRONUNCIATION_PREVIEW`].
-pub(crate) const MORE_PRONUNCIATIONS: &str = "Pronunciations of the word";
+pub const MORE_PRONUNCIATIONS: &str = "Pronunciations of the word";
 
 /// What the play button of a pronunciation says when hovered.
-pub(crate) const PLAY_TOOLTIP: &str = "Play the pronunciation";
+pub const PLAY_TOOLTIP: &str = "Play the pronunciation";
 
 /// The tooltip of a play button whose playback failed. It names no cause:
 /// the media backend's message may be translated.
-pub(crate) const PLAYBACK_FAILED: &str = "Playback failed.";
+pub const PLAYBACK_FAILED: &str = "Playback failed.";
 
 /// One pronunciation of an article: plain texts, never markup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1343,18 +1341,17 @@ const GLOSS_HINT: &str = "Click a gloss to see it in Russian and look the Englis
 
 /// What stands under the chosen gloss when it cannot be translated for want
 /// of a DeepL key.
-pub(crate) const GLOSS_NO_KEY: &str =
-    "The definition is translated online. Add a DeepL key in Settings.";
+pub const GLOSS_NO_KEY: &str = "The definition is translated online. Add a DeepL key in Settings.";
 
 /// What stands before the English word of the chosen gloss.
-pub(crate) const LOOK_UP_ENGLISH: &str = "Look up in English:";
+pub const LOOK_UP_ENGLISH: &str = "Look up in English:";
 
 /// What stands before the lemma of a gloss that names a form of it, when
 /// the analysis of the word says which form.
 const FORM_OF: &str = "Form of";
 
 /// The tag of the glosses that name a form of another word.
-pub(crate) const FORM_TAG: &str = "form";
+pub const FORM_TAG: &str = "form";
 
 /// The English glosses of a word, as the window lays them out, or the line
 /// that there are none.
@@ -1958,7 +1955,7 @@ const ONLINE_SENTENCE_LABEL: &str = "Whole sentence";
 pub(crate) const ONLINE_SOURCE: &str = "Online · DeepL";
 
 /// The dim line under an answer from the offline dictionary alone.
-pub(crate) const OFFLINE_SOURCE: &str = "Offline dictionary";
+pub const OFFLINE_SOURCE: &str = "Offline dictionary";
 
 /// The dim line under an answer that has both.
 pub(crate) const BOTH_SOURCES: &str = "Online · DeepL, offline dictionary";
@@ -1969,16 +1966,16 @@ const ANSWER_LONE_LABEL: &str = "Russian";
 
 /// What stands before the dictionary's translations when the word is
 /// translated in its sentence.
-pub(crate) const WHOLE_WORD_LABEL: &str = "The word as a whole:";
+pub const WHOLE_WORD_LABEL: &str = "The word as a whole:";
 
 /// The note that stands in the card while there is no DeepL key: what is
 /// not done, what a key would give, and the button that adds one.
-pub(crate) const NO_KEY_LINE: &str = "The sentence is not translated offline.";
-pub(crate) const NO_KEY_HINT: &str = "With a DeepL key, the word is translated in its sentence.";
-pub(crate) const ADD_KEY_LABEL: &str = "Add DeepL key…";
+pub const NO_KEY_LINE: &str = "The sentence is not translated offline.";
+pub const NO_KEY_HINT: &str = "With a DeepL key, the word is translated in its sentence.";
+pub const ADD_KEY_LABEL: &str = "Add DeepL key…";
 
 /// The tip under the card of a word looked up without its sentence.
-pub(crate) const LONE_WORD_TIP: &str =
+pub const LONE_WORD_TIP: &str =
     "Select the whole sentence, not only the word, to see how it is translated there.";
 
 /// The line of an online request that still runs.

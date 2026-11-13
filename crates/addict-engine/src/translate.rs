@@ -12,7 +12,7 @@
 //! whether its answer is shown. Which requests are sent, and when, is
 //! [`online`](crate::online)'s; the text of the field and the chosen word are
 //! [`manual`](crate::manual)'s. Putting any of it on the screen is
-//! [`resident`](crate::resident)'s. Nothing is sent for a Russian word
+//! `resident`'s. Nothing is sent for a Russian word
 //! ([`is_sent`]), neither the word nor its sentence: it is read offline only.
 
 use std::{sync::Arc, time::Duration};

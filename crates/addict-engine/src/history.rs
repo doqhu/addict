@@ -8,18 +8,18 @@
 //! texts ahead of the position. Typing records nothing, but Back from a typed
 //! text that is not the one at the position records it first, so Forward
 //! comes back to it. Going Back or Forward records nothing. At most
-//! [`LIMIT`] texts are kept, the oldest dropped first.
+//! `LIMIT` texts are kept, the oldest dropped first.
 //!
 //! This module owns the texts and the position, and nothing of the window:
-//! [`resident`](crate::resident) records and walks the history, and
-//! [`widgets`](crate::widgets) puts the text it gives into the field.
+//! `resident` records and walks the history, and
+//! `widgets` puts the text it gives into the field.
 
 /// How many texts the history keeps.
 pub(crate) const LIMIT: usize = 100;
 
 /// The texts the field held, the oldest first, and the position in them.
 #[derive(Debug, Default)]
-pub(crate) struct History {
+pub struct History {
     entries: Vec<String>,
     /// The index of the text at the position; 0 when there is none.
     at: usize,
@@ -29,7 +29,7 @@ impl History {
     /// Records `text` at the position: the texts ahead of it go, and `text`
     /// is the newest. An empty text, and the text already at the position,
     /// change nothing.
-    pub(crate) fn record(&mut self, text: &str) {
+    pub fn record(&mut self, text: &str) {
         if text.is_empty() || self.current() == Some(text) {
             return;
         }
@@ -47,7 +47,7 @@ impl History {
     /// The text before the position, which becomes the position; `None`
     /// when there is none. The field's `current` text, when it is not the
     /// one at the position, is recorded first.
-    pub(crate) fn back(&mut self, current: &str) -> Option<&str> {
+    pub fn back(&mut self, current: &str) -> Option<&str> {
         if !self.can_back(current) {
             return None;
         }
@@ -58,7 +58,7 @@ impl History {
 
     /// The text after the position, which becomes the position; `None`
     /// when there is none.
-    pub(crate) fn forward(&mut self) -> Option<&str> {
+    pub fn forward(&mut self) -> Option<&str> {
         if !self.can_forward() {
             return None;
         }
@@ -69,7 +69,7 @@ impl History {
     /// Whether Back from the field's `current` text has somewhere to go: a
     /// text before the position, or the one at it when `current` is another
     /// text, which Back records.
-    pub(crate) fn can_back(&self, current: &str) -> bool {
+    pub fn can_back(&self, current: &str) -> bool {
         match self.current() {
             None => false,
             Some(at) => self.at > 0 || (!current.is_empty() && current != at),
@@ -77,7 +77,7 @@ impl History {
     }
 
     /// Whether there is a text after the position.
-    pub(crate) fn can_forward(&self) -> bool {
+    pub fn can_forward(&self) -> bool {
         self.at + 1 < self.entries.len()
     }
 
