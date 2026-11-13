@@ -146,9 +146,15 @@ def inside(image, out, lang):
                 if exe.name == 'addict':
                     resident = int(proc.name); bundle = Path(os.fsdecode(env[b'APPDIR']))
                 elif bundle and exe.is_relative_to(bundle):
+                    # A short-lived child can start exiting between reads: its
+                    # memory goes first, so cmdline and maps then read empty
+                    # while the PID remains. Read cmdline first and keep only
+                    # samples where both are intact, so an exiting child never
+                    # replaces a complete sample.
+                    cmdline = [arg for arg in (proc/'cmdline').read_bytes().decode().split('\0') if arg]
                     maps = (proc/'maps').read_text()
-                    if 'libtesseract.so' in maps and 'libleptonica.so' in maps:
-                        observed[proc.name] = {'exe': str(exe), 'cmdline': (proc/'cmdline').read_bytes().decode().split('\0'), 'maps': maps}
+                    if cmdline and 'libtesseract.so' in maps and 'libleptonica.so' in maps:
+                        observed[proc.name] = {'exe': str(exe), 'cmdline': cmdline, 'maps': maps}
             except (OSError, KeyError): pass
 
     def wait(predicate, seconds=45):
