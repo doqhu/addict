@@ -87,7 +87,10 @@ CI on GitHub runs the format and lint checks, the tests, `reuse lint`, a
 secret scan of the whole history, the tests of the release trigger and upload
 script (`scripts/release-tests.sh`), and builds the Flatpak and checks it with
 `flatpak-builder-lint`, but not the build without the test features or the
-GTK guard, so run `scripts/check.sh` yourself.
+GTK guard, so run `scripts/check.sh` yourself. CI runs once for each commit
+of a pull request and for each commit on `main`; a push to another branch
+without a pull request starts no run, but "Run workflow" on the CI workflow's
+Actions page tests any branch.
 
 To lint the Flatpak locally as CI and Flathub do, use the lint build and the
 `flatpak-builder-lint` commands in the header of
