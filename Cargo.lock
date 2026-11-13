@@ -9,6 +9,7 @@ dependencies = [
  "addict-core",
  "addict-deepl",
  "addict-dictionary",
+ "addict-engine",
  "addict-platform",
  "clap",
  "futures-channel",
@@ -17,8 +18,6 @@ dependencies = [
  "gtk4",
  "libc",
  "lzma-rs",
- "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -58,6 +57,27 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+]
+
+[[package]]
+name = "addict-engine"
+version = "0.2.0"
+dependencies = [
+ "addict-core",
+ "addict-deepl",
+ "addict-dictionary",
+ "addict-platform",
+ "clap",
+ "futures-channel",
+ "futures-util",
+ "libc",
+ "lzma-rs",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]

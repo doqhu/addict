@@ -1,0 +1,45 @@
+[package]
+name = "addict-engine"
+version.workspace = true
+description = "Addict engine: the GTK-free logic behind the window and the commands"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "addict_engine"
+path = "src/lib.rs"
+
+[dependencies]
+addict-core = { path = "../addict-core" }
+addict-deepl = { path = "../addict-deepl" }
+addict-dictionary = { path = "../addict-dictionary" }
+addict-platform = { path = "../addict-platform" }
+clap = { version = "=4.6.7", features = ["derive"] }
+futures-channel = "=0.3.34"
+libc = "=0.2.190"
+# The download of the published indexes, as addict-deepl's: no default
+# features, rustls with the bundled Mozilla roots.
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-webpki-roots"] }
+rusqlite = { version = "=0.41.0", features = ["bundled"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+# `rt` for `spawn_blocking`: the checks and the install of a downloaded
+# index leave the runner's thread.
+tokio = { version = "=1.53.2", features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+# The sample dictionary and translator are for tests only: the product cannot
+# name them.
+addict-core = { path = "../addict-core", features = ["sample"] }
+# The stub of the DeepL server, for the tests only.
+addict-deepl = { path = "../addict-deepl", features = ["stub"] }
+# `poll!` and `pin_mut!` in the download tests.
+futures-util = "=0.3.34"
+# For the acceptance harness, the `harness` example of addict-app, whose
+# format and rules the evidence tests include.
+serde = { version = "=1.0.229", features = ["derive"] }
+# `net` and `io-util` for the static-file stub of the download tests.
+tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "process", "rt", "time"] }
+# The xz assets of the download tests.
+lzma-rs = "=0.3.0"

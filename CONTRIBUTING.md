@@ -123,6 +123,11 @@ that an artifact works on a target distribution.
 - `crates/addict-dictionary` -- the dictionary index format, its reader and
   the importers of each dictionary source.
 - `crates/addict-deepl` -- the DeepL client and its key file.
+- `crates/addict-engine` -- the logic of the program without its widgets:
+  the texts of the window, the manual path, lookups, online requests,
+  downloads, the cache, the history and the evidence. It must not depend on
+  GTK, GDK, gio or glib; `scripts/check.sh` guards it, so a second frontend
+  can reuse it.
 - `crates/addict-app` -- the `addict` program: the resident process, the
   window and the commands.
 

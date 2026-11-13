@@ -14,7 +14,7 @@
 //! and its request is still awaited here.
 //!
 //! Sending the requests is [`translate`](crate::translate)'s and
-//! [`resident`](crate::resident)'s; the texts shown for the state are
+//! `resident`'s; the texts shown for the state are
 //! [`view`](crate::view)'s.
 
 use std::collections::BTreeMap;

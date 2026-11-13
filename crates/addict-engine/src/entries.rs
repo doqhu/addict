@@ -72,13 +72,14 @@ pub fn failure_reason(failure: &StartupFailure) -> String {
     }
 }
 
-/// The app icon by size in pixels, from `icons/make-icons.py`. The binary
-/// carries them so that the install works from wherever it is run.
+/// The app icon by size in pixels, from
+/// `crates/addict-app/icons/make-icons.py`. The binary carries them so that
+/// the install works from wherever it is run.
 const ICONS: [(u32, &[u8]); 4] = [
-    (64, include_bytes!("../icons/64.png")),
-    (128, include_bytes!("../icons/128.png")),
-    (256, include_bytes!("../icons/256.png")),
-    (512, include_bytes!("../icons/512.png")),
+    (64, include_bytes!("../../addict-app/icons/64.png")),
+    (128, include_bytes!("../../addict-app/icons/128.png")),
+    (256, include_bytes!("../../addict-app/icons/256.png")),
+    (512, include_bytes!("../../addict-app/icons/512.png")),
 ];
 
 fn applications_dir() -> Result<PathBuf, String> {

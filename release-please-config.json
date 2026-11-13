@@ -16,7 +16,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name.value == 'addict-app' || @.name.value == 'addict-core' || @.name.value == 'addict-deepl' || @.name.value == 'addict-dictionary' || @.name.value == 'addict-platform')].version"
+          "jsonpath": "$.package[?(@.name.value == 'addict-app' || @.name.value == 'addict-core' || @.name.value == 'addict-deepl' || @.name.value == 'addict-dictionary' || @.name.value == 'addict-engine' || @.name.value == 'addict-platform')].version"
         },
         {
           "type": "generic",

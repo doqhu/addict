@@ -35,15 +35,15 @@ use crate::{
 // what the application writes as the harness reads it.
 #[cfg(test)]
 #[allow(dead_code)] // capture_environment: used by the harness CLI only
-#[path = "../examples/harness/environment.rs"]
+#[path = "../../addict-app/examples/harness/environment.rs"]
 mod environment;
 #[cfg(test)]
 #[allow(dead_code)] // append: used by the harness CLI only
-#[path = "../examples/harness/format.rs"]
+#[path = "../../addict-app/examples/harness/format.rs"]
 mod format;
 #[cfg(test)]
 #[allow(dead_code)] // sample, gpu: used by the harness CLI only
-#[path = "../examples/harness/metrics.rs"]
+#[path = "../../addict-app/examples/harness/metrics.rs"]
 mod metrics;
 
 /// The version of the record format, as the harness checks it.

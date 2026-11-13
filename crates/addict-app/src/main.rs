@@ -238,28 +238,28 @@
 //! widgets of the window are [`widgets`]'s.
 
 mod about;
-mod cache;
-mod capture;
-mod dictionaries;
-mod download;
-mod entries;
-mod evidence;
 mod file_import;
 mod first_run;
 mod gpu;
-mod history;
-mod language;
-mod manual;
-mod online;
 mod presentation;
 mod recording;
 mod resident;
 mod settings;
 mod style;
-mod translate;
-mod view;
 mod widgets;
 mod wrap;
+
+// The static-file server of the engine's download tests, for the tests of
+// the first-run offer and the resident here: test code is not exported.
+#[cfg(test)]
+#[allow(dead_code)] // Redirect, Short, Stall: used by the engine's tests only
+#[path = "../../addict-engine/src/download/stub.rs"]
+mod stub;
+
+use addict_engine::{
+    cache, capture, dictionaries, download, entries, evidence, history, language, manual, online,
+    translate, view,
+};
 
 use std::{
     cell::RefCell,
