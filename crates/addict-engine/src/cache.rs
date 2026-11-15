@@ -650,6 +650,7 @@ pub(crate) mod tests {
             text: "bank".to_owned(),
             context: Some(context.to_owned()),
             source: Source::En,
+            target: Source::Ru,
         }
     }
 
@@ -708,26 +709,31 @@ pub(crate) mod tests {
                 text: "bank".to_owned(),
                 context: None,
                 source: Source::En,
+                target: Source::Ru,
             },
             Request {
                 text: "bank".to_owned(),
                 context: Some(String::new()),
                 source: Source::En,
+                target: Source::Ru,
             },
             Request {
                 text: RIVER.to_owned(),
                 context: None,
                 source: Source::En,
+                target: Source::Ru,
             },
             Request {
                 text: "banco".to_owned(),
                 context: Some("El banco cerró.".to_owned()),
                 source: Source::Es,
+                target: Source::Ru,
             },
             Request {
                 text: "banco".to_owned(),
                 context: Some("El banco cerró.".to_owned()),
                 source: Source::Ca,
+                target: Source::Ru,
             },
         ];
         for request in &requests {
@@ -739,6 +745,23 @@ pub(crate) mod tests {
         assert_eq!(translator.inner().asked(), requests);
         let keys: std::collections::HashSet<_> = requests.iter().map(key_of).collect();
         assert_eq!(keys.len(), requests.len());
+        assert_eq!(translator.store().footprint().rows, requests.len() as u64);
+    }
+
+    #[test]
+    fn the_same_text_to_another_target_is_another_key_and_a_miss() {
+        let temp = TempDir::new("target");
+        let translator = cached(&temp.cache(), Ok("ответ"));
+        let requests = [Source::Ru, Source::En, Source::Es, Source::Ca].map(|target| Request {
+            target,
+            ..bank(RIVER)
+        });
+        let keys: std::collections::HashSet<_> = requests.iter().map(key_of).collect();
+        assert_eq!(keys.len(), requests.len());
+        for request in &requests {
+            let _ = ready(translator.translate(request.clone()));
+        }
+        assert_eq!(translator.inner().asked(), requests);
         assert_eq!(translator.store().footprint().rows, requests.len() as u64);
     }
 
@@ -933,6 +956,7 @@ pub(crate) mod tests {
             text: secret.to_owned(),
             context: None,
             source: Source::En,
+            target: Source::Ru,
         };
         let _ = ready(translator.translate(answer));
         let store = translator.store();

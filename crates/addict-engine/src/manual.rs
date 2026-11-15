@@ -396,7 +396,7 @@ pub fn offline(
     }
     match chosen {
         Language::En => look_up_first(work, articles, word, chosen, on_outcome),
-        Language::Es | Language::Ca => {
+        Language::Es | Language::Ca | Language::Ru => {
             match known.and_then(|indexes| indexes.of_language(chosen)) {
                 Some(State::Open | State::Unreadable) => {
                     look_up_first(work, articles, word, chosen, on_outcome)
@@ -456,7 +456,7 @@ pub fn result_in(outcome: Outcome<Looked>, word: &str, language: Language) -> Op
     }
     match language {
         Language::En => lookup_result(outcome, word),
-        Language::Es | Language::Ca => Some(match lookup_result(outcome, word)? {
+        Language::Es | Language::Ca | Language::Ru => Some(match lookup_result(outcome, word)? {
             Lookup::Grouped { grouped, .. } => Lookup::Grouped { language, grouped },
             Lookup::NotImported { .. } => Lookup::NoDictionary(language),
             other => other,
@@ -504,7 +504,7 @@ pub(crate) mod tests {
     use addict_core::{
         dictionary::{Dictionary, Sample},
         input::{Source, WindowState},
-        translation::Source as Language,
+        translation::{Source as Language, reading_languages},
     };
     use addict_platform::work::{Outcome, Work};
 
@@ -663,6 +663,44 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn russian_as_the_chosen_language_has_no_dictionary_and_asks_nothing() {
+        assert_eq!(Indexes::OPEN.of_language(Language::Ru), None);
+        for known in [None, Some(Indexes::OPEN)] {
+            let started = offline(
+                None,
+                std::sync::Arc::new(Unasked),
+                "bank".to_owned(),
+                Language::Ru,
+                known,
+                |_, _| panic!("a lookup ended"),
+            );
+            assert_eq!(
+                started.err(),
+                Some(Box::new(Lookup::NoDictionary(Language::Ru))),
+                "{known:?}"
+            );
+        }
+        assert!(!checks_again(
+            &Lookup::NoDictionary(Language::Ru),
+            Language::Ru
+        ));
+        // The default lookup in Russian is a dictionary not imported, and
+        // asks no index.
+        struct EnglishOnly;
+        impl Articles for EnglishOnly {
+            fn indexes(&self) -> Indexes {
+                Indexes::OPEN
+            }
+
+            fn look_up(&self, word: &str) -> Looked {
+                panic!("{word} was looked up")
+            }
+        }
+        let looked = EnglishOnly.look_up_in(Language::Ru, "bank");
+        assert!(matches!(looked.answer, Answer::NotImported), "{looked:?}");
+    }
+
     /// A source of articles that answers a lookup in its language, and in
     /// no other, with the same answer.
     struct Speaking(Language, Answer);
@@ -751,7 +789,7 @@ pub(crate) mod tests {
                     answer: Answer::Grouped(banco()),
                     indexes: self.indexes(),
                 },
-                Language::En | Language::Ca => self.look_up(word),
+                Language::En | Language::Ca | Language::Ru => self.look_up(word),
             }
         }
     }
@@ -785,7 +823,7 @@ pub(crate) mod tests {
     #[test]
     fn a_word_the_chosen_language_lacks_is_answered_and_named_in_another() {
         let known = Some(SpanishOnly.indexes());
-        for chosen in Language::ALL {
+        for chosen in reading_languages(Language::Ru) {
             let (answered, outcome) = answered_offline(SpanishOnly, chosen, known, "cerró");
             assert_eq!(answered, Language::Es, "{chosen:?}");
             assert_eq!(
@@ -844,7 +882,7 @@ pub(crate) mod tests {
             Some(with_spanish(State::Missing)),
             Some(with_catalan(State::Unreadable)),
         ];
-        for chosen in Language::ALL {
+        for chosen in reading_languages(Language::Ru) {
             for indexes in known {
                 for word in ["собака", "«Дом»,", "еж"] {
                     let asked = std::sync::Arc::default();
@@ -932,7 +970,7 @@ pub(crate) mod tests {
                 word: "banco".to_owned(),
             },
         ] {
-            for language in Language::ALL {
+            for language in reading_languages(Language::Ru) {
                 assert!(!checks_again(&lookup, language), "{lookup:?}");
             }
         }

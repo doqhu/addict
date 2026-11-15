@@ -9,7 +9,7 @@
 
 mod common;
 
-use addict_core::translation::Source as Language;
+use addict_core::translation::{Source as Language, reading_languages};
 use addict_dictionary::{Index, import::Source, lookup};
 use common::path_from;
 
@@ -18,10 +18,11 @@ use common::path_from;
 fn the_matrix_words_get_their_translations_from_the_real_indexes() {
     let dir = path_from("ADDICT_INDEX_DIR");
     let open = |language| {
-        let path = dir.join(Source::from_russian(language).index_name());
+        let source = Source::from_russian(language).expect("a Russian source");
+        let path = dir.join(source.index_name());
         Index::open(&path).unwrap_or_else(|error| panic!("{error}"))
     };
-    let [english, spanish, catalan] = Language::ALL.map(open);
+    let [english, spanish, catalan] = reading_languages(Language::Ru).map(open);
     let found = |index: &Index, word: &str| lookup::russian(index, word).expect("lookup");
     let texts = |words: &[&str]| -> Option<Vec<String>> {
         Some(words.iter().map(|word| (*word).to_owned()).collect())

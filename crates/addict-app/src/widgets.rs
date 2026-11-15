@@ -35,7 +35,7 @@ use std::{
 use addict_core::{
     input::{Source, WindowState},
     sentence,
-    translation::Source as Language,
+    translation::{Source as Language, reading_languages},
 };
 use gtk::{gdk, gio, glib, prelude::*};
 
@@ -201,7 +201,8 @@ fn meta_row() -> (gtk::Box, gtk::Label, gtk::Label) {
 }
 
 /// The switch of the reading language: one linked toggle button for each
-/// language, in the order of [`Language::ALL`], English pressed. A click
+/// reading language of the window, in the order of
+/// [`reading_languages`] of Russian, English pressed. A click
 /// does not take the focus from the field.
 fn language_switch() -> (gtk::Box, Vec<(Language, gtk::ToggleButton)>) {
     let switch = gtk::Box::builder()
@@ -211,7 +212,7 @@ fn language_switch() -> (gtk::Box, Vec<(Language, gtk::ToggleButton)>) {
         .valign(gtk::Align::Center)
         .build();
     let mut buttons: Vec<(Language, gtk::ToggleButton)> = Vec::new();
-    for language in Language::ALL {
+    for language in reading_languages(Language::Ru) {
         let button = gtk::ToggleButton::builder()
             .label(language_label(language))
             .focus_on_click(false)

@@ -80,16 +80,19 @@ pub fn request(input: &Input, subject: Subject, source: Source) -> Option<Reques
             text: input.word().to_owned(),
             context: Some(sentence?),
             source,
+            target: Source::Ru,
         }),
         Subject::Sentence(_) => Some(Request {
             text: sentence?,
             context: None,
             source,
+            target: Source::Ru,
         }),
         Subject::Lone => sentence.is_none().then(|| Request {
             text: input.word().to_owned(),
             context: None,
             source,
+            target: Source::Ru,
         }),
     }
 }
@@ -180,7 +183,10 @@ pub(crate) mod tests {
 
     use addict_core::{
         dictionary::{Dictionary, Sample},
-        translation::{Canned, Refusal, Request, Source as Language, Translating, Translator},
+        translation::{
+            Canned, Refusal, Request, Source as Language, Translating, Translator,
+            reading_languages,
+        },
     };
     use addict_deepl::{
         DeepL,
@@ -240,6 +246,7 @@ pub(crate) mod tests {
                 text: definition.clone(),
                 context: None,
                 source: Language::En,
+                target: Language::Ru,
             }]
         );
         let (retry, request) = shown.request_definition().expect("retry action");
@@ -251,6 +258,7 @@ pub(crate) mod tests {
                 text: definition,
                 context: None,
                 source: Language::En,
+                target: Language::Ru,
             }]
         );
         assert!(shown.request_definition().is_none());
@@ -325,6 +333,7 @@ pub(crate) mod tests {
             text: "bank".to_owned(),
             context: Some(RIVER.to_owned()),
             source: Language::En,
+            target: Language::Ru,
         }
     }
 
@@ -400,6 +409,7 @@ pub(crate) mod tests {
             text: "bank".to_owned(),
             context: None,
             source: Language::En,
+            target: Language::Ru,
         }
     }
 
@@ -533,6 +543,7 @@ pub(crate) mod tests {
                     text: text.to_owned(),
                     context: None,
                     source,
+                    target: Language::Ru,
                 }]
             );
             let (online, record) =
@@ -605,6 +616,7 @@ pub(crate) mod tests {
             text: RIVER.to_owned(),
             context: None,
             source: Language::En,
+            target: Language::Ru,
         }
     }
 
@@ -613,6 +625,7 @@ pub(crate) mod tests {
             text: "river".to_owned(),
             context: Some(RIVER.to_owned()),
             source: Language::En,
+            target: Language::Ru,
         }
     }
 
@@ -621,6 +634,7 @@ pub(crate) mod tests {
             text: word.to_owned(),
             context: None,
             source: Language::En,
+            target: Language::Ru,
         }
     }
 
@@ -803,7 +817,7 @@ pub(crate) mod tests {
 
     #[test]
     fn nothing_is_sent_for_a_russian_word_nor_for_its_sentence() {
-        for language in Language::ALL {
+        for language in reading_languages(Language::Ru) {
             // Alone, by Enter or by a paste.
             let mut desk = Desk::with_text(Ok("x"), "собака");
             desk.language = language;
@@ -868,11 +882,13 @@ pub(crate) mod tests {
                     text: "banco".to_owned(),
                     context: Some(BANCO_SENTENCE.to_owned()),
                     source: Language::Es,
+                    target: Language::Ru,
                 },
                 Request {
                     text: BANCO_SENTENCE.to_owned(),
                     context: None,
                     source: Language::Es,
+                    target: Language::Ru,
                 },
             ]
         );
@@ -893,6 +909,7 @@ pub(crate) mod tests {
                 text: text.to_owned(),
                 context: None,
                 source: Language::Ca,
+                target: Language::Ru,
             }
         );
         assert_eq!(desk.asked()[0].text, "col·lecció");
@@ -917,11 +934,13 @@ pub(crate) mod tests {
                     text: "banco".to_owned(),
                     context: Some(BANCO_SENTENCE.to_owned()),
                     source: Language::Es,
+                    target: Language::Ru,
                 },
                 Request {
                     text: BANCO_SENTENCE.to_owned(),
                     context: None,
                     source: Language::Es,
+                    target: Language::Ru,
                 },
             ]
         );
@@ -941,11 +960,13 @@ pub(crate) mod tests {
                     text: "banco".to_owned(),
                     context: None,
                     source: Language::Es,
+                    target: Language::Ru,
                 },
                 Request {
                     text: "banco".to_owned(),
                     context: None,
                     source: Language::Ca,
+                    target: Language::Ru,
                 },
             ]
         );
@@ -1030,11 +1051,13 @@ pub(crate) mod tests {
                     text: "iterations".to_owned(),
                     context: Some(sentence.to_owned()),
                     source: Language::En,
+                    target: Language::Ru,
                 },
                 Request {
                     text: sentence.to_owned(),
                     context: None,
                     source: Language::En,
+                    target: Language::Ru,
                 },
             ]
         );
@@ -1054,11 +1077,13 @@ pub(crate) mod tests {
                     text: "pitfall".to_owned(),
                     context: Some(other.to_owned()),
                     source: Language::En,
+                    target: Language::Ru,
                 },
                 Request {
                     text: other.to_owned(),
                     context: None,
                     source: Language::En,
+                    target: Language::Ru,
                 },
             ]
         );
@@ -1125,6 +1150,7 @@ pub(crate) mod tests {
                 text: "bank".to_owned(),
                 context: Some(text.clone()),
                 source: Language::En,
+                target: Language::Ru,
             }]
         );
         assert_eq!(desk.shown().sentence, Some(&Whole::TooLong));
@@ -1136,6 +1162,7 @@ pub(crate) mod tests {
                 text: "river".to_owned(),
                 context: Some(text),
                 source: Language::En,
+                target: Language::Ru,
             }
         );
     }
@@ -1152,6 +1179,7 @@ pub(crate) mod tests {
                 text,
                 context: None,
                 source: Language::En,
+                target: Language::Ru,
             }
         );
     }
@@ -1179,6 +1207,7 @@ pub(crate) mod tests {
                     text: "bank".to_owned(),
                     context: Some(edited.to_owned()),
                     source: Language::En,
+                    target: Language::Ru,
                 },
                 lone_request(edited),
             ]
@@ -1563,7 +1592,7 @@ pub(crate) mod tests {
         );
         // No language answered: the chosen one.
         for subject in [Subject::Word(CERRO), Subject::Lone, Subject::Sentence(0)] {
-            for chosen in Language::ALL {
+            for chosen in reading_languages(Language::Ru) {
                 assert_eq!(source_of(subject, chosen, None), chosen);
                 assert_eq!(source_of(subject, chosen, Some(chosen)), chosen);
             }

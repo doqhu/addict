@@ -4175,7 +4175,7 @@ mod tests {
 
     #[test]
     fn a_line_that_is_an_offered_command_is_not_a_text() {
-        for language in Language::ALL {
+        for language in addict_core::translation::reading_languages(Language::Ru) {
             assert!(is_offered_command(&install_tesseract(language)));
             assert!(is_offered_command(&install_language(language)));
         }

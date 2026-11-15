@@ -159,6 +159,7 @@ pub fn ocr_language(language: Language) -> &'static str {
         Language::En => "eng",
         Language::Es => "spa",
         Language::Ca => "cat",
+        Language::Ru => "rus",
     }
 }
 
@@ -536,7 +537,10 @@ pub(crate) mod tests {
 
     #[test]
     fn every_language_is_recognized_with_its_own_data() {
-        assert_eq!(Language::ALL.map(ocr_language), ["eng", "spa", "cat"]);
+        assert_eq!(
+            Language::ALL.map(ocr_language),
+            ["eng", "spa", "cat", "rus"]
+        );
     }
 
     /// Whether the Tesseract of the rule lists the data `language` as

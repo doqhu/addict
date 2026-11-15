@@ -110,7 +110,7 @@ impl Indexes {
         match language {
             Language::Es => Some(self.spanish),
             Language::Ca => Some(self.catalan),
-            Language::En => None,
+            Language::En | Language::Ru => None,
         }
     }
 
@@ -201,7 +201,7 @@ pub trait Articles: Send + Sync {
     fn look_up_in(&self, language: Language, word: &str) -> Looked {
         match language {
             Language::En => self.look_up(word),
-            Language::Es | Language::Ca => Looked {
+            Language::Es | Language::Ca | Language::Ru => Looked {
                 answer: Answer::NotImported,
                 indexes: self.indexes(),
             },
@@ -479,8 +479,10 @@ impl Dictionaries {
     fn look_up_russian_in(&self, into: Language, word: &str) -> Looked {
         let mut opened = self.open.lock().unwrap_or_else(PoisonError::into_inner);
         let indexes = self.open_missing(&mut opened);
-        let source = Source::from_russian(into);
         let looked = |answer| Looked { answer, indexes };
+        let Some(source) = Source::from_russian(into) else {
+            return looked(Answer::NotImported);
+        };
         let open = opened.russian.iter().any(|(kept, _)| *kept == source);
         let mut index = None;
         match self.open(source, open, |opened| index = Some(opened)) {
@@ -527,6 +529,10 @@ impl Articles for Dictionaries {
         match language {
             Language::En => self.look_up(word),
             Language::Es | Language::Ca => self.look_up_language(language, word),
+            Language::Ru => Looked {
+                answer: Answer::NotImported,
+                indexes: self.indexes(),
+            },
         }
     }
 
@@ -590,7 +596,7 @@ pub mod tests {
 
     use addict_core::{
         dictionary::{Article, Dictionary, Sample, Sense},
-        translation::Source as Language,
+        translation::{Source as Language, reading_languages},
     };
     use addict_dictionary::{
         format::{Contents, ExceptionForm, Headword, SenseRecord, encode},
@@ -1748,7 +1754,7 @@ pub mod tests {
             dir.write(source, &metadata_only_contents(code, "bank"));
         }
         let dictionaries = dir.dictionaries();
-        for chosen in Language::ALL {
+        for chosen in reading_languages(Language::Ru) {
             let (language, looked) = dictionaries.look_up_first(chosen, "bank");
             assert_eq!(language, chosen);
             assert_eq!(
@@ -1892,7 +1898,7 @@ pub mod tests {
     fn a_word_no_language_has_is_the_chosen_language_s_miss() {
         let dir = three_languages("nobody", true);
         let dictionaries = dir.dictionaries();
-        for chosen in Language::ALL {
+        for chosen in reading_languages(Language::Ru) {
             let (language, looked) = dictionaries.look_up_first(chosen, "zzz");
             assert_eq!(language, chosen);
             assert_eq!(looked.answer, Answer::NoEntry);

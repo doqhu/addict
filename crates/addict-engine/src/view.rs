@@ -27,7 +27,7 @@ use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 use addict_core::{
     dictionary::{Article, LexicalEntry, PartOfSpeech, Pos, Pronunciation, Sense},
     input::{Source, WindowState},
-    translation::{Refusal, Request, Source as Language},
+    translation::{Refusal, Request, Source as Language, reading_languages},
 };
 
 use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
@@ -198,6 +198,7 @@ pub fn language_label(language: Language) -> &'static str {
         Language::En => "EN",
         Language::Es => "ES",
         Language::Ca => "CA",
+        Language::Ru => "RU",
     }
 }
 
@@ -223,6 +224,7 @@ pub(crate) fn ocr_package(language: Language) -> &'static str {
         Language::En => "tesseract-langpack-eng",
         Language::Es => "tesseract-langpack-spa",
         Language::Ca => "tesseract-langpack-cat",
+        Language::Ru => "tesseract-langpack-rus",
     }
 }
 
@@ -232,6 +234,7 @@ fn ocr_language(language: Language) -> &'static str {
         Language::En => "English",
         Language::Es => "Spanish",
         Language::Ca => "Catalan",
+        Language::Ru => "Russian",
     }
 }
 
@@ -315,8 +318,12 @@ pub const COPIED_LABEL: &str = "Copied";
 /// wrote it into the line: the install of Tesseract for a language, then the
 /// install of a language's data. `None` for a line that names none.
 pub fn command_in(line: &str) -> Option<String> {
-    let tesseract = Language::ALL.into_iter().map(install_tesseract);
-    let data = Language::ALL.into_iter().map(install_language);
+    let tesseract = reading_languages(Language::Ru)
+        .into_iter()
+        .map(install_tesseract);
+    let data = reading_languages(Language::Ru)
+        .into_iter()
+        .map(install_language);
     tesseract
         .chain(data)
         .find(|command| line.contains(command.as_str()))
@@ -445,6 +452,7 @@ fn dictionary_language(language: Language) -> &'static str {
         Language::En => "English",
         Language::Es => "Spanish",
         Language::Ca => "Catalan",
+        Language::Ru => "Russian",
     }
 }
 
@@ -513,6 +521,7 @@ fn from_russian_label(language: Language) -> &'static str {
         Language::En => "English, for the word as a whole:",
         Language::Es => "Spanish, for the word as a whole:",
         Language::Ca => "Catalan, for the word as a whole:",
+        Language::Ru => "Russian, for the word as a whole:",
     }
 }
 
@@ -525,6 +534,7 @@ fn missing_from_russian(language: Language) -> &'static str {
         Language::En => "No Russian-English dictionary is imported.",
         Language::Es => "No Russian-Spanish dictionary is imported.",
         Language::Ca => "No Russian-Catalan dictionary is imported.",
+        Language::Ru => "There is no offline dictionary for Russian.",
     }
 }
 
@@ -545,6 +555,7 @@ fn definitions_label(language: Language) -> &'static str {
         Language::En => SENSES_LABEL,
         Language::Es => "Spanish definitions",
         Language::Ca => "Catalan definitions",
+        Language::Ru => "Russian definitions",
     }
 }
 
@@ -555,6 +566,7 @@ fn no_definitions(language: Language) -> &'static str {
         Language::En => NO_DEFINITIONS,
         Language::Es => "The dictionary has no Spanish definitions of this word.",
         Language::Ca => "The dictionary has no Catalan definitions of this word.",
+        Language::Ru => "The dictionary has no Russian definitions of this word.",
     }
 }
 
@@ -565,6 +577,7 @@ fn missing_russian(language: Language) -> &'static str {
         Language::En => "No English-Russian dictionary is imported.",
         Language::Es => "No Spanish-Russian dictionary is imported.",
         Language::Ca => "No Catalan-Russian dictionary is imported.",
+        Language::Ru => "There is no offline dictionary for Russian.",
     }
 }
 
@@ -575,6 +588,7 @@ fn missing_definitions(language: Language) -> &'static str {
         Language::En => "No dictionary of English definitions is imported.",
         Language::Es => "No dictionary of Spanish definitions is imported.",
         Language::Ca => "No dictionary of Catalan definitions is imported.",
+        Language::Ru => "No dictionary of Russian definitions is imported.",
     }
 }
 
@@ -585,6 +599,7 @@ fn word_synonyms_label(language: Language) -> &'static str {
         Language::En => "English synonyms of the word",
         Language::Es => "Spanish synonyms of the word",
         Language::Ca => "Catalan synonyms of the word",
+        Language::Ru => "Russian synonyms of the word",
     }
 }
 
@@ -596,6 +611,7 @@ fn more_synonyms_label(language: Language) -> &'static str {
         Language::En => "More English synonyms",
         Language::Es => "More Spanish synonyms",
         Language::Ca => "More Catalan synonyms",
+        Language::Ru => "More Russian synonyms",
     }
 }
 
@@ -606,6 +622,7 @@ fn missing_synonyms(language: Language) -> &'static str {
         Language::En => "No dictionary of English synonyms is imported.",
         Language::Es => "No dictionary of Spanish synonyms is imported.",
         Language::Ca => "No dictionary of Catalan synonyms is imported.",
+        Language::Ru => "No dictionary of Russian synonyms is imported.",
     }
 }
 
@@ -801,9 +818,9 @@ fn person_text(language: Language, person: Person, number: Number) -> &'static s
             (Language::Es, Number::Plural) => "ustedes",
             (Language::Ca, Number::Singular) => "vostè",
             (Language::Ca, Number::Plural) => "vostès",
-            // English has no analyses: the words of the tags.
-            (Language::En, Number::Singular) => "formal sg",
-            (Language::En, Number::Plural) => "formal pl",
+            // English and Russian have no analyses: the words of the tags.
+            (Language::En | Language::Ru, Number::Singular) => "formal sg",
+            (Language::En | Language::Ru, Number::Plural) => "formal pl",
         },
     }
 }
@@ -843,6 +860,7 @@ fn missing_english(language: Language) -> &'static str {
         Language::En => "No dictionary of English glosses is imported.",
         Language::Es => "No Spanish-English dictionary is imported.",
         Language::Ca => "No Catalan-English dictionary is imported.",
+        Language::Ru => "No Russian-English dictionary is imported.",
     }
 }
 
@@ -2374,6 +2392,7 @@ impl Shown {
             text: text.to_owned(),
             context: None,
             source,
+            target: Language::Ru,
         };
         self.next_definition += 1;
         let number = self.next_definition;
@@ -2440,7 +2459,7 @@ mod tests {
         dictionary::{Article, Dictionary, Sample, Sense},
         input::{Source, WindowState},
         sentence::words,
-        translation::{Refusal, Request, Source as Language},
+        translation::{Refusal, Request, Source as Language, reading_languages},
     };
 
     use super::{
@@ -2976,7 +2995,7 @@ mod tests {
 
     #[test]
     fn the_install_commands_stand_only_in_their_lines() {
-        for language in Language::ALL {
+        for language in reading_languages(Language::Ru) {
             for failure in every_failure() {
                 let text = failure_text(&failure, language);
                 assert_eq!(
@@ -3014,7 +3033,7 @@ mod tests {
                 failure,
                 Failure::Ocr(OcrFailure::TesseractMissing | OcrFailure::LanguageMissing)
             ) {
-                for language in Language::ALL {
+                for language in reading_languages(Language::Ru) {
                     assert_eq!(
                         failure_text(&failure, language),
                         failure_text(&failure, Language::En)
@@ -3026,7 +3045,7 @@ mod tests {
 
     #[test]
     fn a_line_naming_an_install_gives_exactly_that_command() {
-        for language in Language::ALL {
+        for language in reading_languages(Language::Ru) {
             for failure in every_failure() {
                 let text = failure_text(&failure, language);
                 let expected = match failure {
@@ -4844,6 +4863,7 @@ mod tests {
                     text: "Mueble alargado para sentarse.".to_owned(),
                     context: None,
                     source: language,
+                    target: Language::Ru,
                 }
             );
             assert_eq!(shown.definition_action(), (true, false));
@@ -4932,6 +4952,7 @@ mod tests {
                     text: "bench".to_owned(),
                     context: None,
                     source: Language::En,
+                    target: Language::Ru,
                 }
             );
             assert!(shown.answer_definition(number, translated("скамья")));

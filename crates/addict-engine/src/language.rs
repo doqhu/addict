@@ -6,8 +6,9 @@
 //! runner each time the switch of the window changes; never on the UI thread
 //! nor on the way to showing the window. A file that is missing, cannot be
 //! read or holds anything but one known code is English, and nothing is said
-//! about it. A write that fails is written to stderr only: the choice holds
-//! until the application ends.
+//! about it. Russian is not a reading language of the window yet, so its
+//! code is read as English too. A write that fails is written to stderr
+//! only: the choice holds until the application ends.
 
 use std::{
     fs::{self, File},
@@ -16,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-use addict_core::translation::Source;
+use addict_core::translation::{Source, reading_languages};
 
 /// The name of the file inside the configuration directory.
 const LANGUAGE_FILE: &str = "language";
@@ -34,11 +35,13 @@ pub fn path() -> Option<PathBuf> {
 }
 
 /// The language the file at `path` holds; English for no path, a missing or
-/// unreadable file and any content but one known code, white space around it
-/// aside. This reads the file, so it runs on the runner.
+/// unreadable file and any content but the code of one reading language of
+/// the window, white space around it aside. This reads the file, so it runs
+/// on the runner.
 pub fn read(path: Option<&Path>) -> Source {
     path.and_then(|path| read_code(path).ok())
         .and_then(|content| Source::of_code(content.trim()))
+        .filter(|source| reading_languages(Source::Ru).contains(source))
         .unwrap_or_default()
 }
 
@@ -69,7 +72,7 @@ pub fn write(path: Option<&Path>, source: Source) -> io::Result<()> {
 mod tests {
     use std::path::PathBuf;
 
-    use addict_core::translation::Source;
+    use addict_core::translation::{Source, reading_languages};
 
     use super::{read, write};
 
@@ -100,7 +103,7 @@ mod tests {
     fn a_written_language_is_read_back() {
         let dir = TempDir::new("round");
         let file = dir.file();
-        for source in Source::ALL {
+        for source in reading_languages(Source::Ru) {
             write(Some(&file), source).expect("written");
             assert_eq!(
                 std::fs::read_to_string(&file).expect("the file"),
@@ -118,7 +121,15 @@ mod tests {
         assert_eq!(read(None), Source::En);
         assert_eq!(read(Some(&file)), Source::En);
         std::fs::create_dir_all(file.parent().expect("parent")).expect("dir");
-        for content in ["fr\n", "", "ES\n", "es ca\n", "en-GB", "\u{0}\u{ff}"] {
+        for content in [
+            "fr\n",
+            "",
+            "ES\n",
+            "es ca\n",
+            "en-GB",
+            "\u{0}\u{ff}",
+            "ru\n",
+        ] {
             std::fs::write(&file, content).expect("write");
             assert_eq!(read(Some(&file)), Source::En, "{content:?}");
         }
