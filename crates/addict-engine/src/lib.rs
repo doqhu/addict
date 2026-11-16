@@ -9,6 +9,7 @@ pub mod evidence;
 pub mod history;
 pub mod language;
 pub mod manual;
+pub mod my_language;
 pub mod online;
 pub mod translate;
 pub mod view;

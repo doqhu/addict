@@ -169,6 +169,7 @@ use crate::{
     history::History,
     language,
     manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
+    my_language,
     online::{self, Kept, Subject},
     recording::Recording,
     settings::{self, CacheState, KeyState, Settings, StartupEnd, StartupShown},
@@ -268,6 +269,11 @@ enum Event {
     LanguageRead(Language),
     /// The user pressed the button of this language in the switch.
     LanguageChosen(Language),
+    /// The my-language file, read on the runner after the start, holds this
+    /// language.
+    MyLanguageRead(Language),
+    /// The user chose this language in the My language row of Settings.
+    MyLanguageChosen(Language),
     /// The check at the start says where the dictionary indexes stand.
     Indexes {
         generation: u64,
@@ -541,6 +547,16 @@ struct Session {
     language_chosen: bool,
     /// The read or the write of the language file on the runner.
     language_job: Option<Job>,
+    /// The language the online translations are made into.
+    my_language: Language,
+    /// Where my language is kept across restarts; `None` when the
+    /// environment names no configuration directory.
+    my_language_file: Option<std::path::PathBuf>,
+    /// Whether the user chose my language in this session: the read of the
+    /// file, should it come later, changes nothing then.
+    my_language_chosen: bool,
+    /// The read or the write of the my-language file on the runner.
+    my_language_job: Option<Job>,
     /// Where the first-run offer to download a dictionary stands.
     first_run: FirstRun,
     download_run: u64,
@@ -803,6 +819,14 @@ impl Session {
                 }
             }
             Event::LanguageChosen(language) => self.language_chosen(language),
+            Event::MyLanguageRead(language) => {
+                self.my_language_job = None;
+                if !self.my_language_chosen {
+                    self.settings.render_my_language(language);
+                    self.apply_my_language(language);
+                }
+            }
+            Event::MyLanguageChosen(language) => self.my_language_chosen(language),
             Event::Indexes {
                 generation,
                 indexes,
@@ -1846,7 +1870,7 @@ impl Session {
         let request = self
             .manual
             .input()
-            .and_then(|input| translate::request(input, subject, source));
+            .and_then(|input| translate::request(input, subject, source, self.my_language));
         let started = self.send_online(request, subject.into(), move |outcome, elapsed| {
             Event::Translated {
                 text,
@@ -2111,6 +2135,33 @@ impl Session {
             return;
         }
         self.language = language;
+        self.ask_again();
+    }
+
+    /// The user chose `language` in Settings: my language from now on, kept
+    /// in the my-language file by a write on the runner, and what the window
+    /// shows of the current word is asked anew into it.
+    fn my_language_chosen(&mut self, language: Language) {
+        self.my_language_chosen = true;
+        // Saved even when it equals the one in use: the file may still hold
+        // another, its read not having come yet.
+        self.apply_my_language(language);
+        self.save_my_language();
+    }
+
+    /// Makes `language` the language of the online translations and asks the
+    /// shown word again into it.
+    fn apply_my_language(&mut self, language: Language) {
+        if language == self.my_language {
+            return;
+        }
+        self.my_language = language;
+        self.ask_again();
+    }
+
+    /// Redoes the offline result of the shown word and forgets and asks again
+    /// its online texts, after the reading language or my language changed.
+    fn ask_again(&mut self) {
         // The field holds a newer text, whose own event comes next and is
         // handled in the new language.
         if self.field_is_newer() {
@@ -2165,6 +2216,33 @@ impl Session {
         });
         if self.language_job.is_none() {
             eprintln!("addict: the reading language was not kept: no runner");
+        }
+    }
+
+    /// Writes my language to its file on the runner. A write that fails is
+    /// written to stderr and nothing else: the choice holds until the
+    /// application ends.
+    fn save_my_language(&mut self) {
+        let path = self.my_language_file.clone();
+        let language = self.my_language;
+        self.my_language_job = self.work.upgrade().map(|work| {
+            work.run(
+                language::FILE_LIMIT,
+                async move { my_language::write(path.as_deref(), language) },
+                |outcome| match outcome {
+                    // Replaced by a newer choice, which is written instead.
+                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
+                    Outcome::Finished(Err(e)) => {
+                        eprintln!("addict: my language was not kept: {e}");
+                    }
+                    Outcome::TimedOut | Outcome::Panicked => {
+                        eprintln!("addict: my language was not kept");
+                    }
+                },
+            )
+        });
+        if self.my_language_job.is_none() {
+            eprintln!("addict: my language was not kept: no runner");
         }
     }
 
@@ -2743,6 +2821,7 @@ fn start_settings(
     let clear = sender.clone();
     let startup = sender.clone();
     let imported = sender.clone();
+    let my_language = sender.clone();
     let download = sender.clone();
     Settings::new(
         window,
@@ -2758,6 +2837,9 @@ fn start_settings(
         },
         move |enable| {
             let _ = startup.unbounded_send(Event::ToggleStartup(enable));
+        },
+        move |chosen| {
+            let _ = my_language.unbounded_send(Event::MyLanguageChosen(chosen));
         },
         move || refresh_import(articles.clone(), imported.clone()),
         move || {
@@ -2895,6 +2977,28 @@ fn start_language(
     Some(job)
 }
 
+/// Starts the one read of the my-language file at `path` on `work`; the
+/// language it holds, Russian for anything else, comes to `sender` as an
+/// event. Without a runner nothing is read, and Russian stays.
+fn start_my_language(
+    work: Option<&Work>,
+    path: Option<std::path::PathBuf>,
+    sender: &UnboundedSender<Event>,
+) -> Option<Job> {
+    let read = sender.clone();
+    let job = work?.run(
+        language::FILE_LIMIT,
+        async move { my_language::read(path.as_deref()) },
+        move |outcome| {
+            if let Outcome::Finished(language) = outcome {
+                // On the worker: the UI thread wakes for the event.
+                let _ = read.unbounded_send(Event::MyLanguageRead(language));
+            }
+        },
+    );
+    Some(job)
+}
+
 /// Starts the decision of the first-run offer on `work`, for the `indexes`
 /// of the first check: the choice file is read and, when the offer is due,
 /// the manifest is fetched and comes to `sender` as an event. When the
@@ -2991,6 +3095,8 @@ fn start(
     // path is made here; the file is the runner's.
     let language_file = language::path();
     let language_job = start_language(work.as_deref(), language_file.clone(), &sender);
+    let my_language_file = my_language::path();
+    let my_language_job = start_my_language(work.as_deref(), my_language_file.clone(), &sender);
     let (translator, key_file, cache) = online_translator();
     let settings = start_settings(&window, key_file.as_deref(), articles.clone(), &sender);
     let about = About::new(&window);
@@ -3033,6 +3139,10 @@ fn start(
         language_file,
         language_chosen: false,
         language_job,
+        my_language: Language::Ru,
+        my_language_file,
+        my_language_chosen: false,
+        my_language_job,
         first_run: FirstRun::Unasked,
         download_run: 0,
         first_run_choice: None,
@@ -3605,6 +3715,10 @@ mod tests {
             language_file: None,
             language_chosen: false,
             language_job: None,
+            my_language: Language::Ru,
+            my_language_file: None,
+            my_language_chosen: false,
+            my_language_job: None,
             first_run: FirstRun::Done,
             download_run: 0,
             first_run_choice: None,

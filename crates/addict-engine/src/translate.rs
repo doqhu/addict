@@ -73,26 +73,26 @@ pub fn is_sent(input: &Input, subject: Subject) -> bool {
 /// context. For a lone word: the word, without context. `None` when the
 /// input is not of that kind: a lone word has no sentence, and a word of a
 /// sentence is not sent without it.
-pub fn request(input: &Input, subject: Subject, source: Source) -> Option<Request> {
+pub fn request(input: &Input, subject: Subject, source: Source, target: Source) -> Option<Request> {
     let sentence = input.sentence().map(str::to_owned);
     match subject {
         Subject::Word(_) => Some(Request {
             text: input.word().to_owned(),
             context: Some(sentence?),
             source,
-            target: Source::Ru,
+            target,
         }),
         Subject::Sentence(_) => Some(Request {
             text: sentence?,
             context: None,
             source,
-            target: Source::Ru,
+            target,
         }),
         Subject::Lone => sentence.is_none().then(|| Request {
             text: input.word().to_owned(),
             context: None,
             source,
-            target: Source::Ru,
+            target,
         }),
     }
 }
@@ -344,6 +344,7 @@ pub(crate) mod tests {
             manual.input().expect("input"),
             Subject::Word(chosen),
             Language::En,
+            Language::Ru,
         )
         .expect("a sentence")
     }
@@ -638,6 +639,19 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn the_target_reaches_the_request() {
+        let manual = bank_of_the_river();
+        let input = manual.input().expect("input");
+        let sent =
+            request(input, Subject::Word(BANK), Language::En, Language::En).expect("a request");
+        assert_eq!(sent.target, Language::En);
+        assert_eq!(addict_deepl::client::sent(&sent).target_lang, "EN-US");
+        let sentence =
+            request(input, Subject::Sentence(0), Language::En, Language::Es).expect("a request");
+        assert_eq!(sentence.target, Language::Es);
+    }
+
     /// The indices of `bank` and `river` in [`RIVER`].
     pub(crate) const BANK: usize = 4;
     pub(crate) const RIVER_WORD: usize = 7;
@@ -657,26 +671,35 @@ pub(crate) mod tests {
         let manual = bank_of_the_river();
         let input = manual.input().expect("input");
         assert_eq!(
-            request(input, Subject::Word(BANK), Language::En),
+            request(input, Subject::Word(BANK), Language::En, Language::Ru),
             Some(bank_request())
         );
         assert_eq!(
-            request(input, Subject::Sentence(0), Language::En),
+            request(input, Subject::Sentence(0), Language::En, Language::Ru),
             Some(sentence_request())
         );
         // A word of a sentence is not sent without it.
-        assert_eq!(request(input, Subject::Lone, Language::En), None);
+        assert_eq!(
+            request(input, Subject::Lone, Language::En, Language::Ru),
+            None
+        );
 
         let mut manual = Manual::default();
         lone(&mut manual, " Bank. ");
         let input = manual.input().expect("input");
         assert_eq!(
-            request(input, Subject::Lone, Language::En),
+            request(input, Subject::Lone, Language::En, Language::Ru),
             Some(lone_request("Bank"))
         );
         // A lone word has no sentence to send, as text or as context.
-        assert_eq!(request(input, Subject::Word(0), Language::En), None);
-        assert_eq!(request(input, Subject::Sentence(0), Language::En), None);
+        assert_eq!(
+            request(input, Subject::Word(0), Language::En, Language::Ru),
+            None
+        );
+        assert_eq!(
+            request(input, Subject::Sentence(0), Language::En, Language::Ru),
+            None
+        );
     }
 
     /// The manual path as the resident drives it, without a window: an edit
@@ -755,7 +778,7 @@ pub(crate) mod tests {
             let asked = self
                 .manual
                 .input()
-                .and_then(|input| request(input, subject, self.language));
+                .and_then(|input| request(input, subject, self.language, Language::Ru));
             let started = translate(
                 Some(&self.work),
                 self.translator.clone(),
@@ -1466,7 +1489,7 @@ pub(crate) mod tests {
                 translate(
                     Some(&work),
                     translator.clone(),
-                    request(input, subject, Language::En),
+                    request(input, subject, Language::En, Language::Ru),
                     move |outcome| {
                         let _ = online.send(Reported::Online(outcome));
                     },
@@ -1540,7 +1563,7 @@ pub(crate) mod tests {
             let _job = translate(
                 Some(&work),
                 translator.clone(),
-                request(input, subject, language),
+                request(input, subject, language, Language::Ru),
                 move |outcome| {
                     let _ = sender.send(outcome);
                 },
@@ -1615,7 +1638,7 @@ pub(crate) mod tests {
             let _job = translate(
                 Some(&work),
                 translator.clone(),
-                request(input, subject, source),
+                request(input, subject, source, Language::Ru),
                 move |outcome| {
                     let _ = sender.send((outcome, probe.ended()));
                 },
@@ -1672,6 +1695,7 @@ pub(crate) mod tests {
                 spanish.input().expect("input"),
                 Subject::Word(BANCO),
                 Language::Es,
+                Language::Ru,
             ),
             move |outcome| {
                 let _ = sender.send(outcome);
