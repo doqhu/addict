@@ -846,16 +846,20 @@ impl Session {
                 elapsed,
             } => self.translated(text, subject, source, number, outcome, elapsed),
             Event::LanguageRead(language) => {
-                self.language_job = None;
+                // After a choice the job is its write, which must not be
+                // dropped (and so cancelled) by the read.
                 if !self.language_chosen {
+                    self.language_job = None;
                     self.saved_language = language;
                     self.apply_reading_language();
                 }
             }
             Event::LanguageChosen(language) => self.language_chosen(language),
             Event::MyLanguageRead(language) => {
-                self.my_language_job = None;
+                // After a choice the job is its write, which must not be
+                // dropped (and so cancelled) by the read.
                 if !self.my_language_chosen {
+                    self.my_language_job = None;
                     self.settings.render_my_language(language);
                     self.apply_my_language(language);
                 }
@@ -3917,8 +3921,10 @@ mod tests {
 
     /// A saved Russian with English mine ends pressed whichever file is
     /// read first, and a click on a gloss's English word with English mine
-    /// saves Spanish. One session, put back to its start between the two
-    /// orders: a second one does not start in the same process. Run alone:
+    /// saves Spanish, and a later read neither undoes that choice nor drops
+    /// (and so cancels) its write. One session, put back to its start
+    /// between the two orders: a second one does not start in the same
+    /// process. Run alone:
     /// GTK starts once per process, on one thread.
     #[test]
     #[ignore = "needs a display; run alone"]
@@ -3948,13 +3954,19 @@ mod tests {
         session.look_up_english("bank");
         assert_eq!(session.saved_language, Language::Es);
         assert_eq!(session.language, Language::Es);
+        // A read handled after the choice neither undoes it nor drops (and
+        // so cancels) its write.
+        session.handle(Event::LanguageRead(Language::Ru));
+        assert_eq!(session.saved_language, Language::Es);
+        assert!(session.language_job.is_some());
         session.settings.window().destroy();
         session.window.destroy();
     }
 
     /// British with English mine ends in the session's request as `EN-GB`
     /// whichever file is read first; the English spelling row is shown only while English is
-    /// mine; a choice is not undone by a later read; with Spanish mine the
+    /// mine; a choice of the spelling or of my language is neither undone
+    /// by a later read nor loses its write; with Spanish mine the
     /// spelling changes no request. One session, put back to its start
     /// between the two orders. Run alone: GTK starts once per process, on
     /// one thread.
@@ -4017,9 +4029,16 @@ mod tests {
         session.handle(Event::EnglishRead(English::Gb));
         assert_eq!(session.english, English::Us);
         assert_eq!(target_lang(&session), "EN-US");
+        // Nor does the read drop (and so cancel) the write of the choice.
+        assert!(session.english_job.is_some());
 
         // Spanish mine: the row is hidden and the spelling changes nothing.
         session.handle(Event::MyLanguageChosen(Language::Es));
+        // A later read of my language neither undoes the choice nor drops
+        // its write.
+        session.handle(Event::MyLanguageRead(Language::Ru));
+        assert_eq!(session.my_language, Language::Es);
+        assert!(session.my_language_job.is_some());
         assert!(!session.settings.english_row().0);
         assert_eq!(target_lang(&session), "ES");
         session.handle(Event::EnglishChosen(English::Gb));
