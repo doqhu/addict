@@ -87,14 +87,14 @@
 //! at a time, and a new result stops it. A playback that fails says so in
 //! the button's tooltip.
 //!
-//! A click on a word of a sentence also asks DeepL, online, for two Russian
-//! texts: the word translated in that sentence, for which the word and the
+//! A click on a word of a sentence also asks DeepL, online, for two texts
+//! in my language: the word translated in that sentence, for which the word and the
 //! sentence as its context are sent, and, once for the text of the field,
 //! the sentence itself, sent without context. A selected nonblank dictionary
 //! definition, or English gloss of a Spanish or Catalan word, is sent without
-//! context only by Translate definition into Russian, from the language it
+//! context only by Translate definition into my language, from the language it
 //! is in: English for an English definition and for a gloss, Spanish or
-//! Catalan for a definition of that language. Its labelled Russian answer
+//! Catalan for a definition of that language. Its labelled answer, in my language,
 //! appears below it, before synonyms; changing the choice or replacing the
 //! article cancels and clears it. Each
 //! stands below the result under a label that says what it is, apart from

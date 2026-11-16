@@ -877,7 +877,7 @@ impl Session {
             } => {
                 if self.indexes.update(generation, indexes) {
                     self.check = None;
-                    self.view.render_indexes(indexes);
+                    self.view.render_indexes(indexes, self.my_language);
                     self.first_indexes(indexes);
                 }
             }
@@ -888,7 +888,7 @@ impl Session {
             Event::Imported(completed) => completed.apply(|generation, indexes| {
                 if self.indexes.update(generation, indexes) {
                     self.check = None;
-                    self.view.render_indexes(indexes);
+                    self.view.render_indexes(indexes, self.my_language);
                     self.first_indexes(indexes);
                 }
             }),
@@ -1853,7 +1853,7 @@ impl Session {
         if let Outcome::Finished(looked) = &outcome
             && self.indexes.update(generation, looked.indexes)
         {
-            self.view.render_indexes(looked.indexes);
+            self.view.render_indexes(looked.indexes, self.my_language);
         }
         if !self.manual.awaits(run) {
             return;
@@ -2111,10 +2111,10 @@ impl Session {
         self.render_shown();
     }
 
-    /// "Translate definition into Russian" was pressed: the definition of
-    /// the chosen sense or gloss is sent alone, from its own language into
-    /// my language, as a job of its own, unless the field
-    /// holds a newer text or the shown result offers no definition to send.
+    /// "Translate definition into" my language was pressed: the definition
+    /// of the chosen sense or gloss is sent alone, from its own language
+    /// into my language, as a job of its own, unless the field holds a
+    /// newer text or the shown result offers no definition to send.
     fn definition_action(&mut self) {
         // As for a click: the field may hold a newer text already.
         if self.field_is_newer() {
@@ -2210,8 +2210,9 @@ impl Session {
     /// shows its reading languages, with [`language::reading`] of the saved
     /// language pressed, and the shown word is asked again once, into it and
     /// from the reading language that results; a chosen definition is
-    /// translated into it from now on. Nothing is written of a reading
-    /// language that falls back.
+    /// translated into it from now on, and the line of the indexes names
+    /// what it lacks. Nothing is written of a reading language that falls
+    /// back.
     fn apply_my_language(&mut self, language: Language) {
         // The English spelling row is offered only while English is mine.
         self.settings.show_english(language == Language::En);
@@ -2219,6 +2220,11 @@ impl Session {
             return;
         }
         self.my_language = language;
+        // The line of the indexes was said for the language before: the
+        // index of the Russian translations is asked by Russian mine only.
+        if let Some(indexes) = self.indexes.known {
+            self.view.render_indexes(indexes, language);
+        }
         // A definition translated into the language before is forgotten,
         // and its job cancelled.
         self.translating_definition = None;
@@ -4022,6 +4028,60 @@ mod tests {
         session.handle(Event::MyLanguageChosen(Language::En));
         assert!(session.settings.english_row().0);
         assert_eq!(target_lang(&session), "EN-GB");
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// With FreeDict missing, the line of the indexes names it while
+    /// Russian is mine, and goes once Spanish is: whether my language is
+    /// read after the indexes or chosen in Settings. The definition button
+    /// names my language. Run alone: GTK starts once per process, on one
+    /// thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_indexes_line_and_the_definition_button_follow_my_language() {
+        use addict_engine::dictionaries::{Indexes, State};
+        gtk::init().expect("a display");
+        let (mut session, _events, _work) = test_session("io.github.doqhu.Addict.MyTextsTest");
+        let indexes = Indexes {
+            definitions: State::Open,
+            translations: State::Missing,
+            spanish: State::Open,
+            catalan: State::Open,
+        };
+        session.handle(Event::Indexes {
+            generation: 0,
+            indexes,
+        });
+        let (visible, text) = session.view.indexes_line();
+        assert!(visible && text.contains("Russian translations"), "{text}");
+        session.render_shown();
+        assert_eq!(
+            session.view.definition_action_text(),
+            "Translate definition into Russian"
+        );
+
+        // My language read after the indexes, as at startup.
+        session.handle(Event::MyLanguageRead(Language::Es));
+        assert_eq!(session.view.indexes_line(), (false, String::new()));
+        assert_eq!(
+            session.view.definition_action_text(),
+            "Translate definition into Spanish"
+        );
+
+        // Back to Russian, then English chosen in Settings.
+        session.handle(Event::MyLanguageChosen(Language::Ru));
+        assert!(session.view.indexes_line().0);
+        assert_eq!(
+            session.view.definition_action_text(),
+            "Translate definition into Russian"
+        );
+        session.handle(Event::MyLanguageChosen(Language::En));
+        assert_eq!(session.view.indexes_line(), (false, String::new()));
+        assert_eq!(
+            session.view.definition_action_text(),
+            "Translate definition into English"
+        );
         session.settings.window().destroy();
         session.window.destroy();
     }

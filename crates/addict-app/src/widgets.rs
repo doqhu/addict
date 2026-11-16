@@ -45,14 +45,14 @@ use crate::{
     view::{
         ADD_KEY_LABEL, ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, AnalysisGroup, Answer,
         AnswerLine, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COPIED_LABEL, COPY_LABEL,
-        ChosenGloss, DEFINITION_ACTION, Explained, FIELD_PLACEHOLDER, FORM_TAG, FORWARD_TOOLTIP,
-        FormRow, GLOSS_NO_KEY, GlossRow, GlossTexts, LANGUAGE_TOOLTIP, LONE_WORD_TIP,
-        LOOK_UP_ENGLISH, Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE,
-        OnlineRow, OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
+        ChosenGloss, Explained, FIELD_PLACEHOLDER, FORM_TAG, FORWARD_TOOLTIP, FormRow,
+        GLOSS_NO_KEY, GlossRow, GlossTexts, LANGUAGE_TOOLTIP, LONE_WORD_TIP, LOOK_UP_ENGLISH,
+        Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE, OnlineRow,
+        OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
         PronunciationText, RETRY_LABEL, ResultTexts, SENSES_LABEL, SHOW_LESS, SYNONYM_PREVIEW,
         SenseText, Shown, SynonymTexts, WHOLE_WORD_LABEL, answer_texts, binding_texts,
-        choice_texts, command_in, indexes_text, language_label, online_rows, sentence_markup,
-        show_more, synonym_class, synonym_description, texts,
+        choice_texts, command_in, definition_action_label, indexes_text, language_label,
+        online_rows, sentence_markup, show_more, synonym_class, synonym_description, texts,
     },
     wrap::Wrap,
 };
@@ -1172,8 +1172,9 @@ struct ResultArea {
     /// Under the headword: the other pronunciations, a row each.
     pronunciations: gtk::Box,
     line: gtk::Label,
-    /// The answer: what it is, the Russian, large, the sentence under it,
-    /// the dictionary's other translations and where it came from.
+    /// The answer: what it is, the word in my language, large, the
+    /// sentence under it, the dictionary's other translations and where it
+    /// came from.
     answer: AnswerBox,
     /// Without a DeepL key: what a key would give, and the button that adds
     /// one.
@@ -1461,7 +1462,7 @@ fn result_area() -> ResultArea {
         .visible(false)
         .build();
     let definition_action = gtk::Button::builder()
-        .label(DEFINITION_ACTION)
+        .label(definition_action_label(Language::Ru))
         .halign(gtk::Align::Start)
         .focus_on_click(false)
         .css_classes(["definition"])
@@ -1626,6 +1627,9 @@ pub struct View {
     /// translations do not: the shown result's
     /// [`Translating::answer_language`](crate::view::Translating::answer_language).
     answer_language: Cell<Language>,
+    /// My language for the shown result: the online rows are sent into it,
+    /// and a refusal about the language names it.
+    my_language: Cell<Language>,
     /// Whether the synonyms of the word that no sense took are shown; a new
     /// result closes them, a choice in the same one keeps them.
     synonyms_open: Rc<Cell<bool>>,
@@ -1706,6 +1710,7 @@ impl View {
             translations: RefCell::new(None),
             online: RefCell::new(Vec::new()),
             answer_language: Cell::new(Language::Ru),
+            my_language: Cell::new(Language::Ru),
             synonyms_open: Rc::new(Cell::new(false)),
             lone_word: Cell::new(false),
         };
@@ -1746,12 +1751,29 @@ impl View {
         }
     }
 
-    /// Shows what is said about `indexes`, or hides the line when both are
-    /// open.
-    pub fn render_indexes(&self, indexes: Indexes) {
-        let text = indexes_text(indexes);
+    /// Shows what is said about `indexes` with `my` language, or hides the
+    /// line when there is nothing to say.
+    pub fn render_indexes(&self, indexes: Indexes, my: Language) {
+        let text = indexes_text(indexes, my);
         self.indexes.set_text(&text);
         self.indexes.set_visible(!text.is_empty());
+    }
+
+    /// The line of the indexes as shown: whether it is visible, and its
+    /// text; for the tests.
+    #[cfg(test)]
+    pub fn indexes_line(&self) -> (bool, String) {
+        (self.indexes.get_visible(), self.indexes.text().to_string())
+    }
+
+    /// What the definition button says; for the tests.
+    #[cfg(test)]
+    pub fn definition_action_text(&self) -> String {
+        self.result
+            .definition_action
+            .label()
+            .map(|label| label.to_string())
+            .unwrap_or_default()
     }
 
     /// Runs `retry` each time Retry is pressed.
@@ -2005,6 +2027,10 @@ impl View {
         let result = &self.result;
         let (visible, sensitive) = shown.definition_action();
         result.definition_action.set_sensitive(sensitive);
+        result
+            .definition_action
+            .set_label(definition_action_label(shown.translating().my));
+        self.my_language.set(shown.translating().my);
         // Out of the old rows before they go: it is put under the chosen
         // one again below.
         if let Some(parent) = result.definition_action.parent().and_downcast::<gtk::Box>() {
@@ -2136,7 +2162,7 @@ impl View {
     pub fn render_online(&self, online: &OnlineTexts<'_>, key_file: Option<&std::path::Path>) {
         self.release_focus();
         self.online.replace(
-            online_rows(online, key_file)
+            online_rows(online, key_file, self.my_language.get())
                 .into_iter()
                 .map(OnlineRow::into_owned)
                 .collect(),

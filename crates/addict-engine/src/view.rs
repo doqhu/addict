@@ -143,8 +143,17 @@ const INDEX_GIVES: [&str; 2] = ["English definitions and synonyms", "Russian tra
 
 /// The line of the indexes: what is said about every index that is missing
 /// or cannot be read, one line for each, with the action that imports its
-/// file. Empty when both are open. Plain text, not markup.
-pub fn indexes_text(indexes: Indexes) -> String {
+/// file. Empty when both are open. Plain text, not markup. The index of the
+/// translations gives Russian only, and only Russian mine asks it: with
+/// another language `my`, it is not reported, as if it were open.
+pub fn indexes_text(indexes: Indexes, my: Language) -> String {
+    let indexes = match my {
+        Language::Ru => indexes,
+        Language::En | Language::Es | Language::Ca => Indexes {
+            translations: State::Open,
+            ..indexes
+        },
+    };
     // The Spanish index is not one of the files: the line is the same with
     // it or without it.
     if indexes.files() == Indexes::OPEN.files() {
@@ -497,12 +506,27 @@ const CHOOSE_SENSE: &str = "Click a sense to see its short explanation and its s
 const EXPLANATION_MARK: &str = "Short explanation — the dictionary definition of the sense you chose; \
      it is not checked against the sentence:";
 
-/// What the button that sends the definition of the chosen sense says.
-pub const DEFINITION_ACTION: &str = "Translate definition into Russian";
+/// What the button that sends the definition of the chosen sense into `my`
+/// language says. No wildcard arm.
+pub fn definition_action_label(my: Language) -> &'static str {
+    match my {
+        Language::En => "Translate definition into English",
+        Language::Es => "Translate definition into Spanish",
+        Language::Ca => "Translate definition into Catalan",
+        Language::Ru => "Translate definition into Russian",
+    }
+}
 
 /// What stands above the online translation of the definition of the chosen
-/// sense.
-const DEFINITION_LABEL: &str = "Online, this definition in Russian:";
+/// sense or gloss into `my` language. No wildcard arm.
+fn definition_label(my: Language) -> &'static str {
+    match my {
+        Language::En => "Online, this definition in English:",
+        Language::Es => "Online, this definition in Spanish:",
+        Language::Ca => "Online, this definition in Catalan:",
+        Language::Ru => "Online, this definition in Russian:",
+    }
+}
 
 /// What stands before the synonyms of the chosen sense.
 const SYNONYMS_LABEL: &str = "Synonyms of this sense:";
@@ -1460,8 +1484,17 @@ pub struct ChosenGloss<'a> {
     pub no_key: bool,
 }
 
-/// The line under the label of the English glosses.
-const GLOSS_HINT: &str = "Click a gloss to see it in Russian and look the English word up.";
+/// The line under the label of the English glosses, with `my` language.
+/// With English mine a gloss is never translated, so the line does not
+/// offer it. No wildcard arm.
+fn gloss_hint(my: Language) -> &'static str {
+    match my {
+        Language::En => "Click a gloss to look the English word up.",
+        Language::Es => "Click a gloss to see it in Spanish and look the English word up.",
+        Language::Ca => "Click a gloss to see it in Catalan and look the English word up.",
+        Language::Ru => "Click a gloss to see it in Russian and look the English word up.",
+    }
+}
 
 /// What stands under the chosen gloss when it cannot be translated for want
 /// of a DeepL key.
@@ -1626,6 +1659,7 @@ fn gloss_texts<'a>(
     english: &'a [String],
     grouped: &'a Grouped,
     analysis: &Analysis,
+    my: Language,
 ) -> GlossTexts<'a> {
     if english.is_empty() {
         return GlossTexts::Missing(NO_GLOSS);
@@ -1709,7 +1743,7 @@ fn gloss_texts<'a>(
     GlossTexts::Glosses(Glosses {
         label: ENGLISH_LABEL,
         count,
-        hint: GLOSS_HINT,
+        hint: gloss_hint(my),
         groups,
         forms,
         all: english,
@@ -1818,6 +1852,7 @@ fn lookup_texts<'a>(
             definition,
             key_file,
             translating.target(Language::En),
+            translating.my,
         ),
         Lookup::Grouped { language, grouped } => grouped_texts(
             *language,
@@ -1826,6 +1861,7 @@ fn lookup_texts<'a>(
             definition,
             key_file,
             translating.target(*language),
+            translating.my,
         ),
         // The list of translations alone: no senses, synonyms or glosses.
         Lookup::FromRussian {
@@ -1864,14 +1900,15 @@ fn lookup_texts<'a>(
     }
 }
 
-/// The parts of `article`, its translations row for `target`; see
-/// [`choice_texts`].
+/// The parts of `article`, its translations row for `target`; the
+/// definition is translated into `my` language. See [`choice_texts`].
 fn article_texts<'a>(
     article: &'a Article,
     chosen: Option<usize>,
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
     target: Language,
+    my: Language,
 ) -> ResultTexts<'a> {
     let (hint, senses) = sense_texts(
         &article.senses,
@@ -1880,6 +1917,7 @@ fn article_texts<'a>(
         chosen,
         definition,
         key_file,
+        my,
     );
     ResultTexts {
         line: None,
@@ -1907,7 +1945,8 @@ fn article_texts<'a>(
 /// kind in its own part, a kind with no index or with nothing for the word
 /// said by its own line. `choice` is a sense of the definitions or an
 /// English gloss, and the online translation `definition` stands under it.
-/// The translations row is for `target`, as in [`choice_texts`].
+/// The translations row is for `target`, as in [`choice_texts`]; the
+/// definition is translated into `my` language.
 fn grouped_texts<'a>(
     language: Language,
     grouped: &'a Grouped,
@@ -1915,6 +1954,7 @@ fn grouped_texts<'a>(
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
     target: Language,
+    my: Language,
 ) -> ResultTexts<'a> {
     let senses = grouped.definitions.as_deref().unwrap_or_default();
     let chosen = match choice {
@@ -1929,6 +1969,7 @@ fn grouped_texts<'a>(
         chosen,
         definition,
         key_file,
+        my,
     );
     let hint = match &grouped.definitions {
         None => Some(missing_definitions(language)),
@@ -1974,7 +2015,7 @@ fn grouped_texts<'a>(
     let analysis = analysis(language, grouped);
     let glosses = match &grouped.english {
         None => GlossTexts::Missing(missing_english(language)),
-        Some(english) => gloss_texts(english, grouped, &analysis),
+        Some(english) => gloss_texts(english, grouped, &analysis, my),
     };
     let gloss = match choice {
         Some(Choice::Gloss(index)) => grouped
@@ -1988,8 +2029,8 @@ fn grouped_texts<'a>(
                     definition: definition
                         .filter(|_| !text.trim().is_empty() && !no_key)
                         .map(|online| Block {
-                            label: DEFINITION_LABEL,
-                            line: online_line(online, key_file),
+                            label: definition_label(my),
+                            line: online_line(online, key_file, my),
                         }),
                     no_key,
                 }
@@ -2015,7 +2056,8 @@ fn grouped_texts<'a>(
 /// stands above them while none is chosen; no hint for an empty list. A
 /// sense's part of speech comes from `entries` when it has none of its own.
 /// A sense's synonyms are its own and those of the synonym meanings of
-/// `groups` that belong to it, as [`matched_groups`] finds them.
+/// `groups` that belong to it, as [`matched_groups`] finds them. The
+/// definition is translated into `my` language.
 fn sense_texts<'a>(
     senses: &'a [Sense],
     entries: &'a [LexicalEntry],
@@ -2023,6 +2065,7 @@ fn sense_texts<'a>(
     chosen: Option<usize>,
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
+    my: Language,
 ) -> (Option<&'static str>, Vec<SenseText<'a>>) {
     let chosen = chosen.filter(|index| *index < senses.len());
     let hint = (!senses.is_empty() && chosen.is_none()).then_some(CHOOSE_SENSE);
@@ -2050,8 +2093,8 @@ fn sense_texts<'a>(
                     definition: definition
                         .filter(|_| !sense.definition.trim().is_empty())
                         .map(|online| Block {
-                            label: DEFINITION_LABEL,
-                            line: online_line(online, key_file),
+                            label: definition_label(my),
+                            line: online_line(online, key_file, my),
                         }),
                     synonyms: Listed::of_cow(SYNONYMS_LABEL, synonyms, NO_SYNONYMS),
                 }),
@@ -2066,7 +2109,7 @@ fn sense_texts<'a>(
 pub enum Online {
     /// The request runs; its end is not known yet.
     Pending,
-    /// The Russian text the translator gave.
+    /// The text the translator gave, in my language.
     Translated(String),
     /// The request gave no translation.
     Refused(Refusal),
@@ -2111,10 +2154,6 @@ pub const OFFLINE_SOURCE: &str = "Offline dictionary";
 
 /// The dim line under an answer that has both.
 pub(crate) const BOTH_SOURCES: &str = "Online · DeepL, offline dictionary";
-
-/// What stands above the online translation of a word without a sentence,
-/// with the dictionary's translations under it.
-const ANSWER_LONE_LABEL: &str = "Russian";
 
 /// What stands before the dictionary's translations when the word is
 /// translated in its sentence.
@@ -2189,7 +2228,7 @@ impl OnlineRow<'_> {
 /// One line of the answer and how it reads.
 pub type AnswerLine<'a> = (Cow<'a, str>, OnlineState);
 
-/// The answer at the top of the card: the Russian the word has, first.
+/// The answer at the top of the card: the word in my language, first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answer<'a> {
     /// What it is.
@@ -2257,7 +2296,7 @@ pub fn answer_texts<'a>(
     }
     if let Some(lone) = find(OnlineKind::Lone) {
         return Some(Answer {
-            label: ANSWER_LONE_LABEL,
+            label: dictionary_language(language),
             word: Some(lone),
             sentence,
             pills: items,
@@ -2297,14 +2336,21 @@ pub fn answer_texts<'a>(
 /// sentence and the sentence, in this order; empty when there is none. A
 /// row's line is the pending line, the translation as it came, the line of
 /// a refusal or the line of a text that is too long. A refusal about the
-/// key names `key_file`, or says how to make it known when there is none.
-pub fn online_rows<'a>(texts: &OnlineTexts<'a>, key_file: Option<&Path>) -> Vec<OnlineRow<'a>> {
+/// key names `key_file`, or says how to make it known when there is none;
+/// one about the language names `my` language, which the texts are sent
+/// into.
+pub fn online_rows<'a>(
+    texts: &OnlineTexts<'a>,
+    key_file: Option<&Path>,
+    my: Language,
+) -> Vec<OnlineRow<'a>> {
     let mut rows = Vec::new();
     if let Some(online) = texts.word {
         rows.push(online_row(
             ONLINE_WORD_LABEL,
             online,
             key_file,
+            my,
             OnlineKind::Word,
         ));
     }
@@ -2313,6 +2359,7 @@ pub fn online_rows<'a>(texts: &OnlineTexts<'a>, key_file: Option<&Path>) -> Vec<
             ONLINE_LONE_LABEL,
             online,
             key_file,
+            my,
             OnlineKind::Lone,
         ));
     }
@@ -2322,6 +2369,7 @@ pub fn online_rows<'a>(texts: &OnlineTexts<'a>, key_file: Option<&Path>) -> Vec<
                 ONLINE_SENTENCE_LABEL,
                 online,
                 key_file,
+                my,
                 OnlineKind::Sentence,
             ),
             Whole::TooLong => OnlineRow {
@@ -2342,6 +2390,7 @@ fn online_row<'a>(
     label: &'static str,
     online: &'a Online,
     key_file: Option<&Path>,
+    my: Language,
     kind: OnlineKind,
 ) -> OnlineRow<'a> {
     let state = match online {
@@ -2351,7 +2400,7 @@ fn online_row<'a>(
     };
     OnlineRow {
         label,
-        line: online_line(online, key_file),
+        line: online_line(online, key_file, my),
         state,
         word: kind != OnlineKind::Sentence,
         kind,
@@ -2360,20 +2409,22 @@ fn online_row<'a>(
 }
 
 /// The line of one online request: the pending line, the translation as it
-/// came or the line of a refusal. No wildcard arm: a new state does not
-/// compile until it is given its line.
-fn online_line<'a>(online: &'a Online, key_file: Option<&Path>) -> Cow<'a, str> {
+/// came or the line of a refusal, for a text sent into `my` language. No
+/// wildcard arm: a new state does not compile until it is given its line.
+fn online_line<'a>(online: &'a Online, key_file: Option<&Path>, my: Language) -> Cow<'a, str> {
     match online {
         Online::Pending => Cow::Borrowed(ONLINE_PENDING),
         Online::Translated(text) => Cow::Borrowed(text),
-        Online::Refused(refusal) => Cow::Owned(refusal_text(*refusal, key_file)),
+        Online::Refused(refusal) => Cow::Owned(refusal_text(*refusal, key_file, my)),
     }
 }
 
 /// The line of `refusal`, which says what failed. A refusal about the key
-/// names `key_file`, or says how to make it known when there is none. No
+/// names `key_file`, or says how to make it known when there is none; one
+/// about the language names `my` language, which the text was sent into. No
 /// wildcard arm: a new refusal does not compile until it is given its line.
-fn refusal_text(refusal: Refusal, key_file: Option<&Path>) -> String {
+fn refusal_text(refusal: Refusal, key_file: Option<&Path>, my: Language) -> String {
+    let unsupported;
     let line = match refusal {
         Refusal::Key => "A DeepL key is required.",
         Refusal::UnreadableKey => "Cannot read the DeepL key file.",
@@ -2382,7 +2433,11 @@ fn refusal_text(refusal: Refusal, key_file: Option<&Path>) -> String {
         Refusal::Network => "Cannot connect to DeepL.",
         Refusal::Quota => "The DeepL quota is exhausted.",
         Refusal::UnsupportedLanguage => {
-            "DeepL does not support translation from this language into Russian."
+            unsupported = format!(
+                "DeepL does not support translation from this language into {}.",
+                dictionary_language(my)
+            );
+            unsupported.as_str()
         }
         Refusal::TimedOut => "Online translation timed out.",
         Refusal::Other => ONLINE_UNAVAILABLE,
@@ -2807,8 +2862,8 @@ mod tests {
                 [
                     EXPLANATION_MARK.to_owned(),
                     "  land <near> & water  ".to_owned(),
-                    super::DEFINITION_LABEL.to_owned(),
-                    super::online_line(&online, Some(path)).into_owned(),
+                    super::definition_label(Language::Ru).to_owned(),
+                    super::online_line(&online, Some(path), Language::Ru).into_owned(),
                     format!("{SYNONYMS_LABEL} shore"),
                     String::new(),
                     format!("{RUSSIAN_LABEL} берег"),
@@ -2816,7 +2871,7 @@ mod tests {
             );
         }
         let dictionary_only = details(shown.lookup().expect("article"), shown.sense());
-        assert!(!dictionary_only.contains(&super::DEFINITION_LABEL.to_owned()));
+        assert!(!dictionary_only.contains(&super::definition_label(Language::Ru).to_owned()));
         // A blank definition is never sent, so it has no block.
         shown.choose(2);
         let texts = result_texts(
@@ -2825,7 +2880,7 @@ mod tests {
             Some(&Online::Pending),
             None,
         );
-        assert!(!read(&texts).contains(&super::DEFINITION_LABEL.to_owned()));
+        assert!(!read(&texts).contains(&super::definition_label(Language::Ru).to_owned()));
     }
 
     const SENTENCE: &str = "I sat on the bank.";
@@ -2836,7 +2891,7 @@ mod tests {
 
     /// The labels and lines of the rows of `texts`, with no key file.
     fn online(texts: &OnlineTexts<'_>) -> Vec<(&'static str, String, OnlineState, bool)> {
-        online_rows(texts, None)
+        online_rows(texts, None, Language::Ru)
             .into_iter()
             .map(|row| (row.label, row.line.into_owned(), row.state, row.word))
             .collect()
@@ -2844,7 +2899,7 @@ mod tests {
 
     #[test]
     fn without_an_online_text_there_is_no_row() {
-        assert!(online_rows(&OnlineTexts::default(), None).is_empty());
+        assert!(online_rows(&OnlineTexts::default(), None, Language::Ru).is_empty());
     }
 
     #[test]
@@ -2936,6 +2991,7 @@ mod tests {
                 lone: None,
             },
             None,
+            Language::Ru,
         ) {
             assert_eq!(row.line, "<b>берег</b> & банк");
         }
@@ -2996,7 +3052,7 @@ mod tests {
             Refusal::TimedOut,
             Refusal::Other,
         ] {
-            let line = super::refusal_text(refusal, None);
+            let line = super::refusal_text(refusal, None, Language::Ru);
             let refused = Online::Refused(refusal);
             let whole = Whole::Asked(refused.clone());
             assert_eq!(
@@ -3861,7 +3917,7 @@ mod tests {
 
     #[test]
     fn the_unsupported_language_line_names_no_pair() {
-        let line = super::refusal_text(Refusal::UnsupportedLanguage, None);
+        let line = super::refusal_text(Refusal::UnsupportedLanguage, None, Language::Ru);
         assert!(!line.contains("EN"), "{line}");
         assert!(line.contains("DeepL"), "{line}");
     }
@@ -3935,7 +3991,7 @@ mod tests {
                     catalan: State::Missing,
                 };
                 assert_eq!(
-                    indexes_text(indexes).is_empty(),
+                    indexes_text(indexes, Language::Ru).is_empty(),
                     indexes == Indexes::OPEN,
                     "{indexes:?}"
                 );
@@ -3945,12 +4001,15 @@ mod tests {
 
     #[test]
     fn with_nothing_imported_the_line_says_so_and_names_both_files() {
-        let line = indexes_text(Indexes {
-            definitions: State::Missing,
-            translations: State::Missing,
-            spanish: State::Missing,
-            catalan: State::Missing,
-        });
+        let line = indexes_text(
+            Indexes {
+                definitions: State::Missing,
+                translations: State::Missing,
+                spanish: State::Missing,
+                catalan: State::Missing,
+            },
+            Language::Ru,
+        );
         assert_eq!(
             line,
             "The dictionaries are not imported. Use Settings → Download dictionaries, or import each downloaded file through \
@@ -3963,12 +4022,15 @@ mod tests {
     fn the_line_of_the_indexes_names_each_one_that_is_not_open() {
         for definitions in STATES {
             for translations in STATES {
-                let text = indexes_text(Indexes {
-                    definitions,
-                    translations,
-                    spanish: State::Missing,
-                    catalan: State::Missing,
-                });
+                let text = indexes_text(
+                    Indexes {
+                        definitions,
+                        translations,
+                        spanish: State::Missing,
+                        catalan: State::Missing,
+                    },
+                    Language::Ru,
+                );
                 let named = [(OEWN, definitions), (FREEDICT, translations)];
                 let lines = named.iter().filter(|(_, s)| *s != State::Open).count();
                 if lines > 0 && (definitions, translations) != (State::Missing, State::Missing) {
@@ -3998,23 +4060,29 @@ mod tests {
 
     #[test]
     fn one_index_alone_says_what_the_other_would_give() {
-        let text = indexes_text(Indexes {
-            definitions: State::Open,
-            translations: State::Missing,
-            spanish: State::Missing,
-            catalan: State::Missing,
-        });
+        let text = indexes_text(
+            Indexes {
+                definitions: State::Open,
+                translations: State::Missing,
+                spanish: State::Missing,
+                catalan: State::Missing,
+            },
+            Language::Ru,
+        );
         assert_eq!(
             text,
             "No Russian translations: freedict-eng-rus-2025.11.23.src.tar.xz is not \
              imported. Use Settings → Download dictionaries, or import it through Settings → Import file…"
         );
-        let text = indexes_text(Indexes {
-            definitions: State::Unreadable,
-            translations: State::Open,
-            spanish: State::Missing,
-            catalan: State::Missing,
-        });
+        let text = indexes_text(
+            Indexes {
+                definitions: State::Unreadable,
+                translations: State::Open,
+                spanish: State::Missing,
+                catalan: State::Missing,
+            },
+            Language::Ru,
+        );
         assert_eq!(
             text,
             "No English definitions and synonyms: the index oewn.index cannot be read. \
@@ -4746,9 +4814,12 @@ mod tests {
             }],
             note: None,
         };
-        let GlossTexts::Glosses(texts) =
-            super::gloss_texts(grouped.english.as_deref().unwrap(), &grouped, &analysis)
-        else {
+        let GlossTexts::Glosses(texts) = super::gloss_texts(
+            grouped.english.as_deref().unwrap(),
+            &grouped,
+            &analysis,
+            Language::Ru,
+        ) else {
             panic!("glosses");
         };
         assert_eq!(texts.count, "5 glosses · 2 forms");
@@ -5307,7 +5378,7 @@ mod tests {
                 Some(super::ChosenGloss {
                     index: 1,
                     definition: Some(super::Block {
-                        label: super::DEFINITION_LABEL,
+                        label: super::definition_label(Language::Ru),
                         line: "скамья".into(),
                     }),
                     no_key: false,
@@ -5355,14 +5426,14 @@ mod tests {
         assert_eq!(
             explained.definition,
             Some(super::Block {
-                label: super::DEFINITION_LABEL,
+                label: super::definition_label(Language::Ru),
                 line: "скамья".into(),
             })
         );
         assert!(texts.senses[0].explained.is_none());
         assert_eq!(texts.gloss, None);
         assert_eq!(
-            super::DEFINITION_LABEL,
+            super::definition_label(Language::Ru),
             "Online, this definition in Russian:"
         );
     }
@@ -5379,8 +5450,8 @@ mod tests {
                 };
                 for spanish in STATES {
                     assert_eq!(
-                        indexes_text(Indexes { spanish, ..english }),
-                        indexes_text(english),
+                        indexes_text(Indexes { spanish, ..english }, Language::Ru),
+                        indexes_text(english, Language::Ru),
                         "{english:?} {spanish:?}"
                     );
                 }
@@ -5616,7 +5687,7 @@ mod tests {
         ];
         let mut lines = std::collections::BTreeSet::new();
         for refusal in refusals {
-            let line = super::refusal_text(refusal, None);
+            let line = super::refusal_text(refusal, None, Language::Ru);
             assert!(lines.insert(line.clone()), "{line}");
             let online = Online::Refused(refusal);
             let line_shown = super::online_rows(
@@ -5625,6 +5696,7 @@ mod tests {
                     ..OnlineTexts::default()
                 },
                 Some(std::path::Path::new("/config/<key>&/deepl.key")),
+                Language::Ru,
             )
             .remove(0)
             .line;
@@ -6264,18 +6336,25 @@ mod tests {
             let said = translations_and_glosses(&texts);
             assert!(!cyrillic(&said), "{said}");
             assert!(!said.contains("Russian"), "{said}");
-            // The rest of the article is as for Russian mine.
+            // The rest of the article is as for Russian mine, but for the
+            // gloss hint, which names my language.
             let russian = for_pair(&lookup, Language::Ru, pressed);
-            assert_eq!(
+            fn unhinted(texts: ResultTexts<'_>) -> ResultTexts<'_> {
                 ResultTexts {
                     translations: None,
-                    ..texts.clone()
-                },
-                ResultTexts {
-                    translations: None,
-                    ..russian
+                    glosses: texts.glosses.map(|glosses| match glosses {
+                        super::GlossTexts::Glosses(glosses) => {
+                            super::GlossTexts::Glosses(super::Glosses {
+                                hint: "",
+                                ..glosses
+                            })
+                        }
+                        missing @ super::GlossTexts::Missing(_) => missing,
+                    }),
+                    ..texts
                 }
-            );
+            }
+            assert_eq!(unhinted(texts.clone()), unhinted(russian));
             // The top card names the target, not Russian.
             let language = Translating { my, pressed }.answer_language(Some(&lookup));
             let answer =
@@ -6388,5 +6467,261 @@ mod tests {
         );
         // The pressed language changes nothing else that is shown.
         assert_eq!(shown.lookup(), Some(&lookup));
+    }
+
+    /// `spanish_all` read as `language`: a grouped article of Spanish or
+    /// Catalan with an index of every kind.
+    fn grouped_in(language: Language) -> Lookup {
+        let Lookup::Grouped { grouped, .. } = spanish_all() else {
+            panic!("spanish_all is grouped");
+        };
+        Lookup::Grouped { language, grouped }
+    }
+
+    #[test]
+    fn the_window_texts_name_my_language() {
+        let unsupported = Online::Refused(Refusal::UnsupportedLanguage);
+        for (my, name) in [
+            (Language::En, "English"),
+            (Language::Es, "Spanish"),
+            (Language::Ca, "Catalan"),
+            (Language::Ru, "Russian"),
+        ] {
+            let pressed = if my == Language::Es {
+                Language::Ca
+            } else {
+                Language::Es
+            };
+            let translating = Translating { my, pressed };
+            // The button that sends the chosen definition.
+            assert_eq!(
+                super::definition_action_label(my),
+                format!("Translate definition into {name}")
+            );
+            // The label above the translated definition, of a sense of an
+            // English article and of a Catalan one, and of a gloss.
+            let english = Lookup::Article(article());
+            let catalan = grouped_in(Language::Ca);
+            let translation = translated("definició");
+            for lookup in [&english, &catalan] {
+                let texts = super::choice_texts(
+                    lookup,
+                    Some(super::Choice::Sense(0)),
+                    Some(&translation),
+                    None,
+                    None,
+                    translating,
+                );
+                let block = texts.senses[0]
+                    .explained
+                    .as_ref()
+                    .and_then(|explained| explained.definition.as_ref())
+                    .expect("the block of the definition");
+                assert_eq!(block.label, format!("Online, this definition in {name}:"));
+            }
+            let texts = super::choice_texts(
+                &catalan,
+                Some(super::Choice::Gloss(1)),
+                Some(&translation),
+                None,
+                None,
+                translating,
+            );
+            let block = texts
+                .gloss
+                .and_then(|gloss| gloss.definition)
+                .expect("the block of the gloss");
+            assert_eq!(block.label, format!("Online, this definition in {name}:"));
+            // The hint of the glosses: with English mine a gloss is not
+            // translated.
+            let read = if my == Language::Es {
+                Language::Ca
+            } else {
+                Language::Es
+            };
+            let lookup = grouped_in(read);
+            let Some(super::GlossTexts::Glosses(glosses)) =
+                super::choice_texts(&lookup, None, None, None, None, translating).glosses
+            else {
+                panic!("glosses");
+            };
+            let hint = match my {
+                Language::En => "Click a gloss to look the English word up.".to_owned(),
+                Language::Es | Language::Ca | Language::Ru => {
+                    format!("Click a gloss to see it in {name} and look the English word up.")
+                }
+            };
+            assert_eq!(glosses.hint, hint);
+            // The top card over a word translated online without a sentence.
+            let lone = translated("bank");
+            let rows = online_rows(
+                &OnlineTexts {
+                    lone: Some(&lone),
+                    ..OnlineTexts::default()
+                },
+                None,
+                my,
+            );
+            let language = translating.answer_language(Some(&english));
+            let answer = super::answer_texts(None, &rows, language).expect("an answer");
+            assert_eq!(answer.label, name);
+            // A language DeepL does not support, in an online row and under
+            // the chosen definition.
+            let refused =
+                format!("DeepL does not support translation from this language into {name}.");
+            let whole = Whole::Asked(unsupported.clone());
+            for row in online_rows(
+                &OnlineTexts {
+                    word: Some(&unsupported),
+                    sentence: Some(&whole),
+                    lone: Some(&unsupported),
+                },
+                None,
+                my,
+            ) {
+                assert_eq!(row.line, refused);
+            }
+            let texts = super::choice_texts(
+                &english,
+                Some(super::Choice::Sense(0)),
+                Some(&unsupported),
+                None,
+                None,
+                translating,
+            );
+            let block = texts.senses[0]
+                .explained
+                .as_ref()
+                .and_then(|explained| explained.definition.as_ref())
+                .expect("the block of the definition");
+            assert_eq!(block.line, refused);
+            // The indexes: FreeDict gives Russian only, so it is named
+            // missing with Russian mine alone.
+            let freedict_missing = Indexes {
+                definitions: State::Open,
+                translations: State::Missing,
+                spanish: State::Missing,
+                catalan: State::Missing,
+            };
+            let both_missing = Indexes {
+                definitions: State::Missing,
+                ..freedict_missing
+            };
+            let oewn_missing = Indexes {
+                translations: State::Open,
+                ..both_missing
+            };
+            match my {
+                Language::Ru => {
+                    assert!(
+                        indexes_text(freedict_missing, my).starts_with("No Russian translations: ")
+                    );
+                    assert!(
+                        indexes_text(both_missing, my)
+                            .starts_with("The dictionaries are not imported.")
+                    );
+                }
+                Language::En | Language::Es | Language::Ca => {
+                    assert_eq!(indexes_text(freedict_missing, my), "");
+                    assert_eq!(
+                        indexes_text(both_missing, my),
+                        indexes_text(oewn_missing, Language::Ru)
+                    );
+                    assert!(indexes_text(both_missing, my).contains(OEWN.published));
+                    assert!(!indexes_text(both_missing, my).contains(FREEDICT.published));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn with_another_language_mine_no_text_names_russian() {
+        let states = [
+            Online::Pending,
+            translated("text"),
+            Online::Refused(Refusal::Key),
+            Online::Refused(Refusal::UnreadableKey),
+            Online::Refused(Refusal::UnsafeKey),
+            Online::Refused(Refusal::RejectedKey),
+            Online::Refused(Refusal::Network),
+            Online::Refused(Refusal::Quota),
+            Online::Refused(Refusal::UnsupportedLanguage),
+            Online::Refused(Refusal::TimedOut),
+            Online::Refused(Refusal::Other),
+        ];
+        let lookups = [
+            Lookup::Article(article()),
+            grouped_in(Language::Es),
+            grouped_in(Language::Ca),
+        ];
+        for my in [Language::En, Language::Es, Language::Ca] {
+            let mut said = vec![super::definition_action_label(my).to_owned()];
+            for pressed in [Language::En, Language::Es, Language::Ca] {
+                let translating = Translating { my, pressed };
+                for lookup in &lookups {
+                    let language = translating.answer_language(Some(lookup));
+                    let plain = super::choice_texts(lookup, None, None, None, None, translating);
+                    for online in &states {
+                        for choice in [
+                            None,
+                            Some(super::Choice::Sense(0)),
+                            Some(super::Choice::Gloss(1)),
+                        ] {
+                            let texts = super::choice_texts(
+                                lookup,
+                                choice,
+                                Some(online),
+                                None,
+                                Some((Language::En, Language::Es)),
+                                translating,
+                            );
+                            said.push(format!("{texts:?}"));
+                            let whole = Whole::Asked(online.clone());
+                            for texts in [
+                                OnlineTexts {
+                                    word: Some(online),
+                                    sentence: Some(&whole),
+                                    lone: None,
+                                },
+                                OnlineTexts {
+                                    word: None,
+                                    sentence: Some(&whole),
+                                    lone: Some(online),
+                                },
+                                OnlineTexts {
+                                    word: None,
+                                    sentence: Some(&Whole::TooLong),
+                                    lone: None,
+                                },
+                                OnlineTexts::default(),
+                            ] {
+                                let rows = online_rows(&texts, None, my);
+                                said.push(format!("{rows:?}"));
+                                let answer = super::answer_texts(
+                                    plain.translations.as_ref(),
+                                    &rows,
+                                    language,
+                                );
+                                said.push(format!("{answer:?}"));
+                            }
+                        }
+                    }
+                }
+            }
+            for definitions in STATES {
+                said.push(indexes_text(
+                    Indexes {
+                        definitions,
+                        translations: State::Missing,
+                        spanish: State::Missing,
+                        catalan: State::Missing,
+                    },
+                    my,
+                ));
+            }
+            for text in said {
+                assert!(!text.contains("Russian"), "{my:?}: {text}");
+            }
+        }
     }
 }
