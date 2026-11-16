@@ -118,6 +118,16 @@ impl Combined {
     /// once; empty when none is, or when nothing of the word is left. An
     /// error of either index is the error of the lookup.
     pub fn find_reduced(&self, word: &str) -> Result<Vec<Found>, Error> {
+        self.reduced(word, |headword| self.find(headword))
+    }
+
+    /// The reduced lookup through `find`, which gives the article of one
+    /// headword; see [`Combined::find_reduced`].
+    fn reduced(
+        &self,
+        word: &str,
+        find: impl Fn(&str) -> Result<Option<Article>, Error>,
+    ) -> Result<Vec<Found>, Error> {
         let written = reduction::stripped(word);
         if written.is_empty() {
             return Ok(Vec::new());
@@ -134,7 +144,7 @@ impl Combined {
         );
         let mut found = Vec::new();
         for headword in candidates {
-            if let Some(article) = self.find(&headword)? {
+            if let Some(article) = find(&headword)? {
                 found.push(Found { headword, article });
             }
         }
@@ -147,6 +157,26 @@ impl Combined {
     /// of either index is the error of the lookup, and no article is given.
     pub fn article(&self, word: &str) -> Result<Option<Article>, Error> {
         Ok(merged(self.find_reduced(word)?))
+    }
+
+    /// [`Combined::article`] from the definitions index alone, for a reader
+    /// whose language the translations index does not translate into: the
+    /// same forms are tried, with the same exception list, and only the
+    /// headwords of the definitions index are found. The article has no
+    /// entry, sense metadata or translation of the translations index, and a
+    /// word only that index has is `None`. Without a definitions index there
+    /// is no article. Only the definitions index is read.
+    pub fn definitions_article(&self, word: &str) -> Result<Option<Article>, Error> {
+        let Some(definitions) = &self.definitions else {
+            return Ok(None);
+        };
+        let found = self.reduced(word, |headword| {
+            Ok(definitions.find(headword)?.map(|mut article| {
+                article.translations.clear();
+                article
+            }))
+        })?;
+        Ok(merged(found))
     }
 }
 
@@ -964,6 +994,56 @@ mod tests {
         for word in ["despite", "webhook", "xyzzy"] {
             assert_eq!(alone.article(word).expect("article"), None, "{word}");
         }
+    }
+
+    #[test]
+    fn the_definitions_article_has_no_translation_and_no_word_of_the_other_index() {
+        let dir = TempDir::new("combined-definitions-article");
+        let both = opened(&dir);
+        let (definitions, _) = paths(&dir);
+        let mut alone = Combined::default();
+        alone.set_definitions(Index::open(&definitions).expect("open"));
+        for word in ["bank", "banks", "Bank", "went", "wood"] {
+            let article = both
+                .definitions_article(word)
+                .expect("article")
+                .expect(word);
+            assert!(!article.senses.is_empty(), "{word}");
+            assert_eq!(article.translations, Vec::<String>::new(), "{word}");
+            // As the definitions index alone gives it.
+            assert_eq!(
+                Some(article),
+                alone.article(word).expect("article"),
+                "{word}"
+            );
+        }
+        // `bank` has Russian translations in the pair.
+        assert!(
+            !both
+                .article("bank")
+                .expect("article")
+                .expect("bank")
+                .translations
+                .is_empty()
+        );
+        // Words only the translations index has, and a word neither has.
+        for word in ["despite", "webhook", "webhooks", "xyzzy", ""] {
+            assert_eq!(
+                both.definitions_article(word).expect("article"),
+                None,
+                "{word}"
+            );
+        }
+        // Without a definitions index there is nothing, whatever the other has.
+        let (_, translations) = paths(&dir);
+        let mut only_translations = Combined::default();
+        only_translations.set_translations(Index::open(&translations).expect("open"));
+        assert_eq!(
+            only_translations
+                .definitions_article("bank")
+                .expect("article"),
+            None
+        );
     }
 
     #[test]

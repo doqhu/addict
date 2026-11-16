@@ -35,6 +35,7 @@ use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 use addict_dictionary::{
     analysis::{Analyses, Number, Person, Shape, TenseMood},
     lookup::Grouped,
+    pairs,
 };
 
 use crate::{
@@ -578,6 +579,111 @@ fn missing_russian(language: Language) -> &'static str {
         Language::Es => "No Spanish-Russian dictionary is imported.",
         Language::Ca => "No Catalan-Russian dictionary is imported.",
         Language::Ru => "There is no offline dictionary for Russian.",
+    }
+}
+
+/// The line of a pair with no offline source of translations: the language
+/// a word is read in and the one it would be translated into. The pair of a
+/// language with itself needs none, and has no line of its own. No wildcard
+/// arm, as in [`definitions_label`].
+fn no_pair(reading: Language, target: Language) -> &'static str {
+    macro_rules! line {
+        ($reading:literal, $target:literal) => {
+            concat!(
+                "There is no ",
+                $reading,
+                " → ",
+                $target,
+                " offline dictionary yet."
+            )
+        };
+    }
+    match (reading, target) {
+        (Language::En, Language::Es) => line!("English", "Spanish"),
+        (Language::En, Language::Ca) => line!("English", "Catalan"),
+        (Language::En, Language::Ru) => line!("English", "Russian"),
+        (Language::Es, Language::En) => line!("Spanish", "English"),
+        (Language::Es, Language::Ca) => line!("Spanish", "Catalan"),
+        (Language::Es, Language::Ru) => line!("Spanish", "Russian"),
+        (Language::Ca, Language::En) => line!("Catalan", "English"),
+        (Language::Ca, Language::Es) => line!("Catalan", "Spanish"),
+        (Language::Ca, Language::Ru) => line!("Catalan", "Russian"),
+        (Language::Ru, Language::En) => line!("Russian", "English"),
+        (Language::Ru, Language::Es) => line!("Russian", "Spanish"),
+        (Language::Ru, Language::Ca) => line!("Russian", "Catalan"),
+        (Language::En, Language::En)
+        | (Language::Es, Language::Es)
+        | (Language::Ca, Language::Ca)
+        | (Language::Ru, Language::Ru) => "",
+    }
+}
+
+/// The translations row of a word read in `language` for the `target`
+/// language beside Russian: none when the word is in the target language
+/// already or when the pair has a source, whose translations stand under
+/// their own label (the English glosses); else the line that says the pair
+/// has no offline dictionary. What the result carries is not shown: a
+/// result looked up for Russian may still be on screen.
+fn pair_row(language: Language, target: Language) -> Option<Listed<'static>> {
+    (language != target && pairs::translations(language, target).is_empty())
+        .then(|| Listed::Missing(no_pair(language, target)))
+}
+
+/// Whom the shown result is for: my language and the pressed reading
+/// language. The target of a word answered in a language follows from them
+/// ([`Translating::target`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Translating {
+    /// My language.
+    pub my: Language,
+    /// The reading language pressed.
+    pub pressed: Language,
+}
+
+impl Default for Translating {
+    /// Russian mine, as before there was a choice, and Russian pressed.
+    fn default() -> Self {
+        Self {
+            my: Language::Ru,
+            pressed: Language::Ru,
+        }
+    }
+}
+
+impl Translating {
+    /// The language a word answered in `answered` is translated into: my
+    /// language, unless the word is in my language, and then the pressed
+    /// one.
+    pub fn target(self, answered: Language) -> Language {
+        if answered == self.my {
+            self.pressed
+        } else {
+            self.my
+        }
+    }
+
+    /// The language that names the top card's answer to `lookup` when the
+    /// dictionary's translations do not: the language of a Russian word's
+    /// translations, and my language for any other result, since the
+    /// online word and sentence under that label are sent into my
+    /// language. With Russian mine it is Russian, as before. No wildcard
+    /// arm.
+    pub fn answer_language(self, lookup: Option<&Lookup>) -> Language {
+        match lookup {
+            Some(Lookup::FromRussian { language, .. }) => *language,
+            Some(
+                Lookup::Article(_)
+                | Lookup::Grouped { .. }
+                | Lookup::Pending
+                | Lookup::NoEntry { .. }
+                | Lookup::NoDictionary(_)
+                | Lookup::NotImported { .. }
+                | Lookup::NoRussianDictionary(_)
+                | Lookup::Unreadable(_)
+                | Lookup::Unfinished,
+            )
+            | None => self.my,
+        }
     }
 }
 
@@ -1636,6 +1742,7 @@ pub fn result_texts<'a>(
         definition,
         key_file,
         None,
+        Translating::default(),
     )
 }
 
@@ -1645,19 +1752,24 @@ pub fn result_texts<'a>(
 /// blank. A refusal about the key names `key_file`, as in
 /// [`online_rows`]. An article that the language `elsewhere.1` gave for a
 /// word the chosen language `elsewhere.0` had no entry for has the line
-/// that names both. No wildcard arm: a new variant does not compile until
-/// it is given its text.
+/// that names both. The translations row of an article is for the target
+/// `translating` gives its language ([`Translating::target`]): the
+/// dictionary's Russian translations for Russian, and for another language
+/// the line that its pair has no offline dictionary, or no row when the
+/// pair's translations are the English glosses. No wildcard arm: a new
+/// variant does not compile until it is given its text.
 pub fn choice_texts<'a>(
     lookup: &'a Lookup,
     choice: Option<Choice>,
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
     elsewhere: Option<(Language, Language)>,
+    translating: Translating,
 ) -> ResultTexts<'a> {
     let elsewhere = elsewhere
         .filter(|(chosen, found)| chosen != found)
         .map(|(chosen, found)| elsewhere_text(chosen, found));
-    let texts = lookup_texts(lookup, choice, definition, key_file);
+    let texts = lookup_texts(lookup, choice, definition, key_file, translating);
     match lookup {
         Lookup::Article(_) | Lookup::Grouped { .. } => ResultTexts { elsewhere, ..texts },
         // A Russian word is answered by the chosen language only.
@@ -1679,6 +1791,7 @@ fn lookup_texts<'a>(
     choice: Option<Choice>,
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
+    translating: Translating,
 ) -> ResultTexts<'a> {
     let chosen = match choice {
         Some(Choice::Sense(index)) => Some(index),
@@ -1699,10 +1812,21 @@ fn lookup_texts<'a>(
     };
     match lookup {
         Lookup::Pending => line(Cow::Borrowed(PENDING)),
-        Lookup::Article(article) => article_texts(article, chosen, definition, key_file),
-        Lookup::Grouped { language, grouped } => {
-            grouped_texts(*language, grouped, choice, definition, key_file)
-        }
+        Lookup::Article(article) => article_texts(
+            article,
+            chosen,
+            definition,
+            key_file,
+            translating.target(Language::En),
+        ),
+        Lookup::Grouped { language, grouped } => grouped_texts(
+            *language,
+            grouped,
+            choice,
+            definition,
+            key_file,
+            translating.target(*language),
+        ),
         // The list of translations alone: no senses, synonyms or glosses.
         Lookup::FromRussian {
             language,
@@ -1740,12 +1864,14 @@ fn lookup_texts<'a>(
     }
 }
 
-/// The parts of `article`; see [`choice_texts`].
+/// The parts of `article`, its translations row for `target`; see
+/// [`choice_texts`].
 fn article_texts<'a>(
     article: &'a Article,
     chosen: Option<usize>,
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
+    target: Language,
 ) -> ResultTexts<'a> {
     let (hint, senses) = sense_texts(
         &article.senses,
@@ -1762,11 +1888,14 @@ fn article_texts<'a>(
         senses_label: SENSES_LABEL,
         hint: hint.or(article.senses.is_empty().then_some(NO_DEFINITIONS)),
         senses,
-        translations: Some(Listed::of(
-            RUSSIAN_LABEL,
-            &article.translations,
-            NO_TRANSLATION,
-        )),
+        translations: match target {
+            Language::Ru => Some(Listed::of(
+                RUSSIAN_LABEL,
+                &article.translations,
+                NO_TRANSLATION,
+            )),
+            Language::En | Language::Es | Language::Ca => pair_row(Language::En, target),
+        },
         word_synonyms: None,
         glosses: None,
         gloss: None,
@@ -1778,12 +1907,14 @@ fn article_texts<'a>(
 /// kind in its own part, a kind with no index or with nothing for the word
 /// said by its own line. `choice` is a sense of the definitions or an
 /// English gloss, and the online translation `definition` stands under it.
+/// The translations row is for `target`, as in [`choice_texts`].
 fn grouped_texts<'a>(
     language: Language,
     grouped: &'a Grouped,
     choice: Option<Choice>,
     definition: Option<&'a Online>,
     key_file: Option<&Path>,
+    target: Language,
 ) -> ResultTexts<'a> {
     let senses = grouped.definitions.as_deref().unwrap_or_default();
     let chosen = match choice {
@@ -1804,9 +1935,12 @@ fn grouped_texts<'a>(
         Some(senses) if senses.is_empty() => Some(no_definitions(language)),
         Some(_) => hint.filter(|_| !matches!(choice, Some(Choice::Gloss(_)))),
     };
-    let translations = match &grouped.russian {
-        None => Listed::Missing(missing_russian(language)),
-        Some(russian) => Listed::of(RUSSIAN_LABEL, russian, NO_TRANSLATION),
+    let translations = match target {
+        Language::Ru => Some(match &grouped.russian {
+            None => Listed::Missing(missing_russian(language)),
+            Some(russian) => Listed::of(RUSSIAN_LABEL, russian, NO_TRANSLATION),
+        }),
+        Language::En | Language::Es | Language::Ca => pair_row(language, target),
     };
     let in_senses = senses.iter().any(|sense| !sense.synonyms.is_empty());
     // A meaning that a sense took stands under that sense: only the others
@@ -1869,7 +2003,7 @@ fn grouped_texts<'a>(
         senses_label: definitions_label(language),
         hint,
         senses: rows,
-        translations: Some(translations),
+        translations,
         word_synonyms,
         glosses: Some(glosses),
         gloss,
@@ -2085,10 +2219,13 @@ pub struct Answer<'a> {
 /// translations as [`Answer::whole`]; else the word translated without a
 /// sentence, with the dictionary's as pills; else the dictionary's first,
 /// with its others as pills. Rows refused for want of a key are no answer:
-/// [`Answer::no_key`] says so instead.
+/// [`Answer::no_key`] says so instead. An answer without the dictionary's
+/// own label is named by `language`, the language it is in
+/// ([`Translating::answer_language`]).
 pub fn answer_texts<'a>(
     translations: Option<&'a Listed<'a>>,
     rows: &'a [OnlineRow<'a>],
+    language: Language,
 ) -> Option<Answer<'a>> {
     let no_key = !rows.is_empty() && rows.iter().all(|row| row.no_key);
     let find = |kind: OnlineKind| {
@@ -2102,7 +2239,9 @@ pub fn answer_texts<'a>(
         Some(Listed::Missing(line)) => (None, &[][..], Some(*line)),
         None => (None, &[][..], None),
     };
-    let label = label.unwrap_or(RUSSIAN_LABEL).trim_end_matches(':');
+    let label = label
+        .unwrap_or(from_russian_label(language))
+        .trim_end_matches(':');
     let sentence = find(OnlineKind::Sentence);
     if let Some(word) = find(OnlineKind::Word) {
         return Some(Answer {
@@ -2279,6 +2418,9 @@ pub struct Shown {
     /// My language: a chosen definition is sent into it, and one already in
     /// it is not offered.
     my_language: Language,
+    /// The reading language pressed: a word of my language is translated
+    /// into it ([`Translating::target`]).
+    pressed: Language,
     /// The spelling of English: a definition sent into English mine is
     /// spelled so.
     english: English,
@@ -2295,6 +2437,7 @@ impl Default for Shown {
             next_definition: 0,
             generation: 0,
             my_language: Language::Ru,
+            pressed: Language::Ru,
             english: English::Us,
         }
     }
@@ -2309,6 +2452,20 @@ impl Shown {
             self.definition = None;
         }
         self.my_language = language;
+    }
+
+    /// Makes `language` the reading language pressed. Nothing is forgotten:
+    /// the shown result is rendered for it from now on.
+    pub fn set_pressed(&mut self, language: Language) {
+        self.pressed = language;
+    }
+
+    /// Whom the shown result is for: my language and the pressed one.
+    pub fn translating(&self) -> Translating {
+        Translating {
+            my: self.my_language,
+            pressed: self.pressed,
+        }
     }
 
     /// Makes `english` the spelling of English: a chosen definition sent
@@ -2517,8 +2674,8 @@ mod tests {
         NO_TRANSLATION, NO_WORD_SYNONYMS, ONLINE_LONE_LABEL, ONLINE_PENDING, ONLINE_SENTENCE_LABEL,
         ONLINE_SOURCE, ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online, OnlineState,
         OnlineTexts, PENDING, RUSSIAN_LABEL, ResultTexts, SYNONYMS_LABEL, Shown, SynonymTexts,
-        UNFINISHED, Whole, binding_texts, indexes_text, online_rows, result_texts, sentence_markup,
-        texts,
+        Translating, UNFINISHED, Whole, binding_texts, indexes_text, online_rows, result_texts,
+        sentence_markup, texts,
     };
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
@@ -4233,6 +4390,7 @@ mod tests {
             shown.definition(),
             None,
             shown.elsewhere(),
+            Translating::default(),
         )
     }
 
@@ -4686,7 +4844,7 @@ mod tests {
                 OnlineState::Translated,
             ),
         ];
-        let answer = answer_texts(Some(&translations), &rows).expect("an answer");
+        let answer = answer_texts(Some(&translations), &rows, Language::Ru).expect("an answer");
         assert_eq!(answer.label, "In this sentence");
         assert_eq!(answer.word.expect("the word").0, "есть");
         assert_eq!(answer.sentence.expect("the sentence").0, "У них есть дом.");
@@ -4706,7 +4864,7 @@ mod tests {
             label: RUSSIAN_LABEL,
             items: Cow::Borrowed(&items[..]),
         };
-        let answer = answer_texts(Some(&translations), &[]).expect("an answer");
+        let answer = answer_texts(Some(&translations), &[], Language::Ru).expect("an answer");
         assert_eq!(answer.label, "Russian, for the word as a whole");
         assert_eq!(answer.word.expect("the first").0, "иметь");
         assert_eq!(answer.pills, &items[1..]);
@@ -4719,10 +4877,10 @@ mod tests {
         );
         refused.no_key = true;
         let rows = [refused];
-        let answer = answer_texts(Some(&translations), &rows).expect("an answer");
+        let answer = answer_texts(Some(&translations), &rows, Language::Ru).expect("an answer");
         assert_eq!(answer.word.expect("the first").0, "иметь");
         assert!(answer.no_key);
-        assert_eq!(answer_texts(None, &[]), None);
+        assert_eq!(answer_texts(None, &[], Language::Ru), None);
     }
 
     /// A word without a sentence, translated online, is the answer, with
@@ -4736,7 +4894,7 @@ mod tests {
             items: Cow::Borrowed(&items[..]),
         };
         let rows = [row(OnlineKind::Lone, "", OnlineState::Pending)];
-        let answer = answer_texts(Some(&translations), &rows).expect("an answer");
+        let answer = answer_texts(Some(&translations), &rows, Language::Ru).expect("an answer");
         assert_eq!(answer.label, "Russian");
         assert_eq!(answer.word.expect("pending").1, OnlineState::Pending);
         assert_eq!(answer.pills, &items[..]);
@@ -5076,7 +5234,14 @@ mod tests {
         assert_eq!(shown.request_definition(), None);
         // Even with an answer at hand, a blank text has no block.
         let lookup = shown.lookup().expect("article");
-        let texts = super::choice_texts(lookup, shown.choice(), Some(&Online::Pending), None, None);
+        let texts = super::choice_texts(
+            lookup,
+            shown.choice(),
+            Some(&Online::Pending),
+            None,
+            None,
+            Translating::default(),
+        );
         assert_eq!(texts.gloss.expect("chosen").definition, None);
         let texts = result_texts(lookup, Some(0), Some(&Online::Pending), None);
         assert_eq!(
@@ -5132,6 +5297,7 @@ mod tests {
                 shown.definition(),
                 None,
                 None,
+                Translating::default(),
             );
             // Under the gloss, not under a sense.
             assert!(texts.senses.iter().all(|sense| sense.explained.is_none()));
@@ -5962,5 +6128,265 @@ mod tests {
             let texts = result_texts(&lookup, None, None, None);
             assert_eq!(texts.senses[0].pos, Some("sustantivo femenino"));
         }
+    }
+
+    /// The texts of `lookup` for `my` language mine and `pressed` pressed,
+    /// with nothing chosen.
+    fn for_pair(lookup: &Lookup, my: Language, pressed: Language) -> ResultTexts<'_> {
+        super::choice_texts(lookup, None, None, None, None, Translating { my, pressed })
+    }
+
+    /// Whether `text` has a Cyrillic letter.
+    fn cyrillic(text: &str) -> bool {
+        text.chars()
+            .any(|letter| ('\u{0400}'..='\u{04ff}').contains(&letter))
+    }
+
+    /// Everything the translations row and the glosses of `texts` say, as
+    /// one text.
+    fn translations_and_glosses(texts: &ResultTexts<'_>) -> String {
+        let row = match &texts.translations {
+            Some(Listed::Items { label, items }) => format!("{label} {}", items.join(", ")),
+            Some(Listed::Missing(line)) => (*line).to_owned(),
+            None => String::new(),
+        };
+        let glosses = texts
+            .glosses
+            .as_ref()
+            .map_or_else(String::new, super::GlossTexts::line);
+        format!("{row}\n{glosses}")
+    }
+
+    #[test]
+    fn the_target_is_my_language_unless_the_word_is_in_it() {
+        for my in Language::ALL {
+            for pressed in Language::ALL {
+                let translating = Translating { my, pressed };
+                for answered in Language::ALL {
+                    let expected = if answered == my { pressed } else { my };
+                    assert_eq!(translating.target(answered), expected);
+                }
+            }
+        }
+        // Russian mine: a word read in a language beside Russian is
+        // translated into Russian whatever is pressed.
+        for pressed in Language::ALL {
+            let translating = Translating {
+                my: Language::Ru,
+                pressed,
+            };
+            for answered in [Language::En, Language::Es, Language::Ca] {
+                assert_eq!(translating.target(answered), Language::Ru);
+            }
+        }
+        assert_eq!(
+            Translating::default(),
+            Translating {
+                my: Language::Ru,
+                pressed: Language::Ru,
+            }
+        );
+        assert_eq!(Shown::default().translating(), Translating::default());
+    }
+
+    #[test]
+    fn a_spanish_word_for_english_mine_has_its_glosses_and_no_russian() {
+        // As the indexes give it with English mine: no Russian asked.
+        let Lookup::Grouped { grouped, .. } = spanish_all() else {
+            panic!("spanish_all is grouped");
+        };
+        let asked = Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                russian: None,
+                ..grouped
+            },
+        };
+        // And one looked up with Russian mine before, still shown.
+        for lookup in [asked, spanish_all()] {
+            let texts = for_pair(&lookup, Language::En, Language::Es);
+            assert_eq!(texts.translations, None);
+            let said = translations_and_glosses(&texts);
+            assert!(said.contains("bench"), "{said}");
+            assert!(!cyrillic(&said), "{said}");
+            assert!(!said.contains("Russian"), "{said}");
+            assert_eq!(texts.senses.len(), 2);
+            assert!(texts.word_synonyms.is_some());
+            // The top card has no Russian either.
+            let language = Translating {
+                my: Language::En,
+                pressed: Language::Es,
+            }
+            .answer_language(Some(&lookup));
+            assert_eq!(language, Language::En);
+            assert_eq!(
+                super::answer_texts(texts.translations.as_ref(), &[], language),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn a_pair_without_a_source_says_so() {
+        let english = Lookup::Article(article());
+        for (lookup, my, pressed, line) in [
+            // A Spanish word, Catalan mine.
+            (
+                spanish_all(),
+                Language::Ca,
+                Language::Es,
+                "There is no Spanish → Catalan offline dictionary yet.",
+            ),
+            // An English word, Spanish mine.
+            (
+                english.clone(),
+                Language::Es,
+                Language::En,
+                "There is no English → Spanish offline dictionary yet.",
+            ),
+            // An English word, English mine: into the pressed language.
+            (
+                english.clone(),
+                Language::En,
+                Language::Es,
+                "There is no English → Spanish offline dictionary yet.",
+            ),
+            // A word of my language found by the fallback.
+            (
+                spanish_all(),
+                Language::Es,
+                Language::Ca,
+                "There is no Spanish → Catalan offline dictionary yet.",
+            ),
+        ] {
+            let texts = for_pair(&lookup, my, pressed);
+            assert_eq!(texts.translations, Some(Listed::Missing(line)), "{line}");
+            let said = translations_and_glosses(&texts);
+            assert!(!cyrillic(&said), "{said}");
+            assert!(!said.contains("Russian"), "{said}");
+            // The rest of the article is as for Russian mine.
+            let russian = for_pair(&lookup, Language::Ru, pressed);
+            assert_eq!(
+                ResultTexts {
+                    translations: None,
+                    ..texts.clone()
+                },
+                ResultTexts {
+                    translations: None,
+                    ..russian
+                }
+            );
+            // The top card names the target, not Russian.
+            let language = Translating { my, pressed }.answer_language(Some(&lookup));
+            let answer =
+                super::answer_texts(texts.translations.as_ref(), &[], language).expect("an answer");
+            assert_eq!(answer.missing, Some(line));
+            assert!(!answer.label.contains("Russian"), "{}", answer.label);
+            assert!(answer.pills.is_empty());
+        }
+        // The English glosses keep their own label with Catalan mine.
+        let lookup = spanish_all();
+        let texts = for_pair(&lookup, Language::Ca, Language::Es);
+        assert!(translations_and_glosses(&texts).contains("bench"));
+    }
+
+    #[test]
+    fn with_russian_mine_the_texts_are_as_before() {
+        let lookups = [
+            Lookup::Article(article()),
+            spanish_all(),
+            spanish(),
+            Lookup::FromRussian {
+                language: Language::Es,
+                translations: vec!["perro".to_owned()],
+            },
+        ];
+        for lookup in &lookups {
+            for pressed in Language::ALL {
+                assert_eq!(
+                    for_pair(lookup, Language::Ru, pressed),
+                    result_texts(lookup, None, None, None),
+                    "{lookup:?} {pressed:?}"
+                );
+                assert_eq!(
+                    Translating {
+                        my: Language::Ru,
+                        pressed,
+                    }
+                    .answer_language(Some(lookup)),
+                    if let Lookup::FromRussian { language, .. } = lookup {
+                        *language
+                    } else {
+                        Language::Ru
+                    }
+                );
+            }
+        }
+        let english = Lookup::Article(article());
+        let texts = for_pair(&english, Language::Ru, Language::Es);
+        assert_eq!(
+            texts.translations,
+            Some(Listed::Items {
+                label: RUSSIAN_LABEL,
+                items: Cow::Owned(vec!["раз".to_owned(), "два".to_owned()]),
+            })
+        );
+        // The answer without the dictionary's label is still Russian's.
+        let rows = [super::OnlineRow {
+            label: ONLINE_SENTENCE_LABEL,
+            line: Cow::Borrowed("Я сидел на берегу."),
+            state: OnlineState::Translated,
+            word: false,
+            kind: super::OnlineKind::Sentence,
+            no_key: false,
+        }];
+        let answer = super::answer_texts(None, &rows, Language::Ru).expect("an answer");
+        assert_eq!(answer.label, RUSSIAN_LABEL.trim_end_matches(':'));
+        let answer = super::answer_texts(None, &rows, Language::En).expect("an answer");
+        assert_eq!(answer.label, "English, for the word as a whole");
+        // The online answer is in my language, whatever the result: an
+        // English word of English mine too, pressed Spanish.
+        let english_mine = Translating {
+            my: Language::En,
+            pressed: Language::Es,
+        };
+        let english = Lookup::Article(article());
+        for lookup in [
+            None,
+            Some(&Lookup::Pending),
+            Some(&Lookup::Unfinished),
+            Some(&english),
+        ] {
+            assert_eq!(english_mine.answer_language(lookup), Language::En);
+        }
+    }
+
+    #[test]
+    fn a_result_shown_for_russian_shows_no_russian_once_another_language_is_mine() {
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(article())));
+        let lookup = shown.lookup().expect("article").clone();
+        let before = super::choice_texts(&lookup, None, None, None, None, shown.translating());
+        assert!(cyrillic(&translations_and_glosses(&before)));
+        shown.set_my_language(Language::En);
+        shown.set_pressed(Language::Es);
+        assert_eq!(
+            shown.translating(),
+            Translating {
+                my: Language::En,
+                pressed: Language::Es,
+            }
+        );
+        let after = super::choice_texts(&lookup, None, None, None, None, shown.translating());
+        let said = translations_and_glosses(&after);
+        assert!(!cyrillic(&said), "{said}");
+        assert_eq!(
+            after.translations,
+            Some(Listed::Missing(
+                "There is no English → Spanish offline dictionary yet."
+            ))
+        );
+        // The pressed language changes nothing else that is shown.
+        assert_eq!(shown.lookup(), Some(&lookup));
     }
 }

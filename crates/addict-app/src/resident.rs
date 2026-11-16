@@ -1798,6 +1798,7 @@ impl Session {
             self.articles.clone(),
             word,
             language,
+            self.my_language,
             self.indexes.known,
             move |language, outcome| {
                 // On the worker: the UI thread wakes for the event.
@@ -2185,6 +2186,8 @@ impl Session {
     fn apply_reading_language(&mut self) {
         let language = language::reading(self.saved_language, self.my_language);
         self.view.set_language(language);
+        // The shown result names its pair by the pressed language.
+        self.shown.set_pressed(language);
         if language == self.language {
             return;
         }
@@ -2219,9 +2222,12 @@ impl Session {
         // A definition translated into the language before is forgotten,
         // and its job cancelled.
         self.translating_definition = None;
-        self.shown.set_my_language(language);
-        self.render_shown();
         let reading = language::reading(self.saved_language, language);
+        self.shown.set_my_language(language);
+        // Rendered for the new pair: a result looked up for the language
+        // before shows none of its translations.
+        self.shown.set_pressed(reading);
+        self.render_shown();
         self.view
             .set_reading_languages(reading_languages(language), reading);
         self.language = reading;
@@ -3614,6 +3620,7 @@ mod tests {
                     articles.clone(),
                     word.to_owned(),
                     language,
+                    Language::Ru,
                     cached.known,
                     |_, _| {}
                 )
@@ -3670,6 +3677,7 @@ mod tests {
                 articles.clone(),
                 word.to_owned(),
                 language,
+                Language::Ru,
                 cached.known,
                 move |language, outcome| {
                     let _ = send.send((language, outcome));
@@ -3798,6 +3806,7 @@ mod tests {
                 articles.clone(),
                 word.to_owned(),
                 language,
+                Language::Ru,
                 cached.known,
                 move |language, outcome| {
                     let _ = send.send((language, outcome));

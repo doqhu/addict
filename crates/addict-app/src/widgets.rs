@@ -1622,6 +1622,10 @@ pub struct View {
     /// both.
     translations: RefCell<Option<Listed<'static>>>,
     online: RefCell<Vec<OnlineRow<'static>>>,
+    /// The language the answer is in, which names it when the dictionary's
+    /// translations do not: the shown result's
+    /// [`Translating::answer_language`](crate::view::Translating::answer_language).
+    answer_language: Cell<Language>,
     /// Whether the synonyms of the word that no sense took are shown; a new
     /// result closes them, a choice in the same one keeps them.
     synonyms_open: Rc<Cell<bool>>,
@@ -1701,6 +1705,7 @@ impl View {
             pronounced: Cell::new(None),
             translations: RefCell::new(None),
             online: RefCell::new(Vec::new()),
+            answer_language: Cell::new(Language::Ru),
             synonyms_open: Rc::new(Cell::new(false)),
             lone_word: Cell::new(false),
         };
@@ -2006,6 +2011,8 @@ impl View {
             parent.remove(&result.definition_action);
         }
         clear(&result.rows);
+        self.answer_language
+            .set(shown.translating().answer_language(shown.lookup()));
         let Some(lookup) = shown.lookup() else {
             self.hide_result();
             return;
@@ -2016,6 +2023,7 @@ impl View {
             shown.definition(),
             key_file,
             shown.elsewhere(),
+            shown.translating(),
         );
         // A result that is not an article has its line; an article of
         // another language than the chosen one has the line that says so,
@@ -2146,7 +2154,7 @@ impl View {
             let online = self.online.borrow();
             fill_answer(
                 result,
-                answer_texts(translations.as_ref(), &online).as_ref(),
+                answer_texts(translations.as_ref(), &online, self.answer_language.get()).as_ref(),
                 &self.field,
             );
         }
