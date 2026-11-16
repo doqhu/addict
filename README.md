@@ -1,12 +1,14 @@
 # addict
 
-addict is a hotkey translator for Linux readers of English, Spanish and
-Catalan. Select or copy a word or a sentence anywhere, press the shortcut, and
-a small window shows the dictionary article of the word: its senses, synonyms,
-transcriptions with recordings, and its Russian translations. Click a word of
-a sentence and DeepL translates the word in that sentence, and the sentence
-itself, into Russian. Text that cannot be selected, such as an image or a
-video, can be captured from the screen and read with Tesseract OCR.
+addict is a hotkey translator for Linux readers of English, Spanish, Catalan
+and Russian. You choose your own language, the language of translation, in
+Settings; the other three are the languages you read. Select or copy a word or
+a sentence anywhere, press the shortcut, and a small window shows the
+dictionary article of the word: its senses, synonyms, transcriptions with
+recordings, and its translations into your language. Click a word of a
+sentence and DeepL translates the word in that sentence, and the sentence
+itself, into your language. Text that cannot be selected, such as an image or
+a video, can be captured from the screen and read with Tesseract OCR.
 
 ![The addict window with the article of a Catalan word](docs/screenshot.png)
 
@@ -15,16 +17,27 @@ video, can be captured from the screen and read with Tesseract OCR.
 - A clipboard shortcut reads the selected text, or the clipboard when nothing
   is selected, the same way in every application. A separate screenshot
   shortcut opens the interactive region picker for OCR.
+- Settings → My language chooses the language of translation: English,
+  Spanish, Catalan or Russian, which is the default. The window's three
+  language buttons are the other three. While English is your language,
+  Settings → English spelling chooses US, the default, or British spelling
+  for the online translations.
 - Offline dictionary lookup in English, Spanish and Catalan, by the word as
   written and by its dictionary forms. When the reading language has
   dictionaries but none of them has the word, the other two are asked.
-- Russian translations from the dictionaries and, online, from DeepL: the
-  clicked word in the context of its sentence, the sentence, or a chosen
-  definition. Answers are cached on disk for up to 90 days after their last
-  use.
+- Translations into your language online, from DeepL, between any two of the
+  four languages: the clicked word in the context of its sentence, the
+  sentence, or a chosen definition. Answers are cached on disk for up to 90
+  days after their last use.
+- Offline translations from the dictionaries for the pairs that have one
+  today: English, Spanish and Catalan into Russian, Russian into English,
+  Spanish and Catalan, and English glosses of Spanish and Catalan words. For
+  any other pair the window says that there is no offline dictionary for it
+  yet.
 - Capture: choose an area of the screen, and its text replaces the field.
-- A Russian word is looked up the other way: its translations into the
-  reading language.
+- A Russian word is translated into your language. With Russian as your
+  language, it is looked up the other way: its translations into the reading
+  language.
 - An icon in the top bar with Show, Settings, About and Exit.
 
 ## Requirements
@@ -290,6 +303,11 @@ addict keeps its settings as small files in `~/.config/addict`
   is used as is.
 - `language` -- the reading language, written when you switch it in the
   window.
+- `my-language` -- your language, the language of translation: `en`, `es`,
+  `ca` or `ru`, written when you choose it in Settings. Without the file it is
+  Russian.
+- `english` -- the spelling of English for online translations, `us` or `gb`,
+  written when you choose it in Settings. Without the file it is US.
 
 DeepL answers are cached in `~/.cache/addict`; Settings shows the cache size
 and clears it.
