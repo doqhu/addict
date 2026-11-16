@@ -1,14 +1,18 @@
-//! The reading language kept across restarts: one line, `en`, `es` or `ca`,
-//! in the file `language` of the product's configuration directory,
+//! The reading language kept across restarts: one line, `en`, `es`, `ca`
+//! or `ru`, in the file `language` of the product's configuration directory,
 //! [`addict_deepl::key::config_dir`], the directory of the DeepL key.
 //!
 //! The file is read once, on the runner, after the start, and written on the
-//! runner each time the switch of the window changes; never on the UI thread
+//! runner at each choice of the user, a press in the switch or a click on a
+//! gloss's English word; a change of the switch caused by my language writes
+//! nothing. Neither is done on the UI thread
 //! nor on the way to showing the window. A file that is missing, cannot be
 //! read or holds anything but one known code is English, and nothing is said
-//! about it. Russian is not a reading language of the window yet, so its
-//! code is read as English too. A write that fails is written to stderr
-//! only: the choice holds until the application ends.
+//! about it. A write that fails is written to stderr only: the choice holds
+//! until the application ends.
+//!
+//! The language kept is the saved one; the window reads in
+//! [`reading`] of it and my language, which never is my language itself.
 
 use std::{
     fs::{self, File},
@@ -35,14 +39,24 @@ pub fn path() -> Option<PathBuf> {
 }
 
 /// The language the file at `path` holds; English for no path, a missing or
-/// unreadable file and any content but the code of one reading language of
-/// the window, white space around it aside. This reads the file, so it runs
-/// on the runner.
+/// unreadable file and any content but the code of one language, white
+/// space around it aside. This reads the file, so it runs on the runner.
 pub fn read(path: Option<&Path>) -> Source {
     path.and_then(|path| read_code(path).ok())
         .and_then(|content| Source::of_code(content.trim()))
-        .filter(|source| reading_languages(Source::Ru).contains(source))
         .unwrap_or_default()
+}
+
+/// The language the window reads in when `saved` is the saved reading
+/// language and `my` is my language: `saved`, unless it is `my`, and then
+/// the first of [`reading_languages`] of `my`. Nothing is written by it: a
+/// saved language that falls back stays saved.
+pub fn reading(saved: Source, my: Source) -> Source {
+    if saved == my {
+        reading_languages(my)[0]
+    } else {
+        saved
+    }
 }
 
 /// The first bytes of the regular file at `path`, as text.
@@ -74,7 +88,7 @@ mod tests {
 
     use addict_core::translation::{Source, reading_languages};
 
-    use super::{read, write};
+    use super::{read, reading, write};
 
     /// A directory of one test, removed when the test ends.
     struct TempDir(PathBuf);
@@ -103,7 +117,7 @@ mod tests {
     fn a_written_language_is_read_back() {
         let dir = TempDir::new("round");
         let file = dir.file();
-        for source in reading_languages(Source::Ru) {
+        for source in Source::ALL {
             write(Some(&file), source).expect("written");
             assert_eq!(
                 std::fs::read_to_string(&file).expect("the file"),
@@ -128,7 +142,7 @@ mod tests {
             "es ca\n",
             "en-GB",
             "\u{0}\u{ff}",
-            "ru\n",
+            "RU\n",
         ] {
             std::fs::write(&file, content).expect("write");
             assert_eq!(read(Some(&file)), Source::En, "{content:?}");
@@ -144,6 +158,39 @@ mod tests {
         std::fs::remove_dir(&file).expect("remove");
         std::fs::write(&file, [0xff, 0xfe, b'e', b's']).expect("write");
         assert_eq!(read(Some(&file)), Source::En);
+    }
+
+    /// The saved language holds unless it is my language, which falls back
+    /// to the first reading language of my language; with Russian mine,
+    /// every saved language of 0.2.0 holds.
+    #[test]
+    fn the_reading_language_is_the_saved_one_unless_it_is_mine() {
+        for my in Source::ALL {
+            for saved in Source::ALL {
+                let expected = if saved == my {
+                    reading_languages(my)[0]
+                } else {
+                    saved
+                };
+                let effective = reading(saved, my);
+                assert_eq!(effective, expected, "{saved:?} with {my:?}");
+                assert_ne!(effective, my, "{saved:?} with {my:?}");
+                assert!(reading_languages(my).contains(&effective));
+            }
+        }
+        assert_eq!(reading(Source::En, Source::En), Source::Es);
+        assert_eq!(reading(Source::Ru, Source::Ru), Source::En);
+        for saved in reading_languages(Source::Ru) {
+            assert_eq!(reading(saved, Source::Ru), saved);
+        }
+    }
+
+    /// A saved Russian falls back to English while Russian is mine and is
+    /// Russian again with English mine.
+    #[test]
+    fn a_saved_russian_comes_back_with_english_mine() {
+        assert_eq!(reading(Source::Ru, Source::Ru), Source::En);
+        assert_eq!(reading(Source::Ru, Source::En), Source::Ru);
     }
 
     #[test]

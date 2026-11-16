@@ -2,7 +2,8 @@
 //! right under them the source line, then the binding row and the line of
 //! the dictionary indexes, then the field for a word or a sentence, with
 //! Back and Forward left of it and the switch of the reading language,
-//! EN / ES / CA, and the Capture button beside it, the text of the field
+//! the three reading languages of my language (EN / ES / CA with Russian
+//! mine), and the Capture button beside it, the text of the field
 //! with its words as links and, last, the result, which scrolls: the card
 //! of the word with its translations as pills, the online texts, and the
 //! list of senses, a row for each, the chosen one explained under its row;
@@ -200,32 +201,38 @@ fn meta_row() -> (gtk::Box, gtk::Label, gtk::Label) {
     (meta, source, status)
 }
 
-/// The switch of the reading language: one linked toggle button for each
-/// reading language of the window, in the order of
-/// [`reading_languages`] of Russian, English pressed. A click
+/// The switch of the reading language: three linked toggle buttons, one for
+/// each of [`reading_languages`] of Russian at first, English pressed, and
+/// the languages they stand for, slot by slot. The languages change with my
+/// language ([`View::set_reading_languages`]); the buttons stay. A click
 /// does not take the focus from the field.
-fn language_switch() -> (gtk::Box, Vec<(Language, gtk::ToggleButton)>) {
+fn language_switch() -> (gtk::Box, LanguageSlots, Vec<gtk::ToggleButton>) {
     let switch = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .css_classes(["linked", "language"])
         .tooltip_text(LANGUAGE_TOOLTIP)
         .valign(gtk::Align::Center)
         .build();
-    let mut buttons: Vec<(Language, gtk::ToggleButton)> = Vec::new();
-    for language in reading_languages(Language::Ru) {
+    let languages = reading_languages(Language::Ru);
+    let mut buttons: Vec<gtk::ToggleButton> = Vec::new();
+    for language in languages {
         let button = gtk::ToggleButton::builder()
             .label(language_label(language))
             .focus_on_click(false)
             .active(language == Language::default())
             .build();
-        if let Some((_, first)) = buttons.first() {
+        if let Some(first) = buttons.first() {
             button.set_group(Some(first));
         }
         switch.append(&button);
-        buttons.push((language, button));
+        buttons.push(button);
     }
-    (switch, buttons)
+    (switch, Rc::new(Cell::new(languages)), buttons)
 }
+
+/// The languages the buttons of the switch stand for, slot by slot; read by
+/// the handlers of the buttons, so a change needs no new handler.
+type LanguageSlots = Rc<Cell<[Language; 3]>>;
 
 /// A button of the history left of the field, showing `icon`, with
 /// `tooltip`: it never takes the focus from the field, and it cannot be
@@ -247,7 +254,8 @@ struct FieldRow {
     field: gtk::Entry,
     back: gtk::Button,
     forward: gtk::Button,
-    languages: Vec<(Language, gtk::ToggleButton)>,
+    languages: LanguageSlots,
+    language_buttons: Vec<gtk::ToggleButton>,
     capture: gtk::Button,
 }
 
@@ -274,7 +282,7 @@ fn field_row() -> FieldRow {
         .build();
     history.append(&back);
     history.append(&forward);
-    let (switch, languages) = language_switch();
+    let (switch, languages, language_buttons) = language_switch();
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.append(&history);
     row.append(&field);
@@ -286,6 +294,7 @@ fn field_row() -> FieldRow {
         back,
         forward,
         languages,
+        language_buttons,
         capture,
     }
 }
@@ -1581,11 +1590,14 @@ pub struct View {
     /// The handler that reports the changes of the field; blocked while a
     /// recognized text is put in.
     sentence_handler: RefCell<Option<glib::SignalHandlerId>>,
+    /// The languages the buttons of the switch stand for, slot by slot: the
+    /// reading languages of my language.
+    languages: LanguageSlots,
     /// Beside the field: the switch of the reading language, a button for
-    /// each language.
-    languages: Vec<(Language, gtk::ToggleButton)>,
-    /// Set while [`View::set_language`] presses a button, so that the
-    /// change is not reported as the user's.
+    /// each slot of `languages`.
+    language_buttons: Vec<gtk::ToggleButton>,
+    /// Set while [`View::set_language`] or [`View::set_reading_languages`]
+    /// presses a button, so that the change is not reported as the user's.
     setting_language: Rc<Cell<bool>>,
     /// Beside the field: takes a screen capture.
     capture: gtk::Button,
@@ -1650,6 +1662,7 @@ impl View {
             back,
             forward,
             languages,
+            language_buttons,
             capture,
         } = field_row();
         let sentence = wrapping(gtk::Label::builder().use_markup(true))
@@ -1676,6 +1689,7 @@ impl View {
             forward,
             sentence_handler: RefCell::new(None),
             languages,
+            language_buttons,
             setting_language: Rc::new(Cell::new(false)),
             capture,
             sentence,
@@ -1776,32 +1790,50 @@ impl View {
     }
 
     /// Runs `chosen` with the language each time the user presses the button
-    /// of another language in the switch; [`View::set_language`] does not
-    /// run it. Called once.
+    /// of another language in the switch: the language its slot stands for
+    /// at the press. [`View::set_language`] and
+    /// [`View::set_reading_languages`] do not run it. Called once.
     pub fn connect_language_chosen(&self, chosen: impl Fn(Language) + 'static) {
         let chosen = Rc::new(chosen);
-        for (language, button) in &self.languages {
-            let (language, chosen) = (*language, chosen.clone());
+        for (slot, button) in self.language_buttons.iter().enumerate() {
+            let chosen = chosen.clone();
+            let languages = self.languages.clone();
             let setting = self.setting_language.clone();
             button.connect_toggled(move |button| {
                 // The button let go in a group is toggled too.
                 if button.is_active() && !setting.get() {
-                    chosen(language);
+                    chosen(languages.get()[slot]);
                 }
             });
         }
     }
 
     /// Presses the button of `language` in the switch, without running the
-    /// handler of [`View::connect_language_chosen`].
+    /// handler of [`View::connect_language_chosen`]. A language the switch
+    /// does not show presses nothing.
     pub fn set_language(&self, language: Language) {
         self.setting_language.set(true);
-        for (shown, button) in &self.languages {
+        let languages = self.languages.get();
+        for (shown, button) in languages.iter().zip(&self.language_buttons) {
             if *shown == language {
                 button.set_active(true);
             }
         }
         self.setting_language.set(false);
+    }
+
+    /// Makes the buttons of the switch stand for `languages`, slot by slot,
+    /// labelled as [`language_label`] says, and presses the one of
+    /// `pressed`, all without running the handler of
+    /// [`View::connect_language_chosen`].
+    pub fn set_reading_languages(&self, languages: [Language; 3], pressed: Language) {
+        self.setting_language.set(true);
+        self.languages.set(languages);
+        for (language, button) in languages.iter().zip(&self.language_buttons) {
+            button.set_label(language_label(*language));
+        }
+        self.setting_language.set(false);
+        self.set_language(pressed);
     }
 
     /// Runs `capture` each time Capture is pressed.
@@ -2159,7 +2191,10 @@ impl View {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, rc::Rc};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
 
     use addict_core::{
         dictionary::{
@@ -2168,6 +2203,7 @@ mod tests {
         },
         input::WindowState,
         sentence::words,
+        translation::{Source as Language, reading_languages},
     };
     use gtk::{glib, prelude::*};
 
@@ -2673,6 +2709,47 @@ mod tests {
         view.put_into_field("bank");
         assert_eq!(view.field_text(), "bank");
         assert!(submitted.get());
+    }
+
+    /// New reading languages relabel the buttons and keep the pressed
+    /// language without reporting a choice, and a later press reports the
+    /// language of the slot as it is now. Run alone: GTK starts once per
+    /// process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_switch_follows_new_reading_languages() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let labels = |view: &View| -> Vec<String> {
+            view.language_buttons
+                .iter()
+                .map(|button| button.label().expect("a label").into())
+                .collect()
+        };
+        let pressed = |view: &View| -> Vec<bool> {
+            view.language_buttons
+                .iter()
+                .map(ToggleButtonExt::is_active)
+                .collect()
+        };
+        assert_eq!(labels(&view), ["EN", "ES", "CA"]);
+        assert_eq!(pressed(&view), [true, false, false]);
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let chosen = heard.clone();
+        view.connect_language_chosen(move |language| chosen.borrow_mut().push(language));
+        view.set_language(Language::Es);
+        assert_eq!(pressed(&view), [false, true, false]);
+        view.set_reading_languages(reading_languages(Language::En), Language::Es);
+        assert_eq!(labels(&view), ["ES", "CA", "RU"]);
+        assert_eq!(pressed(&view), [true, false, false]);
+        assert!(heard.borrow().is_empty());
+        view.language_buttons[2].set_active(true);
+        assert_eq!(*heard.borrow(), [Language::Ru]);
+        view.set_reading_languages(reading_languages(Language::Ru), Language::En);
+        assert_eq!(labels(&view), ["EN", "ES", "CA"]);
+        assert_eq!(pressed(&view), [true, false, false]);
+        view.language_buttons[1].set_active(true);
+        assert_eq!(*heard.borrow(), [Language::Ru, Language::Es]);
     }
 
     /// A result that replaces the one holding the focus puts the focus

@@ -82,8 +82,10 @@
 //! shows no line. Retry, a launch, Show of the tray and a capture read no
 //! clipboard.
 //!
-//! The user reads in one language, chosen with the EN / ES / CA switch
-//! beside the field; English at first. The online requests about the
+//! The user reads in one language, chosen with the switch beside the
+//! field, whose three buttons are the reading languages of my language
+//! (EN / ES / CA with Russian mine) and change with it; English at first,
+//! or Spanish when English is mine. The online requests about the
 //! field's text are sent from it, but for a word answered by another
 //! language (below). English is looked up offline in its two
 //! indexes. Spanish and Catalan are each looked up in their own indexes when
@@ -108,7 +110,9 @@
 //! submit asked; with no word nothing is sent. The choice is kept in the
 //! language file, read once on the runner after the start and written on the runner at each change
 //! ([`language`](crate::language)); a read that comes after the user chose
-//! changes nothing.
+//! changes nothing. The language kept is apart from the one read in: while
+//! it is my language, the first reading language of my language is pressed
+//! instead, and nothing is written of that fallback.
 //!
 //! The session keeps the history of the field for as long as the process
 //! lives, hiding the window included, and writes none of it: a submitted
@@ -140,7 +144,7 @@ use addict_core::{
     APP_ID,
     input::{Source, window_state},
     sentence,
-    translation::{Request, Source as Language, Translator},
+    translation::{Request, Source as Language, Translator, reading_languages},
 };
 use addict_deepl::{DeepL, key};
 use addict_dictionary::{import, release::Manifest};
@@ -537,8 +541,14 @@ struct Session {
     /// Where the read of the selection and the clipboard of a press stands.
     copying: Copying,
     /// The language the user reads: the sentence requests are sent from
-    /// it, and its indexes are looked up first.
+    /// it, and its indexes are looked up first. Always
+    /// [`language::reading`] of `saved_language` and `my_language`.
     language: Language,
+    /// The reading language of the language file or of the user's last
+    /// choice, kept apart from `language`: it falls back while it is my
+    /// language and comes back when it no longer is, and only it is
+    /// written.
+    saved_language: Language,
     /// Where the reading language is kept across restarts; `None` when the
     /// environment names no configuration directory.
     language_file: Option<std::path::PathBuf>,
@@ -815,7 +825,8 @@ impl Session {
             Event::LanguageRead(language) => {
                 self.language_job = None;
                 if !self.language_chosen {
-                    self.apply_language(language);
+                    self.saved_language = language;
+                    self.apply_reading_language();
                 }
             }
             Event::LanguageChosen(language) => self.language_chosen(language),
@@ -2041,12 +2052,13 @@ impl Session {
     }
 
     /// The English word of a gloss was clicked: it goes into the field as a
-    /// paste puts it, and English becomes the reading language. The field
-    /// is newer than the shown text then, so the language change asks
+    /// paste puts it, and English becomes the reading language, as the user
+    /// chose it, or the first reading language when English is mine. The
+    /// field is newer than the shown text then, so the language change asks
     /// nothing for the old one; the field's own events look the word up.
     fn look_up_english(&mut self, word: &str) {
         self.view.put_into_field(word);
-        self.language_chosen(Language::En);
+        self.language_chosen(language::reading(Language::En, self.my_language));
     }
 
     /// Something was chosen where `previous` was: the job translating the
@@ -2111,25 +2123,28 @@ impl Session {
         }
     }
 
-    /// The user pressed the button of `language` in the switch: it is the
-    /// reading language from now on, kept in the language file by a write on
-    /// the runner, and what the window shows of the current word is asked
-    /// anew in it.
+    /// The user chose `language`, by a press in the switch or a click on a
+    /// gloss's English word: it is the saved reading language from now on,
+    /// kept in the language file by a write on the runner at each such
+    /// choice, and what the window shows of the current word is asked anew
+    /// in it. A change of the switch caused by my language writes nothing.
     fn language_chosen(&mut self, language: Language) {
         self.language_chosen = true;
-        if language == self.language {
-            return;
-        }
-        self.apply_language(language);
+        self.saved_language = language;
+        self.apply_reading_language();
+        // Saved even when it equals the one in use: the file may still hold
+        // another, its read not having come yet.
         self.save_language();
     }
 
-    /// Makes `language` the reading language and the switch shows it. The
+    /// Makes [`language::reading`] of the saved language and my language
+    /// the reading language and the switch shows it. When it changed, the
     /// word shown, if there is one, has its offline result redone and its
     /// online texts forgotten and asked again, as its click or its submit
     /// asked them: a word of a sentence with its sentence, a lone word only
     /// when it was submitted. Without a word nothing is sent.
-    fn apply_language(&mut self, language: Language) {
+    fn apply_reading_language(&mut self) {
+        let language = language::reading(self.saved_language, self.my_language);
         self.view.set_language(language);
         if language == self.language {
             return;
@@ -2149,13 +2164,20 @@ impl Session {
         self.save_my_language();
     }
 
-    /// Makes `language` the language of the online translations and asks the
-    /// shown word again into it.
+    /// Makes `language` the language of the online translations: the switch
+    /// shows its reading languages, with [`language::reading`] of the saved
+    /// language pressed, and the shown word is asked again once, into it and
+    /// from the reading language that results. Nothing is written of a
+    /// reading language that falls back.
     fn apply_my_language(&mut self, language: Language) {
         if language == self.my_language {
             return;
         }
         self.my_language = language;
+        let reading = language::reading(self.saved_language, language);
+        self.view
+            .set_reading_languages(reading_languages(language), reading);
+        self.language = reading;
         self.ask_again();
     }
 
@@ -2197,7 +2219,7 @@ impl Session {
     /// the application ends.
     fn save_language(&mut self) {
         let path = self.language_file.clone();
-        let language = self.language;
+        let language = self.saved_language;
         self.language_job = self.work.upgrade().map(|work| {
             work.run(
                 language::FILE_LIMIT,
@@ -3136,6 +3158,7 @@ fn start(
         capturing: Capturing::default(),
         copying: Copying::default(),
         language: Language::default(),
+        saved_language: Language::default(),
         language_file,
         language_chosen: false,
         language_job,
@@ -3657,18 +3680,23 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "needs a display; run alone"]
-    fn settings_download_uses_the_shared_dialog_and_ignores_old_runs() {
+    /// A full session of the window for a test, its application registered
+    /// under `id`, no file of its own; given back with its events and the
+    /// runner it uses. Needs a display.
+    fn test_session(
+        id: &str,
+    ) -> (
+        super::Session,
+        futures_channel::mpsc::UnboundedReceiver<Event>,
+        std::rc::Rc<addict_platform::work::Work>,
+    ) {
         use super::*;
-        use addict_dictionary::release::Published;
-        gtk::init().expect("a display");
         let app = gtk::Application::builder()
-            .application_id("io.github.doqhu.Addict.RecoveryTest")
+            .application_id(id)
             .flags(gio::ApplicationFlags::NON_UNIQUE)
             .build();
         app.register(gio::Cancellable::NONE).unwrap();
-        let (sender, mut events) = futures_channel::mpsc::unbounded();
+        let (sender, events) = futures_channel::mpsc::unbounded();
         let binding = Binding::Attempting;
         let (view, window) = build_ui(&app, &binding, &sender);
         let work = Rc::new(Work::start().unwrap());
@@ -3676,7 +3704,7 @@ mod tests {
         let (translator, key_file, cache) = online_translator();
         let settings = start_settings(&window, key_file.as_deref(), articles.clone(), &sender);
         let about = About::new(&window);
-        let mut session = Session {
+        let session = Session {
             binding,
             view,
             window,
@@ -3712,6 +3740,7 @@ mod tests {
             capturing: Capturing::default(),
             copying: Copying::default(),
             language: Language::default(),
+            saved_language: Language::default(),
             language_file: None,
             language_chosen: false,
             language_job: None,
@@ -3723,6 +3752,53 @@ mod tests {
             download_run: 0,
             first_run_choice: None,
         };
+        (session, events, work)
+    }
+
+    /// A saved Russian with English mine ends pressed whichever file is
+    /// read first, and a click on a gloss's English word with English mine
+    /// saves Spanish. One session, put back to its start between the two
+    /// orders: a second one does not start in the same process. Run alone:
+    /// GTK starts once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_reading_language_holds_in_either_read_order_and_on_a_gloss_click() {
+        use addict_core::translation::reading_languages;
+        gtk::init().expect("a display");
+        let (mut session, _events, _work) = test_session("io.github.doqhu.Addict.LanguageTest");
+        session.handle(Event::LanguageRead(Language::Ru));
+        assert_eq!(session.language, Language::En);
+        session.handle(Event::MyLanguageRead(Language::En));
+        assert_eq!(session.language, Language::Ru);
+        assert_eq!(session.saved_language, Language::Ru);
+
+        // Back to the start: nothing read, Russian mine.
+        session.saved_language = Language::default();
+        session.language = Language::default();
+        session.my_language = Language::Ru;
+        session
+            .view
+            .set_reading_languages(reading_languages(Language::Ru), Language::default());
+        session.handle(Event::MyLanguageRead(Language::En));
+        assert_eq!(session.language, Language::Es);
+        session.handle(Event::LanguageRead(Language::Ru));
+        assert_eq!(session.language, Language::Ru);
+        assert_eq!(session.saved_language, Language::Ru);
+
+        session.look_up_english("bank");
+        assert_eq!(session.saved_language, Language::Es);
+        assert_eq!(session.language, Language::Es);
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn settings_download_uses_the_shared_dialog_and_ignores_old_runs() {
+        use super::*;
+        use addict_dictionary::release::Published;
+        gtk::init().expect("a display");
+        let (mut session, mut events, work) = test_session("io.github.doqhu.Addict.RecoveryTest");
 
         fn button(widget: &gtk::Widget, text: &str) -> Option<gtk::Button> {
             if let Some(button) = widget.downcast_ref::<gtk::Button>()
