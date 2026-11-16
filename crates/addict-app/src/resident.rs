@@ -86,8 +86,9 @@
 //! field, whose three buttons are the reading languages of my language
 //! (EN / ES / CA with Russian mine) and change with it; English at first,
 //! or Spanish when English is mine. The online requests about the
-//! field's text are sent from it, but for a word answered by another
-//! language (below). English is looked up offline in its two
+//! field's text are sent from it into my language, but for a word answered
+//! by another language and for a Russian word (below). English is looked up
+//! offline in its two
 //! indexes. Spanish and Catalan are each looked up in their own indexes when
 //! the last known state of the indexes says one of that language is there;
 //! otherwise the result is the line that there is no offline dictionary for
@@ -97,13 +98,17 @@
 //! article, and the window names it. The word's online requests, alone or
 //! in its sentence, wait for that lookup and are sent from the language
 //! that answered, or from the chosen one when none did; the sentence's
-//! request is sent at once, from the chosen language. Neither the switch
+//! request is sent at once, from the chosen language. A Russian word, one
+//! with a Cyrillic letter, and its sentence are sent from Russian whatever
+//! is chosen; with Russian as my language nothing is sent for it, neither
+//! the word nor its sentence. Neither the switch
 //! nor the language file changes. With Spanish or Catalan chosen and its
 //! indexes not known to be there, the indexes are checked again, so that an
 //! import done while the application runs is found by the next pick. The
 //! definition of an English sense is OEWN's and is sent from English; that
 //! of a Spanish or Catalan sense from its language, and an English gloss
-//! from English, each recorded with the source it was sent from. A capture
+//! from English, each into my language and recorded with the source it was
+//! sent from; a definition already in my language is not offered. A capture
 //! recognizes the text with the data of the language. A press of another
 //! language forgets the online texts of the field's text and, for the word
 //! shown, redoes its offline result and asks again what its click or its
@@ -144,7 +149,7 @@ use addict_core::{
     APP_ID,
     input::{Source, window_state},
     sentence,
-    translation::{Request, Source as Language, Translator, reading_languages},
+    translation::{Request, Source as Language, Translator, is_russian, reading_languages},
 };
 use addict_deepl::{DeepL, key};
 use addict_dictionary::{import, release::Manifest};
@@ -1851,21 +1856,25 @@ impl Session {
     }
 
     /// Sends the online request about `subject` that [`Kept`] has just
-    /// asked for, as a job in the slot of its subject. A request that could
-    /// not start is a refusal at once. The sentence is sent from the chosen
-    /// language at once. The word, alone or in its sentence, waits while its
-    /// lookup runs, and is then sent from the language that answered, or
-    /// from the chosen one when none did. Nothing is sent for a Russian word,
-    /// neither the word nor its sentence ([`translate::is_sent`]).
+    /// asked for, as a job in the slot of its subject, into my language. A
+    /// request that could not start is a refusal at once. The sentence is
+    /// sent from the chosen language at once. The word, alone or in its
+    /// sentence, waits while its lookup runs, and is then sent from the
+    /// language that answered, or from the chosen one when none did. A
+    /// Russian word and its sentence are sent from Russian whatever is
+    /// chosen ([`translate::source_of`]); with Russian as my language nothing
+    /// is sent for it, neither the word nor its sentence
+    /// ([`translate::is_sent`]).
     fn start_translation(&mut self, subject: Subject) {
         let text = self.manual.text_number();
         let Some(number) = self.online.request_number(subject) else {
             return;
         };
-        // A Russian word is read offline only: nothing is sent for it or its
-        // sentence, nothing is recorded, and its request is not awaited.
+        // With Russian as my language a Russian word is read offline only:
+        // nothing is sent for it or its sentence, nothing is recorded, and
+        // its request is not awaited.
         if let Some(input) = self.manual.input()
-            && !translate::is_sent(input, subject)
+            && !translate::is_sent(input, subject, self.my_language)
         {
             self.online.withdraw(subject);
             return;
@@ -1877,7 +1886,12 @@ impl Session {
             }
             return;
         }
-        let source = translate::source_of(subject, self.language, self.looking_up.answered);
+        let russian = self
+            .manual
+            .input()
+            .is_some_and(|input| is_russian(input.word()));
+        let source =
+            translate::source_of(subject, self.language, self.looking_up.answered, russian);
         let request = self
             .manual
             .input()
@@ -2072,8 +2086,8 @@ impl Session {
     }
 
     /// "Translate definition into Russian" was pressed: the definition of
-    /// the chosen sense or gloss is sent alone, from its own language, as a
-    /// job of its own, unless the field
+    /// the chosen sense or gloss is sent alone, from its own language into
+    /// my language, as a job of its own, unless the field
     /// holds a newer text or the shown result offers no definition to send.
     fn definition_action(&mut self) {
         // As for a click: the field may hold a newer text already.
@@ -2167,13 +2181,19 @@ impl Session {
     /// Makes `language` the language of the online translations: the switch
     /// shows its reading languages, with [`language::reading`] of the saved
     /// language pressed, and the shown word is asked again once, into it and
-    /// from the reading language that results. Nothing is written of a
-    /// reading language that falls back.
+    /// from the reading language that results; a chosen definition is
+    /// translated into it from now on. Nothing is written of a reading
+    /// language that falls back.
     fn apply_my_language(&mut self, language: Language) {
         if language == self.my_language {
             return;
         }
         self.my_language = language;
+        // A definition translated into the language before is forgotten,
+        // and its job cancelled.
+        self.translating_definition = None;
+        self.shown.set_my_language(language);
+        self.render_shown();
         let reading = language::reading(self.saved_language, language);
         self.view
             .set_reading_languages(reading_languages(language), reading);

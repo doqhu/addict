@@ -4,7 +4,8 @@
 //!
 //! The languages of a request are named in one place each:
 //! [`Request::source`] and [`Request::target`], both of English, Spanish,
-//! Catalan and Russian. Every caller still asks for Russian.
+//! Catalan and Russian. Every caller asks for my language, the one the
+//! user chose, as the target.
 //!
 //! [`Translator::translate`] gives a future and runs nothing itself: core has
 //! no runtime, and running the future off the UI thread, under a deadline, is

@@ -2264,7 +2264,7 @@ fn refusal_text(refusal: Refusal, key_file: Option<&Path>) -> String {
 }
 
 /// The result the window shows and the sense or gloss chosen in it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Shown {
     lookup: Option<Lookup>,
     /// The chosen language and the one that gave the shown result, when
@@ -2276,9 +2276,37 @@ pub struct Shown {
     /// Counts the results shown, so the window knows a new one from the
     /// same one shown again.
     generation: u64,
+    /// My language: a chosen definition is sent into it, and one already in
+    /// it is not offered.
+    my_language: Language,
+}
+
+impl Default for Shown {
+    /// Nothing shown, with Russian as my language.
+    fn default() -> Self {
+        Self {
+            lookup: None,
+            elsewhere: None,
+            choice: None,
+            definition: None,
+            next_definition: 0,
+            generation: 0,
+            my_language: Language::Ru,
+        }
+    }
 }
 
 impl Shown {
+    /// Makes `language` my language: a chosen definition is sent into it
+    /// from now on. When it changes, the translation of the definition into
+    /// the one before is forgotten, and a pending one is no longer awaited.
+    pub fn set_my_language(&mut self, language: Language) {
+        if self.my_language != language {
+            self.definition = None;
+        }
+        self.my_language = language;
+    }
+
     /// Another result, or none, is shown: the sense or gloss chosen in the
     /// one before is forgotten.
     pub fn show(&mut self, lookup: Option<Lookup>) {
@@ -2347,9 +2375,13 @@ impl Shown {
         true
     }
 
-    /// Visibility and sensitivity of the explicit definition action.
+    /// Visibility and sensitivity of the explicit definition action. It is
+    /// not available for a definition already in my language: a text is not
+    /// translated into its own language.
     pub fn definition_action(&self) -> (bool, bool) {
-        let available = self.selected_definition().is_some();
+        let available = self
+            .selected_definition()
+            .is_some_and(|(_, language)| language != self.my_language);
         let enabled = available && matches!(self.definition(), None | Some(Online::Refused(_)));
         (available, enabled)
     }
@@ -2381,8 +2413,8 @@ impl Shown {
     /// enabled; the definition is then pending. The text is the
     /// dictionary's, unchanged, and is sent without context, from the
     /// language it is in: English for OEWN and for a gloss, the article's
-    /// language for its own definitions. Only the definition action calls
-    /// this.
+    /// language for its own definitions, into my language. Only the
+    /// definition action calls this.
     pub fn request_definition(&mut self) -> Option<(u64, Request)> {
         if !self.definition_action().1 {
             return None;
@@ -2392,7 +2424,7 @@ impl Shown {
             text: text.to_owned(),
             context: None,
             source,
-            target: Language::Ru,
+            target: self.my_language,
         };
         self.next_definition += 1;
         let number = self.next_definition;
@@ -4881,6 +4913,76 @@ mod tests {
         assert_eq!(shown.definition_action(), (true, true));
         let (_, request) = shown.request_definition().expect("request");
         assert_eq!(request.source, Language::En);
+    }
+
+    #[test]
+    fn a_chosen_definition_is_sent_into_my_language() {
+        let mut shown = Shown::default();
+        shown.set_my_language(Language::En);
+        shown.show(Some(Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                definitions: Some(spanish_senses()),
+                english: Some(vec!["bench".to_owned()]),
+                ..Grouped::default()
+            },
+        }));
+        assert!(shown.choose(1));
+        assert_eq!(shown.definition_action(), (true, true));
+        let (number, request) = shown.request_definition().expect("request");
+        assert_eq!(
+            request,
+            Request {
+                text: "Mueble alargado para sentarse.".to_owned(),
+                context: None,
+                source: Language::Es,
+                target: Language::En,
+            }
+        );
+        // Another my language forgets the pending one: its answer is not
+        // kept, and the definition is sent into the new one.
+        shown.set_my_language(Language::Ca);
+        assert_eq!(shown.definition(), None);
+        assert!(!shown.answer_definition(number, translated("bench")));
+        let (_, request) = shown.request_definition().expect("request");
+        assert_eq!(request.target, Language::Ca);
+    }
+
+    #[test]
+    fn a_definition_already_in_my_language_is_not_offered() {
+        // An English gloss with English mine.
+        let mut shown = Shown::default();
+        shown.set_my_language(Language::En);
+        shown.show(Some(Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                english: Some(vec!["bench".to_owned()]),
+                ..Grouped::default()
+            },
+        }));
+        assert!(shown.choose_gloss(0));
+        assert_eq!(shown.definition_action(), (false, false));
+        assert_eq!(shown.request_definition(), None);
+        // An OEWN sense with English mine.
+        let mut shown = Shown::default();
+        shown.set_my_language(Language::En);
+        shown.show(Some(Lookup::Article(article())));
+        assert!(shown.choose(0));
+        assert_eq!(shown.definition_action(), (false, false));
+        assert_eq!(shown.request_definition(), None);
+        // A Spanish sense with Spanish mine.
+        let mut shown = Shown::default();
+        shown.set_my_language(Language::Es);
+        shown.show(Some(Lookup::Grouped {
+            language: Language::Es,
+            grouped: Grouped {
+                definitions: Some(spanish_senses()),
+                ..Grouped::default()
+            },
+        }));
+        assert!(shown.choose(0));
+        assert_eq!(shown.definition_action(), (false, false));
+        assert_eq!(shown.request_definition(), None);
     }
 
     #[test]

@@ -12,8 +12,11 @@
 //! whether its answer is shown. Which requests are sent, and when, is
 //! [`online`](crate::online)'s; the text of the field and the chosen word are
 //! [`manual`](crate::manual)'s. Putting any of it on the screen is
-//! `resident`'s. Nothing is sent for a Russian word
-//! ([`is_sent`]), neither the word nor its sentence: it is read offline only.
+//! `resident`'s. A Russian word, one with a Cyrillic letter, is sent from
+//! Russian, alone or in its sentence, and so is its sentence, whatever
+//! language is chosen ([`source_of`]); when my language is Russian nothing is
+//! sent for it ([`is_sent`]), neither the word nor its sentence: it is read
+//! offline only.
 
 use std::{sync::Arc, time::Duration};
 
@@ -44,26 +47,39 @@ pub type Translated = Result<String, Refusal>;
 
 /// The language the online request about `subject` is sent from, for a
 /// word read in the `chosen` language whose lookup was `answered` by a
-/// language, or by none (it did not finish, or none ran). The sentence is
-/// sent from the chosen language; the word, alone or in its sentence, from
-/// the language that answered, and from the chosen one when none did. No
-/// wildcard arm: a new subject does not compile until it is given its
-/// language.
-pub fn source_of(subject: Subject, chosen: Source, answered: Option<Source>) -> Source {
+/// language, or by none (it did not finish, or none ran), and that is
+/// `russian` or not ([`is_russian`]). A Russian word, alone or in its
+/// sentence, and its sentence are sent from Russian, whatever is chosen.
+/// Otherwise the sentence is sent from the chosen language; the word, alone
+/// or in its sentence, from the language that answered, and from the chosen
+/// one when none did. No wildcard arm: a new subject does not compile until
+/// it is given its language.
+pub fn source_of(
+    subject: Subject,
+    chosen: Source,
+    answered: Option<Source>,
+    russian: bool,
+) -> Source {
+    if russian {
+        return Source::Ru;
+    }
     match subject {
         Subject::Sentence(_) => chosen,
         Subject::Word(_) | Subject::Lone => answered.unwrap_or(chosen),
     }
 }
 
-/// Whether the online request about `subject` for `input` is sent at all:
-/// not when the chosen word is Russian, whether the request is about the
-/// word, the lone word or its sentence. A Russian word is read offline only.
-/// No wildcard arm: a new subject does not compile until it is given its
-/// answer.
-pub fn is_sent(input: &Input, subject: Subject) -> bool {
+/// Whether the online request about `subject` for `input` is sent at all
+/// into `my` language: not when the chosen word is Russian and so is my
+/// language, whether the request is about the word, the lone word or its
+/// sentence; such a word is read offline only. A Russian word is sent when
+/// my language is another one. No wildcard arm: a new subject does not
+/// compile until it is given its answer.
+pub fn is_sent(input: &Input, subject: Subject, my: Source) -> bool {
     match subject {
-        Subject::Sentence(_) | Subject::Word(_) | Subject::Lone => !is_russian(input.word()),
+        Subject::Sentence(_) | Subject::Word(_) | Subject::Lone => {
+            !(my == Source::Ru && is_russian(input.word()))
+        }
     }
 }
 
@@ -184,7 +200,7 @@ pub(crate) mod tests {
     use addict_core::{
         dictionary::{Dictionary, Sample},
         translation::{
-            Canned, Refusal, Request, Source as Language, Translating, Translator,
+            Canned, Refusal, Request, Source as Language, Translating, Translator, is_russian,
             reading_languages,
         },
     };
@@ -714,6 +730,8 @@ pub(crate) mod tests {
         translator: Arc<Canned>,
         /// The reading language.
         language: Language,
+        /// My language, the one every request is sent into.
+        my: Language,
     }
 
     impl Desk {
@@ -724,6 +742,7 @@ pub(crate) mod tests {
                 work: Work::start().expect("runner"),
                 translator: Arc::new(Canned::new(answer)),
                 language: Language::En,
+                my: Language::Ru,
             }
         }
 
@@ -769,16 +788,18 @@ pub(crate) mod tests {
 
         fn send(&mut self, subject: Subject) {
             if let Some(input) = self.manual.input()
-                && !is_sent(input, subject)
+                && !is_sent(input, subject, self.my)
             {
                 self.kept.withdraw(subject);
                 return;
             }
             let (sender, receiver) = mpsc::channel();
-            let asked = self
-                .manual
-                .input()
-                .and_then(|input| request(input, subject, self.language, Language::Ru));
+            // As the resident sends it, with no lookup that answered.
+            let asked = self.manual.input().and_then(|input| {
+                let russian = is_russian(input.word());
+                let source = source_of(subject, self.language, None, russian);
+                request(input, subject, source, self.my)
+            });
             let started = translate(
                 Some(&self.work),
                 self.translator.clone(),
@@ -883,14 +904,123 @@ pub(crate) mod tests {
         let input =
             addict_core::input::Input::new("собака", None, addict_core::input::Source::Manual)
                 .expect("input");
-        assert!(!is_sent(&input, Subject::Lone));
-        assert!(!is_sent(&input, Subject::Word(0)));
-        assert!(!is_sent(&input, Subject::Sentence(0)));
+        assert!(!is_sent(&input, Subject::Lone, Language::Ru));
+        assert!(!is_sent(&input, Subject::Word(0), Language::Ru));
+        assert!(!is_sent(&input, Subject::Sentence(0), Language::Ru));
         let input =
             addict_core::input::Input::new("bank", None, addict_core::input::Source::Manual)
                 .expect("input");
-        assert!(is_sent(&input, Subject::Lone));
-        assert!(is_sent(&input, Subject::Sentence(0)));
+        assert!(is_sent(&input, Subject::Lone, Language::Ru));
+        assert!(is_sent(&input, Subject::Sentence(0), Language::Ru));
+    }
+
+    /// The Russian sentence of the matrix, and `красный` in it.
+    const KRASNY_SENTENCE: &str = "Мне нравится красный цвет.";
+    const KRASNY: usize = 2;
+
+    /// The word `text` of a sentence, with it as context, and the sentence,
+    /// each sent from `source` into `target`.
+    fn word_and_sentence(
+        text: &str,
+        sentence: &str,
+        source: Language,
+        target: Language,
+    ) -> [Request; 2] {
+        [
+            Request {
+                text: text.to_owned(),
+                context: Some(sentence.to_owned()),
+                source,
+                target,
+            },
+            Request {
+                text: sentence.to_owned(),
+                context: None,
+                source,
+                target,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_russian_word_is_sent_from_ru_into_my_language_whatever_is_pressed() {
+        // English mine: every button English mine offers, Ru among them.
+        for language in reading_languages(Language::En) {
+            let mut desk = Desk::with_text(Ok("red"), KRASNY_SENTENCE);
+            desk.my = Language::En;
+            desk.language = language;
+            desk.click(KRASNY);
+            assert_eq!(
+                desk.asked(),
+                word_and_sentence("красный", KRASNY_SENTENCE, Language::Ru, Language::En),
+                "{language:?}"
+            );
+            assert_eq!(desk.shown().word, Some(&online("red")));
+        }
+        // A lone Russian word, Catalan mine.
+        let mut desk = Desk::with_text(Ok("gos"), "собака");
+        desk.my = Language::Ca;
+        desk.language = Language::Es;
+        desk.submit();
+        assert_eq!(
+            desk.asked(),
+            [Request {
+                text: "собака".to_owned(),
+                context: None,
+                source: Language::Ru,
+                target: Language::Ca,
+            }]
+        );
+        assert_eq!(desk.shown().lone, Some(&online("gos")));
+        let input =
+            addict_core::input::Input::new("собака", None, addict_core::input::Source::Manual)
+                .expect("input");
+        for my in [Language::En, Language::Es, Language::Ca] {
+            for subject in [Subject::Lone, Subject::Word(0), Subject::Sentence(0)] {
+                assert!(is_sent(&input, subject, my), "{my:?}");
+            }
+        }
+        for subject in [Subject::Lone, Subject::Word(0), Subject::Sentence(0)] {
+            for chosen in Language::ALL {
+                for answered in [None, Some(chosen)] {
+                    assert_eq!(source_of(subject, chosen, answered, true), Language::Ru);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_latin_word_keeps_the_pressed_language_into_my_language() {
+        // Ru pressed: a Latin word and its sentence go from the pressed
+        // language, as Russian.
+        let sentence = "Me gusta el color rojo.";
+        let mut desk = Desk::with_text(Ok("red"), sentence);
+        desk.my = Language::En;
+        desk.language = Language::Ru;
+        desk.click(4);
+        assert_eq!(
+            desk.asked(),
+            word_and_sentence("rojo", sentence, Language::Ru, Language::En)
+        );
+        // A Latin word of a Russian sentence goes from the pressed language,
+        // and so does the sentence.
+        let mut desk = Desk::with_text(Ok("bank"), "Мой bank.");
+        desk.my = Language::En;
+        desk.language = Language::Es;
+        desk.click(1);
+        assert_eq!(
+            desk.asked(),
+            word_and_sentence("bank", "Мой bank.", Language::Es, Language::En)
+        );
+        // Spanish into Catalan.
+        let mut desk = Desk::with_text(Ok("vermell"), sentence);
+        desk.my = Language::Ca;
+        desk.language = Language::Es;
+        desk.click(4);
+        assert_eq!(
+            desk.asked(),
+            word_and_sentence("rojo", sentence, Language::Es, Language::Ca)
+        );
     }
 
     #[test]
@@ -1602,22 +1732,32 @@ pub(crate) mod tests {
         // Spanish, its sentence as Catalan.
         const CERRO: usize = 2;
         assert_eq!(
-            source_of(Subject::Word(CERRO), Language::Ca, Some(Language::Es)),
+            source_of(
+                Subject::Word(CERRO),
+                Language::Ca,
+                Some(Language::Es),
+                false
+            ),
             Language::Es
         );
         assert_eq!(
-            source_of(Subject::Lone, Language::Ca, Some(Language::Es)),
+            source_of(Subject::Lone, Language::Ca, Some(Language::Es), false),
             Language::Es
         );
         assert_eq!(
-            source_of(Subject::Sentence(0), Language::Ca, Some(Language::Es)),
+            source_of(
+                Subject::Sentence(0),
+                Language::Ca,
+                Some(Language::Es),
+                false
+            ),
             Language::Ca
         );
         // No language answered: the chosen one.
         for subject in [Subject::Word(CERRO), Subject::Lone, Subject::Sentence(0)] {
             for chosen in reading_languages(Language::Ru) {
-                assert_eq!(source_of(subject, chosen, None), chosen);
-                assert_eq!(source_of(subject, chosen, Some(chosen)), chosen);
+                assert_eq!(source_of(subject, chosen, None, false), chosen);
+                assert_eq!(source_of(subject, chosen, Some(chosen), false), chosen);
             }
         }
         let stub = Stub::start(Reply::translation("закрылся")).expect("stub");
@@ -1632,7 +1772,7 @@ pub(crate) mod tests {
         let work = Work::start().expect("runner");
         let mut records = Vec::new();
         for subject in [Subject::Word(CERRO), Subject::Sentence(0)] {
-            let source = source_of(subject, Language::Ca, Some(Language::Es));
+            let source = source_of(subject, Language::Ca, Some(Language::Es), false);
             let (sender, receiver) = mpsc::channel();
             let probe = Probe::start(true);
             let _job = translate(

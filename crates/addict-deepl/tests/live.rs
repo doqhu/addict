@@ -1,6 +1,9 @@
 //! The live check of the user's key: asks DeepL itself, so it runs only when
 //! asked for, with `cargo test -p addict-deepl -- --ignored --nocapture`.
+//! The same command sends a word in its sentence for every ordered pair of
+//! the four languages.
 
+use addict_core::translation::{Request, Source, Translator};
 use addict_deepl::DeepL;
 
 #[tokio::test]
@@ -25,4 +28,43 @@ async fn the_key_of_the_user_reads_the_languages_and_the_usage() {
     );
     assert!(en.usable_as_source);
     assert!(ru.usable_as_target);
+}
+
+/// The word and its sentence of every language, as the spike sent them.
+const WORDS: [(Source, &str, &str); 4] = [
+    (Source::En, "red", "I like the colour red."),
+    (Source::Es, "rojo", "Me gusta el color rojo."),
+    (Source::Ca, "vermell", "M'agrada el color vermell."),
+    (Source::Ru, "красный", "Мне нравится красный цвет."),
+];
+
+#[tokio::test]
+#[ignore = "calls DeepL with the key of ~/.config/addict/deepl.key"]
+async fn every_ordered_pair_translates_a_word_in_its_sentence() {
+    let client = DeepL::new();
+    let mut pairs = 0;
+    for (source, word, sentence) in WORDS {
+        for target in Source::ALL {
+            if target == source {
+                continue;
+            }
+            let request = Request {
+                text: word.to_owned(),
+                context: Some(sentence.to_owned()),
+                source,
+                target,
+            };
+            let answer = Translator::translate(&client, request).await;
+            println!(
+                "{} -> {}: {word} in “{sentence}”: {answer:?}",
+                source.code(),
+                target.code()
+            );
+            let answer = answer
+                .unwrap_or_else(|refusal| panic!("{source:?} -> {target:?} refused: {refusal:?}"));
+            assert!(!answer.trim().is_empty(), "{source:?} -> {target:?}");
+            pairs += 1;
+        }
+    }
+    assert_eq!(pairs, 12);
 }
