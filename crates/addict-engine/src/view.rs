@@ -27,7 +27,7 @@ use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 use addict_core::{
     dictionary::{Article, LexicalEntry, PartOfSpeech, Pos, Pronunciation, Sense},
     input::{Source, WindowState},
-    translation::{Refusal, Request, Source as Language, reading_languages},
+    translation::{English, Refusal, Request, Source as Language, reading_languages},
 };
 
 use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
@@ -2279,10 +2279,13 @@ pub struct Shown {
     /// My language: a chosen definition is sent into it, and one already in
     /// it is not offered.
     my_language: Language,
+    /// The spelling of English: a definition sent into English mine is
+    /// spelled so.
+    english: English,
 }
 
 impl Default for Shown {
-    /// Nothing shown, with Russian as my language.
+    /// Nothing shown, with Russian as my language and US English.
     fn default() -> Self {
         Self {
             lookup: None,
@@ -2292,6 +2295,7 @@ impl Default for Shown {
             next_definition: 0,
             generation: 0,
             my_language: Language::Ru,
+            english: English::Us,
         }
     }
 }
@@ -2305,6 +2309,18 @@ impl Shown {
             self.definition = None;
         }
         self.my_language = language;
+    }
+
+    /// Makes `english` the spelling of English: a chosen definition sent
+    /// into English mine is spelled so from now on. When it changes while
+    /// English is my language, the translation of the definition in the
+    /// other spelling is forgotten, and a pending one is no longer awaited;
+    /// with any other language mine nothing is forgotten.
+    pub fn set_english(&mut self, english: English) {
+        if self.english != english && self.my_language == Language::En {
+            self.definition = None;
+        }
+        self.english = english;
     }
 
     /// Another result, or none, is shown: the sense or gloss chosen in the
@@ -2425,6 +2441,7 @@ impl Shown {
             context: None,
             source,
             target: self.my_language,
+            english: self.english,
         };
         self.next_definition += 1;
         let number = self.next_definition;
@@ -2491,7 +2508,7 @@ mod tests {
         dictionary::{Article, Dictionary, Sample, Sense},
         input::{Source, WindowState},
         sentence::words,
-        translation::{Refusal, Request, Source as Language, reading_languages},
+        translation::{English, Refusal, Request, Source as Language, reading_languages},
     };
 
     use super::{
@@ -4896,6 +4913,7 @@ mod tests {
                     context: None,
                     source: language,
                     target: Language::Ru,
+                    english: English::Us,
                 }
             );
             assert_eq!(shown.definition_action(), (true, false));
@@ -4937,6 +4955,7 @@ mod tests {
                 context: None,
                 source: Language::Es,
                 target: Language::En,
+                english: English::Us,
             }
         );
         // Another my language forgets the pending one: its answer is not
@@ -4946,6 +4965,54 @@ mod tests {
         assert!(!shown.answer_definition(number, translated("bench")));
         let (_, request) = shown.request_definition().expect("request");
         assert_eq!(request.target, Language::Ca);
+    }
+
+    #[test]
+    fn a_chosen_definition_is_sent_in_the_spelling_of_english() {
+        let spanish = || {
+            Some(Lookup::Grouped {
+                language: Language::Es,
+                grouped: Grouped {
+                    definitions: Some(spanish_senses()),
+                    ..Grouped::default()
+                },
+            })
+        };
+        let mut shown = Shown::default();
+        shown.set_my_language(Language::En);
+        shown.show(spanish());
+        assert!(shown.choose(1));
+        let (number, request) = shown.request_definition().expect("request");
+        assert_eq!(request.english, English::Us);
+        // British forgets the pending US one: its answer is not kept, and
+        // the definition is sent again, British.
+        shown.set_english(English::Gb);
+        assert_eq!(shown.definition(), None);
+        assert!(!shown.answer_definition(number, translated("bench")));
+        let (number, request) = shown.request_definition().expect("request");
+        assert_eq!(
+            (request.target, request.english),
+            (Language::En, English::Gb)
+        );
+        assert_eq!(addict_deepl::client::sent(&request).target_lang, "EN-GB");
+        // A shown answer is forgotten too, and the same variant again
+        // forgets nothing.
+        assert!(shown.answer_definition(number, translated("bench")));
+        shown.set_english(English::Gb);
+        assert_eq!(shown.definition(), Some(&translated("bench")));
+        shown.set_english(English::Us);
+        assert_eq!(shown.definition(), None);
+
+        // With Spanish mine the spelling of English forgets nothing.
+        let mut shown = Shown::default();
+        shown.set_my_language(Language::Es);
+        shown.show(Some(Lookup::Article(article())));
+        assert!(shown.choose(0));
+        let (number, request) = shown.request_definition().expect("request");
+        shown.set_english(English::Gb);
+        assert_eq!(shown.definition(), Some(&Online::Pending));
+        assert!(shown.answer_definition(number, translated("orilla")));
+        assert_eq!(request.target, Language::Es);
     }
 
     #[test]
@@ -5055,6 +5122,7 @@ mod tests {
                     context: None,
                     source: Language::En,
                     target: Language::Ru,
+                    english: English::Us,
                 }
             );
             assert!(shown.answer_definition(number, translated("скамья")));

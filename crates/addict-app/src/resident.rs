@@ -149,7 +149,9 @@ use addict_core::{
     APP_ID,
     input::{Source, window_state},
     sentence,
-    translation::{Request, Source as Language, Translator, is_russian, reading_languages},
+    translation::{
+        English, Request, Source as Language, Translator, is_russian, reading_languages,
+    },
 };
 use addict_deepl::{DeepL, key};
 use addict_dictionary::{import, release::Manifest};
@@ -173,7 +175,7 @@ use crate::{
     capture::{self, Capture, Captured, Failure, Timing},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     download::{self, Downloader},
-    entries, evidence,
+    english, entries, evidence,
     first_run::{self, Offer},
     history::History,
     language,
@@ -283,6 +285,11 @@ enum Event {
     MyLanguageRead(Language),
     /// The user chose this language in the My language row of Settings.
     MyLanguageChosen(Language),
+    /// The English-spelling file, read on the runner after the start, holds
+    /// this spelling.
+    EnglishRead(English),
+    /// The user chose this spelling in the English spelling row of Settings.
+    EnglishChosen(English),
     /// The check at the start says where the dictionary indexes stand.
     Indexes {
         generation: u64,
@@ -572,6 +579,17 @@ struct Session {
     my_language_chosen: bool,
     /// The read or the write of the my-language file on the runner.
     my_language_job: Option<Job>,
+    /// The spelling of English: an English target is spelled so, and any
+    /// other target ignores it.
+    english: English,
+    /// Where the spelling of English is kept across restarts; `None` when
+    /// the environment names no configuration directory.
+    english_file: Option<std::path::PathBuf>,
+    /// Whether the user chose the spelling in this session: the read of the
+    /// file, should it come later, changes nothing then.
+    english_chosen: bool,
+    /// The read or the write of the English-spelling file on the runner.
+    english_job: Option<Job>,
     /// Where the first-run offer to download a dictionary stands.
     first_run: FirstRun,
     download_run: u64,
@@ -843,6 +861,16 @@ impl Session {
                 }
             }
             Event::MyLanguageChosen(language) => self.my_language_chosen(language),
+            Event::EnglishRead(english) => {
+                // After a choice the job is its write, which must not be
+                // dropped (and so cancelled) by the read.
+                if !self.english_chosen {
+                    self.english_job = None;
+                    self.settings.render_english(english);
+                    self.apply_english(english);
+                }
+            }
+            Event::EnglishChosen(english) => self.english_chosen(english),
             Event::Indexes {
                 generation,
                 indexes,
@@ -1892,10 +1920,7 @@ impl Session {
             .is_some_and(|input| is_russian(input.word()));
         let source =
             translate::source_of(subject, self.language, self.looking_up.answered, russian);
-        let request = self
-            .manual
-            .input()
-            .and_then(|input| translate::request(input, subject, source, self.my_language));
+        let request = self.online_request(subject, source);
         let started = self.send_online(request, subject.into(), move |outcome, elapsed| {
             Event::Translated {
                 text,
@@ -2185,6 +2210,8 @@ impl Session {
     /// translated into it from now on. Nothing is written of a reading
     /// language that falls back.
     fn apply_my_language(&mut self, language: Language) {
+        // The English spelling row is offered only while English is mine.
+        self.settings.show_english(language == Language::En);
         if language == self.my_language {
             return;
         }
@@ -2201,8 +2228,43 @@ impl Session {
         self.ask_again();
     }
 
+    /// The user chose `english` in Settings: the spelling of English from
+    /// now on, kept in the English-spelling file by a write on the runner.
+    fn english_chosen(&mut self, english: English) {
+        self.english_chosen = true;
+        // Saved even when it equals the one in use: the file may still hold
+        // another, its read not having come yet.
+        self.apply_english(english);
+        self.save_english();
+    }
+
+    /// Makes `english` the spelling of English. Only when it changed while
+    /// English is my language is anything redone: the translation of a
+    /// definition is forgotten, and its job cancelled, and the shown word
+    /// is asked again in the new spelling. With any other language mine the
+    /// requests do not change, so nothing is asked again.
+    fn apply_english(&mut self, english: English) {
+        let changed = english != self.english;
+        self.english = english;
+        self.shown.set_english(english);
+        self.render_shown();
+        if changed && self.my_language == Language::En {
+            self.translating_definition = None;
+            self.ask_again();
+        }
+    }
+
+    /// The online request about `subject` of the current input, read in
+    /// `source`, into my language in the spelling of English chosen.
+    fn online_request(&self, subject: Subject, source: Language) -> Option<Request> {
+        self.manual.input().and_then(|input| {
+            translate::request(input, subject, source, self.my_language, self.english)
+        })
+    }
+
     /// Redoes the offline result of the shown word and forgets and asks again
-    /// its online texts, after the reading language or my language changed.
+    /// its online texts, after the reading language, my language or, with
+    /// English mine, the spelling of English changed.
     fn ask_again(&mut self) {
         // The field holds a newer text, whose own event comes next and is
         // handled in the new language.
@@ -2285,6 +2347,33 @@ impl Session {
         });
         if self.my_language_job.is_none() {
             eprintln!("addict: my language was not kept: no runner");
+        }
+    }
+
+    /// Writes the spelling of English to its file on the runner. A write
+    /// that fails is written to stderr and nothing else: the choice holds
+    /// until the application ends.
+    fn save_english(&mut self) {
+        let path = self.english_file.clone();
+        let chosen = self.english;
+        self.english_job = self.work.upgrade().map(|work| {
+            work.run(
+                language::FILE_LIMIT,
+                async move { english::write(path.as_deref(), chosen) },
+                |outcome| match outcome {
+                    // Replaced by a newer choice, which is written instead.
+                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
+                    Outcome::Finished(Err(e)) => {
+                        eprintln!("addict: the English spelling was not kept: {e}");
+                    }
+                    Outcome::TimedOut | Outcome::Panicked => {
+                        eprintln!("addict: the English spelling was not kept");
+                    }
+                },
+            )
+        });
+        if self.english_job.is_none() {
+            eprintln!("addict: the English spelling was not kept: no runner");
         }
     }
 
@@ -2864,6 +2953,7 @@ fn start_settings(
     let startup = sender.clone();
     let imported = sender.clone();
     let my_language = sender.clone();
+    let english = sender.clone();
     let download = sender.clone();
     Settings::new(
         window,
@@ -2882,6 +2972,9 @@ fn start_settings(
         },
         move |chosen| {
             let _ = my_language.unbounded_send(Event::MyLanguageChosen(chosen));
+        },
+        move |chosen| {
+            let _ = english.unbounded_send(Event::EnglishChosen(chosen));
         },
         move || refresh_import(articles.clone(), imported.clone()),
         move || {
@@ -3041,6 +3134,28 @@ fn start_my_language(
     Some(job)
 }
 
+/// Starts the one read of the English-spelling file at `path` on `work`;
+/// the spelling it holds, US for anything else, comes to `sender` as an
+/// event. Without a runner nothing is read, and US stays.
+fn start_english(
+    work: Option<&Work>,
+    path: Option<std::path::PathBuf>,
+    sender: &UnboundedSender<Event>,
+) -> Option<Job> {
+    let read = sender.clone();
+    let job = work?.run(
+        language::FILE_LIMIT,
+        async move { english::read(path.as_deref()) },
+        move |outcome| {
+            if let Outcome::Finished(english) = outcome {
+                // On the worker: the UI thread wakes for the event.
+                let _ = read.unbounded_send(Event::EnglishRead(english));
+            }
+        },
+    );
+    Some(job)
+}
+
 /// Starts the decision of the first-run offer on `work`, for the `indexes`
 /// of the first check: the choice file is read and, when the offer is due,
 /// the manifest is fetched and comes to `sender` as an event. When the
@@ -3139,6 +3254,8 @@ fn start(
     let language_job = start_language(work.as_deref(), language_file.clone(), &sender);
     let my_language_file = my_language::path();
     let my_language_job = start_my_language(work.as_deref(), my_language_file.clone(), &sender);
+    let english_file = english::path();
+    let english_job = start_english(work.as_deref(), english_file.clone(), &sender);
     let (translator, key_file, cache) = online_translator();
     let settings = start_settings(&window, key_file.as_deref(), articles.clone(), &sender);
     let about = About::new(&window);
@@ -3186,6 +3303,10 @@ fn start(
         my_language_file,
         my_language_chosen: false,
         my_language_job,
+        english: English::Us,
+        english_file,
+        english_chosen: false,
+        english_job,
         first_run: FirstRun::Unasked,
         download_run: 0,
         first_run_choice: None,
@@ -3768,6 +3889,10 @@ mod tests {
             my_language_file: None,
             my_language_chosen: false,
             my_language_job: None,
+            english: English::Us,
+            english_file: None,
+            english_chosen: false,
+            english_job: None,
             first_run: FirstRun::Done,
             download_run: 0,
             first_run_choice: None,
@@ -3808,6 +3933,86 @@ mod tests {
         session.look_up_english("bank");
         assert_eq!(session.saved_language, Language::Es);
         assert_eq!(session.language, Language::Es);
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// British with English mine ends in the session's request as `EN-GB`
+    /// whichever file is read first; the English spelling row is shown only while English is
+    /// mine; a choice is not undone by a later read; with Spanish mine the
+    /// spelling changes no request. One session, put back to its start
+    /// between the two orders. Run alone: GTK starts once per process, on
+    /// one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_english_spelling_holds_in_either_read_order_and_shows_only_for_english() {
+        use addict_core::translation::{English, reading_languages};
+        use addict_deepl::client::sent;
+        use addict_engine::online::Subject;
+        gtk::init().expect("a display");
+        let (mut session, _events, _work) = test_session("io.github.doqhu.Addict.EnglishTest");
+        // A chosen word in the manual only: the field stays empty, so it is
+        // newer, and a change of language or spelling sends nothing.
+        let _ = session.manual.edit("Me gusta el color rojo.".to_owned());
+        let color = session
+            .manual
+            .words()
+            .iter()
+            .position(|word| &session.manual.sentence()[word.clone()] == "color")
+            .expect("color");
+        session.manual.choose(color).expect("a word");
+        // What the session sends for the word, as `start_translation` asks.
+        let target_lang = |session: &super::Session| {
+            let request = session
+                .online_request(Subject::Word(color), Language::Es)
+                .expect("a request");
+            sent(&request).target_lang
+        };
+        assert_eq!(session.settings.english_row(), (false, English::Us));
+        assert_eq!(target_lang(&session), "RU");
+
+        // The spelling read first, then English mine.
+        session.handle(Event::EnglishRead(English::Gb));
+        assert_eq!(session.english, English::Gb);
+        assert_eq!(session.settings.english_row(), (false, English::Gb));
+        assert_eq!(target_lang(&session), "RU");
+        session.handle(Event::MyLanguageRead(Language::En));
+        assert_eq!(session.settings.english_row(), (true, English::Gb));
+        assert_eq!(target_lang(&session), "EN-GB");
+
+        // Back to the start: nothing read, Russian mine, US.
+        session.my_language = Language::Ru;
+        session.english = English::Us;
+        session.shown = Default::default();
+        session.settings.render_english(English::Us);
+        session.settings.show_english(false);
+        session
+            .view
+            .set_reading_languages(reading_languages(Language::Ru), Language::default());
+        // English mine read first, then the spelling.
+        session.handle(Event::MyLanguageRead(Language::En));
+        assert_eq!(session.settings.english_row(), (true, English::Us));
+        assert_eq!(target_lang(&session), "EN-US");
+        session.handle(Event::EnglishRead(English::Gb));
+        assert_eq!(session.settings.english_row(), (true, English::Gb));
+        assert_eq!(target_lang(&session), "EN-GB");
+
+        // A choice holds against a later read.
+        session.handle(Event::EnglishChosen(English::Us));
+        session.handle(Event::EnglishRead(English::Gb));
+        assert_eq!(session.english, English::Us);
+        assert_eq!(target_lang(&session), "EN-US");
+
+        // Spanish mine: the row is hidden and the spelling changes nothing.
+        session.handle(Event::MyLanguageChosen(Language::Es));
+        assert!(!session.settings.english_row().0);
+        assert_eq!(target_lang(&session), "ES");
+        session.handle(Event::EnglishChosen(English::Gb));
+        assert_eq!(target_lang(&session), "ES");
+        // British, chosen while Spanish was mine, holds once English is.
+        session.handle(Event::MyLanguageChosen(Language::En));
+        assert!(session.settings.english_row().0);
+        assert_eq!(target_lang(&session), "EN-GB");
         session.settings.window().destroy();
         session.window.destroy();
     }

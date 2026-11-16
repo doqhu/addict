@@ -22,7 +22,7 @@ use std::{sync::Arc, time::Duration};
 
 use addict_core::{
     input::Input,
-    translation::{Refusal, Request, Source, Translator, is_russian},
+    translation::{English, Refusal, Request, Source, Translator, is_russian},
 };
 use addict_platform::work::{Job, Outcome, Work};
 
@@ -88,8 +88,15 @@ pub fn is_sent(input: &Input, subject: Subject, my: Source) -> bool {
 /// with the sentence as context. For the sentence: the sentence, without
 /// context. For a lone word: the word, without context. `None` when the
 /// input is not of that kind: a lone word has no sentence, and a word of a
-/// sentence is not sent without it.
-pub fn request(input: &Input, subject: Subject, source: Source, target: Source) -> Option<Request> {
+/// sentence is not sent without it. An English `target` is spelled as
+/// `english` says; any other target ignores it.
+pub fn request(
+    input: &Input,
+    subject: Subject,
+    source: Source,
+    target: Source,
+    english: English,
+) -> Option<Request> {
     let sentence = input.sentence().map(str::to_owned);
     match subject {
         Subject::Word(_) => Some(Request {
@@ -97,18 +104,21 @@ pub fn request(input: &Input, subject: Subject, source: Source, target: Source) 
             context: Some(sentence?),
             source,
             target,
+            english,
         }),
         Subject::Sentence(_) => Some(Request {
             text: sentence?,
             context: None,
             source,
             target,
+            english,
         }),
         Subject::Lone => sentence.is_none().then(|| Request {
             text: input.word().to_owned(),
             context: None,
             source,
             target,
+            english,
         }),
     }
 }
@@ -200,8 +210,8 @@ pub(crate) mod tests {
     use addict_core::{
         dictionary::{Dictionary, Sample},
         translation::{
-            Canned, Refusal, Request, Source as Language, Translating, Translator, is_russian,
-            reading_languages,
+            Canned, English, Refusal, Request, Source as Language, Translating, Translator,
+            is_russian, reading_languages,
         },
     };
     use addict_deepl::{
@@ -263,6 +273,7 @@ pub(crate) mod tests {
                 context: None,
                 source: Language::En,
                 target: Language::Ru,
+                english: English::Us,
             }]
         );
         let (retry, request) = shown.request_definition().expect("retry action");
@@ -275,6 +286,7 @@ pub(crate) mod tests {
                 context: None,
                 source: Language::En,
                 target: Language::Ru,
+                english: English::Us,
             }]
         );
         assert!(shown.request_definition().is_none());
@@ -350,6 +362,7 @@ pub(crate) mod tests {
             context: Some(RIVER.to_owned()),
             source: Language::En,
             target: Language::Ru,
+            english: English::Us,
         }
     }
 
@@ -361,6 +374,7 @@ pub(crate) mod tests {
             Subject::Word(chosen),
             Language::En,
             Language::Ru,
+            English::Us,
         )
         .expect("a sentence")
     }
@@ -427,6 +441,7 @@ pub(crate) mod tests {
             context: None,
             source: Language::En,
             target: Language::Ru,
+            english: English::Us,
         }
     }
 
@@ -561,6 +576,7 @@ pub(crate) mod tests {
                     context: None,
                     source,
                     target: Language::Ru,
+                    english: English::Us,
                 }]
             );
             let (online, record) =
@@ -634,6 +650,7 @@ pub(crate) mod tests {
             context: None,
             source: Language::En,
             target: Language::Ru,
+            english: English::Us,
         }
     }
 
@@ -643,6 +660,7 @@ pub(crate) mod tests {
             context: Some(RIVER.to_owned()),
             source: Language::En,
             target: Language::Ru,
+            english: English::Us,
         }
     }
 
@@ -652,6 +670,7 @@ pub(crate) mod tests {
             context: None,
             source: Language::En,
             target: Language::Ru,
+            english: English::Us,
         }
     }
 
@@ -659,13 +678,48 @@ pub(crate) mod tests {
     fn the_target_reaches_the_request() {
         let manual = bank_of_the_river();
         let input = manual.input().expect("input");
-        let sent =
-            request(input, Subject::Word(BANK), Language::En, Language::En).expect("a request");
+        let sent = request(
+            input,
+            Subject::Word(BANK),
+            Language::En,
+            Language::En,
+            English::Us,
+        )
+        .expect("a request");
         assert_eq!(sent.target, Language::En);
         assert_eq!(addict_deepl::client::sent(&sent).target_lang, "EN-US");
-        let sentence =
-            request(input, Subject::Sentence(0), Language::En, Language::Es).expect("a request");
+        let sentence = request(
+            input,
+            Subject::Sentence(0),
+            Language::En,
+            Language::Es,
+            English::Us,
+        )
+        .expect("a request");
         assert_eq!(sentence.target, Language::Es);
+    }
+
+    #[test]
+    fn a_british_english_target_is_sent_as_en_gb_and_no_other_target_changes() {
+        let manual = bank_of_the_river();
+        let input = manual.input().expect("input");
+        let sent = |target, english| {
+            request(input, Subject::Word(BANK), Language::Es, target, english).expect("a request")
+        };
+        let british = sent(Language::En, English::Gb);
+        assert_eq!(british.english, English::Gb);
+        assert_eq!(addict_deepl::client::sent(&british).target_lang, "EN-GB");
+        assert_eq!(
+            addict_deepl::client::sent(&sent(Language::En, English::Us)).target_lang,
+            "EN-US"
+        );
+        for target in [Language::Es, Language::Ca, Language::Ru] {
+            assert_eq!(
+                addict_deepl::client::sent(&sent(target, English::Gb)),
+                addict_deepl::client::sent(&sent(target, English::Us)),
+                "{target:?}"
+            );
+        }
     }
 
     /// The indices of `bank` and `river` in [`RIVER`].
@@ -687,16 +741,34 @@ pub(crate) mod tests {
         let manual = bank_of_the_river();
         let input = manual.input().expect("input");
         assert_eq!(
-            request(input, Subject::Word(BANK), Language::En, Language::Ru),
+            request(
+                input,
+                Subject::Word(BANK),
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
             Some(bank_request())
         );
         assert_eq!(
-            request(input, Subject::Sentence(0), Language::En, Language::Ru),
+            request(
+                input,
+                Subject::Sentence(0),
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
             Some(sentence_request())
         );
         // A word of a sentence is not sent without it.
         assert_eq!(
-            request(input, Subject::Lone, Language::En, Language::Ru),
+            request(
+                input,
+                Subject::Lone,
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
             None
         );
 
@@ -704,16 +776,34 @@ pub(crate) mod tests {
         lone(&mut manual, " Bank. ");
         let input = manual.input().expect("input");
         assert_eq!(
-            request(input, Subject::Lone, Language::En, Language::Ru),
+            request(
+                input,
+                Subject::Lone,
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
             Some(lone_request("Bank"))
         );
         // A lone word has no sentence to send, as text or as context.
         assert_eq!(
-            request(input, Subject::Word(0), Language::En, Language::Ru),
+            request(
+                input,
+                Subject::Word(0),
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
             None
         );
         assert_eq!(
-            request(input, Subject::Sentence(0), Language::En, Language::Ru),
+            request(
+                input,
+                Subject::Sentence(0),
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
             None
         );
     }
@@ -798,7 +888,7 @@ pub(crate) mod tests {
             let asked = self.manual.input().and_then(|input| {
                 let russian = is_russian(input.word());
                 let source = source_of(subject, self.language, None, russian);
-                request(input, subject, source, self.my)
+                request(input, subject, source, self.my, English::Us)
             });
             let started = translate(
                 Some(&self.work),
@@ -932,12 +1022,14 @@ pub(crate) mod tests {
                 context: Some(sentence.to_owned()),
                 source,
                 target,
+                english: English::Us,
             },
             Request {
                 text: sentence.to_owned(),
                 context: None,
                 source,
                 target,
+                english: English::Us,
             },
         ]
     }
@@ -969,6 +1061,7 @@ pub(crate) mod tests {
                 context: None,
                 source: Language::Ru,
                 target: Language::Ca,
+                english: English::Us,
             }]
         );
         assert_eq!(desk.shown().lone, Some(&online("gos")));
@@ -1036,12 +1129,14 @@ pub(crate) mod tests {
                     context: Some(BANCO_SENTENCE.to_owned()),
                     source: Language::Es,
                     target: Language::Ru,
+                    english: English::Us,
                 },
                 Request {
                     text: BANCO_SENTENCE.to_owned(),
                     context: None,
                     source: Language::Es,
                     target: Language::Ru,
+                    english: English::Us,
                 },
             ]
         );
@@ -1063,6 +1158,7 @@ pub(crate) mod tests {
                 context: None,
                 source: Language::Ca,
                 target: Language::Ru,
+                english: English::Us,
             }
         );
         assert_eq!(desk.asked()[0].text, "col·lecció");
@@ -1088,12 +1184,14 @@ pub(crate) mod tests {
                     context: Some(BANCO_SENTENCE.to_owned()),
                     source: Language::Es,
                     target: Language::Ru,
+                    english: English::Us,
                 },
                 Request {
                     text: BANCO_SENTENCE.to_owned(),
                     context: None,
                     source: Language::Es,
                     target: Language::Ru,
+                    english: English::Us,
                 },
             ]
         );
@@ -1114,12 +1212,14 @@ pub(crate) mod tests {
                     context: None,
                     source: Language::Es,
                     target: Language::Ru,
+                    english: English::Us,
                 },
                 Request {
                     text: "banco".to_owned(),
                     context: None,
                     source: Language::Ca,
                     target: Language::Ru,
+                    english: English::Us,
                 },
             ]
         );
@@ -1205,12 +1305,14 @@ pub(crate) mod tests {
                     context: Some(sentence.to_owned()),
                     source: Language::En,
                     target: Language::Ru,
+                    english: English::Us,
                 },
                 Request {
                     text: sentence.to_owned(),
                     context: None,
                     source: Language::En,
                     target: Language::Ru,
+                    english: English::Us,
                 },
             ]
         );
@@ -1231,12 +1333,14 @@ pub(crate) mod tests {
                     context: Some(other.to_owned()),
                     source: Language::En,
                     target: Language::Ru,
+                    english: English::Us,
                 },
                 Request {
                     text: other.to_owned(),
                     context: None,
                     source: Language::En,
                     target: Language::Ru,
+                    english: English::Us,
                 },
             ]
         );
@@ -1304,6 +1408,7 @@ pub(crate) mod tests {
                 context: Some(text.clone()),
                 source: Language::En,
                 target: Language::Ru,
+                english: English::Us,
             }]
         );
         assert_eq!(desk.shown().sentence, Some(&Whole::TooLong));
@@ -1316,6 +1421,7 @@ pub(crate) mod tests {
                 context: Some(text),
                 source: Language::En,
                 target: Language::Ru,
+                english: English::Us,
             }
         );
     }
@@ -1333,6 +1439,7 @@ pub(crate) mod tests {
                 context: None,
                 source: Language::En,
                 target: Language::Ru,
+                english: English::Us,
             }
         );
     }
@@ -1361,6 +1468,7 @@ pub(crate) mod tests {
                     context: Some(edited.to_owned()),
                     source: Language::En,
                     target: Language::Ru,
+                    english: English::Us,
                 },
                 lone_request(edited),
             ]
@@ -1619,7 +1727,7 @@ pub(crate) mod tests {
                 translate(
                     Some(&work),
                     translator.clone(),
-                    request(input, subject, Language::En, Language::Ru),
+                    request(input, subject, Language::En, Language::Ru, English::Us),
                     move |outcome| {
                         let _ = online.send(Reported::Online(outcome));
                     },
@@ -1693,7 +1801,7 @@ pub(crate) mod tests {
             let _job = translate(
                 Some(&work),
                 translator.clone(),
-                request(input, subject, language, Language::Ru),
+                request(input, subject, language, Language::Ru, English::Us),
                 move |outcome| {
                     let _ = sender.send(outcome);
                 },
@@ -1778,7 +1886,7 @@ pub(crate) mod tests {
             let _job = translate(
                 Some(&work),
                 translator.clone(),
-                request(input, subject, source, Language::Ru),
+                request(input, subject, source, Language::Ru, English::Us),
                 move |outcome| {
                     let _ = sender.send((outcome, probe.ended()));
                 },
@@ -1836,6 +1944,7 @@ pub(crate) mod tests {
                 Subject::Word(BANCO),
                 Language::Es,
                 Language::Ru,
+                English::Us,
             ),
             move |outcome| {
                 let _ = sender.send(outcome);

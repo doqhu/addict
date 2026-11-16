@@ -600,7 +600,10 @@ pub(crate) mod tests {
         task::{Context, Poll, Waker},
     };
 
-    use addict_core::translation::{Canned, Refusal, Request, Source, Translating, Translator};
+    use addict_core::translation::{
+        Canned, English, Refusal, Request, Source, Translating, Translator,
+    };
+    use sha2::{Digest, Sha256};
 
     use super::{
         AGE_LIMIT, Cache, Cached, DAY, FILE, Footprint, SIZE_LIMIT, Store, TAG_FILE, TAG_SIGNATURE,
@@ -651,6 +654,7 @@ pub(crate) mod tests {
             context: Some(context.to_owned()),
             source: Source::En,
             target: Source::Ru,
+            english: English::Us,
         }
     }
 
@@ -710,30 +714,35 @@ pub(crate) mod tests {
                 context: None,
                 source: Source::En,
                 target: Source::Ru,
+                english: English::Us,
             },
             Request {
                 text: "bank".to_owned(),
                 context: Some(String::new()),
                 source: Source::En,
                 target: Source::Ru,
+                english: English::Us,
             },
             Request {
                 text: RIVER.to_owned(),
                 context: None,
                 source: Source::En,
                 target: Source::Ru,
+                english: English::Us,
             },
             Request {
                 text: "banco".to_owned(),
                 context: Some("El banco cerró.".to_owned()),
                 source: Source::Es,
                 target: Source::Ru,
+                english: English::Us,
             },
             Request {
                 text: "banco".to_owned(),
                 context: Some("El banco cerró.".to_owned()),
                 source: Source::Ca,
                 target: Source::Ru,
+                english: English::Us,
             },
         ];
         for request in &requests {
@@ -763,6 +772,57 @@ pub(crate) mod tests {
         }
         assert_eq!(translator.inner().asked(), requests);
         assert_eq!(translator.store().footprint().rows, requests.len() as u64);
+    }
+
+    #[test]
+    fn us_and_british_english_are_two_keys_and_no_other_target_changes() {
+        let temp = TempDir::new("english");
+        let translator = cached(&temp.cache(), Ok("bank"));
+        let to = |target, english| Request {
+            target,
+            english,
+            ..bank(RIVER)
+        };
+        let us = to(Source::En, English::Us);
+        let british = to(Source::En, English::Gb);
+        assert_ne!(key_of(&us), key_of(&british));
+        for target in [Source::Es, Source::Ca, Source::Ru] {
+            assert_eq!(
+                key_of(&to(target, English::Us)),
+                key_of(&to(target, English::Gb)),
+                "{target:?}"
+            );
+        }
+        // Each variant has its own entry: neither answers for the other.
+        for request in [&us, &british, &us, &british] {
+            let _ = ready(translator.translate(request.clone()));
+        }
+        assert_eq!(translator.inner().asked(), [us, british]);
+        assert_eq!(translator.store().footprint().rows, 2);
+    }
+
+    #[test]
+    fn a_us_english_key_is_the_key_english_always_had() {
+        // The key of an English target as it was before the variant: every
+        // field written out by hand, with `EN-US`.
+        fn field(hash: &mut Sha256, bytes: &[u8]) {
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        }
+        let mut hash = Sha256::new();
+        for value in ["1", "EN", "EN-US", "prefer_quality_optimized", "default"] {
+            field(&mut hash, value.as_bytes());
+        }
+        hash.update([1]);
+        field(&mut hash, RIVER.as_bytes());
+        field(&mut hash, b"bank");
+        let before: [u8; 32] = hash.finalize().into();
+        let us = Request {
+            target: Source::En,
+            english: English::Us,
+            ..bank(RIVER)
+        };
+        assert_eq!(key_of(&us), before);
     }
 
     #[test]
@@ -957,6 +1017,7 @@ pub(crate) mod tests {
             context: None,
             source: Source::En,
             target: Source::Ru,
+            english: English::Us,
         };
         let _ = ready(translator.translate(answer));
         let store = translator.store();

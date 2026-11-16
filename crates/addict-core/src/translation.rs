@@ -5,7 +5,8 @@
 //! The languages of a request are named in one place each:
 //! [`Request::source`] and [`Request::target`], both of English, Spanish,
 //! Catalan and Russian. Every caller asks for my language, the one the
-//! user chose, as the target.
+//! user chose, as the target. An English target is spelled as
+//! [`Request::english`] says, US or British; any other target ignores it.
 //!
 //! [`Translator::translate`] gives a future and runs nothing itself: core has
 //! no runtime, and running the future off the UI thread, under a deadline, is
@@ -61,6 +62,36 @@ pub fn reading_languages(my: Source) -> [Source; 3] {
     languages
 }
 
+/// The spelling of an English target: US, the default, or British.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum English {
+    #[default]
+    Us,
+    Gb,
+}
+
+impl English {
+    /// Every variant: US, then British.
+    pub const ALL: [English; 2] = [English::Us, English::Gb];
+
+    /// The lowercase code of the variant: `us` or `gb`. No wildcard arm: a
+    /// new variant does not compile until it is given its code.
+    pub fn code(self) -> &'static str {
+        match self {
+            English::Us => "us",
+            English::Gb => "gb",
+        }
+    }
+
+    /// The variant of `code`, as [`English::code`] writes it, exactly; any
+    /// other text is none.
+    pub fn of_code(code: &str) -> Option<English> {
+        English::ALL
+            .into_iter()
+            .find(|english| english.code() == code)
+    }
+}
+
 /// Whether `word` is Russian: it has a letter of the Cyrillic block,
 /// U+0400 to U+04FF. It is the one rule that routes a picked word to the
 /// Russian dictionaries; nothing else about the word is weighed. A word of
@@ -82,6 +113,8 @@ pub struct Request {
     pub source: Source,
     /// The language `text` is translated to.
     pub target: Source,
+    /// The spelling of an English target; ignored for any other.
+    pub english: English,
 }
 
 /// Why a request gave no translation.
@@ -168,7 +201,8 @@ mod tests {
     };
 
     use super::{
-        Canned, Refusal, Request, Source, Translating, Translator, is_russian, reading_languages,
+        Canned, English, Refusal, Request, Source, Translating, Translator, is_russian,
+        reading_languages,
     };
 
     fn request() -> Request {
@@ -177,6 +211,7 @@ mod tests {
             context: Some("I sat on the bank of the river.".to_owned()),
             source: Source::En,
             target: Source::Ru,
+            english: English::Us,
         }
     }
 
@@ -225,6 +260,18 @@ mod tests {
     }
 
     #[test]
+    fn every_english_variant_has_its_own_code_and_us_is_the_default() {
+        assert_eq!(English::default(), English::Us);
+        assert_eq!(English::ALL.map(English::code), ["us", "gb"]);
+        for english in English::ALL {
+            assert_eq!(English::of_code(english.code()), Some(english));
+        }
+        for other in ["", "GB", "US", "uk", "en-GB", " gb", "gb\n", "en"] {
+            assert_eq!(English::of_code(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
     fn the_reading_languages_are_every_language_but_mine_in_order() {
         use Source::{Ca, En, Es, Ru};
         assert_eq!(reading_languages(Ru), [En, Es, Ca]);
@@ -244,10 +291,12 @@ mod tests {
             context: None,
             source: Source::Es,
             target: Source::En,
+            english: English::Gb,
         };
         drop(ready(translator.translate(english.clone())));
         assert_eq!(translator.asked(), [english]);
         assert_eq!(translator.asked()[0].target, Source::En);
+        assert_eq!(translator.asked()[0].english, English::Gb);
     }
 
     #[test]
@@ -258,6 +307,7 @@ mod tests {
             context: Some("El banco cerró a las tres.".to_owned()),
             source: Source::Es,
             target: Source::Ru,
+            english: English::Us,
         };
         assert_eq!(
             ready(translator.translate(spanish.clone())),

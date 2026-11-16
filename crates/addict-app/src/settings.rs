@@ -15,7 +15,7 @@
 
 use std::{cell::Cell, future::Future, path::Path, rc::Rc, time::Duration};
 
-use addict_core::translation::Source;
+use addict_core::translation::{English, Source};
 use addict_deepl::key::{self, KeyError};
 use addict_platform::{
     desktop::LoginEntry, shortcut::Bindings, startup::StartupFailure, work::Outcome,
@@ -554,6 +554,12 @@ pub struct Settings {
     my_language: gtk::DropDown,
     /// Set while the code, not the user, moves the choice.
     my_language_rendering: Rc<Cell<bool>>,
+    /// The English spelling row, shown only while English is my language.
+    english_row: gtk::Box,
+    /// The English spelling choice.
+    english: gtk::DropDown,
+    /// Set while the code, not the user, moves the choice.
+    english_rendering: Rc<Cell<bool>>,
     download: gtk::Button,
     download_status: gtk::Label,
 }
@@ -572,6 +578,20 @@ pub fn my_language_name(language: Source) -> &'static str {
 /// The names of the my-language row, in the order of its choices.
 pub fn my_language_names() -> Vec<&'static str> {
     Source::ALL.into_iter().map(my_language_name).collect()
+}
+
+/// The name of a spelling of English in the English spelling row. No
+/// wildcard arm: a new variant does not compile until it is named.
+pub fn english_name(english: English) -> &'static str {
+    match english {
+        English::Us => "US",
+        English::Gb => "British",
+    }
+}
+
+/// The names of the English spelling row, in the order of its choices.
+pub fn english_names() -> Vec<&'static str> {
+    English::ALL.into_iter().map(english_name).collect()
 }
 
 pub(crate) fn label(text: &str, classes: &[&str]) -> gtk::Label {
@@ -646,7 +666,8 @@ impl Settings {
     /// field, trimmed and not empty, when Save key or Enter in the field is
     /// pressed; `on_clear` runs when Clear cache is pressed; `on_startup` runs
     /// with the state asked for when the user moves the Start at login switch;
-    /// `on_my_language` runs with the language the user chooses in My language.
+    /// `on_my_language` runs with the language the user chooses in My language;
+    /// `on_english` with the spelling the user chooses in English spelling.
     /// `on_imported` refreshes resident dictionary states before success is shown.
     #[allow(clippy::too_many_arguments)]
     pub fn new<F: Future<Output = Result<(), String>> + 'static>(
@@ -657,6 +678,7 @@ impl Settings {
         on_clear: impl Fn() + 'static,
         on_startup: impl Fn(bool) + 'static,
         on_my_language: impl Fn(Source) + 'static,
+        on_english: impl Fn(English) + 'static,
         on_imported: impl Fn() -> F + 'static,
         on_download: impl Fn() + 'static,
     ) -> Self {
@@ -819,6 +841,39 @@ impl Settings {
         my_language_row.append(&my_language_name);
         my_language_row.append(&my_language);
 
+        let english = gtk::DropDown::from_strings(&english_names());
+        english.set_valign(gtk::Align::Center);
+        english.update_property(&[gtk::accessible::Property::Label("English spelling")]);
+        // Before the handler is connected: the start is not a choice.
+        english.set_selected(
+            English::ALL
+                .iter()
+                .position(|one| *one == English::default())
+                .map_or(0, |index| index as u32),
+        );
+        let english_rendering = Rc::new(Cell::new(false));
+        let rendering = english_rendering.clone();
+        english.connect_selected_notify(move |dropdown| {
+            if !rendering.get()
+                && let Some(chosen) = English::ALL.get(dropdown.selected() as usize)
+            {
+                on_english(*chosen);
+            }
+        });
+        let english_name = label("English spelling", &[]);
+        english_name.set_hexpand(true);
+        english_name.set_valign(gtk::Align::Center);
+        let english_line = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        english_line.append(&english_name);
+        english_line.append(&english);
+        // The row of the list, not its line, is hidden: a hidden row is no
+        // last child, so My language above it keeps no hairline.
+        let english_row = row(&[english_line.upcast_ref()]);
+        english_row.set_visible(false);
+
         let key_note = label("The key is never shown back here.", &["hint"]);
         let import_file = file_import::Row::new();
         let download = gtk::Button::builder()
@@ -869,6 +924,7 @@ impl Settings {
                 &row(&[cache_row.upcast_ref(), cache_status.upcast_ref()]),
                 &row(&[startup_row.upcast_ref(), startup_status.upcast_ref()]),
                 &row(&[my_language_row.upcast_ref()]),
+                &english_row,
             ],
         ));
 
@@ -924,6 +980,9 @@ impl Settings {
             startup_status,
             my_language,
             my_language_rendering,
+            english_row,
+            english,
+            english_rendering,
             download,
             download_status,
         };
@@ -1033,6 +1092,32 @@ impl Settings {
         self.my_language_rendering.set(false);
     }
 
+    /// Shows `english` in the English spelling row without asking anything.
+    pub fn render_english(&self, english: English) {
+        let Some(index) = English::ALL.iter().position(|one| *one == english) else {
+            return;
+        };
+        self.english_rendering.set(true);
+        self.english.set_selected(index as u32);
+        self.english_rendering.set(false);
+    }
+
+    /// Shows the English spelling row, or hides it: it is shown only while
+    /// English is my language.
+    pub fn show_english(&self, shown: bool) {
+        self.english_row.set_visible(shown);
+    }
+
+    /// Whether the English spelling row is shown, and the spelling it shows.
+    #[cfg(test)]
+    pub(crate) fn english_row(&self) -> (bool, English) {
+        let english = English::ALL
+            .get(self.english.selected() as usize)
+            .copied()
+            .unwrap_or_default();
+        (self.english_row.get_visible(), english)
+    }
+
     /// Sets the line of the startup state.
     pub fn say_startup(&self, text: &str) {
         say_in(&self.startup_status, text);
@@ -1106,6 +1191,7 @@ mod tests {
             || {},
             |_| {},
             |_| {},
+            |_| {},
             || async { Ok(()) },
             move || pressed.set(pressed.get() + 1),
         );
@@ -1170,6 +1256,7 @@ mod tests {
             || {},
             |_| {},
             move |chosen| told.borrow_mut().push(chosen),
+            |_| {},
             || async { Ok(()) },
             || {},
         );
@@ -1179,6 +1266,54 @@ mod tests {
         assert!(asked.borrow().is_empty(), "a render asks nothing");
         settings.my_language.set_selected(1);
         assert_eq!(*asked.borrow(), [Source::Es]);
+    }
+
+    #[test]
+    fn the_english_spelling_row_names_the_two_spellings_in_english() {
+        assert_eq!(super::english_names(), ["US", "British"]);
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_english_spelling_row_asks_only_for_the_users_choice_and_starts_hidden() {
+        use addict_core::translation::English;
+        use gtk::prelude::*;
+        gtk::init().expect("a display");
+        let parent = gtk::Window::new();
+        let asked = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let told = asked.clone();
+        let settings = super::Settings::new(
+            &parent,
+            None,
+            || {},
+            |_| {},
+            || {},
+            |_| {},
+            |_| {},
+            move |chosen| told.borrow_mut().push(chosen),
+            || async { Ok(()) },
+            || {},
+        );
+        assert_eq!(settings.english.selected(), 0, "US at first");
+        assert!(!settings.english_row.get_visible(), "hidden at first");
+        assert!(
+            settings.english_row.has_css_class("settings-row"),
+            "the row of the list is the one hidden"
+        );
+        settings.render_english(English::Gb);
+        assert_eq!(settings.english.selected(), 1);
+        settings.render_english(English::Us);
+        assert_eq!(settings.english.selected(), 0);
+        assert!(asked.borrow().is_empty(), "a render asks nothing");
+        settings.english.set_selected(1);
+        assert_eq!(*asked.borrow(), [English::Gb]);
+        settings.show_english(true);
+        assert!(settings.english_row.get_visible());
+        settings.show_english(false);
+        assert!(!settings.english_row.get_visible());
+        assert_eq!(*asked.borrow(), [English::Gb], "showing asks nothing");
+        settings.window.destroy();
+        parent.destroy();
     }
 
     #[test]
@@ -1196,6 +1331,7 @@ mod tests {
             |_| {},
             || {},
             move |wanted| told.borrow_mut().push(wanted),
+            |_| {},
             |_| {},
             || async { Ok(()) },
             || {},
@@ -1234,6 +1370,7 @@ mod tests {
             || {},
             |_| {},
             || {},
+            |_| {},
             |_| {},
             |_| {},
             || async { Ok(()) },

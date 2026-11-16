@@ -257,7 +257,7 @@ mod wrap;
 mod stub;
 
 use addict_engine::{
-    cache, capture, dictionaries, download, entries, evidence, history, language, manual,
+    cache, capture, dictionaries, download, english, entries, evidence, history, language, manual,
     my_language, online, translate, view,
 };
 

@@ -17,7 +17,7 @@ use std::{
     sync::OnceLock,
 };
 
-use addict_core::translation::{Refusal, Request, Source, Translating, Translator};
+use addict_core::translation::{English, Refusal, Request, Source, Translating, Translator};
 use reqwest::{
     StatusCode,
     header::{AUTHORIZATION, HeaderValue},
@@ -44,15 +44,17 @@ fn source_lang(source: Source) -> &'static str {
 }
 
 /// The `target_lang` of a request to `target`, as DeepL writes it. English
-/// names its variant, US, so the answer does not hang on a server default.
-/// No wildcard arm: a new language does not compile until it is given its
+/// always names its variant, `english`, US or British, so the answer does
+/// not hang on a server default; any other target ignores it. No wildcard
+/// arm: a new language or variant does not compile until it is given its
 /// code.
-fn target_lang(target: Source) -> &'static str {
-    match target {
-        Source::En => "EN-US",
-        Source::Es => "ES",
-        Source::Ca => "CA",
-        Source::Ru => "RU",
+fn target_lang(target: Source, english: English) -> &'static str {
+    match (target, english) {
+        (Source::En, English::Us) => "EN-US",
+        (Source::En, English::Gb) => "EN-GB",
+        (Source::Es, _) => "ES",
+        (Source::Ca, _) => "CA",
+        (Source::Ru, _) => "RU",
     }
 }
 
@@ -111,7 +113,7 @@ pub fn sent(request: &Request) -> Sent<'_> {
         text: &request.text,
         context: request.context.as_deref(),
         source_lang: source_lang(request.source),
-        target_lang: target_lang(request.target),
+        target_lang: target_lang(request.target, request.english),
         model_type: MODEL_TYPE,
         formality: FORMALITY,
     }
@@ -337,27 +339,47 @@ fn refusal(error: &reqwest::Error) -> Refusal {
 
 #[cfg(test)]
 mod tests {
-    use addict_core::translation::{Refusal, Request, Source};
+    use addict_core::translation::{English, Refusal, Request, Source};
     use reqwest::StatusCode;
 
     use super::{refused, sent};
 
     #[test]
     fn the_target_of_a_request_is_its_target_lang() {
-        for (target, code) in [
-            (Source::Ru, "RU"),
-            (Source::En, "EN-US"),
-            (Source::Es, "ES"),
-            (Source::Ca, "CA"),
+        for (target, english, code) in [
+            (Source::Ru, English::Us, "RU"),
+            (Source::En, English::Us, "EN-US"),
+            (Source::En, English::Gb, "EN-GB"),
+            (Source::Es, English::Us, "ES"),
+            (Source::Ca, English::Us, "CA"),
         ] {
             let request = Request {
                 text: "banco".to_owned(),
                 context: None,
                 source: Source::Es,
                 target,
+                english,
             };
-            assert_eq!(sent(&request).target_lang, code, "{target:?}");
+            assert_eq!(sent(&request).target_lang, code, "{target:?} {english:?}");
             assert_eq!(sent(&request).source_lang, "ES", "{target:?}");
+        }
+    }
+
+    #[test]
+    fn the_english_variant_changes_nothing_for_any_other_target() {
+        for target in [Source::Es, Source::Ca, Source::Ru] {
+            let request = |english| Request {
+                text: "bank".to_owned(),
+                context: Some("the bank of the river".to_owned()),
+                source: Source::En,
+                target,
+                english,
+            };
+            assert_eq!(
+                sent(&request(English::Us)),
+                sent(&request(English::Gb)),
+                "{target:?}"
+            );
         }
     }
 
@@ -368,6 +390,7 @@ mod tests {
             context: None,
             source: Source::Ru,
             target: Source::En,
+            english: English::Us,
         };
         assert_eq!(sent(&request).source_lang, "RU");
         assert_eq!(sent(&request).target_lang, "EN-US");

@@ -5,7 +5,7 @@ mod common;
 
 use std::{sync::Arc, time::Duration};
 
-use addict_core::translation::{Refusal, Request, Source, Translator};
+use addict_core::translation::{English, Refusal, Request, Source, Translator};
 use addict_deepl::{
     DeepL, Language, Usage,
     stub::{Reply, Stub},
@@ -25,6 +25,7 @@ fn request() -> Request {
         context: Some(SENTENCE.to_owned()),
         source: Source::En,
         target: Source::Ru,
+        english: English::Us,
     }
 }
 
@@ -69,6 +70,7 @@ async fn a_request_without_a_context_sends_none() {
         context: None,
         source: Source::En,
         target: Source::Ru,
+        english: English::Us,
     };
     assert_eq!(client.translate(&request).await, Ok("банк".to_owned()));
     let body: serde_json::Value = serde_json::from_str(&stub.seen()[0].body).expect("JSON");
@@ -87,6 +89,7 @@ async fn a_spanish_word_with_its_sentence_is_sent_from_es() {
         context: Some(sentence.to_owned()),
         source: Source::Es,
         target: Source::Ru,
+        english: English::Us,
     };
     assert_eq!(client.translate(&request).await, Ok("банк".to_owned()));
     let body: serde_json::Value = serde_json::from_str(&stub.seen()[0].body).expect("JSON");
@@ -110,6 +113,7 @@ async fn a_catalan_sentence_is_sent_from_ca_without_context() {
         context: None,
         source: Source::Ca,
         target: Source::Ru,
+        english: English::Us,
     };
     assert_eq!(
         client.translate(&request).await,
@@ -129,11 +133,12 @@ async fn a_catalan_sentence_is_sent_from_ca_without_context() {
 
 #[tokio::test]
 async fn the_target_of_a_request_reaches_the_wire() {
-    for (target, code) in [
-        (Source::En, "EN-US"),
-        (Source::Es, "ES"),
-        (Source::Ca, "CA"),
-        (Source::Ru, "RU"),
+    for (target, english, code) in [
+        (Source::En, English::Us, "EN-US"),
+        (Source::En, English::Gb, "EN-GB"),
+        (Source::Es, English::Us, "ES"),
+        (Source::Ca, English::Us, "CA"),
+        (Source::Ru, English::Us, "RU"),
     ] {
         let (_dir, stub, client) = asking(&format!("target-{code}"), Reply::translation("x"));
         let request = Request {
@@ -141,6 +146,7 @@ async fn the_target_of_a_request_reaches_the_wire() {
             context: None,
             source: Source::Es,
             target,
+            english,
         };
         assert_eq!(client.translate(&request).await, Ok("x".to_owned()));
         let body: serde_json::Value = serde_json::from_str(&stub.seen()[0].body).expect("JSON");
@@ -152,7 +158,7 @@ async fn the_target_of_a_request_reaches_the_wire() {
                 "target_lang": code,
                 "model_type": "prefer_quality_optimized",
             }),
-            "{target:?}"
+            "{target:?} {english:?}"
         );
     }
 }
