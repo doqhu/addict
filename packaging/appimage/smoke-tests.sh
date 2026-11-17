@@ -54,7 +54,7 @@ sources = out/(name+'.sources'); sources.mkdir(); (sources/'source.tar').write_b
 (sources/'SHA256SUMS').write_text(item['sha256']+'  source.tar\n')
 smoke = root/'smoke/ocr'; smoke.mkdir(parents=True)
 (smoke/'image.sha256').write_text(digest+'\n')
-(smoke/'PASS.json').write_text(json.dumps({'eng': 'The bank is beside the river.', 'spa': 'El niño está cerca del río.', 'cat': 'El camí és a prop del riu.'}))
+(smoke/'PASS.json').write_text(json.dumps({'eng': 'The bank is beside the river.', 'spa': 'El niño está cerca del río.', 'cat': 'El camí és a prop del riu.', 'rus': 'Банк стоит на берегу реки.'}))
 PY
 fixture=$work/fixture
 sources=$fixture/target/appimage/Addict-1.0.0-x86_64.AppImage.sources

@@ -81,15 +81,17 @@ installation under test in step 6, not automatic desktop integration.
    `share/licenses/components.json`, addict/Rust/GTK/libc/runtime licenses,
    Tesseract/tessdata licenses and Leptonica notice. Retain the corresponding
    sources beside the handoff and verify every `SHA256SUMS` entry.
-3. **Real capture and OCR.** Display the three fixture lines below in a text
+3. **Real capture and OCR.** Display the four fixture lines below in a text
    editor at a readable size. Select the matching language, press the visible
    window's Capture button and select only one line using the real region
-   picker. Record the actual recognized text for all three languages. Repeat
+   picker; Ru is offered only when my language is not Russian, so choose
+   English as my language in Settings for the Russian line. Record the actual
+   recognized text for all four languages. Repeat
    each capture twice more, confirming the picker appears each time and only
    the chosen region becomes text. Collect successful engine/model opens and
    child mappings, for example with `strace -f -e trace=execve,openat` attached
    to the resident during capture if available. Record the actual bundled
-   Tesseract child, selected eng/spa/cat model, engine, Leptonica and loader
+   Tesseract child, selected eng/spa/cat/rus model, engine, Leptonica and loader
    paths. The production executable rule resolves sibling `bin/tesseract`
    with `../share/tessdata`; filesystem layout alone is insufficient evidence.
 4. **Cancellation and recovery.** Note the current field/result. Start another
@@ -133,6 +135,7 @@ Fixtures from the existing bundled OCR verification:
 The bank is beside the river.
 El niño está cerca del río.
 El camí és a prop del riu.
+Банк стоит на берегу реки.
 ```
 
 ## Results

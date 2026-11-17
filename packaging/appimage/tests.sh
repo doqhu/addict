@@ -127,7 +127,7 @@ lock=json.load(open(root/'packaging/appimage/inputs.lock.json'))
 for item in lock['rpms']+lock['tools']+lock['ocr']+lock['notices']+lock['srpms']+lock['static']:
     (out/item['file']).symlink_to(root/'target/appimage-inputs'/item['file'])
 INPUTS
-for name in tessdata-LICENSE eng.traineddata spa.traineddata cat.traineddata; do
+for name in tessdata-LICENSE eng.traineddata spa.traineddata cat.traineddata rus.traineddata; do
     mv "$work/ocr-inputs/$name" "$work/saved-link"
     refuse "missing input: $name" "$root/scripts/build-appimage.sh" --verify-inputs "$work/ocr-inputs"
     echo corrupt > "$work/ocr-inputs/$name"
@@ -152,7 +152,7 @@ for name in files:
     p = r/name; p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'fixture')
 for name in ['AppRun', 'AppRun.sh', 'sharun', 'dash', 'bin/addict', 'shared/bin/addict', 'bin/tesseract', 'shared/bin/tesseract']:
     (r/name).chmod(0o755)
-for lang in ['eng','spa','cat']:
+for lang in ['eng','spa','cat','rus']:
     target=r/'share/tessdata'/(lang+'.traineddata'); target.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(pathlib.Path(sys.argv[2])/(lang+'.traineddata'),target)
 # Keep another library payload present when the required SONAME alias goes away.
@@ -194,7 +194,7 @@ inventory.write_text(json.dumps({'schema': 1, 'components': components, 'files':
 PY
 check=("$root/scripts/check-appimage.sh" --appdir "$work/AppDir")
 "${check[@]}" > /dev/null
-for path in bin/tesseract shared/bin/tesseract lib/libtesseract.so.5 lib/libleptonica.so.6 share/tessdata/eng.traineddata share/tessdata/spa.traineddata share/tessdata/cat.traineddata lib/libgtk-4.so.1 lib/libGLESv2.so.2 lib/libvulkan_lvp.so lib/libc.so.6 lib/ld-linux-x86-64.so.2 share/glib-2.0/schemas/gschemas.compiled etc/fonts/fonts.conf; do
+for path in bin/tesseract shared/bin/tesseract lib/libtesseract.so.5 lib/libleptonica.so.6 share/tessdata/eng.traineddata share/tessdata/spa.traineddata share/tessdata/cat.traineddata share/tessdata/rus.traineddata lib/libgtk-4.so.1 lib/libGLESv2.so.2 lib/libvulkan_lvp.so lib/libc.so.6 lib/ld-linux-x86-64.so.2 share/glib-2.0/schemas/gschemas.compiled etc/fonts/fonts.conf; do
     mv "$work/AppDir/$path" "$work/removed"
     refuse 'missing \(component\|OCR dependency\):' "${check[@]}"
     mv "$work/removed" "$work/AppDir/$path"
@@ -204,7 +204,7 @@ done
 mv "$work/AppDir/lib/libtesseract.so.5.5" "$work/removed-soname"
 refuse 'missing OCR dependency: lib/libtesseract.so.5.5' "${check[@]}"
 mv "$work/removed-soname" "$work/AppDir/lib/libtesseract.so.5.5"
-for path in shared/bin/tesseract lib/libtesseract.so.5 lib/libleptonica.so.6 share/tessdata/eng.traineddata share/tessdata/spa.traineddata share/tessdata/cat.traineddata; do
+for path in shared/bin/tesseract lib/libtesseract.so.5 lib/libleptonica.so.6 share/tessdata/eng.traineddata share/tessdata/spa.traineddata share/tessdata/cat.traineddata share/tessdata/rus.traineddata; do
     cp "$work/AppDir/$path" "$work/saved"
     echo corrupt >> "$work/AppDir/$path"
     refuse 'corrupt OCR' "${check[@]}"

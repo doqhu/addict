@@ -169,5 +169,5 @@ if sys.argv[3]:
     with open(sys.argv[3], 'rb') as f:
         if b'github.com/VHSgunzo/uruntime' not in f.read(4 << 20): fail('unrecognized runtime header: '+sys.argv[3])
 print('Notices: %d components (%d in the runtime header) cover %d files' % (len(components), len(runtime), len(attributed)))
-print('Validated: x86_64, GTK, libc, loader, schemas, fonts, icons, modules, pinned EN/ES/CA OCR and closure; notices; no dictionary data')
+print('Validated: x86_64, GTK, libc, loader, schemas, fonts, icons, modules, pinned EN/ES/CA/RU OCR and closure; notices; no dictionary data')
 PY

@@ -18,7 +18,8 @@ import time
 
 TEXTS = {'eng': ('en', 'The bank is beside the river.'),
          'spa': ('es', 'El niño está cerca del río.'),
-         'cat': ('ca', 'El camí és a prop del riu.')}
+         'cat': ('ca', 'El camí és a prop del riu.'),
+         'rus': ('ru', 'Банк стоит на берегу реки.')}
 ROOT = Path(__file__).resolve().parents[2]
 DESKTOP = '/org/freedesktop/portal/desktop'
 
@@ -67,6 +68,9 @@ def outer(image, out):
             path = profile/name; path.mkdir(mode=0o700); env[key] = str(path)
         config = profile/'config/addict'; config.mkdir()
         (config/'language').write_text(reading+'\n')
+        # With no my-language file my language is Russian, and Russian is then
+        # never the reading language: the Ru profile reads with English as my language.
+        if reading == 'ru': (config/'my-language').write_text('en\n')
         (config/'first-run-download').write_text('declined\n')
         env.update(PATH='/usr/bin:/bin', GDK_BACKEND='x11',
                    XAUTHORITY=os.environ.get('XAUTHORITY', str(Path.home()/'.Xauthority')))
@@ -77,7 +81,7 @@ def outer(image, out):
             subprocess.run(run_args, env=env, stdout=log, stderr=log, timeout=240, check=True)
     # Written only after all languages and their bounded cleanup pass.
     (out/'PASS.json').write_text(json.dumps({lang: text for lang, (_, text) in TEXTS.items()}, indent=2)+'\n')
-    print('PASS: production EN/ES/CA capture, bundled child/libraries/models and cleanup; '+str(out))
+    print('PASS: production EN/ES/CA/RU capture, bundled child/libraries/models and cleanup; '+str(out))
 
 
 def inside(image, out, lang):
