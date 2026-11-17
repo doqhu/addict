@@ -48,7 +48,7 @@ while IFS= read -r line; do
         *) fail "${line#FAIL: }" ;;
     esac
 done < <(python3 - "$root" <<'PY' || echo "FAIL: the workflow check stopped"
-import pathlib, sys
+import json, pathlib, sys
 import yaml
 
 root = pathlib.Path(sys.argv[1])
@@ -60,6 +60,13 @@ def triggers(name):
 
 def check(ok, case):
     print(("PASS: " if ok else "FAIL: ") + case)
+
+config = json.loads((root / "release-please-config.json").read_text())
+package = config["packages"]["."]
+check(package.get("draft", config.get("draft")) is True,
+      "release-please creates drafts so assets can be uploaded before publication")
+check(package.get("force-tag-creation", config.get("force-tag-creation")) is True,
+      "release-please creates tags for drafts to trigger the release workflow")
 
 release = triggers("release.yml")
 push = release.get("push") or {}
@@ -135,13 +142,21 @@ case $command in
         mkdir -p "$dir/assets"
         if [[ " $* " == *" --draft "* ]]; then echo true > "$dir/draft"; else echo false > "$dir/draft"; fi ;;
     edit)
-        [[ -d $dir ]] || { echo "release not found" >&2; exit 1; } ;;
+        [[ -d $dir ]] || { echo "release not found" >&2; exit 1; }
+        if [[ " $* " == *" --draft=false "* ]]; then
+            if [[ -f $GH_STUB/publish-error ]]; then cat "$GH_STUB/publish-error" >&2; exit 1; fi
+            echo false > "$dir/draft"
+        fi ;;
     delete-asset)
         [[ -f $dir/assets/$1 ]] || { echo "asset not found" >&2; exit 1; }
         rm -- "$dir/assets/$1" ;;
     upload)
         if [[ -f $GH_STUB/upload-error ]]; then cat "$GH_STUB/upload-error" >&2; exit 1; fi
         [[ -d $dir ]] || { echo "release not found" >&2; exit 1; }
+        [[ $(<"$dir/draft") == true ]] || { echo "HTTP 422: Cannot upload assets to an immutable release." >&2; exit 1; }
+        if [[ -f $GH_STUB/fail-asset && $(basename -- "${@: -1}") == $(<"$GH_STUB/fail-asset") ]]; then
+            echo "HTTP 502: Bad Gateway" >&2; exit 1
+        fi
         clobber=false files=()
         for arg in "$@"; do
             if [[ $arg == --clobber ]]; then clobber=true; else files+=("$arg"); fi
@@ -187,28 +202,49 @@ upload() {
         "$root/scripts/release-upload.sh" "$1" "$bundle" "$checksum" 2>&1) || code=$?
 }
 assets_of() { LC_ALL=C ls -1 "$GH_STUB/releases/$1/assets" | tr '\n' ' '; }
-called() { grep -qE "$1" "$GH_STUB/calls"; }
+called() { grep -qE -- "$1" "$GH_STUB/calls"; }
 expect() { if eval "$2"; then pass "$1"; else fail "$1"; echo "  output: $out"; echo "  calls:"; sed 's/^/    /' "$GH_STUB/calls"; fi; }
 new_assets="Addict-0.2.0-x86_64.flatpak Addict-0.2.0-x86_64.flatpak.sha256 "
 same() { cmp -s "$bundle" "$GH_STUB/releases/$1/assets/$(basename -- "$bundle")" && cmp -s "$checksum" "$GH_STUB/releases/$1/assets/$(basename -- "$checksum")"; }
 
 # Real release: the tag's Release exists.
-stub v0.2.0:false indexes-v3:false:manifest.json
+stub v0.2.0:true indexes-v3:false:manifest.json
 upload v0.2.0
 expect "real release: exit 0" '[[ $code == 0 ]]'
 expect "real release: both assets on the tag's Release" '[[ $(assets_of v0.2.0) == "$new_assets" ]] && same v0.2.0'
 expect "real release: the upload uses --clobber" 'called "^release upload v0\.2\.0 --clobber "'
-expect "real release: nothing is created, edited or deleted" '! called "^release (create|edit|delete-asset)"'
+expect "real release: published only after both uploads" '[[ $(tail -1 "$GH_STUB/calls") == "release edit v0.2.0 --draft=false" ]] && [[ $(<"$GH_STUB/releases/v0.2.0/draft") == false ]] && ! called "^release (create|delete-asset)"'
 expect "real release: indexes-v3 is untouched" '[[ $(assets_of indexes-v3) == "manifest.json " ]] && ! called " indexes-v3"'
 
-# Second run: the assets are already there.
-stub v0.2.0:false:Addict-0.2.0-x86_64.flatpak:Addict-0.2.0-x86_64.flatpak.sha256
+# Retry an interrupted upload: assets are already on a draft.
+stub v0.2.0:true:Addict-0.2.0-x86_64.flatpak:Addict-0.2.0-x86_64.flatpak.sha256
 upload v0.2.0
 expect "second run: exit 0" '[[ $code == 0 ]]'
 expect "second run: the assets are replaced" '[[ $(assets_of v0.2.0) == "$new_assets" ]] && same v0.2.0'
 
+# A failure on the final upload leaves a draft, and a retry publishes it.
+stub v0.2.0:true
+echo "$(basename -- "$checksum")" > "$GH_STUB/fail-asset"
+upload v0.2.0
+expect "final upload fails: draft retained, no publication" '[[ $code != 0 ]] && [[ $(<"$GH_STUB/releases/v0.2.0/draft") == true ]] && ! called "^release edit" && [[ $(assets_of v0.2.0) == "$(basename -- "$bundle") " ]]'
+rm "$GH_STUB/fail-asset"
+upload v0.2.0
+expect "retry after final upload fails: complete release published" '[[ $code == 0 ]] && same v0.2.0 && [[ $(<"$GH_STUB/releases/v0.2.0/draft") == false ]]'
+
+stub v0.2.0:true
+echo "HTTP 502: Bad Gateway" > "$GH_STUB/publish-error"
+upload v0.2.0
+expect "publication fails: assets retained on draft" '[[ $code != 0 ]] && same v0.2.0 && [[ $(<"$GH_STUB/releases/v0.2.0/draft") == true ]]'
+rm "$GH_STUB/publish-error"
+upload v0.2.0
+expect "retry after publication fails: published" '[[ $code == 0 ]] && [[ $(<"$GH_STUB/releases/v0.2.0/draft") == false ]]'
+
+stub v0.2.0:false:existing.txt
+upload v0.2.0
+expect "published version: refused before mutation with recovery hint" '[[ $code != 0 ]] && [[ $out == *"v0.2.0 is published"*"use a new version"* ]] && ! called "^release (upload|edit|create|delete-asset)" && [[ $(assets_of v0.2.0) == "existing.txt " ]]'
+
 # Dry run with no draft yet.
-stub v0.2.0:false:Addict-0.2.0-x86_64.flatpak indexes-v3:false:manifest.json
+stub v0.2.0:true:Addict-0.2.0-x86_64.flatpak indexes-v3:false:manifest.json
 upload dry-run
 expect "dry run, no draft: exit 0" '[[ $code == 0 ]]'
 expect "dry run, no draft: a draft is created" 'called "^release create dry-run --draft " && [[ $(<"$GH_STUB/releases/dry-run/draft") == true ]]'
@@ -243,7 +279,7 @@ upload dry-run
 expect "published dry-run: non-zero exit and no upload" '[[ $code != 0 ]] && [[ $out == *"dry-run is published"* ]] && ! called "^release (create|upload|edit|delete-asset)"'
 
 # An unexpected view error stops the script.
-stub v0.2.0:false
+stub v0.2.0:true
 echo "HTTP 502: Bad Gateway" > "$GH_STUB/view-error"
 upload v0.2.0
 expect "view error: non-zero exit, the error shown, no upload" '[[ $code != 0 ]] && [[ $out == *"HTTP 502"* ]] && ! called "^release (create|upload|edit|delete-asset)"'
@@ -502,7 +538,7 @@ all_assets="Addict-0.2.0-x86_64.AppImage Addict-0.2.0-x86_64.AppImage.build.txt 
 
 # Complete handoff. A part size of 4 KiB makes the fixture's source tar
 # (10 KiB) three parts.
-stub v0.2.0:false
+stub v0.2.0:true
 PUBLISH_ENV="PART_SIZE=4096" publish v0.2.0
 expect "complete handoff: exit 0" '[[ $code == 0 ]]'
 expect "complete handoff: every asset on the Release" '[[ $(assets_of v0.2.0) == "$all_assets" ]]'
@@ -516,16 +552,19 @@ expect "complete handoff: the parts pass their .sha256, and the image its own" '
 expect "complete handoff: the reassembled source set passes SHA256SUMS with 3 files" '(cd "$GH_STUB/releases/v0.2.0/assets" && cat "$image".sources.tar.[0-9][0-9] | tar -x -C "$reassembled") && (cd "$reassembled/$image.sources" && sha256sum --check --strict --quiet SHA256SUMS && [[ $(ls | wc -l) == 4 ]])'
 expect "complete handoff: the handoff tar and the extracted tree are removed" '[[ ! -e $runner/handoff/$handoff_tar ]] && [[ -z $(find "$runner" -maxdepth 1 -name ".appimage-assets.*") ]]'
 
-# Second run: the assets are already on the Release.
+expect "complete handoff: publication follows the last checksum upload" '[[ $(tail -2 "$GH_STUB/calls" | head -1) == "release upload v0.2.0 --clobber "*"/$image.sha256" ]] && [[ $(tail -1 "$GH_STUB/calls") == "release edit v0.2.0 --draft=false" ]]'
+
+# Second run after publication refuses to mutate the immutable release.
+: > "$GH_STUB/calls"
 PUBLISH_ENV="PART_SIZE=4096" publish v0.2.0
-expect "second run with the AppImage: exit 0, the same assets once each" '[[ $code == 0 ]] && [[ $(assets_of v0.2.0) == "$all_assets" ]]'
+expect "second run with the AppImage: refused, assets untouched" '[[ $code != 0 ]] && no_upload && [[ $(assets_of v0.2.0) == "$all_assets" ]]'
 
 # Dry run after one of another version: only this run's assets remain.
 stub "dry-run:true:Addict-0.1.1-x86_64.AppImage:Addict-0.1.1-x86_64.AppImage.sources.tar.00:Addict-0.1.1-x86_64.flatpak"
 PUBLISH_ENV="PART_SIZE=4096" publish dry-run
 expect "dry run after an older one: only this run's assets remain" '[[ $code == 0 ]] && [[ $(assets_of dry-run) == "$all_assets" ]]'
 PUBLISH_ENV="PART_SIZE=4096" publish dry-run
-expect "second dry run: the same asset names once each" '[[ $code == 0 ]] && [[ $(assets_of dry-run) == "$all_assets" ]]'
+expect "second dry run: the same asset names once each, still a draft" '[[ $code == 0 ]] && [[ $(assets_of dry-run) == "$all_assets" ]] && [[ $(<"$GH_STUB/releases/dry-run/draft") == true ]] && ! called "--draft=false"'
 
 # The refusals: each uploads nothing, and the asset directory is removed.
 refuse() {
@@ -535,39 +574,39 @@ refuse() {
     expect "$1: the stub gh records no upload" 'no_upload'
     expect "$1: no asset directory is left" '[[ ! -e $runner/appimage ]]'
 }
-stub v0.2.0:false
+stub v0.2.0:true
 publish v0.2.0 'rm "$image.sources/b-2.0.tar.gz"'
 refuse "source removed" "missing corresponding source: b-2.0.tar.gz"
-stub v0.2.0:false
+stub v0.2.0:true
 publish v0.2.0 'rm "$image.sources/b-2.0.tar.gz"; sed -i "/b-2.0.tar.gz/d" "$image.sources/SHA256SUMS"'
 refuse "source and its line removed" "differs from the inventory in $image.notices.json: missing b-2.0.tar.gz"
-stub v0.2.0:false
+stub v0.2.0:true
 publish v0.2.0 'echo extra > "$image.sources/d-4.0.src.rpm"; (cd "$image.sources" && sha256sum -- * | grep -v SHA256SUMS > SHA256SUMS.new && mv SHA256SUMS.new SHA256SUMS)'
 refuse "source not in the inventory" "not in the inventory: d-4.0.src.rpm"
-stub v0.2.0:false
+stub v0.2.0:true
 publish v0.2.0 'printf X | dd of="$image.sources/c-3.0.src.rpm" bs=1 seek=2 conv=notrunc status=none'
 refuse "corrupt source" "corrupt corresponding source: c-3.0.src.rpm"
-stub v0.2.0:false
+stub v0.2.0:true
 publish v0.2.0 'printf X | dd of="$image" bs=1 seek=3 conv=notrunc status=none'
 refuse "corrupt image" "the image does not match its checksum: $image"
-stub v0.2.0:false
+stub v0.2.0:true
 publish v0.2.0 'rm "$image.layout.txt"'
 refuse "metadata file missing" "missing from the handoff: $image.layout.txt"
-stub v0.2.0:false
+stub v0.2.0:true
 publish v0.2.0 '' 'printf X | dd of="$handoff_tar" bs=1 seek=600 conv=notrunc status=none'
 refuse "corrupt handoff tar" "$handoff_tar does not match $handoff_tar.sha256"
 expect "corrupt handoff tar: the tar is kept" '[[ -f $runner/handoff/$handoff_tar ]]'
-stub v0.2.0:false
+stub v0.2.0:true
 publish v0.2.0 '' '' 'printf X | dd of="$source_name" bs=1 seek=600 conv=notrunc status=none'
 expect "corrupt source tarball: non-zero exit" '[[ $code != 0 ]]'
 expect "corrupt source tarball: the checksum failure is shown" '[[ $out == *"$source_name: FAILED"* ]]'
 expect "corrupt source tarball: the stub gh records no upload" 'no_upload'
 # Asset too large, with the limit lowered below the image's size (the parts
 # are 4 KiB, under it).
-stub v0.2.0:false
+stub v0.2.0:true
 PUBLISH_ENV="ASSET_LIMIT=4097 PART_SIZE=4096" publish v0.2.0 'head -c 5000 /dev/zero >> "$image"; sha256sum -- "$image" > "$image.sha256"'
 refuse "asset too large" "not under 4097: $image"
-stub v0.2.0:false
+stub v0.2.0:true
 PUBLISH_ENV="ASSET_LIMIT=4097 PART_SIZE=4096" publish v0.2.0 'head -c 4096 /dev/zero > "$image"; sha256sum -- "$image" > "$image.sha256"'
 expect "asset just under the limit: exit 0" '[[ $code == 0 ]]'
 
