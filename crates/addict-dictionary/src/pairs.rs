@@ -2,10 +2,8 @@
 //! whose own language is another: one row per ordered pair (reading
 //! language, my language) of distinct languages, in [`PAIRS`].
 //!
-//! A row holds the sources that translate words read in its reading
-//! language into its language, today's from the spec's language pairs;
-//! a pair with no source today has an empty row. A pair of a language with
-//! itself has no row: a word read in my own language needs no translation.
+//! Each row holds the sources that translate from its reading language
+//! into my language. A pair of a language with itself has no row.
 //!
 //! Article sources (definitions and synonyms: `oewn`, `kaikki-es-Espanol`,
 //! `omw-es`, `dbnary-ca`, `sinonims-cat`) are not here: they describe a word
@@ -27,7 +25,7 @@ pub struct Pair {
     pub reading: Language,
     /// The language they are translated into.
     pub my: Language,
-    /// The sources that translate them, possibly none.
+    /// The sources that translate them.
     pub sources: &'static [Source],
 }
 
@@ -37,12 +35,12 @@ pub const PAIRS: [Pair; 12] = [
     Pair {
         reading: Language::En,
         my: Language::Es,
-        sources: &[],
+        sources: &[Source::WikdictEnEs],
     },
     Pair {
         reading: Language::En,
         my: Language::Ca,
-        sources: &[],
+        sources: &[Source::WikdictEnCa],
     },
     Pair {
         reading: Language::En,
@@ -52,7 +50,7 @@ pub const PAIRS: [Pair; 12] = [
     Pair {
         reading: Language::Es,
         my: Language::En,
-        sources: &[Source::KaikkiEnSpanish],
+        sources: &[Source::KaikkiEnSpanish, Source::WikdictEsEn],
     },
     Pair {
         reading: Language::Es,
@@ -67,12 +65,12 @@ pub const PAIRS: [Pair; 12] = [
     Pair {
         reading: Language::Ca,
         my: Language::En,
-        sources: &[Source::KaikkiEnCatalan],
+        sources: &[Source::KaikkiEnCatalan, Source::WikdictCaEn],
     },
     Pair {
         reading: Language::Ca,
         my: Language::Es,
-        sources: &[],
+        sources: &[Source::WikdictCaEs],
     },
     Pair {
         reading: Language::Ca,
@@ -97,7 +95,7 @@ pub const PAIRS: [Pair; 12] = [
 ];
 
 /// The sources that translate a word read in `reading` into `my`; none for
-/// a pair with no source and for a language with itself.
+/// a language paired with itself.
 pub fn translations(reading: Language, my: Language) -> &'static [Source] {
     PAIRS
         .iter()
@@ -152,11 +150,11 @@ mod tests {
     fn english_glosses() {
         assert_eq!(
             translations(Language::Es, Language::En),
-            [Source::KaikkiEnSpanish]
+            [Source::KaikkiEnSpanish, Source::WikdictEsEn]
         );
         assert_eq!(
             translations(Language::Ca, Language::En),
-            [Source::KaikkiEnCatalan]
+            [Source::KaikkiEnCatalan, Source::WikdictCaEn]
         );
     }
 
@@ -169,25 +167,14 @@ mod tests {
     }
 
     #[test]
-    fn no_source_today() {
-        for (reading, my) in [
-            (Language::En, Language::Es),
-            (Language::En, Language::Ca),
-            (Language::Ca, Language::Es),
-        ] {
-            assert!(translations(reading, my).is_empty(), "{reading:?} {my:?}");
-        }
-    }
-
-    #[test]
     fn same_language_has_none() {
         for language in Language::ALL {
             assert!(translations(language, language).is_empty(), "{language:?}");
         }
     }
 
-    /// Every ordered pair of distinct languages has exactly one row, in the
-    /// order of `Language::ALL`, and no row pairs a language with itself.
+    /// Every ordered pair of distinct languages has one row with at least
+    /// one translation source, in the order of `Language::ALL`.
     #[test]
     fn every_pair_has_one_row() {
         let expected: Vec<(Language, Language)> = Language::ALL
@@ -198,6 +185,15 @@ mod tests {
         let rows: Vec<(Language, Language)> =
             PAIRS.iter().map(|pair| (pair.reading, pair.my)).collect();
         assert_eq!(rows, expected);
+        for pair in PAIRS {
+            assert!(
+                pair.sources.iter().any(|source| matches!(
+                    source.kind(),
+                    Kind::Translation(_) | Kind::FromRussian
+                )),
+                "{pair:?}"
+            );
+        }
     }
 
     /// Every translation source is in exactly one row, and no article source

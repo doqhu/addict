@@ -1,6 +1,5 @@
-//! The imported indexes as the application's source of articles: the two
-//! English index files and those of the other languages in the data
-//! directory, opened when they are first asked and read on every lookup.
+//! The imported indexes as the application's source of articles, opened
+//! from the data directory and read on every lookup.
 //!
 //! [`Dictionaries`] opens what is not open on each call, so an index imported
 //! while the application runs is found by the next lookup; an index imported
@@ -13,10 +12,10 @@
 //! looked up.
 //!
 //! A word is looked up in the indexes of its reading language
-//! ([`Articles::look_up_in`]): an English word in the two English ones, as
-//! [`Combined`] answers, a Spanish or Catalan word in every index of that
-//! language among the sources of `import::KNOWN`, each under its kind,
-//! through `addict_dictionary::lookup::grouped`. A word the chosen language
+//! ([`Articles::look_up_in`]). [`Combined`] handles the English definitions
+//! and the legacy FreeDict translation path. Grouped lookup serves Spanish,
+//! Catalan and English words translated into Spanish or Catalan.
+//! A word the chosen language
 //! has no entry for is looked up in my language, then in the remaining
 //! reading languages in the order EN, ES, CA, and the first with content answers
 //! ([`Articles::look_up_first`]); the chosen language stays the user's.
@@ -136,8 +135,7 @@ impl Indexes {
 pub enum Answer {
     /// The article of the word, from the English indexes that are open.
     Article(Article),
-    /// What the open indexes of a language beside English give for the
-    /// word, by kind; one of them at least has it.
+    /// What the open indexes give for the word by kind; at least one has it.
     Grouped(Grouped),
     /// The translations the Russian index of the chosen language gives for
     /// a Russian word, each once; never empty.
@@ -247,6 +245,8 @@ pub trait Articles: Send + Sync {
     /// through [`Articles::look_up_for`], with the language that answered.
     /// A miss or a metadata-only answer tries `my` toward `chosen`, followed
     /// by the other reading languages in [`FALLBACK`] order toward `my`.
+    /// An unreadable English WikDict index for the first fallback pair is
+    /// reported before trying other reading languages.
     /// If none has content, return the first metadata-only answer or the
     /// chosen miss, with the latest index states. Russian currently has no
     /// Latin-word lookup, so its missing index also permits fallback.
@@ -280,6 +280,16 @@ pub trait Articles: Send + Sync {
                 Answer::Article(_) | Answer::Grouped(_) | Answer::FromRussian(_) => {
                     return (language, looked);
                 }
+                Answer::Unreadable(file)
+                    if matches!(
+                        (language, my, target),
+                        (Language::En, Language::En, Language::Es | Language::Ca)
+                    ) && pairs::translations(language, target)
+                        .iter()
+                        .any(|&source| IndexFile::of(source) == file) =>
+                {
+                    return (language, looked);
+                }
                 Answer::NoEntry | Answer::NotImported | Answer::Unreadable(_) => {
                     first.indexes = looked.indexes;
                 }
@@ -297,10 +307,10 @@ pub const FALLBACK: [Language; 3] = [Language::En, Language::Es, Language::Ca];
 #[derive(Debug, Default)]
 struct Opened {
     english: Combined,
-    /// The open indexes of the languages beside English, by source.
-    others: Vec<(Source, Index)>,
-    /// The sources beside English whose file is there and could not be
-    /// opened by the last check, or failed a lookup since.
+    /// The open indexes used exclusively in grouped lookup, by source.
+    grouped: Vec<(Source, Index)>,
+    /// The sources in `grouped_sources` whose file could not be opened by
+    /// the last check, or failed a lookup since.
     unreadable: Vec<Source>,
     /// The open indexes of Russian headwords, by source: each is opened by
     /// the first lookup that asks it, and closed when it fails one.
@@ -312,7 +322,7 @@ impl Opened {
     /// open, else unreadable when any is, else missing.
     fn state_of(&self, language: Language) -> State {
         if self
-            .others
+            .grouped
             .iter()
             .any(|(source, _)| source.language() == Some(language))
         {
@@ -339,14 +349,14 @@ impl Opened {
     }
 }
 
-/// The known sources of the languages beside English, each once, in the
-/// order of `import::KNOWN`. A source of Russian headwords reads no
-/// language and is not one of them.
-fn other_sources() -> Vec<Source> {
+/// The sources used exclusively in grouped lookup, each once, in the
+/// order of `import::KNOWN`.
+fn grouped_sources() -> Vec<Source> {
     let mut sources = Vec::new();
     for known in import::KNOWN {
-        let other = matches!(known.source.language(), Some(Language::Es | Language::Ca));
-        if other && !sources.contains(&known.source) {
+        let grouped = matches!(known.source.language(), Some(Language::Es | Language::Ca))
+            || matches!(known.source, Source::WikdictEnEs | Source::WikdictEnCa);
+        if grouped && !sources.contains(&known.source) {
             sources.push(known.source);
         }
     }
@@ -411,14 +421,14 @@ impl Dictionaries {
     /// Opens what is not open in `opened` and says where all stand.
     fn open_missing(&self, opened: &mut Opened) -> Indexes {
         opened.unreadable.clear();
-        for source in other_sources() {
-            let open = opened.others.iter().any(|(kept, _)| *kept == source);
+        for source in grouped_sources() {
+            let open = opened.grouped.iter().any(|(kept, _)| *kept == source);
             let mut index = None;
             if self.open(source, open, |opened| index = Some(opened)) == State::Unreadable {
                 opened.unreadable.push(source);
             }
             if let Some(index) = index {
-                opened.others.push((source, index));
+                opened.grouped.push((source, index));
             }
         }
         let combined = &mut opened.english;
@@ -437,27 +447,22 @@ impl Dictionaries {
         })
     }
 
-    /// The English source of the index `error` is about.
-    fn source_of(&self, error: &Error) -> Source {
-        let translations = self.path(Source::Freedict);
-        if translations.as_deref() == Some(error_path(error)) {
-            Source::Freedict
-        } else {
-            Source::Oewn
-        }
-    }
-
-    /// What the indexes of `language`, not English, say about `word` for
+    /// What the grouped indexes of `language` say about `word` for
     /// someone whose own language is `my`: what each open one gives, by its
-    /// kind, with no English index asked, and an index of translations only
+    /// kind, with an index of translations only
     /// when the pair (`language`, `my`) has it. A file
     /// of the language that is there and is no index is named, and no
     /// article is given, so that it is imported again. An index that could
-    /// not be read is closed and opened again by the next call, as an
-    /// English one is.
+    /// not be read is closed and opened again by the next call.
     fn look_up_language(&self, language: Language, my: Language, word: &str) -> Looked {
         let mut opened = self.open.lock().unwrap_or_else(PoisonError::into_inner);
-        let indexes = self.open_missing(&mut opened);
+        let mut indexes = self.open_missing(&mut opened);
+        if language == Language::En && indexes.definitions == State::Unreadable {
+            return Looked {
+                answer: Answer::Unreadable(IndexFile::of(Source::Oewn)),
+                indexes,
+            };
+        }
         if let Some(source) = opened
             .unreadable
             .iter()
@@ -468,33 +473,50 @@ impl Dictionaries {
                 indexes,
             };
         }
+        let definitions = opened
+            .english
+            .definitions()
+            .filter(|_| language == Language::En)
+            .map(|index| (Source::Oewn, index));
         // In the order of `import::KNOWN`, whatever order they were opened in.
-        let asked: Vec<(Kind, &Index)> = other_sources()
+        let sources: Vec<(Source, &Index)> = definitions
             .into_iter()
-            .filter(|source| source.language() == Some(language) && asked_for(*source, my))
-            .filter_map(|source| {
-                let (_, index) = opened.others.iter().find(|(kept, _)| *kept == source)?;
-                Some((source.kind(), index))
-            })
+            .chain(
+                grouped_sources()
+                    .into_iter()
+                    .filter(|source| source.language() == Some(language) && asked_for(*source, my))
+                    .filter_map(|source| {
+                        let (_, index) = opened.grouped.iter().find(|(kept, _)| *kept == source)?;
+                        Some((source, index))
+                    }),
+            )
             .collect();
-        if asked.is_empty() {
+        let Some(&(first, _)) = sources.first() else {
             return Looked {
                 answer: Answer::NotImported,
                 indexes,
             };
-        }
+        };
+        let asked: Vec<(Kind, &Index)> = sources
+            .iter()
+            .map(|(source, index)| (source.kind(), *index))
+            .collect();
         let answer = match lookup::grouped(&asked, language, word) {
             Ok(Some(grouped)) => Answer::Grouped(grouped),
             Ok(None) => Answer::NoEntry,
             Err(error) => {
-                let failed = other_sources().into_iter().find(|source| {
-                    source.language() == Some(language)
-                        && self.path(*source).as_deref() == Some(error_path(&error))
-                });
-                // Every index has the path of its source, so one is found.
-                let source = failed.unwrap_or(asked_first(&opened, language));
-                opened.others.retain(|(kept, _)| *kept != source);
-                opened.unreadable.push(source);
+                let source = sources
+                    .iter()
+                    .map(|(source, _)| *source)
+                    .find(|source| self.path(*source).as_deref() == Some(error_path(&error)))
+                    .unwrap_or(first);
+                if source == Source::Oewn {
+                    opened.english = Combined::default();
+                    indexes.definitions = State::Unreadable;
+                } else {
+                    opened.grouped.retain(|(kept, _)| *kept != source);
+                    opened.unreadable.push(source);
+                }
                 Answer::Unreadable(IndexFile::of(source))
             }
         };
@@ -540,7 +562,7 @@ impl Dictionaries {
     }
 }
 
-/// Whether `source`, of a language beside English, is asked for someone
+/// Whether `source` is asked for someone
 /// whose own language is `my`: a source of translations, into whichever
 /// target, only when the pair (its language, `my`) has it, any other kind
 /// always. No wildcard arm: a new kind does not compile until it is given
@@ -552,17 +574,6 @@ fn asked_for(source: Source, my: Language) -> bool {
             .is_some_and(|language| pairs::translations(language, my).contains(&source)),
         Kind::Definitions | Kind::Synonyms | Kind::English | Kind::FromRussian => true,
     }
-}
-
-/// The first open source of `language`, the one to name when an error
-/// cannot be told apart.
-fn asked_first(opened: &Opened, language: Language) -> Source {
-    opened
-        .others
-        .iter()
-        .map(|(source, _)| *source)
-        .find(|source| source.language() == Some(language))
-        .unwrap_or(Source::KaikkiEs)
 }
 
 impl Articles for Dictionaries {
@@ -577,10 +588,14 @@ impl Articles for Dictionaries {
     }
 
     fn look_up_for(&self, language: Language, target: Language, word: &str) -> Looked {
-        match language {
-            Language::En => self.look_up_english(word, pairs::translations(language, target)),
-            Language::Es | Language::Ca => self.look_up_language(language, target, word),
-            Language::Ru => Looked {
+        match (language, target) {
+            (Language::En, Language::En | Language::Ru) => {
+                self.look_up_english(word, pairs::translations(language, target))
+            }
+            (Language::En, Language::Es | Language::Ca) | (Language::Es | Language::Ca, _) => {
+                self.look_up_language(language, target, word)
+            }
+            (Language::Ru, _) => Looked {
                 answer: Answer::NotImported,
                 indexes: self.indexes(),
             },
@@ -629,28 +644,12 @@ impl Dictionaries {
                     // Both are closed and opened again by the next call: the
                     // file may be another one by then, imported again.
                     *combined = Combined::default();
-                    match self.source_of(&error) {
-                        // Only an English source is named here.
-                        Source::Oewn
-                        | Source::KaikkiEs
-                        | Source::WikdictEsRu
-                        | Source::OmwEs
-                        | Source::KaikkiEnSpanish
-                        | Source::WikdictCaRu
-                        | Source::DbnaryCa
-                        | Source::SinonimsCat
-                        | Source::KaikkiEnCatalan
-                        | Source::WikdictRuEn
-                        | Source::WikdictRuEs
-                        | Source::WikdictRuCa
-                        | Source::WikdictEsCa => {
-                            indexes.definitions = State::Unreadable;
-                            Answer::Unreadable(definitions)
-                        }
-                        Source::Freedict => {
-                            indexes.translations = State::Unreadable;
-                            Answer::Unreadable(translations)
-                        }
+                    if self.path(Source::Freedict).as_deref() == Some(error_path(&error)) {
+                        indexes.translations = State::Unreadable;
+                        Answer::Unreadable(translations)
+                    } else {
+                        indexes.definitions = State::Unreadable;
+                        Answer::Unreadable(definitions)
                     }
                 }
             },
@@ -682,7 +681,7 @@ pub mod tests {
 
     use super::{
         Answer, Articles, Dictionaries, Grouped, IndexFile, Indexes, Kind, Looked, State,
-        other_sources,
+        grouped_sources,
     };
 
     /// The v1 file of the contents of `v3`, a file [`encode`] wrote of
@@ -764,6 +763,11 @@ pub mod tests {
                 Source::KaikkiEs => spanish(),
                 Source::WikdictEsRu => headwords("es-ru", &[("banco", &[], &["банк"])]),
                 Source::WikdictEsCa => headwords("es-ca", &[("perro", &[], &["gos"])]),
+                Source::WikdictEnEs => headwords("en-es", &[("dog", &[], &["perro"])]),
+                Source::WikdictEnCa => headwords("en-ca", &[("dog", &[], &["gos"])]),
+                Source::WikdictEsEn => headwords("es-en", &[("perro", &[], &["dog"])]),
+                Source::WikdictCaEn => headwords("ca-en", &[("gos", &[], &["dog"])]),
+                Source::WikdictCaEs => headwords("ca-es", &[("gos", &[], &["perro"])]),
                 Source::OmwEs => {
                     headwords("es-syn", &[("banco", &[("", &["banco", "banca"])], &[])])
                 }
@@ -1058,7 +1062,7 @@ pub mod tests {
         }
         // The Catalan sources are known, and none is imported.
         assert!(
-            other_sources()
+            grouped_sources()
                 .iter()
                 .any(|source| source.language() == Some(Language::Ca))
         );
@@ -1628,7 +1632,7 @@ pub mod tests {
         assert_eq!(indexes.catalan, State::Open);
         assert_eq!(indexes.spanish, State::Open);
         assert_eq!(indexes.files(), Indexes::OPEN.files());
-        let catalan: Vec<_> = other_sources()
+        let catalan: Vec<_> = grouped_sources()
             .into_iter()
             .filter(|source| source.language() == Some(Language::Ca))
             .map(|source| source.kind())
@@ -1639,7 +1643,9 @@ pub mod tests {
                 Kind::Translation(Language::Ru),
                 Kind::Definitions,
                 Kind::Synonyms,
-                Kind::English
+                Kind::English,
+                Kind::Translation(Language::En),
+                Kind::Translation(Language::Es),
             ]
         );
 
@@ -2098,7 +2104,7 @@ pub mod tests {
             Some(texts(&["банк"]).as_slice())
         );
         assert!(
-            !other_sources()
+            !grouped_sources()
                 .iter()
                 .any(|source| RUSSIAN.contains(source))
         );
@@ -2239,14 +2245,19 @@ pub mod tests {
         };
         assert_eq!(banco.translations_into(Language::Ca), None);
         assert_eq!(banco.translations, [(Language::Ru, texts(&["банк"]))]);
-        // `perro` is only in `wikdict-es-ca`.
-        for my in [Language::Ru, Language::En] {
-            assert_eq!(
-                dictionaries.look_up_for(Language::Es, my, "perro").answer,
-                Answer::NoEntry,
-                "{my:?}"
-            );
-        }
+        assert_eq!(
+            dictionaries
+                .look_up_for(Language::Es, Language::Ru, "perro")
+                .answer,
+            Answer::NoEntry,
+        );
+        let Answer::Grouped(perro) = dictionaries
+            .look_up_for(Language::Es, Language::En, "perro")
+            .answer
+        else {
+            panic!("perro with English mine");
+        };
+        assert_eq!(perro.translations, [(Language::En, texts(&["dog"]))]);
         // Not imported: the article stands, with no Catalan entry.
         std::fs::remove_file(dir.index(Source::WikdictEsCa)).expect("remove");
         let dictionaries = dir.dictionaries();
@@ -2391,25 +2402,30 @@ pub mod tests {
         assert_eq!(russian.translations, texts(&["берег", "банк"]));
         for my in [Language::Es, Language::Ca, Language::En] {
             let looked = dictionaries.look_up_for(Language::En, my, "bank");
-            let Answer::Article(bank) = looked.answer else {
-                panic!("bank with {my:?} mine");
-            };
-            assert_eq!(bank.translations, Vec::<String>::new(), "{my:?}");
-            assert_eq!(bank.senses, russian.senses, "{my:?}");
-            // The state of FreeDict is said as always.
+            match looked.answer {
+                Answer::Article(bank) if my == Language::En => {
+                    assert!(bank.translations.is_empty());
+                    assert_eq!(bank.senses, russian.senses);
+                }
+                Answer::Grouped(bank) if my != Language::En => {
+                    assert!(bank.translations.is_empty());
+                    assert_eq!(bank.definitions, Some(russian.senses.clone()));
+                }
+                other => panic!("bank with {my:?} mine: {other:?}"),
+            }
             assert_eq!(looked.indexes, dictionaries.indexes(), "{my:?}");
-            // A word only FreeDict has: no entry, FreeDict not asked.
             assert_eq!(
                 dictionaries.look_up_for(Language::En, my, "despite").answer,
                 Answer::NoEntry,
                 "{my:?}"
             );
-            // Its dictionary form too: `went` is `go` through OEWN.
-            assert!(matches!(
-                dictionaries.look_up_for(Language::En, my, "went").answer,
-                Answer::Article(_)
-            ));
         }
+        assert!(matches!(
+            dictionaries
+                .look_up_for(Language::En, Language::En, "went")
+                .answer,
+            Answer::Article(_)
+        ));
         assert!(matches!(
             dictionaries
                 .look_up_for(Language::En, Language::Ru, "despite")
@@ -2424,10 +2440,11 @@ pub mod tests {
                 .dictionaries()
                 .look_up_first(Language::Es, Language::En, "went");
         assert_eq!(language, Language::En);
-        let Answer::Article(went) = looked.answer else {
+        let Answer::Grouped(went) = looked.answer else {
             panic!("went by fallback");
         };
-        assert!(went.translations.is_empty());
+        assert_eq!(went.translations, [(Language::Es, Vec::new())]);
+        assert_eq!(went.definitions.unwrap()[0].definition, "change location");
         let (_, looked) = every
             .dictionaries()
             .look_up_first(Language::Es, Language::Ru, "went");
@@ -2454,9 +2471,302 @@ pub mod tests {
                 .dictionaries()
                 .look_up_for(Language::En, Language::Es, "bank")
                 .answer,
-            Answer::Article(_)
+            Answer::Grouped(_)
         ));
         as_before(&damaged.dictionaries(), "bank");
+    }
+
+    #[test]
+    fn latin_wikdict_directions_render_translations_and_keep_glosses_separate() {
+        use crate::view::{Listed, Translating, choice_texts};
+        use Language::{Ca, En, Es};
+
+        let dir = with_russian("latin-wikdict", &RUSSIAN);
+        for source in [
+            Source::WikdictEnEs,
+            Source::WikdictEnCa,
+            Source::WikdictEsEn,
+            Source::WikdictCaEn,
+            Source::WikdictCaEs,
+        ] {
+            dir.import(source);
+        }
+        dir.write(
+            Source::KaikkiEnSpanish,
+            &headwords("spanish-glosses", &[("perro", &[("a canine", &[])], &[])]),
+        );
+        dir.write(
+            Source::KaikkiEnCatalan,
+            &headwords("catalan-glosses", &[("gos", &[("a canine", &[])], &[])]),
+        );
+        let dictionaries = dir.dictionaries();
+        for (my, pressed, word, reading, label, translation) in [
+            (En, Es, "dog", En, "Spanish", "perro"),
+            (En, Ca, "dog", En, "Catalan", "gos"),
+            (En, Es, "perro", Es, "English", "dog"),
+            (En, Ca, "gos", Ca, "English", "dog"),
+            (Es, Ca, "gos", Ca, "Spanish", "perro"),
+        ] {
+            let (language, looked) = dictionaries.look_up_first(pressed, my, word);
+            assert_eq!(language, reading, "{word}");
+            let lookup = crate::manual::result_in(
+                addict_platform::work::Outcome::Finished(looked),
+                word,
+                language,
+            )
+            .expect("an offline result");
+            let texts = choice_texts(
+                &lookup,
+                None,
+                None,
+                None,
+                Some((pressed, language)),
+                Translating { my, pressed },
+            );
+            let Some(Listed::Items {
+                label: shown,
+                items,
+            }) = texts.translations
+            else {
+                panic!("{word}: {lookup:?}");
+            };
+            assert_eq!(shown, format!("{label}, for the word as a whole:"));
+            assert_eq!(items.as_ref(), [translation]);
+            if language == En {
+                assert!(texts.glosses.is_none());
+                assert!(texts.word_synonyms.is_none());
+                assert!(texts.elsewhere.is_some());
+            } else {
+                let glosses = texts.glosses.expect("Kaikki glosses").line();
+                assert!(glosses.contains("a canine"), "{glosses}");
+            }
+        }
+    }
+
+    #[test]
+    fn english_pair_articles_distinguish_missing_indexes_missing_words_and_missing_definitions() {
+        use crate::view::{Listed, Shown, Translating, choice_texts};
+        use Language::{Ca, En, Es};
+
+        let dir = DataDir::new("english-pair-availability");
+        let entries = r#"{"word":"bank","lang_code":"en","pos":"noun","sounds":[{"ipa":"/bæŋk/"}],"senses":[{"glosses":["side of a river"]}]}"#;
+        let definitions =
+            addict_dictionary::kaikki::parse(entries.as_bytes(), "en", "definitions").unwrap();
+        dir.write(Source::Oewn, &definitions);
+        let dictionaries = dir.dictionaries();
+        let lookup = |dictionaries: &Dictionaries, target, word| {
+            crate::manual::result_in(
+                addict_platform::work::Outcome::Finished(
+                    dictionaries.look_up_for(En, target, word),
+                ),
+                word,
+                En,
+            )
+            .expect("an offline result")
+        };
+        let mut shown = Shown::default();
+        shown.set_my_language(En);
+        shown.set_pressed(Es);
+        shown.show(Some(lookup(&dictionaries, Es, "bank")));
+        assert!(shown.choose(0));
+        assert!(!shown.choose_gloss(0));
+        let texts = choice_texts(
+            shown.lookup().unwrap(),
+            shown.choice(),
+            None,
+            None,
+            None,
+            shown.translating(),
+        );
+        assert_eq!(texts.senses_label, "English definitions");
+        assert_eq!(texts.senses[0].definition, "side of a river");
+        assert!(texts.senses[0].explained.is_some());
+        assert_eq!(texts.pronunciations.len(), 1);
+        assert!(texts.word_synonyms.is_none() && texts.glosses.is_none());
+        assert!(matches!(
+            texts.translations,
+            Some(Listed::Missing(line)) if line.contains("wikdict-en-es.index")
+        ));
+        shown.set_pressed(Ca);
+        let texts = choice_texts(
+            shown.lookup().unwrap(),
+            shown.choice(),
+            None,
+            None,
+            None,
+            shown.translating(),
+        );
+        assert!(texts.senses[0].explained.is_some());
+        assert!(matches!(
+            texts.translations,
+            Some(Listed::Missing(line)) if line.contains("wikdict-en-ca.index")
+        ));
+
+        dir.import(Source::WikdictEnEs);
+        dir.import(Source::WikdictEnCa);
+        for (target, language) in [(Es, "Spanish"), (Ca, "Catalan")] {
+            let result = lookup(&dictionaries, target, "bank");
+            let texts = choice_texts(
+                &result,
+                None,
+                None,
+                None,
+                None,
+                Translating {
+                    my: target,
+                    pressed: En,
+                },
+            );
+            assert!(matches!(
+                texts.translations,
+                Some(Listed::Missing(line))
+                    if line == format!("The dictionary has no {language} translation of this word.")
+            ));
+        }
+        std::fs::remove_file(dir.index(Source::Oewn)).expect("remove");
+        let dictionaries = dir.dictionaries();
+        let result = lookup(&dictionaries, Es, "dog");
+        let texts = choice_texts(
+            &result,
+            None,
+            None,
+            None,
+            None,
+            Translating {
+                my: Es,
+                pressed: En,
+            },
+        );
+        assert!(texts.senses.is_empty());
+        assert!(matches!(
+            texts.translations,
+            Some(Listed::Items { items, .. }) if items.as_ref() == ["perro"]
+        ));
+        assert!(dictionaries.look_up_for(En, En, "dog").answer == Answer::NotImported);
+    }
+
+    #[test]
+    fn changing_the_english_target_keeps_only_its_translations() {
+        use crate::view::{Listed, ResultTexts, Shown, choice_texts};
+        use Language::{Ca, En, Es};
+
+        fn render(shown: &Shown) -> ResultTexts<'_> {
+            choice_texts(
+                shown.lookup().unwrap(),
+                shown.choice(),
+                None,
+                None,
+                None,
+                shown.translating(),
+            )
+        }
+
+        let dir = DataDir::new("english-target-switch");
+        dir.import(Source::Oewn);
+        dir.write(
+            Source::WikdictEnEs,
+            &headwords("en-es", &[("bank", &[], &["orilla"])]),
+        );
+        dir.write(
+            Source::WikdictEnCa,
+            &headwords("en-ca", &[("bank", &[], &["riba"])]),
+        );
+        let dictionaries = dir.dictionaries();
+        let lookup = |target| {
+            let looked = dictionaries.look_up_for(En, target, "bank");
+            crate::manual::result_in(addict_platform::work::Outcome::Finished(looked), "bank", En)
+                .expect("an offline result")
+        };
+        let mut shown = Shown::default();
+        shown.set_my_language(En);
+        shown.set_pressed(Es);
+        shown.show(Some(lookup(Es)));
+        assert!(shown.choose(0));
+        assert!(matches!(
+            render(&shown).translations,
+            Some(Listed::Items { items, .. }) if items.as_ref() == ["orilla"]
+        ));
+        shown.set_pressed(Ca);
+        let stale = render(&shown);
+        assert!(stale.senses[0].explained.is_some());
+        assert!(matches!(
+            stale.translations,
+            Some(Listed::Missing(line)) if line.contains("wikdict-en-ca.index")
+        ));
+        shown.show(Some(lookup(Ca)));
+        assert!(shown.choice().is_none());
+        assert!(matches!(
+            render(&shown).translations,
+            Some(Listed::Items { items, .. }) if items.as_ref() == ["riba"]
+        ));
+        shown.set_pressed(Es);
+        assert!(matches!(
+            render(&shown).translations,
+            Some(Listed::Missing(line)) if line.contains("wikdict-en-es.index")
+        ));
+    }
+
+    #[test]
+    fn damaged_english_wikdict_index_is_named_only_for_its_pair_and_retried() {
+        use Language::{Ca, En, Es, Ru};
+        let dir = DataDir::new("english-wikdict-damage");
+        dir.import(Source::Oewn);
+        dir.import(Source::Freedict);
+        dir.import(Source::WikdictEnCa);
+        let source = Source::WikdictEnEs;
+        std::fs::write(dir.index(source), b"no index").expect("write");
+        let dictionaries = dir.dictionaries();
+        let answer = |target, word| dictionaries.look_up_for(En, target, word).answer;
+        let unreadable = Answer::Unreadable(IndexFile::of(source));
+        assert_eq!(answer(Es, "dog"), unreadable);
+        assert!(matches!(answer(Ca, "dog"), Answer::Grouped(_)));
+        assert!(matches!(answer(Ru, "bank"), Answer::Article(_)));
+        dir.import(source);
+        assert!(matches!(answer(Es, "dog"), Answer::Grouped(_)));
+
+        std::fs::write(dir.index(source), b"").expect("truncate open index");
+        assert_eq!(answer(Es, "dog"), unreadable);
+        std::fs::rename(dir.index(source), dir.path().join("damaged.index")).expect("rename");
+        dir.import(source);
+        assert!(matches!(answer(Es, "dog"), Answer::Grouped(_)));
+    }
+
+    #[test]
+    fn a_damaged_english_pair_blocks_unrelated_fallback_until_repaired() {
+        use Language::{Ca, En, Es};
+
+        for (pressed, pair, chosen, unrelated) in [
+            (Es, Source::WikdictEnEs, Source::KaikkiEs, Source::DbnaryCa),
+            (Ca, Source::WikdictEnCa, Source::DbnaryCa, Source::KaikkiEs),
+        ] {
+            let dir = DataDir::new("english-pair-fallback-damage");
+            dir.import(chosen);
+            dir.write(
+                unrelated,
+                &headwords(
+                    "unrelated",
+                    &[("dog", &[("unrelated definition", &[])], &[])],
+                ),
+            );
+            let other = if pressed == Es { Ca } else { Es };
+            std::fs::write(dir.index(pair), b"no index").expect("write");
+            let dictionaries = dir.dictionaries();
+            assert!(matches!(
+                dictionaries.look_up_for(other, En, "dog").answer,
+                Answer::Grouped(_)
+            ));
+            let (language, looked) = dictionaries.look_up_first(pressed, En, "dog");
+            assert_eq!(language, En);
+            assert_eq!(looked.answer, Answer::Unreadable(IndexFile::of(pair)));
+            dir.import(pair);
+            let (language, looked) = dictionaries.look_up_first(pressed, En, "dog");
+            assert_eq!(language, En);
+            let Answer::Grouped(grouped) = looked.answer else {
+                panic!("dog should have translations after repairing {pair:?}");
+            };
+            let expected = if pressed == Es { "perro" } else { "gos" };
+            assert_eq!(grouped.translations, [(pressed, texts(&[expected]))]);
+        }
     }
 
     #[test]

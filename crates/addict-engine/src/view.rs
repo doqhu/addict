@@ -412,7 +412,7 @@ pub enum Lookup {
     Pending,
     /// The English dictionaries have this article of the word.
     Article(Article),
-    /// The indexes of `language`, not English, gave this for the word, by
+    /// The indexes of `language` gave this for the word, by
     /// kind: one of them at least has it.
     Grouped {
         language: Language,
@@ -611,8 +611,12 @@ fn missing_pair(reading: Language, target: Language) -> &'static str {
         };
     }
     match (reading, target) {
-        (Language::En, Language::Es) => line!("English", "Spanish"),
-        (Language::En, Language::Ca) => line!("English", "Catalan"),
+        (Language::En, Language::Es) => {
+            "No English-Spanish dictionary is imported (wikdict-en-es.index)."
+        }
+        (Language::En, Language::Ca) => {
+            "No English-Catalan dictionary is imported (wikdict-en-ca.index)."
+        }
         (Language::En, Language::Ru) => line!("English", "Russian"),
         (Language::Es, Language::En) => line!("Spanish", "English"),
         (Language::Es, Language::Ca) => line!("Spanish", "Catalan"),
@@ -630,60 +634,8 @@ fn missing_pair(reading: Language, target: Language) -> &'static str {
     }
 }
 
-/// The line of a pair with no offline source of translations: the language
-/// a word is read in and the one it would be translated into. The pair of a
-/// language with itself needs none, and has no line of its own. No wildcard
-/// arm, as in [`definitions_label`].
-fn no_pair(reading: Language, target: Language) -> &'static str {
-    macro_rules! line {
-        ($reading:literal, $target:literal) => {
-            concat!(
-                "There is no ",
-                $reading,
-                " → ",
-                $target,
-                " offline dictionary yet."
-            )
-        };
-    }
-    match (reading, target) {
-        (Language::En, Language::Es) => line!("English", "Spanish"),
-        (Language::En, Language::Ca) => line!("English", "Catalan"),
-        (Language::En, Language::Ru) => line!("English", "Russian"),
-        (Language::Es, Language::En) => line!("Spanish", "English"),
-        (Language::Es, Language::Ca) => line!("Spanish", "Catalan"),
-        (Language::Es, Language::Ru) => line!("Spanish", "Russian"),
-        (Language::Ca, Language::En) => line!("Catalan", "English"),
-        (Language::Ca, Language::Es) => line!("Catalan", "Spanish"),
-        (Language::Ca, Language::Ru) => line!("Catalan", "Russian"),
-        (Language::Ru, Language::En) => line!("Russian", "English"),
-        (Language::Ru, Language::Es) => line!("Russian", "Spanish"),
-        (Language::Ru, Language::Ca) => line!("Russian", "Catalan"),
-        (Language::En, Language::En)
-        | (Language::Es, Language::Es)
-        | (Language::Ca, Language::Ca)
-        | (Language::Ru, Language::Ru) => "",
-    }
-}
-
-/// The translations row of a word read in `language` for the `target`
-/// language beside Russian: none when the word is in the target language
-/// already or when the pair has a source, whose translations stand under
-/// their own label (the English glosses); else the line that says the pair
-/// has no offline dictionary. What the result carries is not shown: a
-/// result looked up for Russian may still be on screen.
-fn pair_row(language: Language, target: Language) -> Option<Listed<'static>> {
-    (language != target && pairs::translations(language, target).is_empty())
-        .then(|| Listed::Missing(no_pair(language, target)))
-}
-
-/// The translations row of `grouped`, a word read in `language`, for the
-/// `target` language: none when the word is in the target language
-/// already; the line of [`no_pair`] when the pair has no source; the
-/// translations into `target` when a source of the pair gives them, or the
-/// line of [`missing_pair`] when none of its indexes is imported; and none
-/// when the pair has only English glosses, which stand under their own
-/// label.
+/// The translations into `target`, or a line naming the missing pair
+/// dictionary. A word already in the target language needs no row.
 fn translations_row<'a>(
     language: Language,
     grouped: &'a Grouped,
@@ -693,9 +645,6 @@ fn translations_row<'a>(
         return None;
     }
     let sources = pairs::translations(language, target);
-    if sources.is_empty() {
-        return Some(Listed::Missing(no_pair(language, target)));
-    }
     let translates = sources
         .iter()
         .any(|source| source.kind() == Kind::Translation(target));
@@ -1844,10 +1793,9 @@ pub fn result_texts<'a>(
 /// word the chosen language `elsewhere.0` had no entry for has the line
 /// that names both. The translations row of an article is for the target
 /// `translating` gives its language ([`Translating::target`]): the
-/// dictionary's Russian translations for Russian, and for another language
-/// the line that its pair has no offline dictionary, or no row when the
-/// pair's translations are the English glosses. No wildcard arm: a new
-/// variant does not compile until it is given its text.
+/// dictionary's translations for that target, or a line naming the
+/// missing pair dictionary. No wildcard arm: a new variant does not
+/// compile until it is given its text.
 pub fn choice_texts<'a>(
     lookup: &'a Lookup,
     choice: Option<Choice>,
@@ -1988,7 +1936,10 @@ fn article_texts<'a>(
                 &article.translations,
                 no_translation(Language::Ru),
             )),
-            Language::En | Language::Es | Language::Ca => pair_row(Language::En, target),
+            Language::Es | Language::Ca => {
+                Some(Listed::Missing(missing_pair(Language::En, target)))
+            }
+            Language::En => None,
         },
         word_synonyms: None,
         glosses: None,
@@ -1997,7 +1948,7 @@ fn article_texts<'a>(
     }
 }
 
-/// The parts of what the indexes of `language`, not English, gave, each
+/// The parts of what the indexes of `language` gave, each
 /// kind in its own part, a kind with no index or with nothing for the word
 /// said by its own line. `choice` is a sense of the definitions or an
 /// English gloss, and the online translation `definition` stands under it.
@@ -2017,7 +1968,11 @@ fn grouped_texts<'a>(
         Some(Choice::Sense(index)) => Some(index),
         Some(Choice::Gloss(_)) | None => None,
     };
-    let groups = grouped.synonyms.as_deref().unwrap_or_default();
+    let groups = if language == Language::En {
+        &[]
+    } else {
+        grouped.synonyms.as_deref().unwrap_or_default()
+    };
     let (hint, rows) = sense_texts(
         senses,
         &grouped.entries,
@@ -2028,11 +1983,27 @@ fn grouped_texts<'a>(
         my,
     );
     let hint = match &grouped.definitions {
+        None if language == Language::En => Some(NO_DEFINITIONS),
         None => Some(missing_definitions(language)),
         Some(senses) if senses.is_empty() => Some(no_definitions(language)),
         Some(_) => hint.filter(|_| !matches!(choice, Some(Choice::Gloss(_)))),
     };
-    let translations = translations_row(language, grouped, target);
+    let texts = ResultTexts {
+        line: None,
+        analysis: Analysis::default(),
+        elsewhere: None,
+        senses_label: definitions_label(language),
+        hint,
+        senses: rows,
+        translations: translations_row(language, grouped, target),
+        word_synonyms: None,
+        glosses: None,
+        gloss: None,
+        pronunciations: pronunciation_texts(&grouped.entries),
+    };
+    if language == Language::En {
+        return texts;
+    }
     let in_senses = senses.iter().any(|sense| !sense.synonyms.is_empty());
     // A meaning that a sense took stands under that sense: only the others
     // are the word's.
@@ -2088,17 +2059,11 @@ fn grouped_texts<'a>(
         Some(Choice::Sense(_)) | None => None,
     };
     ResultTexts {
-        line: None,
         analysis,
-        elsewhere: None,
-        senses_label: definitions_label(language),
-        hint,
-        senses: rows,
-        translations,
         word_synonyms,
         glosses: Some(glosses),
         gloss,
-        pronunciations: pronunciation_texts(&grouped.entries),
+        ..texts
     }
 }
 
@@ -2643,9 +2608,12 @@ impl Shown {
     /// the shown result is an article of a language beside English that has
     /// the gloss. Choosing the chosen gloss again is `true`.
     pub fn choose_gloss(&mut self, index: usize) -> bool {
-        let Some(Lookup::Grouped { grouped, .. }) = &self.lookup else {
+        let Some(Lookup::Grouped { language, grouped }) = &self.lookup else {
             return false;
         };
+        if *language == Language::En {
+            return false;
+        }
         if index >= grouped.english.as_ref().map_or(0, Vec::len) {
             return false;
         }
@@ -6333,7 +6301,12 @@ mod tests {
         // And one looked up with Russian mine before, still shown.
         for lookup in [asked, spanish_all()] {
             let texts = for_pair(&lookup, Language::En, Language::Es);
-            assert_eq!(texts.translations, None);
+            assert_eq!(
+                texts.translations,
+                Some(Listed::Missing(
+                    "No Spanish-English dictionary is imported."
+                ))
+            );
             let said = translations_and_glosses(&texts);
             assert!(said.contains("bench"), "{said}");
             assert!(!cyrillic(&said), "{said}");
@@ -6348,14 +6321,15 @@ mod tests {
             .answer_language(Some(&lookup));
             assert_eq!(language, Language::En);
             assert_eq!(
-                super::answer_texts(texts.translations.as_ref(), &[], language),
-                None
+                super::answer_texts(texts.translations.as_ref(), &[], language)
+                    .and_then(|answer| answer.missing),
+                Some("No Spanish-English dictionary is imported.")
             );
         }
     }
 
     #[test]
-    fn a_pair_without_a_source_says_so() {
+    fn an_unimported_pair_names_the_dictionary() {
         let english = Lookup::Article(article());
         let catalan = || match spanish_all() {
             Lookup::Grouped { grouped, .. } => Lookup::Grouped {
@@ -6370,28 +6344,28 @@ mod tests {
                 catalan(),
                 Language::Es,
                 Language::Ca,
-                "There is no Catalan → Spanish offline dictionary yet.",
+                "No Catalan-Spanish dictionary is imported.",
             ),
             // An English word, Spanish mine.
             (
                 english.clone(),
                 Language::Es,
                 Language::En,
-                "There is no English → Spanish offline dictionary yet.",
+                "No English-Spanish dictionary is imported (wikdict-en-es.index).",
             ),
             // An English word, English mine: into the pressed language.
             (
                 english.clone(),
                 Language::En,
                 Language::Es,
-                "There is no English → Spanish offline dictionary yet.",
+                "No English-Spanish dictionary is imported (wikdict-en-es.index).",
             ),
             // A word of my language found by the fallback.
             (
                 catalan(),
                 Language::Ca,
                 Language::Es,
-                "There is no Catalan → Spanish offline dictionary yet.",
+                "No Catalan-Spanish dictionary is imported.",
             ),
         ] {
             let texts = for_pair(&lookup, my, pressed);
@@ -6529,10 +6503,14 @@ mod tests {
         let russian_only = spanish_all();
         assert_eq!(texts, for_pair(&russian_only, Language::Ru, Language::Es));
         assert_eq!(texts, result_texts(&russian_only, None, None, None));
-        // English mine: the glosses under their own label, no translations
-        // row.
+        // English mine: the glosses and the English translation row.
         let texts = for_pair(&lookup, Language::En, Language::Es);
-        assert_eq!(texts.translations, None);
+        assert_eq!(
+            texts.translations,
+            Some(Listed::Missing(
+                "No Spanish-English dictionary is imported."
+            ))
+        );
         assert!(!translations_and_glosses(&texts).contains("banc,"));
     }
 
@@ -6647,7 +6625,7 @@ mod tests {
         assert_eq!(
             after.translations,
             Some(Listed::Missing(
-                "There is no English → Spanish offline dictionary yet."
+                "No English-Spanish dictionary is imported (wikdict-en-es.index)."
             ))
         );
         // The pressed language changes nothing else that is shown.

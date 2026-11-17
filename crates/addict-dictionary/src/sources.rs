@@ -224,6 +224,32 @@ const WIKDICT_ES_CA: Row = Row {
     link: WIKDICT_LINK,
 };
 
+const WIKDICT_EN_ES: Row = Row {
+    index: "wikdict-en-es",
+    url: Some("https://download.wikdict.com/dictionaries/sqlite/2_2026-06/en-es.sqlite3"),
+    ..WIKDICT_ES_CA
+};
+const WIKDICT_EN_CA: Row = Row {
+    index: "wikdict-en-ca",
+    url: Some("https://download.wikdict.com/dictionaries/sqlite/2_2026-06/en-ca.sqlite3"),
+    ..WIKDICT_ES_CA
+};
+const WIKDICT_ES_EN: Row = Row {
+    index: "wikdict-es-en",
+    url: Some("https://download.wikdict.com/dictionaries/sqlite/2_2026-06/es-en.sqlite3"),
+    ..WIKDICT_ES_CA
+};
+const WIKDICT_CA_EN: Row = Row {
+    index: "wikdict-ca-en",
+    url: Some("https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ca-en.sqlite3"),
+    ..WIKDICT_ES_CA
+};
+const WIKDICT_CA_ES: Row = Row {
+    index: "wikdict-ca-es",
+    url: Some("https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ca-es.sqlite3"),
+    ..WIKDICT_ES_CA
+};
+
 /// The dictionary sources, one row per [`Source`], in the order in which
 /// each source first appears in [`crate::import::KNOWN`].
 pub const ROWS: &[Row] = &[
@@ -241,6 +267,11 @@ pub const ROWS: &[Row] = &[
     WIKDICT_RU_ES,
     WIKDICT_RU_CA,
     WIKDICT_ES_CA,
+    WIKDICT_EN_ES,
+    WIKDICT_EN_CA,
+    WIKDICT_ES_EN,
+    WIKDICT_CA_EN,
+    WIKDICT_CA_ES,
 ];
 
 /// The bundled OCR data and engine: credited, never downloaded.
@@ -321,6 +352,11 @@ pub fn row(source: Source) -> &'static Row {
         Source::WikdictRuEs => &WIKDICT_RU_ES,
         Source::WikdictRuCa => &WIKDICT_RU_CA,
         Source::WikdictEsCa => &WIKDICT_ES_CA,
+        Source::WikdictEnEs => &WIKDICT_EN_ES,
+        Source::WikdictEnCa => &WIKDICT_EN_CA,
+        Source::WikdictEsEn => &WIKDICT_ES_EN,
+        Source::WikdictCaEn => &WIKDICT_CA_EN,
+        Source::WikdictCaEs => &WIKDICT_CA_ES,
     }
 }
 
@@ -343,6 +379,11 @@ mod tests {
         "wikdict-ru-es",
         "wikdict-ru-ca",
         "wikdict-es-ca",
+        "wikdict-en-es",
+        "wikdict-en-ca",
+        "wikdict-es-en",
+        "wikdict-ca-en",
+        "wikdict-ca-es",
         "dbnary-ca",
         "freedict",
         "oewn",
@@ -367,6 +408,11 @@ mod tests {
         Source::WikdictRuEs,
         Source::WikdictRuCa,
         Source::WikdictEsCa,
+        Source::WikdictEnEs,
+        Source::WikdictEnCa,
+        Source::WikdictEsEn,
+        Source::WikdictCaEn,
+        Source::WikdictCaEs,
     ];
 
     /// The table has a row for every documented index and none other.
@@ -504,7 +550,7 @@ mod tests {
             .collect();
         let table: Vec<&str> = ROWS.iter().chain(OCR).map(|row| row.index).collect();
         assert_eq!(listed, table);
-        assert_eq!(listed.len(), 16);
+        assert_eq!(listed.len(), 21);
     }
 
     /// Every index is downloaded by the builder from an `https://` URL that

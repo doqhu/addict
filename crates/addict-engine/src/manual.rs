@@ -493,7 +493,7 @@ pub fn lookup_result(outcome: Outcome<Looked>, word: &str) -> Option<Lookup> {
     match outcome {
         Outcome::Finished(looked) => Some(match looked.answer {
             Answer::Article(article) => Lookup::Article(article),
-            // Only another language gives one, and [`result_in`] names it.
+            // [`result_in`] supplies the language when it differs.
             Answer::Grouped(grouped) => Lookup::Grouped {
                 language: Language::En,
                 grouped,

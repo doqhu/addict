@@ -84,6 +84,16 @@ pub enum Source {
     WikdictRuCa,
     /// WikDict Spanish-Catalan: an SQLite database.
     WikdictEsCa,
+    /// WikDict EN → ES: an SQLite database.
+    WikdictEnEs,
+    /// WikDict EN → CA: an SQLite database.
+    WikdictEnCa,
+    /// WikDict ES → EN: an SQLite database.
+    WikdictEsEn,
+    /// WikDict CA → EN: an SQLite database.
+    WikdictCaEn,
+    /// WikDict CA → ES: an SQLite database.
+    WikdictCaEs,
 }
 
 /// What the senses or the translations of an index are.
@@ -123,6 +133,11 @@ impl Source {
             Self::WikdictRuEs => "wikdict-ru-es.index",
             Self::WikdictRuCa => "wikdict-ru-ca.index",
             Self::WikdictEsCa => "wikdict-es-ca.index",
+            Self::WikdictEnEs => "wikdict-en-es.index",
+            Self::WikdictEnCa => "wikdict-en-ca.index",
+            Self::WikdictEsEn => "wikdict-es-en.index",
+            Self::WikdictCaEn => "wikdict-ca-en.index",
+            Self::WikdictCaEs => "wikdict-ca-es.index",
         }
     }
 
@@ -132,15 +147,21 @@ impl Source {
     /// by [`Source::russian_into`] instead.
     pub fn language(self) -> Option<Language> {
         match self {
-            Self::Oewn | Self::Freedict => Some(Language::En),
+            Self::Oewn | Self::Freedict | Self::WikdictEnEs | Self::WikdictEnCa => {
+                Some(Language::En)
+            }
             Self::KaikkiEs
             | Self::WikdictEsRu
             | Self::OmwEs
             | Self::KaikkiEnSpanish
-            | Self::WikdictEsCa => Some(Language::Es),
-            Self::WikdictCaRu | Self::DbnaryCa | Self::SinonimsCat | Self::KaikkiEnCatalan => {
-                Some(Language::Ca)
-            }
+            | Self::WikdictEsCa
+            | Self::WikdictEsEn => Some(Language::Es),
+            Self::WikdictCaRu
+            | Self::DbnaryCa
+            | Self::SinonimsCat
+            | Self::KaikkiEnCatalan
+            | Self::WikdictCaEn
+            | Self::WikdictCaEs => Some(Language::Ca),
             Self::WikdictRuEn | Self::WikdictRuEs | Self::WikdictRuCa => None,
         }
     }
@@ -162,7 +183,12 @@ impl Source {
             | Self::DbnaryCa
             | Self::SinonimsCat
             | Self::KaikkiEnCatalan
-            | Self::WikdictEsCa => None,
+            | Self::WikdictEsCa
+            | Self::WikdictEnEs
+            | Self::WikdictEnCa
+            | Self::WikdictEsEn
+            | Self::WikdictCaEn
+            | Self::WikdictCaEs => None,
         }
     }
 
@@ -185,7 +211,9 @@ impl Source {
             Self::Freedict | Self::WikdictEsRu | Self::WikdictCaRu => {
                 Kind::Translation(Language::Ru)
             }
-            Self::WikdictEsCa => Kind::Translation(Language::Ca),
+            Self::WikdictEsCa | Self::WikdictEnCa => Kind::Translation(Language::Ca),
+            Self::WikdictEnEs | Self::WikdictCaEs => Kind::Translation(Language::Es),
+            Self::WikdictEsEn | Self::WikdictCaEn => Kind::Translation(Language::En),
             Self::OmwEs | Self::SinonimsCat => Kind::Synonyms,
             Self::KaikkiEnSpanish | Self::KaikkiEnCatalan => Kind::English,
             Self::WikdictRuEn | Self::WikdictRuEs | Self::WikdictRuCa => Kind::FromRussian,
@@ -322,13 +350,48 @@ pub const KNOWN: &[KnownFile<'static>] = &[
     },
     // `wikdict-es-ca`: WikDict 2_2026-06, published under
     // `https://download.wikdict.com/dictionaries/sqlite/2_2026-06/es-ca.sqlite3`.
-    // Last, so the order of the files above is untouched.
     KnownFile {
         name: "es-ca.sqlite3",
         edition: "wikdict-es-ca-2026-06",
         source: Source::WikdictEsCa,
         size: 5_197_824,
         sha256: "c79f5c71f6fda274356f2f5ea09f79fd0aa16614904034d0dce135acc5d15966",
+    },
+    // The remaining Latin pairs, also from WikDict 2_2026-06.
+    KnownFile {
+        name: "en-es.sqlite3",
+        edition: "wikdict-en-es-2026-06",
+        source: Source::WikdictEnEs,
+        size: 16_146_432,
+        sha256: "d66fd6f8b7f3872f5fa17391846468ac18cda11a63b64961ebd36c7ba1069a79",
+    },
+    KnownFile {
+        name: "en-ca.sqlite3",
+        edition: "wikdict-en-ca-2026-06",
+        source: Source::WikdictEnCa,
+        size: 9_711_616,
+        sha256: "44991b6772ad00ea0a7f5ca4e7a2bb2f449ec29cbc6f93db5707dec5decfc2d0",
+    },
+    KnownFile {
+        name: "es-en.sqlite3",
+        edition: "wikdict-es-en-2026-06",
+        source: Source::WikdictEsEn,
+        size: 11_063_296,
+        sha256: "e09d4da3699841ef6210058de837931a36a32ebfccfd2ab1b7baacf58313135c",
+    },
+    KnownFile {
+        name: "ca-en.sqlite3",
+        edition: "wikdict-ca-en-2026-06",
+        source: Source::WikdictCaEn,
+        size: 5_189_632,
+        sha256: "c9931a4de03e65c6b7ba752b1d4cfc81959d94f207abcbe5294db71cdcbf4694",
+    },
+    KnownFile {
+        name: "ca-es.sqlite3",
+        edition: "wikdict-ca-es-2026-06",
+        source: Source::WikdictCaEs,
+        size: 3_993_600,
+        sha256: "56c42aa7d5fa79751e549091e9e627965d6623c3acb640182816f8323090d08f",
     },
 ];
 
@@ -719,7 +782,14 @@ fn import_known(
         Source::KaikkiEs => kaikki_file(&bytes, Language::Es, &edition),
         Source::KaikkiEnSpanish => kaikki_file(&bytes, Language::Es, &edition),
         Source::KaikkiEnCatalan => kaikki_file(&bytes, Language::Ca, &edition),
-        Source::WikdictEsRu | Source::WikdictCaRu | Source::WikdictEsCa => {
+        Source::WikdictEsRu
+        | Source::WikdictCaRu
+        | Source::WikdictEsCa
+        | Source::WikdictEnEs
+        | Source::WikdictEnCa
+        | Source::WikdictEsEn
+        | Source::WikdictCaEn
+        | Source::WikdictCaEs => {
             wikdict::parse(&bytes, &edition).map_err(|error| error.to_string())
         }
         // The `translation` table reads alike whichever way it translates;
@@ -1025,7 +1095,7 @@ mod tests {
         mythes::tests::FIXTURE as THESAURUS,
         oewn::tests::{FIXTURE, OMW},
         testdir::TempDir,
-        wikdict::tests::{database as wikdict, spanish_catalan},
+        wikdict::tests::{database as wikdict, spanish_catalan, translation},
     };
     use addict_core::translation::reading_languages;
 
@@ -1422,7 +1492,7 @@ mod tests {
 
     #[test]
     fn the_known_files_are_the_chosen_wordnet_freedict_and_spanish_kaikki() {
-        assert_eq!(KNOWN.len(), 14);
+        assert_eq!(KNOWN.len(), 19);
         assert_eq!(KNOWN[1].name, "freedict-eng-rus-2025.11.23.src.tar.xz");
         assert_eq!(KNOWN[1].edition, "freedict-eng-rus-2025.11.23");
         assert_eq!(KNOWN[1].size, 3948540);
@@ -2122,6 +2192,11 @@ mod tests {
             Source::WikdictEsRu => wikdict(false),
             Source::WikdictCaRu => wikdict(true),
             Source::WikdictEsCa => spanish_catalan(),
+            Source::WikdictCaEs => translation("cat/gos", "gos", "perro"),
+            Source::WikdictCaEn => translation("cat/gos", "gos", "dog"),
+            Source::WikdictEsEn => translation("spa/perro", "perro", "dog"),
+            Source::WikdictEnCa => translation("eng/dog", "dog", "gos"),
+            Source::WikdictEnEs => translation("eng/dog", "dog", "perro"),
             Source::OmwEs => xz_of(&tar_of(&[
                 ("omw-es/LICENSE", b"a licence"),
                 (OMW_ES_MEMBER, OMW.as_bytes()),
@@ -2205,7 +2280,7 @@ mod tests {
             assert_eq!(notice.sha256, notice.sha256.to_lowercase(), "{source:?}");
             seen.push(source);
         }
-        assert_eq!(seen.len(), 14);
+        assert_eq!(seen.len(), KNOWN.len());
     }
 
     #[test]
@@ -2233,6 +2308,11 @@ mod tests {
             Source::SinonimsCat,
             Source::KaikkiEnCatalan,
             Source::WikdictEsCa,
+            Source::WikdictEnEs,
+            Source::WikdictEnCa,
+            Source::WikdictEsEn,
+            Source::WikdictCaEn,
+            Source::WikdictCaEs,
         ];
         let fixture = Fixture::new("every-source");
         let files: Vec<Archive> = new
@@ -2310,6 +2390,19 @@ mod tests {
             (vec![], vec![], strings(&["gos"]))
         );
         assert_eq!(catalan.exception_forms(), 0);
+        for (source, word, translated) in [
+            (Source::WikdictEnEs, "dog", "perro"),
+            (Source::WikdictEnCa, "dog", "gos"),
+            (Source::WikdictEsEn, "perro", "dog"),
+            (Source::WikdictCaEn, "gos", "dog"),
+            (Source::WikdictCaEs, "gos", "perro"),
+        ] {
+            let index = open(source);
+            assert_eq!(
+                article(&index, word),
+                (vec![], vec![], strings(&[translated]))
+            );
+        }
         // Synonyms: the members of the senses, without the word itself.
         let omw = open(Source::OmwEs);
         assert_eq!(
@@ -2399,12 +2492,11 @@ mod tests {
         )])
     }
 
-    /// The Spanish-Catalan file is pinned last, after the files of Russian
+    /// The Spanish-Catalan file is pinned after the files of Russian
     /// headwords: it reads Spanish and translates into Catalan.
     #[test]
-    fn the_spanish_catalan_file_is_known_last() {
+    fn the_spanish_catalan_file_is_known() {
         let known = KNOWN[13];
-        assert_eq!(KNOWN.len(), 14);
         assert_eq!(known.name, "es-ca.sqlite3");
         assert_eq!(known.edition, "wikdict-es-ca-2026-06");
         assert_eq!(known.source, Source::WikdictEsCa);

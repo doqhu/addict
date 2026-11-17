@@ -344,6 +344,11 @@ pub fn describe(name: &str) -> Option<(&'static str, &'static str)> {
         Source::WikdictRuEs => ("Russian", "WikDict, Russian → Spanish"),
         Source::WikdictRuCa => ("Russian", "WikDict, Russian → Catalan"),
         Source::WikdictEsCa => ("Spanish", "WikDict, Spanish → Catalan"),
+        Source::WikdictEnEs => ("English", "WikDict, English → Spanish"),
+        Source::WikdictEnCa => ("English", "WikDict, English → Catalan"),
+        Source::WikdictEsEn => ("Spanish", "WikDict, Spanish → English"),
+        Source::WikdictCaEn => ("Catalan", "WikDict, Catalan → English"),
+        Source::WikdictCaEs => ("Catalan", "WikDict, Catalan → Spanish"),
     })
 }
 

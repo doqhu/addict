@@ -279,6 +279,12 @@ pub(crate) mod tests {
         builder.finish(&[("table", TABLE, leaf, SQL)])
     }
 
+    pub(crate) fn translation(lexentry: &str, word: &str, translated: &str) -> Vec<u8> {
+        let mut builder = Builder::new(512);
+        let leaf = builder.leaf(&[row(1, lexentry, None, text(word), translated)]);
+        builder.finish(&[("table", TABLE, leaf, SQL)])
+    }
+
     fn translations(contents: &Contents) -> Vec<(&str, Vec<String>)> {
         contents
             .headwords
