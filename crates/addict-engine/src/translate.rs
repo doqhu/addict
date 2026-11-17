@@ -50,6 +50,8 @@ pub type Translated = Result<String, Refusal>;
 /// language, or by none (it did not finish, or none ran), and that is
 /// `russian` or not ([`is_russian`]). A Russian word, alone or in its
 /// sentence, and its sentence are sent from Russian, whatever is chosen.
+/// With Russian pressed, the request also goes from Russian even when a
+/// Latin word was found in another language offline.
 /// Otherwise the sentence is sent from the chosen language; the word, alone
 /// or in its sentence, from the language that answered, and from the chosen
 /// one when none did. No wildcard arm: a new subject does not compile until
@@ -60,7 +62,7 @@ pub fn source_of(
     answered: Option<Source>,
     russian: bool,
 ) -> Source {
-    if russian {
+    if russian || chosen == Source::Ru {
         return Source::Ru;
     }
     match subject {
@@ -1861,8 +1863,13 @@ pub(crate) mod tests {
             ),
             Language::Ca
         );
-        // No language answered: the chosen one.
         for subject in [Subject::Word(CERRO), Subject::Lone, Subject::Sentence(0)] {
+            // Russian pressed keeps Russian as the online source.
+            assert_eq!(
+                source_of(subject, Language::Ru, Some(Language::En), false),
+                Language::Ru
+            );
+            // No language answered: the chosen one.
             for chosen in reading_languages(Language::Ru) {
                 assert_eq!(source_of(subject, chosen, None, false), chosen);
                 assert_eq!(source_of(subject, chosen, Some(chosen), false), chosen);

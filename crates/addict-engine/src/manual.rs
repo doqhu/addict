@@ -380,9 +380,10 @@ fn answering(
 /// For English, the lookup. For another language, its lookup when `known`
 /// says its index is there, open or not readable, so that a damaged file is
 /// named. The lookup tries the chosen language first and, when it has no
-/// entry for the word, the other languages
-/// ([`Articles::look_up_first`]), each with the translations of the pair it
-/// makes with `my`; `on_outcome` is given the language that answered.
+/// entry for the word, my language before the other reading languages
+/// ([`Articles::look_up_first`]); `on_outcome` is given the language that
+/// answered. With Russian pressed, a Latin word can reach this fallback
+/// even though Russian has no article index yet.
 /// Otherwise nothing starts and nothing is asked of `articles`: the line
 /// that says there is no dictionary is given back, so no article of a word
 /// spelt alike in another language is shown. A Russian word
@@ -405,6 +406,7 @@ pub fn offline(
     }
     match chosen {
         Language::En => look_up_first(work, articles, word, chosen, my, on_outcome),
+        Language::Ru if my != chosen => look_up_first(work, articles, word, chosen, my, on_outcome),
         Language::Es | Language::Ca | Language::Ru => {
             match known.and_then(|indexes| indexes.of_language(chosen)) {
                 Some(State::Open | State::Unreadable) => {
@@ -987,7 +989,11 @@ pub(crate) mod tests {
             word.to_owned(),
             pressed,
             my,
-            Some(Indexes::OPEN),
+            Some(Indexes {
+                spanish: State::Open,
+                catalan: State::Open,
+                ..Indexes::OPEN
+            }),
             move |answered, outcome| {
                 let _ = sender.send((answered, outcome));
             },
@@ -1039,9 +1045,12 @@ pub(crate) mod tests {
         );
     }
 
-    /// A source of articles that keeps the language and my language of
-    /// every lookup of a word read in a language, and has no entry.
-    struct Recording(std::sync::Arc<std::sync::Mutex<Vec<(Language, Language)>>>);
+    /// A source of articles that records each source and target and can
+    /// return a Spanish article.
+    struct Recording(
+        std::sync::Arc<std::sync::Mutex<Vec<(Language, Language)>>>,
+        bool,
+    );
 
     impl Articles for Recording {
         fn indexes(&self) -> Indexes {
@@ -1052,26 +1061,44 @@ pub(crate) mod tests {
             panic!("{word} was looked up without my language")
         }
 
-        fn look_up_for(&self, language: Language, my: Language, _word: &str) -> Looked {
-            self.0.lock().expect("asked").push((language, my));
+        fn look_up_for(&self, language: Language, target: Language, _word: &str) -> Looked {
+            self.0.lock().expect("asked").push((language, target));
             Looked {
-                answer: Answer::NoEntry,
+                answer: match language {
+                    Language::Ru => Answer::NotImported,
+                    Language::Es if self.1 => Answer::Grouped(banco()),
+                    Language::En | Language::Es | Language::Ca => Answer::NoEntry,
+                },
                 indexes: Indexes::OPEN,
             }
         }
     }
 
     #[test]
-    fn a_latin_word_is_looked_up_with_my_language() {
-        for my in Language::ALL {
+    fn a_latin_word_tries_my_language_next_toward_the_pressed_language() {
+        use Language::{Ca, En, Es, Ru};
+        for (pressed, my, has_spanish, answered, expected) in [
+            (Ca, Es, true, Es, &[(Ca, Es), (Es, Ca)][..]),
+            (Es, Ca, true, Es, &[(Es, Ca)][..]),
+            (Ca, Es, false, Ca, &[(Ca, Es), (Es, Ca), (En, Es)][..]),
+            (
+                Ru,
+                En,
+                false,
+                Ru,
+                &[(Ru, En), (En, Ru), (Es, En), (Ca, En)][..],
+            ),
+            (Ca, Ru, false, Ca, &[(Ca, Ru), (En, Ru), (Es, Ru)][..]),
+        ] {
             let asked = std::sync::Arc::default();
-            let (answered, _) =
-                answered_for(Recording(Arc::clone(&asked)), Language::En, my, "dog");
-            assert_eq!(answered, Language::En);
-            assert_eq!(
-                *asked.lock().expect("asked"),
-                [(Language::En, my), (Language::Es, my), (Language::Ca, my)]
+            let (language, _) = answered_for(
+                Recording(Arc::clone(&asked), has_spanish),
+                pressed,
+                my,
+                "banco",
             );
+            assert_eq!(language, answered);
+            assert_eq!(*asked.lock().expect("asked"), expected);
         }
     }
 

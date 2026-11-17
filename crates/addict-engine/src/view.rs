@@ -2032,14 +2032,7 @@ fn grouped_texts<'a>(
         Some(senses) if senses.is_empty() => Some(no_definitions(language)),
         Some(_) => hint.filter(|_| !matches!(choice, Some(Choice::Gloss(_)))),
     };
-    // Fallback still reads the (language, my) cell. Until it reads the
-    // reverse pair too, a word of my language has no translations row for
-    // a pair with a source; an unsupported pair keeps its explanatory line.
-    let translations = if language == my {
-        pair_row(language, target)
-    } else {
-        translations_row(language, grouped, target)
-    };
+    let translations = translations_row(language, grouped, target);
     let in_senses = senses.iter().any(|sense| !sense.synonyms.is_empty());
     // A meaning that a sense took stands under that sense: only the others
     // are the word's.
@@ -6514,12 +6507,13 @@ mod tests {
     }
 
     #[test]
-    fn a_word_of_my_language_by_fallback_has_no_supported_pair_row() {
-        // Fallback asks (Es, Es), so it carries no Catalan translations,
-        // whether the es-ca index is imported or not.
-        let lookup = spanish_with_catalan(None);
+    fn a_word_of_my_language_shows_its_translations_into_the_pressed_language() {
+        let lookup = spanish_with_catalan(Some(&["gos"]));
         let texts = for_pair(&lookup, Language::Es, Language::Ca);
-        assert_eq!(texts.translations, None);
+        assert_eq!(
+            translations_and_glosses(&texts).lines().next(),
+            Some("Catalan, for the word as a whole: gos")
+        );
         assert_eq!(texts.senses.len(), 2);
     }
 

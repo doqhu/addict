@@ -17,18 +17,15 @@
 //! [`Combined`] answers, a Spanish or Catalan word in every index of that
 //! language among the sources of `import::KNOWN`, each under its kind,
 //! through `addict_dictionary::lookup::grouped`. A word the chosen language
-//! has no entry for is looked up in the other languages, in the order EN,
-//! ES, CA, and the first that has it answers
+//! has no entry for is looked up in my language, then in the remaining
+//! reading languages in the order EN, ES, CA, and the first with content answers
 //! ([`Articles::look_up_first`]); the chosen language stays the user's.
 //!
-//! The Russian translations of a word read in a language are asked only for
-//! someone whose language they translate into, as
 //! `addict_dictionary::pairs::translations` gives the sources of the pair
-//! (reading language, my language) ([`Articles::look_up_for`]): with
-//! Russian mine, FreeDict and the Spanish and Catalan Russian indexes; with
-//! another language mine, none of them. The other kinds of a language, its
-//! definitions, synonyms and English glosses, are asked whatever my language
-//! is.
+//! (word language, target) ([`Articles::look_up_for`]). The target is my
+//! language for a reading-language word and the pressed reading language
+//! for a word of my language. Definitions, synonyms and English glosses
+//! are asked regardless of the target.
 //!
 //! A Russian word is looked up in the one index of Russian headwords
 //! translated into a language ([`Articles::look_up_russian`]), the source of
@@ -223,13 +220,12 @@ pub trait Articles: Send + Sync {
         }
     }
 
-    /// What the source says about `word` read in `language` for someone
-    /// whose own language is `my`: as [`Articles::look_up_in`], with the
-    /// Russian translations asked only when the pair (`language`, `my`) has
-    /// their source. A source without such sources answers as
+    /// What the source says about `word` read in `language`, with translations
+    /// from the pair (`language`, `target`). A source without support for
+    /// selecting translation indexes answers as
     /// [`Articles::look_up_in`] does.
-    fn look_up_for(&self, language: Language, my: Language, word: &str) -> Looked {
-        let _ = my;
+    fn look_up_for(&self, language: Language, target: Language, word: &str) -> Looked {
+        let _ = target;
         self.look_up_in(language, word)
     }
 
@@ -249,21 +245,29 @@ pub trait Articles: Send + Sync {
     /// What the source says about `word`, read first in the `chosen`
     /// language by someone whose own language is `my`, each language asked
     /// through [`Articles::look_up_for`], with the language that answered.
-    /// The chosen language's
-    /// errors and missing indexes come first. A miss or an answer that is
-    /// `Answer::metadata_only` asks the other languages in [`FALLBACK`]
-    /// order for one with content; when none has it, the first metadata-only
-    /// answer is given, or the chosen miss, with the latest index states.
+    /// A miss or a metadata-only answer tries `my` toward `chosen`, followed
+    /// by the other reading languages in [`FALLBACK`] order toward `my`.
+    /// If none has content, return the first metadata-only answer or the
+    /// chosen miss, with the latest index states. Russian currently has no
+    /// Latin-word lookup, so its missing index also permits fallback.
     fn look_up_first(&self, chosen: Language, my: Language, word: &str) -> (Language, Looked) {
         let mut first = self.look_up_for(chosen, my, word);
         let mut answered = chosen;
-        if first.answer != Answer::NoEntry && !first.answer.metadata_only() {
+        let russian_unavailable =
+            chosen == Language::Ru && my != chosen && first.answer == Answer::NotImported;
+        if first.answer != Answer::NoEntry && !first.answer.metadata_only() && !russian_unavailable
+        {
             return (chosen, first);
         }
-        for language in FALLBACK.into_iter().filter(|other| *other != chosen) {
-            let looked = self.look_up_for(language, my, word);
+        let others = std::iter::once(my)
+            .filter(|language| FALLBACK.contains(language))
+            .chain(FALLBACK.into_iter().filter(|language| *language != my))
+            .filter(|language| *language != chosen);
+        for language in others {
+            let target = if language == my { chosen } else { my };
+            let looked = self.look_up_for(language, target, word);
             if looked.answer.metadata_only() {
-                if first.answer == Answer::NoEntry {
+                if matches!(first.answer, Answer::NoEntry | Answer::NotImported) {
                     first = looked;
                     answered = language;
                 } else {
@@ -572,10 +576,10 @@ impl Articles for Dictionaries {
         self.look_up_for(language, Language::Ru, word)
     }
 
-    fn look_up_for(&self, language: Language, my: Language, word: &str) -> Looked {
+    fn look_up_for(&self, language: Language, target: Language, word: &str) -> Looked {
         match language {
-            Language::En => self.look_up_english(word, pairs::translations(language, my)),
-            Language::Es | Language::Ca => self.look_up_language(language, my, word),
+            Language::En => self.look_up_english(word, pairs::translations(language, target)),
+            Language::Es | Language::Ca => self.look_up_language(language, target, word),
             Language::Ru => Looked {
                 answer: Answer::NotImported,
                 indexes: self.indexes(),
