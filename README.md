@@ -47,8 +47,8 @@ a video, can be captured from the screen and read with Tesseract OCR.
 - GTK 4.20 or later. On a distribution with older GTK, such as Debian 13 or
   Ubuntu 24.04, the build from source fails; use the AppImage or the Flatpak
   bundle (see Install).
-- Tesseract, with the data of English, Spanish and Catalan, for Capture
-  only.
+- Tesseract, with the data of English, Spanish, Catalan and Russian, for
+  Capture only.
 - A DeepL API key (the free plan is enough), for the online translations
   only.
 - The top-bar icon needs a StatusNotifierItem host; on GNOME, the AppIndicator
@@ -125,7 +125,7 @@ On Fedora 43, install the build tools and Tesseract:
 ```sh
 sudo dnf install git gcc pkgconf-pkg-config gtk4-devel rust cargo \
     tesseract tesseract-langpack-eng tesseract-langpack-spa \
-    tesseract-langpack-cat
+    tesseract-langpack-cat tesseract-langpack-rus
 ```
 
 Other distributions need the same: a C compiler, `pkg-config`, the GTK 4.20

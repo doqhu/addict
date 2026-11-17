@@ -155,7 +155,7 @@ bash /inputs/quick-sharun.sh "$CARGO_TARGET_DIR/release/addict" /usr/bin/tessera
 # quick-sharun may copy host tessdata: replace it with the exact shared pins.
 rm -rf "$APPDIR/share/tessdata" "$APPDIR/share/tesseract"
 mkdir -p "$APPDIR/share/tessdata" "$APPDIR/share/licenses/ocr"
-install -m644 /inputs/{eng,spa,cat}.traineddata "$APPDIR/share/tessdata/"
+install -m644 /inputs/{eng,spa,cat,rus}.traineddata "$APPDIR/share/tessdata/"
 install -m644 /inputs/tessdata-LICENSE "$APPDIR/share/licenses/ocr/"
 # Preserve RPM-provided upstream engine and Leptonica notices.
 cp -a /usr/share/licenses/{tesseract,leptonica,giflib} "$APPDIR/share/licenses/ocr/"

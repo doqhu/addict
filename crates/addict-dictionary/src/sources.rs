@@ -237,7 +237,7 @@ pub const OCR: &[Row] = &[
     // The license is also installed under `share/licenses`.
     Row {
         index: "tessdata",
-        upstream: "tessdata eng/spa/cat",
+        upstream: "tessdata eng/spa/cat/rus",
         license: "Apache-2.0",
         credit: "Tesseract OCR",
         url: None,

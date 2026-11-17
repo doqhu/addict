@@ -388,11 +388,11 @@ Desktop acceptance, recorded 2026-11-10:
 ## Bundled OCR and repeatable capture verification (5.3)
 
 The pinned Fedora 43 input set adds Tesseract 5.5.3-2.fc43, Leptonica
-1.87.0-1.fc43 and their resolved RPM dependencies (391 RPMs total). The three
-models and Apache license use the same tessdata_fast 4.1.0 URLs and SHA-256
-pins as the unchanged Flatpak manifest. The build verifies every RPM, tool,
-model and downloaded license before use, and installs with repositories and
-weak dependencies disabled. There is no mutable download fallback.
+1.87.0-1.fc43 and their resolved RPM dependencies (391 RPMs total). The four
+models (`rus` joined `eng`, `spa` and `cat` for Russian Capture) and the Apache
+license use the same tessdata_fast 4.1.0 URLs and SHA-256 pins as the Flatpak
+manifest. The build verifies every RPM, tool, model and downloaded license
+before use, and installs with repositories and weak dependencies disabled. There is no mutable download fallback.
 
 Build and inspect with:
 
@@ -407,13 +407,14 @@ The refusal fixtures require the verified input cache populated by the build.
 The final layout has executable `bin/tesseract` (the sibling launcher) and
 `shared/bin/tesseract` (engine), bundled `lib/libtesseract.so*`,
 `lib/libleptonica.so*` and their complete ELF dependency closure. Only
-`share/tessdata/{eng,spa,cat}.traineddata` are allowed anywhere in the image:
+`share/tessdata/{eng,spa,cat,rus}.traineddata` are allowed anywhere in the image:
 
 | Model | SHA-256 |
 | --- | --- |
 | eng | `7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2` |
 | spa | `6f2e04d02774a18f01bed44b1111f2cd7f3ba7ac9dc4373cd3f898a40ea6b464` |
 | cat | `250db73cd5b380d2798581295dc12f20d0828cdb335a65d833d12dfdbf57117d` |
+| rus | `e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225` |
 
 Quick-sharun's implicitly copied `share/tesseract` and `share/tessdata`
 contents are replaced explicitly. `share/ocr-components.sha256` records the
@@ -443,13 +444,15 @@ The harness first validates the supplied image. For each language it creates
 fresh HOME/XDG directories and a private session bus without system portal
 activation. Only its private Screenshot/Registry mock and the standard AT-SPI
 service are available. There are no OCR configuration overrides; the normal
-language preference selects EN, ES or CA. AT-SPI presses the production Capture
+language preference selects EN, ES, CA or RU. The RU profile also sets my
+language to English: with no my-language file it is Russian, and Russian is
+then never the reading language. AT-SPI presses the production Capture
 button and reads the resulting GTK field. The production app receives the
 known PNG URI from Screenshot, performs the existing capture/OCR path, and
-removes the snapshot. The known texts, including Spanish and Catalan accents,
-are asserted exactly. It records successful model opens with strace and actual
-child executable/arguments/loaded-library paths through `/proc`, then bounds
-resident/extraction teardown. `PASS.json` appears only after all three outputs
+removes the snapshot. The known texts, including Spanish and Catalan accents
+and the Cyrillic line, are asserted exactly. It records successful model
+opens with strace and actual child executable/arguments/loaded-library paths
+through `/proc`, then bounds resident/extraction teardown. `PASS.json` appears only after all four outputs
 and cleanup succeed. A reused evidence directory is refused.
 
 Fixtures are verification resources and never enter the bundle. Regenerate
@@ -793,7 +796,7 @@ host display socket, session/accessibility bus, engine/model directory or FUSE
 device is mounted. The existing `ocr.py` creates each language's private
 HOME/XDG paths and buses, uses Xvfb with X authentication and exercises the
 native Capture button and actual GTK field. It traces the bundled OCR child,
-models and libraries, checks exact EN/ES/CA output and waits for extraction
+models and libraries, checks exact EN/ES/CA/RU output and waits for extraction
 cleanup after each language. Container exit removes any processes or temporary
 extraction even when the harness fails or times out.
 

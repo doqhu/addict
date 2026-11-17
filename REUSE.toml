@@ -38,6 +38,13 @@ SPDX-License-Identifier = "MIT"
 SPDX-FileComment = "A sentence rendered for the EXP-4 experiment."
 
 [[annotations]]
+path = "crates/addict-platform/tests/data/ocr-fixture-rus.png"
+precedence = "closest"
+SPDX-FileCopyrightText = "2026 Ilia Gordeev <ilya.tanat@gmail.com>"
+SPDX-License-Identifier = "MIT"
+SPDX-FileComment = "A Russian sentence rendered with Pillow in Liberation Sans Regular 2.1.5 at 48 px, for the recognition test of the rus data."
+
+[[annotations]]
 path = "crates/addict-core/tests/data/reduction-es-ca.tsv"
 precedence = "closest"
 SPDX-FileCopyrightText = "2026 Ilia Gordeev <ilya.tanat@gmail.com>"

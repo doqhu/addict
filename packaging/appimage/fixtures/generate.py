@@ -13,7 +13,8 @@ assert hashlib.sha256(FONT.read_bytes()).hexdigest() == FONT_SHA256, 'unexpected
 print('font SHA256:', FONT_SHA256)
 TEXTS = {'eng': 'The bank is beside the river.',
          'spa': 'El niño está cerca del río.',
-         'cat': 'El camí és a prop del riu.'}
+         'cat': 'El camí és a prop del riu.',
+         'rus': 'Банк стоит на берегу реки.'}
 for language, text in TEXTS.items():
     image = Image.new('RGB', (1200, 150), 'white')
     ImageDraw.Draw(image).text((30, 40), text, font=ImageFont.truetype(str(FONT), 48), fill='black')

@@ -79,7 +79,7 @@ scripts/check.sh
 It runs `cargo fmt --check`, `cargo clippy` with warnings as errors, a build
 of the product without the test features, all the tests, and a guard that
 keeps GTK out of every crate but `addict-app`. Some tests run Tesseract, so
-install it with its English data. The portal and forwarded-launch tests also
+install it with its English and Russian data. The portal and forwarded-launch tests also
 need `dbus-run-session` and `dbus-daemon` (`sudo dnf install dbus-daemon` on
 Fedora). They create isolated session buses and do not use your desktop portal.
 

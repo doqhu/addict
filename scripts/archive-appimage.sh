@@ -21,7 +21,7 @@ for suffix in ('', '.sha256', '.build.txt', '.inputs.lock.json', '.rpms.txt', '.
 digest = hashlib.file_digest(image.open('rb'), 'sha256').hexdigest()
 if (directory/(name+'.sha256')).read_text() != digest+'  '+name+'\n':
     raise SystemExit('invalid image checksum or relative filename')
-expected = {'eng': 'The bank is beside the river.', 'spa': 'El niño está cerca del río.', 'cat': 'El camí és a prop del riu.'}
+expected = {'eng': 'The bank is beside the river.', 'spa': 'El niño está cerca del río.', 'cat': 'El camí és a prop del riu.', 'rus': 'Банк стоит на берегу реки.'}
 if json.loads((smoke/'ocr/PASS.json').read_text()) != expected or (smoke/'ocr/image.sha256').read_text().strip() != digest:
     raise SystemExit('smoke evidence does not match this image')
 lock = json.loads((root/'packaging/appimage/inputs.lock.json').read_text())

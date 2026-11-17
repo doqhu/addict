@@ -43,7 +43,8 @@ TOOL_RULES = [
     ('bin/*.hook', 'anylinux-appimages'), ('lib/lib.path', 'anylinux-appimages'), ('shared/lib', 'anylinux-appimages'),
     ('etc/ssl/openssl.cnf', 'anylinux-appimages'),  # written by quick-sharun, not Fedora's file
     ('share/tessdata/eng.traineddata', 'tessdata_fast'), ('share/tessdata/spa.traineddata', 'tessdata_fast'),
-    ('share/tessdata/cat.traineddata', 'tessdata_fast'), ('share/licenses/ocr/tessdata-LICENSE', 'tessdata_fast'),
+    ('share/tessdata/cat.traineddata', 'tessdata_fast'), ('share/tessdata/rus.traineddata', 'tessdata_fast'),
+    ('share/licenses/ocr/tessdata-LICENSE', 'tessdata_fast'),
 ]
 # Caches built at deploy time belong to the package whose data they index.
 CACHE_RULES = [('share/glib-2.0/schemas/gschemas.compiled', 'glib2'),
@@ -271,9 +272,9 @@ def main(argv):
         'license_files': ['share/licenses/addict/LICENSE', 'share/licenses/addict/CREDITS', 'share/licenses/addict/crate-licenses.txt'],
         'source': {'url': 'https://github.com/doqhu/addict', 'revision': revision, 'snapshot_sha256': snapshot}}
     components['tessdata_fast'] = {
-        'origin': 'pinned-download', 'inputs': [pinned[n] for n in ('eng.traineddata', 'spa.traineddata', 'cat.traineddata')],
+        'origin': 'pinned-download', 'inputs': [pinned[n] for n in ('eng.traineddata', 'spa.traineddata', 'cat.traineddata', 'rus.traineddata')],
         'license': 'Apache-2.0', 'license_files': ['share/licenses/ocr/tessdata-LICENSE'],
-        'source': {'files': [pinned[n] for n in ('eng.traineddata', 'spa.traineddata', 'cat.traineddata', 'tessdata-LICENSE')]}}
+        'source': {'files': [pinned[n] for n in ('eng.traineddata', 'spa.traineddata', 'cat.traineddata', 'rus.traineddata', 'tessdata-LICENSE')]}}
     tools = {
         'anylinux-sharun': ('MIT', ['sharun.tar'], [('LICENSE', notice('anylinux-sharun-LICENSE'))], ['anylinux-sharun-source.tar.gz'], None),
         'dash': ('BSD-3-Clause AND GPL-2.0-or-later', ['sharun.tar'], [], ['dash-0.5.13.5.tar.gz', 'anylinux-sharun-source.tar.gz'], None),

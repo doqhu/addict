@@ -2008,6 +2008,11 @@
       "file": "cat.traineddata",
       "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/cat.traineddata",
       "sha256": "250db73cd5b380d2798581295dc12f20d0828cdb335a65d833d12dfdbf57117d"
+    },
+    {
+      "file": "rus.traineddata",
+      "url": "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/rus.traineddata",
+      "sha256": "e16e5e036cce1d9ec2b00063cf8b54472625b9e14d893a169e2b0dedeb4df225"
     }
   ],
   "notices": [
