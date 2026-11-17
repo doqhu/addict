@@ -12,14 +12,17 @@
 //! whether its answer is shown. Which requests are sent, and when, is
 //! [`online`](crate::online)'s; the text of the field and the chosen word are
 //! [`manual`](crate::manual)'s. Putting any of it on the screen is
-//! `resident`'s. Nothing is sent for a Russian word
-//! ([`is_sent`]), neither the word nor its sentence: it is read offline only.
+//! `resident`'s. A Russian word, one with a Cyrillic letter, is sent from
+//! Russian, alone or in its sentence, and so is its sentence, whatever
+//! language is chosen ([`source_of`]); when my language is Russian nothing is
+//! sent for it ([`is_sent`]), neither the word nor its sentence: it is read
+//! offline only.
 
 use std::{sync::Arc, time::Duration};
 
 use addict_core::{
     input::Input,
-    translation::{Refusal, Request, Source, Translator, is_russian},
+    translation::{English, Refusal, Request, Source, Translator, is_russian},
 };
 use addict_platform::work::{Job, Outcome, Work};
 
@@ -44,26 +47,39 @@ pub type Translated = Result<String, Refusal>;
 
 /// The language the online request about `subject` is sent from, for a
 /// word read in the `chosen` language whose lookup was `answered` by a
-/// language, or by none (it did not finish, or none ran). The sentence is
-/// sent from the chosen language; the word, alone or in its sentence, from
-/// the language that answered, and from the chosen one when none did. No
-/// wildcard arm: a new subject does not compile until it is given its
-/// language.
-pub fn source_of(subject: Subject, chosen: Source, answered: Option<Source>) -> Source {
+/// language, or by none (it did not finish, or none ran), and that is
+/// `russian` or not ([`is_russian`]). A Russian word, alone or in its
+/// sentence, and its sentence are sent from Russian, whatever is chosen.
+/// Otherwise the sentence is sent from the chosen language; the word, alone
+/// or in its sentence, from the language that answered, and from the chosen
+/// one when none did. No wildcard arm: a new subject does not compile until
+/// it is given its language.
+pub fn source_of(
+    subject: Subject,
+    chosen: Source,
+    answered: Option<Source>,
+    russian: bool,
+) -> Source {
+    if russian {
+        return Source::Ru;
+    }
     match subject {
         Subject::Sentence(_) => chosen,
         Subject::Word(_) | Subject::Lone => answered.unwrap_or(chosen),
     }
 }
 
-/// Whether the online request about `subject` for `input` is sent at all:
-/// not when the chosen word is Russian, whether the request is about the
-/// word, the lone word or its sentence. A Russian word is read offline only.
-/// No wildcard arm: a new subject does not compile until it is given its
-/// answer.
-pub fn is_sent(input: &Input, subject: Subject) -> bool {
+/// Whether the online request about `subject` for `input` is sent at all
+/// into `my` language: not when the chosen word is Russian and so is my
+/// language, whether the request is about the word, the lone word or its
+/// sentence; such a word is read offline only. A Russian word is sent when
+/// my language is another one. No wildcard arm: a new subject does not
+/// compile until it is given its answer.
+pub fn is_sent(input: &Input, subject: Subject, my: Source) -> bool {
     match subject {
-        Subject::Sentence(_) | Subject::Word(_) | Subject::Lone => !is_russian(input.word()),
+        Subject::Sentence(_) | Subject::Word(_) | Subject::Lone => {
+            !(my == Source::Ru && is_russian(input.word()))
+        }
     }
 }
 
@@ -72,24 +88,37 @@ pub fn is_sent(input: &Input, subject: Subject) -> bool {
 /// with the sentence as context. For the sentence: the sentence, without
 /// context. For a lone word: the word, without context. `None` when the
 /// input is not of that kind: a lone word has no sentence, and a word of a
-/// sentence is not sent without it.
-pub fn request(input: &Input, subject: Subject, source: Source) -> Option<Request> {
+/// sentence is not sent without it. An English `target` is spelled as
+/// `english` says; any other target ignores it.
+pub fn request(
+    input: &Input,
+    subject: Subject,
+    source: Source,
+    target: Source,
+    english: English,
+) -> Option<Request> {
     let sentence = input.sentence().map(str::to_owned);
     match subject {
         Subject::Word(_) => Some(Request {
             text: input.word().to_owned(),
             context: Some(sentence?),
             source,
+            target,
+            english,
         }),
         Subject::Sentence(_) => Some(Request {
             text: sentence?,
             context: None,
             source,
+            target,
+            english,
         }),
         Subject::Lone => sentence.is_none().then(|| Request {
             text: input.word().to_owned(),
             context: None,
             source,
+            target,
+            english,
         }),
     }
 }
@@ -180,7 +209,10 @@ pub(crate) mod tests {
 
     use addict_core::{
         dictionary::{Dictionary, Sample},
-        translation::{Canned, Refusal, Request, Source as Language, Translating, Translator},
+        translation::{
+            Canned, English, Refusal, Request, Source as Language, Translating, Translator,
+            is_russian, reading_languages,
+        },
     };
     use addict_deepl::{
         DeepL,
@@ -240,6 +272,8 @@ pub(crate) mod tests {
                 text: definition.clone(),
                 context: None,
                 source: Language::En,
+                target: Language::Ru,
+                english: English::Us,
             }]
         );
         let (retry, request) = shown.request_definition().expect("retry action");
@@ -251,6 +285,8 @@ pub(crate) mod tests {
                 text: definition,
                 context: None,
                 source: Language::En,
+                target: Language::Ru,
+                english: English::Us,
             }]
         );
         assert!(shown.request_definition().is_none());
@@ -325,6 +361,8 @@ pub(crate) mod tests {
             text: "bank".to_owned(),
             context: Some(RIVER.to_owned()),
             source: Language::En,
+            target: Language::Ru,
+            english: English::Us,
         }
     }
 
@@ -335,6 +373,8 @@ pub(crate) mod tests {
             manual.input().expect("input"),
             Subject::Word(chosen),
             Language::En,
+            Language::Ru,
+            English::Us,
         )
         .expect("a sentence")
     }
@@ -400,6 +440,8 @@ pub(crate) mod tests {
             text: "bank".to_owned(),
             context: None,
             source: Language::En,
+            target: Language::Ru,
+            english: English::Us,
         }
     }
 
@@ -533,6 +575,8 @@ pub(crate) mod tests {
                     text: text.to_owned(),
                     context: None,
                     source,
+                    target: Language::Ru,
+                    english: English::Us,
                 }]
             );
             let (online, record) =
@@ -605,6 +649,8 @@ pub(crate) mod tests {
             text: RIVER.to_owned(),
             context: None,
             source: Language::En,
+            target: Language::Ru,
+            english: English::Us,
         }
     }
 
@@ -613,6 +659,8 @@ pub(crate) mod tests {
             text: "river".to_owned(),
             context: Some(RIVER.to_owned()),
             source: Language::En,
+            target: Language::Ru,
+            english: English::Us,
         }
     }
 
@@ -621,6 +669,56 @@ pub(crate) mod tests {
             text: word.to_owned(),
             context: None,
             source: Language::En,
+            target: Language::Ru,
+            english: English::Us,
+        }
+    }
+
+    #[test]
+    fn the_target_reaches_the_request() {
+        let manual = bank_of_the_river();
+        let input = manual.input().expect("input");
+        let sent = request(
+            input,
+            Subject::Word(BANK),
+            Language::En,
+            Language::En,
+            English::Us,
+        )
+        .expect("a request");
+        assert_eq!(sent.target, Language::En);
+        assert_eq!(addict_deepl::client::sent(&sent).target_lang, "EN-US");
+        let sentence = request(
+            input,
+            Subject::Sentence(0),
+            Language::En,
+            Language::Es,
+            English::Us,
+        )
+        .expect("a request");
+        assert_eq!(sentence.target, Language::Es);
+    }
+
+    #[test]
+    fn a_british_english_target_is_sent_as_en_gb_and_no_other_target_changes() {
+        let manual = bank_of_the_river();
+        let input = manual.input().expect("input");
+        let sent = |target, english| {
+            request(input, Subject::Word(BANK), Language::Es, target, english).expect("a request")
+        };
+        let british = sent(Language::En, English::Gb);
+        assert_eq!(british.english, English::Gb);
+        assert_eq!(addict_deepl::client::sent(&british).target_lang, "EN-GB");
+        assert_eq!(
+            addict_deepl::client::sent(&sent(Language::En, English::Us)).target_lang,
+            "EN-US"
+        );
+        for target in [Language::Es, Language::Ca, Language::Ru] {
+            assert_eq!(
+                addict_deepl::client::sent(&sent(target, English::Gb)),
+                addict_deepl::client::sent(&sent(target, English::Us)),
+                "{target:?}"
+            );
         }
     }
 
@@ -643,26 +741,71 @@ pub(crate) mod tests {
         let manual = bank_of_the_river();
         let input = manual.input().expect("input");
         assert_eq!(
-            request(input, Subject::Word(BANK), Language::En),
+            request(
+                input,
+                Subject::Word(BANK),
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
             Some(bank_request())
         );
         assert_eq!(
-            request(input, Subject::Sentence(0), Language::En),
+            request(
+                input,
+                Subject::Sentence(0),
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
             Some(sentence_request())
         );
         // A word of a sentence is not sent without it.
-        assert_eq!(request(input, Subject::Lone, Language::En), None);
+        assert_eq!(
+            request(
+                input,
+                Subject::Lone,
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
+            None
+        );
 
         let mut manual = Manual::default();
         lone(&mut manual, " Bank. ");
         let input = manual.input().expect("input");
         assert_eq!(
-            request(input, Subject::Lone, Language::En),
+            request(
+                input,
+                Subject::Lone,
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
             Some(lone_request("Bank"))
         );
         // A lone word has no sentence to send, as text or as context.
-        assert_eq!(request(input, Subject::Word(0), Language::En), None);
-        assert_eq!(request(input, Subject::Sentence(0), Language::En), None);
+        assert_eq!(
+            request(
+                input,
+                Subject::Word(0),
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
+            None
+        );
+        assert_eq!(
+            request(
+                input,
+                Subject::Sentence(0),
+                Language::En,
+                Language::Ru,
+                English::Us
+            ),
+            None
+        );
     }
 
     /// The manual path as the resident drives it, without a window: an edit
@@ -677,6 +820,8 @@ pub(crate) mod tests {
         translator: Arc<Canned>,
         /// The reading language.
         language: Language,
+        /// My language, the one every request is sent into.
+        my: Language,
     }
 
     impl Desk {
@@ -687,6 +832,7 @@ pub(crate) mod tests {
                 work: Work::start().expect("runner"),
                 translator: Arc::new(Canned::new(answer)),
                 language: Language::En,
+                my: Language::Ru,
             }
         }
 
@@ -732,16 +878,18 @@ pub(crate) mod tests {
 
         fn send(&mut self, subject: Subject) {
             if let Some(input) = self.manual.input()
-                && !is_sent(input, subject)
+                && !is_sent(input, subject, self.my)
             {
                 self.kept.withdraw(subject);
                 return;
             }
             let (sender, receiver) = mpsc::channel();
-            let asked = self
-                .manual
-                .input()
-                .and_then(|input| request(input, subject, self.language));
+            // As the resident sends it, with no lookup that answered.
+            let asked = self.manual.input().and_then(|input| {
+                let russian = is_russian(input.word());
+                let source = source_of(subject, self.language, None, russian);
+                request(input, subject, source, self.my, English::Us)
+            });
             let started = translate(
                 Some(&self.work),
                 self.translator.clone(),
@@ -803,7 +951,7 @@ pub(crate) mod tests {
 
     #[test]
     fn nothing_is_sent_for_a_russian_word_nor_for_its_sentence() {
-        for language in Language::ALL {
+        for language in reading_languages(Language::Ru) {
             // Alone, by Enter or by a paste.
             let mut desk = Desk::with_text(Ok("x"), "собака");
             desk.language = language;
@@ -846,14 +994,126 @@ pub(crate) mod tests {
         let input =
             addict_core::input::Input::new("собака", None, addict_core::input::Source::Manual)
                 .expect("input");
-        assert!(!is_sent(&input, Subject::Lone));
-        assert!(!is_sent(&input, Subject::Word(0)));
-        assert!(!is_sent(&input, Subject::Sentence(0)));
+        assert!(!is_sent(&input, Subject::Lone, Language::Ru));
+        assert!(!is_sent(&input, Subject::Word(0), Language::Ru));
+        assert!(!is_sent(&input, Subject::Sentence(0), Language::Ru));
         let input =
             addict_core::input::Input::new("bank", None, addict_core::input::Source::Manual)
                 .expect("input");
-        assert!(is_sent(&input, Subject::Lone));
-        assert!(is_sent(&input, Subject::Sentence(0)));
+        assert!(is_sent(&input, Subject::Lone, Language::Ru));
+        assert!(is_sent(&input, Subject::Sentence(0), Language::Ru));
+    }
+
+    /// The Russian sentence of the matrix, and `красный` in it.
+    const KRASNY_SENTENCE: &str = "Мне нравится красный цвет.";
+    const KRASNY: usize = 2;
+
+    /// The word `text` of a sentence, with it as context, and the sentence,
+    /// each sent from `source` into `target`.
+    fn word_and_sentence(
+        text: &str,
+        sentence: &str,
+        source: Language,
+        target: Language,
+    ) -> [Request; 2] {
+        [
+            Request {
+                text: text.to_owned(),
+                context: Some(sentence.to_owned()),
+                source,
+                target,
+                english: English::Us,
+            },
+            Request {
+                text: sentence.to_owned(),
+                context: None,
+                source,
+                target,
+                english: English::Us,
+            },
+        ]
+    }
+
+    #[test]
+    fn a_russian_word_is_sent_from_ru_into_my_language_whatever_is_pressed() {
+        // English mine: every button English mine offers, Ru among them.
+        for language in reading_languages(Language::En) {
+            let mut desk = Desk::with_text(Ok("red"), KRASNY_SENTENCE);
+            desk.my = Language::En;
+            desk.language = language;
+            desk.click(KRASNY);
+            assert_eq!(
+                desk.asked(),
+                word_and_sentence("красный", KRASNY_SENTENCE, Language::Ru, Language::En),
+                "{language:?}"
+            );
+            assert_eq!(desk.shown().word, Some(&online("red")));
+        }
+        // A lone Russian word, Catalan mine.
+        let mut desk = Desk::with_text(Ok("gos"), "собака");
+        desk.my = Language::Ca;
+        desk.language = Language::Es;
+        desk.submit();
+        assert_eq!(
+            desk.asked(),
+            [Request {
+                text: "собака".to_owned(),
+                context: None,
+                source: Language::Ru,
+                target: Language::Ca,
+                english: English::Us,
+            }]
+        );
+        assert_eq!(desk.shown().lone, Some(&online("gos")));
+        let input =
+            addict_core::input::Input::new("собака", None, addict_core::input::Source::Manual)
+                .expect("input");
+        for my in [Language::En, Language::Es, Language::Ca] {
+            for subject in [Subject::Lone, Subject::Word(0), Subject::Sentence(0)] {
+                assert!(is_sent(&input, subject, my), "{my:?}");
+            }
+        }
+        for subject in [Subject::Lone, Subject::Word(0), Subject::Sentence(0)] {
+            for chosen in Language::ALL {
+                for answered in [None, Some(chosen)] {
+                    assert_eq!(source_of(subject, chosen, answered, true), Language::Ru);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_latin_word_keeps_the_pressed_language_into_my_language() {
+        // Ru pressed: a Latin word and its sentence go from the pressed
+        // language, as Russian.
+        let sentence = "Me gusta el color rojo.";
+        let mut desk = Desk::with_text(Ok("red"), sentence);
+        desk.my = Language::En;
+        desk.language = Language::Ru;
+        desk.click(4);
+        assert_eq!(
+            desk.asked(),
+            word_and_sentence("rojo", sentence, Language::Ru, Language::En)
+        );
+        // A Latin word of a Russian sentence goes from the pressed language,
+        // and so does the sentence.
+        let mut desk = Desk::with_text(Ok("bank"), "Мой bank.");
+        desk.my = Language::En;
+        desk.language = Language::Es;
+        desk.click(1);
+        assert_eq!(
+            desk.asked(),
+            word_and_sentence("bank", "Мой bank.", Language::Es, Language::En)
+        );
+        // Spanish into Catalan.
+        let mut desk = Desk::with_text(Ok("vermell"), sentence);
+        desk.my = Language::Ca;
+        desk.language = Language::Es;
+        desk.click(4);
+        assert_eq!(
+            desk.asked(),
+            word_and_sentence("rojo", sentence, Language::Es, Language::Ca)
+        );
     }
 
     #[test]
@@ -868,11 +1128,15 @@ pub(crate) mod tests {
                     text: "banco".to_owned(),
                     context: Some(BANCO_SENTENCE.to_owned()),
                     source: Language::Es,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
                 Request {
                     text: BANCO_SENTENCE.to_owned(),
                     context: None,
                     source: Language::Es,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
             ]
         );
@@ -893,6 +1157,8 @@ pub(crate) mod tests {
                 text: text.to_owned(),
                 context: None,
                 source: Language::Ca,
+                target: Language::Ru,
+                english: English::Us,
             }
         );
         assert_eq!(desk.asked()[0].text, "col·lecció");
@@ -917,11 +1183,15 @@ pub(crate) mod tests {
                     text: "banco".to_owned(),
                     context: Some(BANCO_SENTENCE.to_owned()),
                     source: Language::Es,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
                 Request {
                     text: BANCO_SENTENCE.to_owned(),
                     context: None,
                     source: Language::Es,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
             ]
         );
@@ -941,11 +1211,15 @@ pub(crate) mod tests {
                     text: "banco".to_owned(),
                     context: None,
                     source: Language::Es,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
                 Request {
                     text: "banco".to_owned(),
                     context: None,
                     source: Language::Ca,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
             ]
         );
@@ -1030,11 +1304,15 @@ pub(crate) mod tests {
                     text: "iterations".to_owned(),
                     context: Some(sentence.to_owned()),
                     source: Language::En,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
                 Request {
                     text: sentence.to_owned(),
                     context: None,
                     source: Language::En,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
             ]
         );
@@ -1054,11 +1332,15 @@ pub(crate) mod tests {
                     text: "pitfall".to_owned(),
                     context: Some(other.to_owned()),
                     source: Language::En,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
                 Request {
                     text: other.to_owned(),
                     context: None,
                     source: Language::En,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
             ]
         );
@@ -1125,6 +1407,8 @@ pub(crate) mod tests {
                 text: "bank".to_owned(),
                 context: Some(text.clone()),
                 source: Language::En,
+                target: Language::Ru,
+                english: English::Us,
             }]
         );
         assert_eq!(desk.shown().sentence, Some(&Whole::TooLong));
@@ -1136,6 +1420,8 @@ pub(crate) mod tests {
                 text: "river".to_owned(),
                 context: Some(text),
                 source: Language::En,
+                target: Language::Ru,
+                english: English::Us,
             }
         );
     }
@@ -1152,6 +1438,8 @@ pub(crate) mod tests {
                 text,
                 context: None,
                 source: Language::En,
+                target: Language::Ru,
+                english: English::Us,
             }
         );
     }
@@ -1179,6 +1467,8 @@ pub(crate) mod tests {
                     text: "bank".to_owned(),
                     context: Some(edited.to_owned()),
                     source: Language::En,
+                    target: Language::Ru,
+                    english: English::Us,
                 },
                 lone_request(edited),
             ]
@@ -1437,7 +1727,7 @@ pub(crate) mod tests {
                 translate(
                     Some(&work),
                     translator.clone(),
-                    request(input, subject, Language::En),
+                    request(input, subject, Language::En, Language::Ru, English::Us),
                     move |outcome| {
                         let _ = online.send(Reported::Online(outcome));
                     },
@@ -1511,7 +1801,7 @@ pub(crate) mod tests {
             let _job = translate(
                 Some(&work),
                 translator.clone(),
-                request(input, subject, language),
+                request(input, subject, language, Language::Ru, English::Us),
                 move |outcome| {
                     let _ = sender.send(outcome);
                 },
@@ -1550,22 +1840,32 @@ pub(crate) mod tests {
         // Spanish, its sentence as Catalan.
         const CERRO: usize = 2;
         assert_eq!(
-            source_of(Subject::Word(CERRO), Language::Ca, Some(Language::Es)),
+            source_of(
+                Subject::Word(CERRO),
+                Language::Ca,
+                Some(Language::Es),
+                false
+            ),
             Language::Es
         );
         assert_eq!(
-            source_of(Subject::Lone, Language::Ca, Some(Language::Es)),
+            source_of(Subject::Lone, Language::Ca, Some(Language::Es), false),
             Language::Es
         );
         assert_eq!(
-            source_of(Subject::Sentence(0), Language::Ca, Some(Language::Es)),
+            source_of(
+                Subject::Sentence(0),
+                Language::Ca,
+                Some(Language::Es),
+                false
+            ),
             Language::Ca
         );
         // No language answered: the chosen one.
         for subject in [Subject::Word(CERRO), Subject::Lone, Subject::Sentence(0)] {
-            for chosen in Language::ALL {
-                assert_eq!(source_of(subject, chosen, None), chosen);
-                assert_eq!(source_of(subject, chosen, Some(chosen)), chosen);
+            for chosen in reading_languages(Language::Ru) {
+                assert_eq!(source_of(subject, chosen, None, false), chosen);
+                assert_eq!(source_of(subject, chosen, Some(chosen), false), chosen);
             }
         }
         let stub = Stub::start(Reply::translation("закрылся")).expect("stub");
@@ -1580,13 +1880,13 @@ pub(crate) mod tests {
         let work = Work::start().expect("runner");
         let mut records = Vec::new();
         for subject in [Subject::Word(CERRO), Subject::Sentence(0)] {
-            let source = source_of(subject, Language::Ca, Some(Language::Es));
+            let source = source_of(subject, Language::Ca, Some(Language::Es), false);
             let (sender, receiver) = mpsc::channel();
             let probe = Probe::start(true);
             let _job = translate(
                 Some(&work),
                 translator.clone(),
-                request(input, subject, source),
+                request(input, subject, source, Language::Ru, English::Us),
                 move |outcome| {
                     let _ = sender.send((outcome, probe.ended()));
                 },
@@ -1643,6 +1943,8 @@ pub(crate) mod tests {
                 spanish.input().expect("input"),
                 Subject::Word(BANCO),
                 Language::Es,
+                Language::Ru,
+                English::Us,
             ),
             move |outcome| {
                 let _ = sender.send(outcome);

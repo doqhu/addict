@@ -72,6 +72,7 @@ pub fn headwords(language: Language, word: &str, lemmas: &Lemmas) -> Vec<String>
         Language::En => reduction::forms(&lowercase, &of(&lowercase)),
         Language::Es => reduction_es_ca::forms(&lowercase, reduction_es_ca::Language::Es, of),
         Language::Ca => reduction_es_ca::forms(&lowercase, reduction_es_ca::Language::Ca, of),
+        Language::Ru => Vec::new(),
     };
     let mut candidates = vec![written.to_owned()];
     for candidate in std::iter::once(lowercase).chain(forms) {
@@ -96,6 +97,7 @@ pub fn asked_forms(language: Language, word: &str) -> Vec<String> {
         Language::En => Vec::new(),
         Language::Es => reduction_es_ca::bases(&lowercase, reduction_es_ca::Language::Es),
         Language::Ca => reduction_es_ca::bases(&lowercase, reduction_es_ca::Language::Ca),
+        Language::Ru => Vec::new(),
     };
     std::iter::once(lowercase).chain(bases).collect()
 }

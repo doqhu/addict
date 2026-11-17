@@ -21,12 +21,22 @@
 //! ES, CA, and the first that has it answers
 //! ([`Articles::look_up_first`]); the chosen language stays the user's.
 //!
+//! The Russian translations of a word read in a language are asked only for
+//! someone whose language they translate into, as
+//! `addict_dictionary::pairs::translations` gives the sources of the pair
+//! (reading language, my language) ([`Articles::look_up_for`]): with
+//! Russian mine, FreeDict and the Spanish and Catalan Russian indexes; with
+//! another language mine, none of them. The other kinds of a language, its
+//! definitions, synonyms and English glosses, are asked whatever my language
+//! is.
+//!
 //! A Russian word is looked up in the one index of Russian headwords
-//! translated into the chosen language ([`Articles::look_up_russian`]), and
-//! in nothing else: no other language is asked for it, and no other index
-//! for a word read in a language. The Russian indexes are opened when they
-//! are first asked, and are not among [`Indexes`]: the English line and the
-//! states of Spanish and Catalan do not change with them.
+//! translated into a language ([`Articles::look_up_russian`]), the source of
+//! the pair (Russian, that language), and in nothing else: no other language
+//! is asked for it, and no other index for a word read in a language. The
+//! Russian indexes are opened when they are first asked, and are not among
+//! [`Indexes`]: the English line and the states of Spanish and Catalan do
+//! not change with them.
 //!
 //! Everything here opens or reads files, so it is called on the work runner
 //! and never on the UI thread. Starting a lookup there is
@@ -42,6 +52,7 @@ use addict_dictionary::{
     Combined, Error, Index,
     import::{self, Kind, Source},
     lookup::{self, Grouped},
+    pairs,
 };
 
 /// One index of the data directory, by the names the user sees.
@@ -110,7 +121,7 @@ impl Indexes {
         match language {
             Language::Es => Some(self.spanish),
             Language::Ca => Some(self.catalan),
-            Language::En => None,
+            Language::En | Language::Ru => None,
         }
     }
 
@@ -201,11 +212,21 @@ pub trait Articles: Send + Sync {
     fn look_up_in(&self, language: Language, word: &str) -> Looked {
         match language {
             Language::En => self.look_up(word),
-            Language::Es | Language::Ca => Looked {
+            Language::Es | Language::Ca | Language::Ru => Looked {
                 answer: Answer::NotImported,
                 indexes: self.indexes(),
             },
         }
+    }
+
+    /// What the source says about `word` read in `language` for someone
+    /// whose own language is `my`: as [`Articles::look_up_in`], with the
+    /// Russian translations asked only when the pair (`language`, `my`) has
+    /// their source. A source without such sources answers as
+    /// [`Articles::look_up_in`] does.
+    fn look_up_for(&self, language: Language, my: Language, word: &str) -> Looked {
+        let _ = my;
+        self.look_up_in(language, word)
     }
 
     /// What the source says about the Russian `word` translated into
@@ -222,19 +243,21 @@ pub trait Articles: Send + Sync {
     }
 
     /// What the source says about `word`, read first in the `chosen`
-    /// language, with the language that answered. The chosen language's
+    /// language by someone whose own language is `my`, each language asked
+    /// through [`Articles::look_up_for`], with the language that answered.
+    /// The chosen language's
     /// errors and missing indexes come first. A miss or an answer that is
     /// `Answer::metadata_only` asks the other languages in [`FALLBACK`]
     /// order for one with content; when none has it, the first metadata-only
     /// answer is given, or the chosen miss, with the latest index states.
-    fn look_up_first(&self, chosen: Language, word: &str) -> (Language, Looked) {
-        let mut first = self.look_up_in(chosen, word);
+    fn look_up_first(&self, chosen: Language, my: Language, word: &str) -> (Language, Looked) {
+        let mut first = self.look_up_for(chosen, my, word);
         let mut answered = chosen;
         if first.answer != Answer::NoEntry && !first.answer.metadata_only() {
             return (chosen, first);
         }
         for language in FALLBACK.into_iter().filter(|other| *other != chosen) {
-            let looked = self.look_up_in(language, word);
+            let looked = self.look_up_for(language, my, word);
             if looked.answer.metadata_only() {
                 if first.answer == Answer::NoEntry {
                     first = looked;
@@ -416,19 +439,21 @@ impl Dictionaries {
         }
     }
 
-    /// What the indexes of `language`, not English, say about `word`: what
-    /// each open one gives, by its kind, with no English index asked. A file
+    /// What the indexes of `language`, not English, say about `word` for
+    /// someone whose own language is `my`: what each open one gives, by its
+    /// kind, with no English index asked, and a Russian index only when the
+    /// pair (`language`, `my`) has it. A file
     /// of the language that is there and is no index is named, and no
     /// article is given, so that it is imported again. An index that could
     /// not be read is closed and opened again by the next call, as an
     /// English one is.
-    fn look_up_language(&self, language: Language, word: &str) -> Looked {
+    fn look_up_language(&self, language: Language, my: Language, word: &str) -> Looked {
         let mut opened = self.open.lock().unwrap_or_else(PoisonError::into_inner);
         let indexes = self.open_missing(&mut opened);
         if let Some(source) = opened
             .unreadable
             .iter()
-            .find(|source| source.language() == Some(language))
+            .find(|source| source.language() == Some(language) && asked_for(**source, my))
         {
             return Looked {
                 answer: Answer::Unreadable(IndexFile::of(*source)),
@@ -438,7 +463,7 @@ impl Dictionaries {
         // In the order of `import::KNOWN`, whatever order they were opened in.
         let asked: Vec<(Kind, &Index)> = other_sources()
             .into_iter()
-            .filter(|source| source.language() == Some(language))
+            .filter(|source| source.language() == Some(language) && asked_for(*source, my))
             .filter_map(|source| {
                 let (_, index) = opened.others.iter().find(|(kept, _)| *kept == source)?;
                 Some((source.kind(), index))
@@ -479,8 +504,10 @@ impl Dictionaries {
     fn look_up_russian_in(&self, into: Language, word: &str) -> Looked {
         let mut opened = self.open.lock().unwrap_or_else(PoisonError::into_inner);
         let indexes = self.open_missing(&mut opened);
-        let source = Source::from_russian(into);
         let looked = |answer| Looked { answer, indexes };
+        let Some(&source) = pairs::translations(Language::Ru, into).first() else {
+            return looked(Answer::NotImported);
+        };
         let open = opened.russian.iter().any(|(kept, _)| *kept == source);
         let mut index = None;
         match self.open(source, open, |opened| index = Some(opened)) {
@@ -505,6 +532,19 @@ impl Dictionaries {
     }
 }
 
+/// Whether `source`, of a language beside English, is asked for someone
+/// whose own language is `my`: a source of Russian translations only when
+/// the pair (its language, `my`) has it, any other kind always. No wildcard
+/// arm: a new kind does not compile until it is given its answer.
+fn asked_for(source: Source, my: Language) -> bool {
+    match source.kind() {
+        Kind::Russian => source
+            .language()
+            .is_some_and(|language| pairs::translations(language, my).contains(&source)),
+        Kind::Definitions | Kind::Synonyms | Kind::English | Kind::FromRussian => true,
+    }
+}
+
 /// The first open source of `language`, the one to name when an error
 /// cannot be told apart.
 fn asked_first(opened: &Opened, language: Language) -> Source {
@@ -524,9 +564,17 @@ impl Articles for Dictionaries {
     }
 
     fn look_up_in(&self, language: Language, word: &str) -> Looked {
+        self.look_up_for(language, Language::Ru, word)
+    }
+
+    fn look_up_for(&self, language: Language, my: Language, word: &str) -> Looked {
         match language {
-            Language::En => self.look_up(word),
-            Language::Es | Language::Ca => self.look_up_language(language, word),
+            Language::En => self.look_up_english(word, pairs::translations(language, my)),
+            Language::Es | Language::Ca => self.look_up_language(language, my, word),
+            Language::Ru => Looked {
+                answer: Answer::NotImported,
+                indexes: self.indexes(),
+            },
         }
     }
 
@@ -535,12 +583,37 @@ impl Articles for Dictionaries {
     }
 
     fn look_up(&self, word: &str) -> Looked {
+        self.look_up_for(Language::En, Language::Ru, word)
+    }
+}
+
+impl Dictionaries {
+    /// What the English indexes say about `word`, with the FreeDict
+    /// translations only when they are among `translating`, the sources of
+    /// the pair (English, my language). Without them only the definitions
+    /// index is read and answers: a word only FreeDict has is no entry, and
+    /// with no definitions index there is nothing to look it up in. Where
+    /// the indexes stand is said as by every call.
+    fn look_up_english(&self, word: &str, translating: &[Source]) -> Looked {
         let mut opened = self.open.lock().unwrap_or_else(PoisonError::into_inner);
         let mut indexes = self.open_missing(&mut opened);
         let combined = &mut opened.english;
         let [(definitions, _), (translations, _)] = indexes.files();
-        let answer = match (indexes.definitions, indexes.translations) {
-            (State::Open, _) | (_, State::Open) => match combined.article(word) {
+        let with_translations = translating.contains(&Source::Freedict);
+        let asked = if with_translations {
+            indexes.translations
+        } else {
+            State::Missing
+        };
+        let article = |combined: &Combined| {
+            if with_translations {
+                combined.article(word)
+            } else {
+                combined.definitions_article(word)
+            }
+        };
+        let answer = match (indexes.definitions, asked) {
+            (State::Open, _) | (_, State::Open) => match article(combined) {
                 Ok(Some(article)) => Answer::Article(article),
                 Ok(None) => Answer::NoEntry,
                 Err(error) => {
@@ -590,7 +663,7 @@ pub mod tests {
 
     use addict_core::{
         dictionary::{Article, Dictionary, Sample, Sense},
-        translation::Source as Language,
+        translation::{Source as Language, reading_languages},
     };
     use addict_dictionary::{
         format::{Contents, ExceptionForm, Headword, SenseRecord, encode},
@@ -1658,18 +1731,18 @@ pub mod tests {
             dictionaries.look_up_in(Language::Ca, "cerró").answer,
             Answer::NoEntry
         );
-        let (language, looked) = dictionaries.look_up_first(Language::Ca, "cerró");
+        let (language, looked) = dictionaries.look_up_first(Language::Ca, Language::Ru, "cerró");
         assert_eq!(language, Language::Es);
         assert_eq!(russian_of(&looked.answer), Some(texts(&["закрыть"])));
         assert_eq!(looked, dictionaries.look_up_in(Language::Es, "cerró"));
         // An English word read in Spanish or Catalan: English answers first.
         for chosen in [Language::Es, Language::Ca] {
-            let (language, looked) = dictionaries.look_up_first(chosen, "went");
+            let (language, looked) = dictionaries.look_up_first(chosen, Language::Ru, "went");
             assert_eq!(language, Language::En, "{chosen:?}");
             assert_eq!(looked, dictionaries.look_up("went"), "{chosen:?}");
         }
         // A Catalan word read in English.
-        let (language, looked) = dictionaries.look_up_first(Language::En, "banc");
+        let (language, looked) = dictionaries.look_up_first(Language::En, Language::Ru, "banc");
         assert_eq!(language, Language::Ca);
         assert_eq!(russian_of(&looked.answer), Some(texts(&["скамья"])));
     }
@@ -1706,7 +1779,7 @@ pub mod tests {
             );
             assert_eq!(grouped.definitions, Some(Vec::new()));
             assert!(direct.answer.metadata_only());
-            let (language, looked) = dictionaries.look_up_first(chosen, "bank");
+            let (language, looked) = dictionaries.look_up_first(chosen, Language::Ru, "bank");
             assert_eq!(language, Language::En);
             assert_eq!(looked.answer, dictionaries.look_up("bank").answer);
             assert!(
@@ -1729,7 +1802,7 @@ pub mod tests {
         let dictionaries = dir.dictionaries();
         assert!(dictionaries.look_up("bank").answer.metadata_only());
         for chosen in [Language::Ca, Language::En, Language::Es] {
-            let (language, looked) = dictionaries.look_up_first(chosen, "bank");
+            let (language, looked) = dictionaries.look_up_first(chosen, Language::Ru, "bank");
             assert_eq!(language, Language::Es);
             assert_eq!(russian_of(&looked.answer), Some(texts(&["банк"])));
             assert!(!looked.answer.metadata_only());
@@ -1748,8 +1821,8 @@ pub mod tests {
             dir.write(source, &metadata_only_contents(code, "bank"));
         }
         let dictionaries = dir.dictionaries();
-        for chosen in Language::ALL {
-            let (language, looked) = dictionaries.look_up_first(chosen, "bank");
+        for chosen in reading_languages(Language::Ru) {
+            let (language, looked) = dictionaries.look_up_first(chosen, Language::Ru, "bank");
             assert_eq!(language, chosen);
             assert_eq!(
                 looked.answer,
@@ -1762,7 +1835,7 @@ pub mod tests {
         dir.write(Source::DbnaryCa, &metadata_only_contents("ca", "another"));
         std::fs::write(dir.index(Source::KaikkiEs), b"damaged index").unwrap();
         let dictionaries = dir.dictionaries();
-        let (language, looked) = dictionaries.look_up_first(Language::Ca, "bank");
+        let (language, looked) = dictionaries.look_up_first(Language::Ca, Language::Ru, "bank");
         assert_eq!(language, Language::En);
         assert_eq!(looked.answer, dictionaries.look_up("bank").answer);
         assert!(looked.answer.metadata_only());
@@ -1780,11 +1853,14 @@ pub mod tests {
         );
         let dictionaries = dir.dictionaries();
         assert_eq!(
-            dictionaries.look_up_first(Language::Es, "bank").1.answer,
+            dictionaries
+                .look_up_first(Language::Es, Language::Ru, "bank")
+                .1
+                .answer,
             Answer::NotImported
         );
         std::fs::write(dir.index(Source::KaikkiEs), b"damaged index").unwrap();
-        let (language, looked) = dictionaries.look_up_first(Language::Es, "bank");
+        let (language, looked) = dictionaries.look_up_first(Language::Es, Language::Ru, "bank");
         assert_eq!(language, Language::Es);
         assert_eq!(looked.answer, Answer::Unreadable(SPANISH));
     }
@@ -1872,16 +1948,16 @@ pub mod tests {
     fn the_chosen_language_answers_a_word_it_has() {
         let dir = three_languages("chosen-wins", true);
         let dictionaries = dir.dictionaries();
-        let (language, looked) = dictionaries.look_up_first(Language::Es, "banco");
+        let (language, looked) = dictionaries.look_up_first(Language::Es, Language::Ru, "banco");
         assert_eq!(language, Language::Es);
         assert_eq!(russian_of(&looked.answer), Some(texts(&["банк"])));
-        let (language, looked) = dictionaries.look_up_first(Language::Ca, "banco");
+        let (language, looked) = dictionaries.look_up_first(Language::Ca, Language::Ru, "banco");
         assert_eq!(language, Language::Ca);
         assert_eq!(russian_of(&looked.answer), Some(texts(&["лавка"])));
         // English with the word: the same as the English lookup.
         for word in ["bank", "went", "Bank"] {
             assert_eq!(
-                dictionaries.look_up_first(Language::En, word),
+                dictionaries.look_up_first(Language::En, Language::Ru, word),
                 (Language::En, dictionaries.look_up(word)),
                 "{word}"
             );
@@ -1892,8 +1968,8 @@ pub mod tests {
     fn a_word_no_language_has_is_the_chosen_language_s_miss() {
         let dir = three_languages("nobody", true);
         let dictionaries = dir.dictionaries();
-        for chosen in Language::ALL {
-            let (language, looked) = dictionaries.look_up_first(chosen, "zzz");
+        for chosen in reading_languages(Language::Ru) {
+            let (language, looked) = dictionaries.look_up_first(chosen, Language::Ru, "zzz");
             assert_eq!(language, chosen);
             assert_eq!(looked.answer, Answer::NoEntry);
             assert_eq!(looked.indexes, dictionaries.indexes());
@@ -1904,7 +1980,7 @@ pub mod tests {
         dir.import(Source::Freedict);
         let dictionaries = dir.dictionaries();
         assert_eq!(
-            dictionaries.look_up_first(Language::En, "zzz"),
+            dictionaries.look_up_first(Language::En, Language::Ru, "zzz"),
             (Language::En, dictionaries.look_up("zzz"))
         );
     }
@@ -1919,13 +1995,13 @@ pub mod tests {
             &headwords("ca-ru", &[("banc", &[], &["скамья"])]),
         );
         let dictionaries = dir.dictionaries();
-        let (language, looked) = dictionaries.look_up_first(Language::Ca, "cerró");
+        let (language, looked) = dictionaries.look_up_first(Language::Ca, Language::Ru, "cerró");
         assert_eq!(language, Language::Ca);
         assert_eq!(looked.answer, Answer::NoEntry);
         assert_eq!(looked.indexes.spanish, State::Missing);
         // A damaged file of another language is passed over too.
         std::fs::write(dir.index(Source::WikdictEsRu), b"no index").expect("write");
-        let (language, looked) = dictionaries.look_up_first(Language::Ca, "cerró");
+        let (language, looked) = dictionaries.look_up_first(Language::Ca, Language::Ru, "cerró");
         assert_eq!(language, Language::Ca);
         assert_eq!(looked.answer, Answer::NoEntry);
         assert_eq!(looked.indexes.spanish, State::Unreadable);
@@ -1936,7 +2012,7 @@ pub mod tests {
         let dir = three_languages("chosen-unreadable", true);
         std::fs::write(dir.index(Source::KaikkiEs), b"no index").expect("write");
         let dictionaries = dir.dictionaries();
-        let (language, looked) = dictionaries.look_up_first(Language::Es, "went");
+        let (language, looked) = dictionaries.look_up_first(Language::Es, Language::Ru, "went");
         assert_eq!(language, Language::Es);
         assert_eq!(looked.answer, Answer::Unreadable(SPANISH));
     }
@@ -2005,6 +2081,299 @@ pub mod tests {
                 .iter()
                 .any(|source| RUSSIAN.contains(source))
         );
+    }
+
+    /// The answers of every reading language for `word` with Russian mine
+    /// are those of [`Articles::look_up_in`], as before my language was
+    /// asked.
+    fn as_before(dictionaries: &Dictionaries, word: &str) {
+        for language in Language::ALL {
+            assert_eq!(
+                dictionaries.look_up_for(language, Language::Ru, word),
+                dictionaries.look_up_in(language, word),
+                "{language:?} {word}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_russian_word_is_translated_into_the_source_of_its_pair() {
+        let dir = with_russian("russian-pair", &RUSSIAN);
+        let dictionaries = dir.dictionaries();
+        // English mine, Spanish pressed: `wikdict-ru-en` alone.
+        let into = crate::manual::russian_into(Language::Es, Language::En);
+        assert_eq!(into, Language::En);
+        assert_eq!(
+            dictionaries.look_up_russian(into, "Москва").answer,
+            Answer::FromRussian(texts(&["Moscow", "Moskva"]))
+        );
+        assert_eq!(
+            dictionaries.look_up_russian(into, "собака").answer,
+            Answer::NoEntry
+        );
+        // Russian mine: the pressed language's, as in 0.2.0.
+        let into = crate::manual::russian_into(Language::Ca, Language::Ru);
+        assert_eq!(into, Language::Ca);
+        assert_eq!(
+            dictionaries.look_up_russian(into, "ёж").answer,
+            Answer::FromRussian(texts(&["eriçó"]))
+        );
+        // Catalan mine, Russian pressed, and no `wikdict-ru-ca`.
+        let dir = with_russian("russian-pair-missing", &[Source::WikdictRuEn]);
+        let into = crate::manual::russian_into(Language::Ru, Language::Ca);
+        assert_eq!(into, Language::Ca);
+        assert_eq!(
+            dir.dictionaries().look_up_russian(into, "ёж").answer,
+            Answer::NotImported
+        );
+        // No pair of Russian with itself.
+        assert_eq!(
+            dictionaries.look_up_russian(Language::Ru, "ёж").answer,
+            Answer::NotImported
+        );
+    }
+
+    #[test]
+    fn a_spanish_word_has_no_russian_translations_for_another_language_mine() {
+        let dir = with_russian("spanish-pair", &[]);
+        let dictionaries = dir.dictionaries();
+        let Answer::Grouped(russian) = dictionaries
+            .look_up_for(Language::Es, Language::Ru, "banco")
+            .answer
+        else {
+            panic!("banco with Russian mine");
+        };
+        assert_eq!(russian.russian, Some(texts(&["банк"])));
+        for my in [Language::En, Language::Ca] {
+            let Answer::Grouped(banco) = dictionaries.look_up_for(Language::Es, my, "banco").answer
+            else {
+                panic!("banco with {my:?} mine");
+            };
+            // `wikdict-es-ru` is not asked; every other kind is.
+            assert_eq!(banco.russian, None, "{my:?}");
+            assert_eq!(
+                Grouped {
+                    russian: russian.russian.clone(),
+                    ..banco
+                },
+                russian,
+                "{my:?}"
+            );
+        }
+        let Answer::Grouped(colleccio) = dictionaries
+            .look_up_for(Language::Ca, Language::En, "col·lecció")
+            .answer
+        else {
+            panic!("col·lecció");
+        };
+        assert_eq!(colleccio.russian, None);
+        assert_eq!(colleccio.english, Some(texts(&["collection", "set"])));
+        // `banc` is only in `wikdict-ca-ru`.
+        assert_eq!(
+            dictionaries
+                .look_up_for(Language::Ca, Language::En, "banc")
+                .answer,
+            Answer::NoEntry
+        );
+        as_before(&dictionaries, "banco");
+        as_before(&dictionaries, "banc");
+        as_before(&dictionaries, "col·lecció");
+    }
+
+    #[test]
+    fn a_damaged_russian_index_is_not_named_for_another_language_mine() {
+        let dir = with_russian("damaged-pair", &[]);
+        std::fs::write(dir.index(Source::WikdictEsRu), b"no index").expect("write");
+        let dictionaries = dir.dictionaries();
+        let Answer::Grouped(banco) = dictionaries
+            .look_up_for(Language::Es, Language::En, "banco")
+            .answer
+        else {
+            panic!("banco with English mine");
+        };
+        assert_eq!(banco.russian, None);
+        assert!(banco.definitions.is_some());
+        assert_eq!(
+            dictionaries
+                .look_up_for(Language::Es, Language::Ru, "banco")
+                .answer,
+            Answer::Unreadable(IndexFile::of(Source::WikdictEsRu))
+        );
+    }
+
+    /// English mine, Spanish pressed, no network: `banco` from the indexes
+    /// to the texts of the window has English glosses and nothing Russian.
+    #[test]
+    fn banco_for_english_mine_shows_english_glosses_and_nothing_russian() {
+        use crate::view::{Listed, Translating, choice_texts};
+
+        let dir = with_russian("banco-english", &RUSSIAN);
+        let (language, looked) =
+            dir.dictionaries()
+                .look_up_first(Language::Es, Language::En, "banco");
+        assert_eq!(language, Language::Es);
+        let lookup = crate::manual::result_in(
+            addict_platform::work::Outcome::Finished(looked),
+            "banco",
+            language,
+        )
+        .expect("a result");
+        let texts = choice_texts(
+            &lookup,
+            None,
+            None,
+            None,
+            None,
+            Translating {
+                my: Language::En,
+                pressed: Language::Es,
+            },
+        );
+        let row = match &texts.translations {
+            Some(Listed::Items { label, items }) => format!("{label} {}", items.join(", ")),
+            Some(Listed::Missing(line)) => (*line).to_owned(),
+            None => String::new(),
+        };
+        let glosses = texts
+            .glosses
+            .as_ref()
+            .map_or_else(String::new, crate::view::GlossTexts::line);
+        let said = format!("{row}\n{glosses}");
+        assert!(said.contains("bank"), "{said}");
+        assert!(
+            !said
+                .chars()
+                .any(|letter| ('\u{0400}'..='\u{04ff}').contains(&letter)),
+            "{said}"
+        );
+        assert!(!said.contains("Russian"), "{said}");
+    }
+
+    #[test]
+    fn a_word_only_a_russian_index_has_is_no_entry_for_another_language_mine() {
+        let dir = with_russian("spanish-pair-only", &[]);
+        dir.write(
+            Source::WikdictEsRu,
+            &headwords("es-ru", &[("solo", &[], &["один"])]),
+        );
+        let dictionaries = dir.dictionaries();
+        let (language, looked) = dictionaries.look_up_first(Language::Es, Language::En, "solo");
+        assert_eq!(language, Language::Es);
+        assert_eq!(looked.answer, Answer::NoEntry);
+        // With Russian mine, `wikdict-es-ru` has it, as in 0.2.0.
+        let (language, looked) = dictionaries.look_up_first(Language::Es, Language::Ru, "solo");
+        assert_eq!(language, Language::Es);
+        let Answer::Grouped(solo) = looked.answer else {
+            panic!("solo");
+        };
+        assert_eq!(solo.russian, Some(texts(&["один"])));
+        // A language with only that index has nothing to look it up in.
+        let only = DataDir::new("spanish-pair-alone");
+        only.write(
+            Source::WikdictEsRu,
+            &headwords("es-ru", &[("solo", &[], &["один"])]),
+        );
+        let alone = only.dictionaries();
+        assert_eq!(
+            alone.look_up_for(Language::Es, Language::En, "solo").answer,
+            Answer::NotImported
+        );
+        assert!(matches!(
+            alone.look_up_for(Language::Es, Language::Ru, "solo").answer,
+            Answer::Grouped(_)
+        ));
+    }
+
+    #[test]
+    fn an_english_word_has_no_freedict_translations_for_another_language_mine() {
+        let dir = DataDir::new("english-pair");
+        dir.import(Source::Oewn);
+        dir.write(
+            Source::Freedict,
+            &headwords(
+                "freedict",
+                &[
+                    ("bank", &[], &["берег", "банк"]),
+                    ("despite", &[], &["несмотря на"]),
+                ],
+            ),
+        );
+        let dictionaries = dir.dictionaries();
+        let Answer::Article(russian) = dictionaries
+            .look_up_for(Language::En, Language::Ru, "bank")
+            .answer
+        else {
+            panic!("bank with Russian mine");
+        };
+        assert_eq!(russian.translations, texts(&["берег", "банк"]));
+        for my in [Language::Es, Language::Ca, Language::En] {
+            let looked = dictionaries.look_up_for(Language::En, my, "bank");
+            let Answer::Article(bank) = looked.answer else {
+                panic!("bank with {my:?} mine");
+            };
+            assert_eq!(bank.translations, Vec::<String>::new(), "{my:?}");
+            assert_eq!(bank.senses, russian.senses, "{my:?}");
+            // The state of FreeDict is said as always.
+            assert_eq!(looked.indexes, dictionaries.indexes(), "{my:?}");
+            // A word only FreeDict has: no entry, FreeDict not asked.
+            assert_eq!(
+                dictionaries.look_up_for(Language::En, my, "despite").answer,
+                Answer::NoEntry,
+                "{my:?}"
+            );
+            // Its dictionary form too: `went` is `go` through OEWN.
+            assert!(matches!(
+                dictionaries.look_up_for(Language::En, my, "went").answer,
+                Answer::Article(_)
+            ));
+        }
+        assert!(matches!(
+            dictionaries
+                .look_up_for(Language::En, Language::Ru, "despite")
+                .answer,
+            Answer::Article(_)
+        ));
+        // English mine, a word Spanish lacks found in English, without
+        // FreeDict's translations.
+        let every = with_russian("english-pair-fallback", &[]);
+        let (language, looked) =
+            every
+                .dictionaries()
+                .look_up_first(Language::Es, Language::En, "went");
+        assert_eq!(language, Language::En);
+        let Answer::Article(went) = looked.answer else {
+            panic!("went by fallback");
+        };
+        assert!(went.translations.is_empty());
+        let (_, looked) = every
+            .dictionaries()
+            .look_up_first(Language::Es, Language::Ru, "went");
+        let Answer::Article(went) = looked.answer else {
+            panic!("went by fallback");
+        };
+        assert_eq!(went.translations, texts(&["идти"]));
+        as_before(&dictionaries, "bank");
+        as_before(&dictionaries, "despite");
+        // FreeDict alone is nothing to look a word up in for Spanish mine,
+        // and its damage is not named.
+        let only = DataDir::new("english-pair-freedict");
+        only.import(Source::Freedict);
+        let alone = only.dictionaries();
+        assert_eq!(
+            alone.look_up_for(Language::En, Language::Es, "bank").answer,
+            Answer::NotImported
+        );
+        let damaged = DataDir::new("english-pair-damaged");
+        damaged.import(Source::Oewn);
+        std::fs::write(damaged.index(Source::Freedict), b"no index").expect("write");
+        assert!(matches!(
+            damaged
+                .dictionaries()
+                .look_up_for(Language::En, Language::Es, "bank")
+                .answer,
+            Answer::Article(_)
+        ));
+        as_before(&damaged.dictionaries(), "bank");
     }
 
     #[test]

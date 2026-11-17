@@ -14,19 +14,23 @@
 
   <description>
     <p>
-      Addict is a hotkey translator for readers of English, Spanish and
-      Catalan. Select or copy a word or a sentence anywhere, press the
-      shortcut, and a small window shows the dictionary article of the word:
-      its senses, synonyms, transcriptions with recordings, and its Russian
-      translations.
+      Addict is a hotkey translator for readers of English, Spanish, Catalan
+      and Russian. Choose your own language, the language of translation, in
+      Settings; the other three are the languages you read. Select or copy a
+      word or a sentence anywhere, press the shortcut, and a small window
+      shows the dictionary article of the word: its senses, synonyms,
+      transcriptions with recordings, and its translations into your
+      language.
     </p>
     <ul>
       <li>A clipboard shortcut reads the selected text, or the clipboard when nothing is selected, the same way in every application</li>
+      <li>Your language is English, Spanish, Catalan or Russian, chosen in Settings, with US or British spelling for English</li>
       <li>Offline dictionary lookup in English, Spanish and Catalan, by the word as written and by its dictionary forms</li>
-      <li>Russian translations from the dictionaries and, online with a DeepL API key, of the clicked word in the context of its sentence and of the sentence itself</li>
+      <li>Online translations into your language with a DeepL API key, between any two of the four languages, of the clicked word in the context of its sentence and of the sentence itself</li>
+      <li>Offline translations from the dictionaries between Russian and English, Spanish or Catalan, and English glosses of Spanish and Catalan words</li>
       <li>A separate screenshot shortcut opens a region picker to read text in an image or a video with Tesseract OCR; assign its key in Settings</li>
       <li>Normal launches show the main window, with Settings available directly; use --background for a silent login launch</li>
-      <li>A Russian word is looked up the other way: its translations into the reading language</li>
+      <li>A Russian word is translated into your language, or, with Russian as your language, into the reading language</li>
     </ul>
   </description>
 

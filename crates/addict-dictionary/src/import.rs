@@ -159,13 +159,15 @@ impl Source {
         }
     }
 
-    /// The source of Russian headwords translated into `language`. No
-    /// wildcard arm: a new language does not compile until it is given one.
-    pub fn from_russian(language: Language) -> Self {
+    /// The source of Russian headwords translated into `language`; none
+    /// for Russian itself. No wildcard arm: a new language does not compile
+    /// until it is given one.
+    pub fn from_russian(language: Language) -> Option<Self> {
         match language {
-            Language::En => Self::WikdictRuEn,
-            Language::Es => Self::WikdictRuEs,
-            Language::Ca => Self::WikdictRuCa,
+            Language::En => Some(Self::WikdictRuEn),
+            Language::Es => Some(Self::WikdictRuEs),
+            Language::Ca => Some(Self::WikdictRuCa),
+            Language::Ru => None,
         }
     }
 
@@ -1005,6 +1007,7 @@ mod tests {
         testdir::TempDir,
         wikdict::tests::database as wikdict,
     };
+    use addict_core::translation::reading_languages;
 
     fn os(text: &str) -> Option<OsString> {
         Some(OsString::from(text))
@@ -2420,12 +2423,13 @@ mod tests {
                 ),
             ]
         );
-        for language in Language::ALL {
+        for language in reading_languages(Language::Ru) {
             assert_eq!(
-                Source::from_russian(language).russian_into(),
+                Source::from_russian(language).and_then(Source::russian_into),
                 Some(language)
             );
         }
+        assert_eq!(Source::from_russian(Language::Ru), None);
         // The ten other sources read a language and translate no Russian.
         for known in &KNOWN[..10] {
             assert!(known.source.language().is_some(), "{:?}", known.source);

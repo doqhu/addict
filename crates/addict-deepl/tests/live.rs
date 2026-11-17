@@ -1,6 +1,10 @@
 //! The live check of the user's key: asks DeepL itself, so it runs only when
 //! asked for, with `cargo test -p addict-deepl -- --ignored --nocapture`.
+//! The same command sends a word in its sentence for every ordered pair of
+//! the four languages, and a Spanish sentence to US and to British
+//! English.
 
+use addict_core::translation::{English, Request, Source, Translator};
 use addict_deepl::DeepL;
 
 #[tokio::test]
@@ -25,4 +29,66 @@ async fn the_key_of_the_user_reads_the_languages_and_the_usage() {
     );
     assert!(en.usable_as_source);
     assert!(ru.usable_as_target);
+}
+
+/// The word and its sentence of every language, as the spike sent them.
+const WORDS: [(Source, &str, &str); 4] = [
+    (Source::En, "red", "I like the colour red."),
+    (Source::Es, "rojo", "Me gusta el color rojo."),
+    (Source::Ca, "vermell", "M'agrada el color vermell."),
+    (Source::Ru, "красный", "Мне нравится красный цвет."),
+];
+
+#[tokio::test]
+#[ignore = "calls DeepL with the key of ~/.config/addict/deepl.key"]
+async fn every_ordered_pair_translates_a_word_in_its_sentence() {
+    let client = DeepL::new();
+    let mut pairs = 0;
+    for (source, word, sentence) in WORDS {
+        for target in Source::ALL {
+            if target == source {
+                continue;
+            }
+            let request = Request {
+                text: word.to_owned(),
+                context: Some(sentence.to_owned()),
+                source,
+                target,
+                english: English::Us,
+            };
+            let answer = Translator::translate(&client, request).await;
+            println!(
+                "{} -> {}: {word} in “{sentence}”: {answer:?}",
+                source.code(),
+                target.code()
+            );
+            let answer = answer
+                .unwrap_or_else(|refusal| panic!("{source:?} -> {target:?} refused: {refusal:?}"));
+            assert!(!answer.trim().is_empty(), "{source:?} -> {target:?}");
+            pairs += 1;
+        }
+    }
+    assert_eq!(pairs, 12);
+}
+
+#[tokio::test]
+#[ignore = "calls DeepL with the key of ~/.config/addict/deepl.key"]
+async fn us_and_british_english_spell_the_colour_their_own_way() {
+    let client = DeepL::new();
+    for (english, spelling) in [(English::Us, "color"), (English::Gb, "colour")] {
+        let request = Request {
+            text: "Me gusta el color rojo".to_owned(),
+            context: None,
+            source: Source::Es,
+            target: Source::En,
+            english,
+        };
+        let answer = Translator::translate(&client, request).await;
+        println!("es -> en {}: {answer:?}", english.code());
+        let answer = answer.unwrap_or_else(|refusal| panic!("{english:?} refused: {refusal:?}"));
+        assert!(
+            answer.to_lowercase().contains(spelling),
+            "{english:?}: {answer:?}"
+        );
+    }
 }

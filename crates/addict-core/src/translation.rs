@@ -1,9 +1,12 @@
 //! The online translator contract: a text in the language of its
-//! [`Source`] and an optional context in, the Russian text or a [`Refusal`]
-//! out.
+//! [`Source`] and an optional context in, the text in the language of its
+//! target or a [`Refusal`] out.
 //!
-//! The language of a request is named in one place, [`Request::source`]:
-//! English, Spanish or Catalan. The target is always Russian.
+//! The languages of a request are named in one place each:
+//! [`Request::source`] and [`Request::target`], both of English, Spanish,
+//! Catalan and Russian. Every caller asks for my language, the one the
+//! user chose, as the target. An English target is spelled as
+//! [`Request::english`] says, US or British; any other target ignores it.
 //!
 //! [`Translator::translate`] gives a future and runs nothing itself: core has
 //! no runtime, and running the future off the UI thread, under a deadline, is
@@ -13,27 +16,30 @@
 
 use std::{future::Future, pin::Pin};
 
-/// The language a text is read in and translated from. English is the
-/// default.
+/// A language a text is read in, translated from or translated to.
+/// English is the default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Source {
     #[default]
     En,
     Es,
     Ca,
+    Ru,
 }
 
 impl Source {
-    /// Every language, in the order the window offers them.
-    pub const ALL: [Source; 3] = [Source::En, Source::Es, Source::Ca];
+    /// Every language: the three the window offers, then Russian.
+    pub const ALL: [Source; 4] = [Source::En, Source::Es, Source::Ca, Source::Ru];
 
-    /// The lowercase code of the language: `en`, `es` or `ca`. No wildcard
-    /// arm: a new language does not compile until it is given its code.
+    /// The lowercase code of the language: `en`, `es`, `ca` or `ru`. No
+    /// wildcard arm: a new language does not compile until it is given its
+    /// code.
     pub fn code(self) -> &'static str {
         match self {
             Source::En => "en",
             Source::Es => "es",
             Source::Ca => "ca",
+            Source::Ru => "ru",
         }
     }
 
@@ -41,6 +47,48 @@ impl Source {
     /// other text is none.
     pub fn of_code(code: &str) -> Option<Source> {
         Source::ALL.into_iter().find(|source| source.code() == code)
+    }
+}
+
+/// The languages read in by someone whose own language is `my`: every
+/// language but `my`, in the order of [`Source::ALL`]. With Russian, they
+/// are the three the window offers.
+pub fn reading_languages(my: Source) -> [Source; 3] {
+    let mut languages = [Source::En; 3];
+    let others = Source::ALL.into_iter().filter(|language| *language != my);
+    for (slot, language) in languages.iter_mut().zip(others) {
+        *slot = language;
+    }
+    languages
+}
+
+/// The spelling of an English target: US, the default, or British.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum English {
+    #[default]
+    Us,
+    Gb,
+}
+
+impl English {
+    /// Every variant: US, then British.
+    pub const ALL: [English; 2] = [English::Us, English::Gb];
+
+    /// The lowercase code of the variant: `us` or `gb`. No wildcard arm: a
+    /// new variant does not compile until it is given its code.
+    pub fn code(self) -> &'static str {
+        match self {
+            English::Us => "us",
+            English::Gb => "gb",
+        }
+    }
+
+    /// The variant of `code`, as [`English::code`] writes it, exactly; any
+    /// other text is none.
+    pub fn of_code(code: &str) -> Option<English> {
+        English::ALL
+            .into_iter()
+            .find(|english| english.code() == code)
     }
 }
 
@@ -63,6 +111,10 @@ pub struct Request {
     pub context: Option<String>,
     /// The language of `text` and `context`.
     pub source: Source,
+    /// The language `text` is translated to.
+    pub target: Source,
+    /// The spelling of an English target; ignored for any other.
+    pub english: English,
 }
 
 /// Why a request gave no translation.
@@ -92,11 +144,11 @@ pub enum Refusal {
 /// The pending answer of a translator.
 pub type Translating<'a> = Pin<Box<dyn Future<Output = Result<String, Refusal>> + Send + 'a>>;
 
-/// An online translator from the language of a request into Russian. It is
-/// shared with the thread that runs the requests.
+/// An online translator from the language of a request into its target. It
+/// is shared with the thread that runs the requests.
 pub trait Translator: Send + Sync {
-    /// The Russian text for `request`. Nothing happens until the future is
-    /// polled, and dropping it gives the request up.
+    /// The text in the target language for `request`. Nothing happens until
+    /// the future is polled, and dropping it gives the request up.
     fn translate(&self, request: Request) -> Translating<'_>;
 }
 
@@ -148,13 +200,18 @@ mod tests {
         task::{Context, Poll, Waker},
     };
 
-    use super::{Canned, Refusal, Request, Source, Translating, Translator, is_russian};
+    use super::{
+        Canned, English, Refusal, Request, Source, Translating, Translator, is_russian,
+        reading_languages,
+    };
 
     fn request() -> Request {
         Request {
             text: "bank".to_owned(),
             context: Some("I sat on the bank of the river.".to_owned()),
             source: Source::En,
+            target: Source::Ru,
+            english: English::Us,
         }
     }
 
@@ -191,13 +248,55 @@ mod tests {
 
     #[test]
     fn every_language_has_its_own_code_and_is_found_by_it() {
-        assert_eq!(Source::ALL.map(Source::code), ["en", "es", "ca"]);
+        assert_eq!(Source::ALL.map(Source::code), ["en", "es", "ca", "ru"]);
         for source in Source::ALL {
             assert_eq!(Source::of_code(source.code()), Some(source));
         }
-        for other in ["", "fr", "EN", " en", "es\n", "en-GB"] {
+        assert_eq!(Source::Ru.code(), "ru");
+        assert_eq!(Source::of_code("ru"), Some(Source::Ru));
+        for other in ["", "fr", "EN", " en", "es\n", "en-GB", "RU", "rus"] {
             assert_eq!(Source::of_code(other), None, "{other:?}");
         }
+    }
+
+    #[test]
+    fn every_english_variant_has_its_own_code_and_us_is_the_default() {
+        assert_eq!(English::default(), English::Us);
+        assert_eq!(English::ALL.map(English::code), ["us", "gb"]);
+        for english in English::ALL {
+            assert_eq!(English::of_code(english.code()), Some(english));
+        }
+        for other in ["", "GB", "US", "uk", "en-GB", " gb", "gb\n", "en"] {
+            assert_eq!(English::of_code(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn the_reading_languages_are_every_language_but_mine_in_order() {
+        use Source::{Ca, En, Es, Ru};
+        assert_eq!(reading_languages(Ru), [En, Es, Ca]);
+        assert_eq!(reading_languages(En), [Es, Ca, Ru]);
+        assert_eq!(reading_languages(Es), [En, Ca, Ru]);
+        assert_eq!(reading_languages(Ca), [En, Es, Ru]);
+        for my in Source::ALL {
+            assert!(!reading_languages(my).contains(&my), "{my:?}");
+        }
+    }
+
+    #[test]
+    fn a_request_keeps_its_target() {
+        let translator = Canned::new(Ok("bank"));
+        let english = Request {
+            text: "banco".to_owned(),
+            context: None,
+            source: Source::Es,
+            target: Source::En,
+            english: English::Gb,
+        };
+        drop(ready(translator.translate(english.clone())));
+        assert_eq!(translator.asked(), [english]);
+        assert_eq!(translator.asked()[0].target, Source::En);
+        assert_eq!(translator.asked()[0].english, English::Gb);
     }
 
     #[test]
@@ -207,6 +306,8 @@ mod tests {
             text: "banco".to_owned(),
             context: Some("El banco cerró a las tres.".to_owned()),
             source: Source::Es,
+            target: Source::Ru,
+            english: English::Us,
         };
         assert_eq!(
             ready(translator.translate(spanish.clone())),

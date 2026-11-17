@@ -5,7 +5,7 @@ mod common;
 
 use std::{sync::Arc, time::Duration};
 
-use addict_core::translation::{Refusal, Request, Source, Translator};
+use addict_core::translation::{English, Refusal, Request, Source, Translator};
 use addict_deepl::{
     DeepL, Language, Usage,
     stub::{Reply, Stub},
@@ -24,6 +24,8 @@ fn request() -> Request {
         text: "bank".to_owned(),
         context: Some(SENTENCE.to_owned()),
         source: Source::En,
+        target: Source::Ru,
+        english: English::Us,
     }
 }
 
@@ -67,6 +69,8 @@ async fn a_request_without_a_context_sends_none() {
         text: "bank".to_owned(),
         context: None,
         source: Source::En,
+        target: Source::Ru,
+        english: English::Us,
     };
     assert_eq!(client.translate(&request).await, Ok("банк".to_owned()));
     let body: serde_json::Value = serde_json::from_str(&stub.seen()[0].body).expect("JSON");
@@ -84,6 +88,8 @@ async fn a_spanish_word_with_its_sentence_is_sent_from_es() {
         text: "banco".to_owned(),
         context: Some(sentence.to_owned()),
         source: Source::Es,
+        target: Source::Ru,
+        english: English::Us,
     };
     assert_eq!(client.translate(&request).await, Ok("банк".to_owned()));
     let body: serde_json::Value = serde_json::from_str(&stub.seen()[0].body).expect("JSON");
@@ -106,6 +112,8 @@ async fn a_catalan_sentence_is_sent_from_ca_without_context() {
         text: "La col·lecció d'art.".to_owned(),
         context: None,
         source: Source::Ca,
+        target: Source::Ru,
+        english: English::Us,
     };
     assert_eq!(
         client.translate(&request).await,
@@ -121,6 +129,38 @@ async fn a_catalan_sentence_is_sent_from_ca_without_context() {
             "model_type": "prefer_quality_optimized",
         })
     );
+}
+
+#[tokio::test]
+async fn the_target_of_a_request_reaches_the_wire() {
+    for (target, english, code) in [
+        (Source::En, English::Us, "EN-US"),
+        (Source::En, English::Gb, "EN-GB"),
+        (Source::Es, English::Us, "ES"),
+        (Source::Ca, English::Us, "CA"),
+        (Source::Ru, English::Us, "RU"),
+    ] {
+        let (_dir, stub, client) = asking(&format!("target-{code}"), Reply::translation("x"));
+        let request = Request {
+            text: "banco".to_owned(),
+            context: None,
+            source: Source::Es,
+            target,
+            english,
+        };
+        assert_eq!(client.translate(&request).await, Ok("x".to_owned()));
+        let body: serde_json::Value = serde_json::from_str(&stub.seen()[0].body).expect("JSON");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "text": ["banco"],
+                "source_lang": "ES",
+                "target_lang": code,
+                "model_type": "prefer_quality_optimized",
+            }),
+            "{target:?} {english:?}"
+        );
+    }
 }
 
 #[tokio::test]
