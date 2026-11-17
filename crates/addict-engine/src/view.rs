@@ -4011,12 +4011,11 @@ mod tests {
                 let indexes = Indexes {
                     definitions,
                     translations,
-                    spanish: State::Missing,
-                    catalan: State::Missing,
+                    ..Indexes::MISSING
                 };
                 assert_eq!(
                     indexes_text(indexes, Language::Ru).is_empty(),
-                    indexes == Indexes::OPEN,
+                    indexes.files() == Indexes::OPEN.files(),
                     "{indexes:?}"
                 );
             }
@@ -4025,15 +4024,7 @@ mod tests {
 
     #[test]
     fn with_nothing_imported_the_line_says_so_and_names_both_files() {
-        let line = indexes_text(
-            Indexes {
-                definitions: State::Missing,
-                translations: State::Missing,
-                spanish: State::Missing,
-                catalan: State::Missing,
-            },
-            Language::Ru,
-        );
+        let line = indexes_text(Indexes::MISSING, Language::Ru);
         assert_eq!(
             line,
             "The dictionaries are not imported. Use Settings → Download dictionaries, or import each downloaded file through \
@@ -4050,8 +4041,7 @@ mod tests {
                     Indexes {
                         definitions,
                         translations,
-                        spanish: State::Missing,
-                        catalan: State::Missing,
+                        ..Indexes::MISSING
                     },
                     Language::Ru,
                 );
@@ -4088,8 +4078,7 @@ mod tests {
             Indexes {
                 definitions: State::Open,
                 translations: State::Missing,
-                spanish: State::Missing,
-                catalan: State::Missing,
+                ..Indexes::MISSING
             },
             Language::Ru,
         );
@@ -4102,8 +4091,7 @@ mod tests {
             Indexes {
                 definitions: State::Unreadable,
                 translations: State::Open,
-                spanish: State::Missing,
-                catalan: State::Missing,
+                ..Indexes::MISSING
             },
             Language::Ru,
         );
@@ -5469,8 +5457,7 @@ mod tests {
                 let english = Indexes {
                     definitions,
                     translations,
-                    spanish: State::Missing,
-                    catalan: State::Missing,
+                    ..Indexes::MISSING
                 };
                 for spanish in STATES {
                     assert_eq!(
@@ -6763,8 +6750,7 @@ mod tests {
             let freedict_missing = Indexes {
                 definitions: State::Open,
                 translations: State::Missing,
-                spanish: State::Missing,
-                catalan: State::Missing,
+                ..Indexes::MISSING
             };
             let both_missing = Indexes {
                 definitions: State::Missing,
@@ -6876,8 +6862,7 @@ mod tests {
                     Indexes {
                         definitions,
                         translations: State::Missing,
-                        spanish: State::Missing,
-                        catalan: State::Missing,
+                        ..Indexes::MISSING
                     },
                     my,
                 ));

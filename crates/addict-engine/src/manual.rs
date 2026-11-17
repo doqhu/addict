@@ -1624,10 +1624,11 @@ pub(crate) mod tests {
     struct Answering(Answer);
 
     const TRANSLATIONS_ONLY: Indexes = Indexes {
-        definitions: State::Missing,
         translations: State::Open,
-        spanish: State::Missing,
-        catalan: State::Missing,
+        presence: Indexes::MISSING
+            .presence
+            .with(addict_dictionary::import::Source::Freedict),
+        ..Indexes::MISSING
     };
 
     impl Articles for Answering {

@@ -1,11 +1,10 @@
 //! The first-run offer to download the published dictionaries.
 //!
-//! The offer is due when no index is there, of any language, and the user
-//! has not answered it before: the choice file, `first-run-download` in the
+//! The offer is due when all indexes required for my language are missing
+//! and the user has not declined it. The choice file, `first-run-download` in the
 //! product's configuration directory ([`addict_deepl::key::config_dir`]),
 //! holds `declined` once Not now was pressed. Download writes no choice: an
-//! install that fails is offered again at the next start, and one that
-//! succeeds leaves an index, so nothing is offered again.
+//! required index that is open or unreadable suppresses the next offer.
 //!
 //! The dialog lists every index of the manifest, which is fetched before it
 //! shows, with its size. Download installs them one after another, as a
@@ -23,6 +22,7 @@ use std::{
     time::Duration,
 };
 
+use addict_core::translation::Source as Language;
 use addict_dictionary::{
     release::{self, Manifest, Published},
     sources,
@@ -30,7 +30,7 @@ use addict_dictionary::{
 use gtk::{glib, prelude::*};
 
 use crate::{
-    dictionaries::{Indexes, State},
+    dictionaries::Indexes,
     download::{DownloadError, Downloader},
     settings::label,
 };
@@ -173,32 +173,24 @@ pub fn write(path: Option<&Path>) -> io::Result<()> {
     fs::write(path, format!("{DECLINED}\n"))
 }
 
-/// Whether the offer is due: every index is missing, none merely
-/// unreadable, and the user has not `chosen` before.
-pub fn should_offer(indexes: &Indexes, chosen: bool) -> bool {
-    let Indexes {
-        definitions,
-        translations,
-        spanish,
-        catalan,
-    } = *indexes;
-    !chosen
-        && [definitions, translations, spanish, catalan]
-            .iter()
-            .all(|state| *state == State::Missing)
+/// Whether the offer is due for `my`: every required index is missing and
+/// the user has not declined.
+pub fn should_offer(indexes: &Indexes, my: Language, chosen: bool) -> bool {
+    !chosen && indexes.required_indexes_missing(my)
 }
 
-/// The manifest to offer from, when the offer is due for `indexes` and the
-/// `chosen` answer: `Ok(None)` when it is not due, which asks nothing of
+/// The manifest to offer from, when the offer is due for `my` given the
+/// `indexes` and the `chosen` answer: `Ok(None)` when it is not due, which asks nothing of
 /// `downloader`, and an error when the manifest cannot be had or lists no
 /// index, which shows no dialog and keeps no choice, so the next start asks
 /// again.
 pub async fn offered_manifest(
     indexes: Indexes,
+    my: Language,
     chosen: bool,
     downloader: &Downloader,
 ) -> Result<Option<Manifest>, DownloadError> {
-    if !should_offer(&indexes, chosen) {
+    if !should_offer(&indexes, my, chosen) {
         return Ok(None);
     }
     let manifest = downloader.manifest().await?;
@@ -1242,13 +1234,6 @@ mod tests {
         }
     }
 
-    const MISSING: Indexes = Indexes {
-        definitions: State::Missing,
-        translations: State::Missing,
-        spanish: State::Missing,
-        catalan: State::Missing,
-    };
-
     /// A missing or garbled manifest gives an error, so no dialog shows and
     /// nothing is kept; with an index or a choice, the release is not asked.
     #[tokio::test]
@@ -1260,7 +1245,7 @@ mod tests {
         let manifest_path = format!("/{}/{}", release::tag(), release::MANIFEST_2);
         let empty = Stub::start(HashMap::new()).expect("the stub");
         let downloader = Downloader::with_base_url(empty.base_url());
-        let error = offered_manifest(MISSING, false, &downloader)
+        let error = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader)
             .await
             .expect_err("no manifest");
         assert!(
@@ -1274,7 +1259,7 @@ mod tests {
         )]))
         .expect("the stub");
         let downloader = Downloader::with_base_url(garbled.base_url());
-        let error = offered_manifest(MISSING, false, &downloader)
+        let error = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader)
             .await
             .expect_err("garbled");
         assert!(matches!(error, DownloadError::Manifest { .. }), "{error:?}");
@@ -1290,7 +1275,7 @@ mod tests {
         )]))
         .expect("the stub");
         let downloader = Downloader::with_base_url(empty_list.base_url());
-        let error = offered_manifest(MISSING, false, &downloader)
+        let error = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader)
             .await
             .expect_err("no index");
         assert!(matches!(error, DownloadError::Manifest { .. }), "{error:?}");
@@ -1306,15 +1291,11 @@ mod tests {
         )]))
         .expect("the stub");
         let downloader = Downloader::with_base_url(good.base_url());
-        let due = offered_manifest(MISSING, false, &downloader).await;
+        let due = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader).await;
         assert_eq!(due.expect("due"), Some(published));
         assert_eq!(good.seen().len(), 1);
-        let installed = Indexes {
-            definitions: State::Open,
-            ..MISSING
-        };
-        for (indexes, chosen) in [(MISSING, true), (installed, false)] {
-            let due = offered_manifest(indexes, chosen, &downloader).await;
+        for (indexes, chosen) in [(Indexes::MISSING, true), (Indexes::OPEN, false)] {
+            let due = offered_manifest(indexes, Language::Ru, chosen, &downloader).await;
             assert_eq!(due.expect("not due"), None);
         }
         assert_eq!(good.seen().len(), 1, "the release is asked only when due");
@@ -1355,7 +1336,9 @@ mod tests {
             };
             let stub = Stub::start(routes).unwrap();
             let downloader = Downloader::with_base_url(stub.base_url());
-            let offer = offered_manifest(MISSING, false, &downloader).await.unwrap();
+            let offer = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader)
+                .await
+                .unwrap();
             assert_eq!(offer.as_ref(), Some(expected));
             assert_eq!(stub.seen(), requests);
 
@@ -1629,32 +1612,49 @@ mod tests {
     }
 
     #[test]
-    fn the_offer_is_due_only_with_every_index_missing_and_no_choice() {
-        assert!(should_offer(&MISSING, false));
-        assert!(!should_offer(&MISSING, true));
-        for state in [State::Open, State::Unreadable] {
-            for indexes in [
-                Indexes {
-                    definitions: state,
-                    ..MISSING
-                },
-                Indexes {
-                    translations: state,
-                    ..MISSING
-                },
-                Indexes {
-                    spanish: state,
-                    ..MISSING
-                },
-                Indexes {
-                    catalan: state,
-                    ..MISSING
-                },
-            ] {
-                assert!(!should_offer(&indexes, false), "{indexes:?}");
-            }
+    fn the_offer_checks_only_required_indexes_and_respects_decline() {
+        use addict_dictionary::{
+            format::{Contents, encode},
+            pairs,
+        };
+        use addict_engine::dictionaries::{Articles, Dictionaries};
+
+        let dir = TempDir::new("required-offer");
+        let dictionaries = Dictionaries::new(Some(dir.0.clone()));
+        let empty = dictionaries.indexes();
+        for my in Language::ALL {
+            assert!(should_offer(&empty, my, false));
+            assert!(!should_offer(&empty, my, true));
         }
-        assert!(!should_offer(&Indexes::OPEN, false));
+
+        let install = |name: &str| {
+            let index = encode(&Contents {
+                source: name.to_owned(),
+                headwords: Vec::new(),
+                senses: Vec::new(),
+                forms: Vec::new(),
+                analyses: Vec::new(),
+            })
+            .expect("encode");
+            fs::write(dir.0.join(format!("{name}.index")), index).expect("install");
+        };
+        install("wikdict-ru-es");
+        let indexes = dictionaries.indexes();
+        assert!(should_offer(&indexes, Language::En, false));
+        assert!(!should_offer(&indexes, Language::En, true));
+        assert!(!should_offer(&indexes, Language::Ru, false));
+
+        let oewn = dir.0.join("oewn.index");
+        fs::write(&oewn, b"not an index").expect("write corrupt index");
+        assert!(!should_offer(&dictionaries.indexes(), Language::En, false));
+        install("oewn");
+        assert!(!should_offer(&dictionaries.indexes(), Language::En, false));
+
+        for name in pairs::required_index_names(Language::En) {
+            install(name);
+        }
+        assert!(!dir.0.join("wikdict-ca-es.index").exists());
+        assert!(!should_offer(&dictionaries.indexes(), Language::En, false));
     }
 
     #[test]

@@ -16,7 +16,10 @@
 
 use addict_core::translation::Source as Language;
 
-use crate::import::Source;
+use crate::{
+    import::{KNOWN, Kind, Source},
+    sources,
+};
 
 /// The translation sources of one ordered pair of distinct languages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,10 +106,109 @@ pub fn translations(reading: Language, my: Language) -> &'static [Source] {
         .map_or(&[], |pair| pair.sources)
 }
 
+/// The article and English gloss sources, plus translations into and out of
+/// `my`, in source row order.
+pub fn required_sources(my: Language) -> impl Iterator<Item = Source> {
+    sources::ROWS.iter().filter_map(move |row| {
+        let source = KNOWN
+            .iter()
+            .map(|known| known.source)
+            .find(|&source| sources::row(source).index == row.index)?;
+        match source.kind() {
+            Kind::Definitions | Kind::Synonyms | Kind::English => Some(source),
+            Kind::Translation(_) | Kind::FromRussian => PAIRS
+                .iter()
+                .any(|pair| (pair.my == my || pair.reading == my) && pair.sources.contains(&source))
+                .then_some(source),
+        }
+    })
+}
+
+/// Manifest names of the indexes required for `my`, in source row order.
+pub fn required_index_names(my: Language) -> impl Iterator<Item = &'static str> {
+    required_sources(my).map(|source| sources::row(source).index)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::import::Kind;
+
+    #[test]
+    fn required_index_inventories() {
+        let english = [
+            "oewn",
+            "freedict",
+            "kaikki-es-Espanol",
+            "omw-es",
+            "kaikki-en-Spanish",
+            "dbnary-ca",
+            "sinonims-cat",
+            "kaikki-en-Catalan",
+            "wikdict-ru-en",
+            "wikdict-en-es",
+            "wikdict-en-ca",
+            "wikdict-es-en",
+            "wikdict-ca-en",
+        ];
+        let spanish = [
+            "oewn",
+            "wikdict-es-ru",
+            "kaikki-es-Espanol",
+            "omw-es",
+            "kaikki-en-Spanish",
+            "dbnary-ca",
+            "sinonims-cat",
+            "kaikki-en-Catalan",
+            "wikdict-ru-es",
+            "wikdict-es-ca",
+            "wikdict-en-es",
+            "wikdict-es-en",
+            "wikdict-ca-es",
+        ];
+        let catalan = [
+            "oewn",
+            "kaikki-es-Espanol",
+            "omw-es",
+            "kaikki-en-Spanish",
+            "wikdict-ca-ru",
+            "dbnary-ca",
+            "sinonims-cat",
+            "kaikki-en-Catalan",
+            "wikdict-ru-ca",
+            "wikdict-es-ca",
+            "wikdict-en-ca",
+            "wikdict-ca-en",
+            "wikdict-ca-es",
+        ];
+        let russian = [
+            "oewn",
+            "freedict",
+            "wikdict-es-ru",
+            "kaikki-es-Espanol",
+            "omw-es",
+            "kaikki-en-Spanish",
+            "wikdict-ca-ru",
+            "dbnary-ca",
+            "sinonims-cat",
+            "kaikki-en-Catalan",
+            "wikdict-ru-en",
+            "wikdict-ru-es",
+            "wikdict-ru-ca",
+        ];
+        for (my, expected) in [
+            (Language::En, english),
+            (Language::Es, spanish),
+            (Language::Ca, catalan),
+            (Language::Ru, russian),
+        ] {
+            assert_eq!(
+                required_index_names(my).collect::<Vec<_>>(),
+                expected,
+                "{my:?}"
+            );
+        }
+        assert_eq!(russian, crate::release::LEGACY_PUBLISHED);
+    }
 
     /// Whether the source translates its headwords rather than describing
     /// them in their own language. No wildcard arm.

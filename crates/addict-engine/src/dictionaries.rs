@@ -30,9 +30,8 @@
 //! translated into a language ([`Articles::look_up_russian`]), the source of
 //! the pair (Russian, that language), and in nothing else: no other language
 //! is asked for it, and no other index for a word read in a language. The
-//! Russian indexes are opened when they are first asked, and are not among
-//! [`Indexes`]: the English line and the states of Spanish and Catalan do
-//! not change with them.
+//! Russian indexes are opened when they are first asked. [`Indexes`] records
+//! their presence without opening them.
 //!
 //! Everything here opens or reads files, so it is called on the work runner
 //! and never on the UI thread. Starting a lookup there is
@@ -83,6 +82,23 @@ pub enum State {
     Unreadable,
 }
 
+/// One bit per source, set for an open or unreadable index.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IndexPresence(u32);
+
+impl IndexPresence {
+    /// Record that `source` is present.
+    pub const fn with(self, source: Source) -> Self {
+        Self(self.0 | (1 << source as u32))
+    }
+
+    fn contains(self, source: Source) -> bool {
+        self.0 & (1 << source as u32) != 0
+    }
+}
+
+const _: () = assert!(addict_dictionary::sources::ROWS.len() <= u32::BITS as usize);
+
 /// Where the indexes stand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Indexes {
@@ -97,9 +113,20 @@ pub struct Indexes {
     pub spanish: State,
     /// The Catalan indexes, as the Spanish ones.
     pub catalan: State,
+    /// Presence of each source, independently of the view summaries.
+    pub presence: IndexPresence,
 }
 
 impl Indexes {
+    /// No indexes are present.
+    pub const MISSING: Self = Self {
+        definitions: State::Missing,
+        translations: State::Missing,
+        spanish: State::Missing,
+        catalan: State::Missing,
+        presence: IndexPresence(0),
+    };
+
     /// Both English indexes are open, and no Spanish or Catalan one is
     /// imported.
     pub const OPEN: Self = Self {
@@ -107,7 +134,16 @@ impl Indexes {
         translations: State::Open,
         spanish: State::Missing,
         catalan: State::Missing,
+        presence: Self::MISSING
+            .presence
+            .with(Source::Oewn)
+            .with(Source::Freedict),
     };
+
+    /// Whether every required index for `my` is missing.
+    pub fn required_indexes_missing(self, my: Language) -> bool {
+        !pairs::required_sources(my).any(|source| self.presence.contains(source))
+    }
 
     /// Where the indexes of the offline dictionary of `language` stand, for
     /// the languages beside English; `None` for English, whose two indexes
@@ -420,11 +456,16 @@ impl Dictionaries {
 
     /// Opens what is not open in `opened` and says where all stand.
     fn open_missing(&self, opened: &mut Opened) -> Indexes {
+        let mut presence = IndexPresence::default();
         opened.unreadable.clear();
         for source in grouped_sources() {
             let open = opened.grouped.iter().any(|(kept, _)| *kept == source);
             let mut index = None;
-            if self.open(source, open, |opened| index = Some(opened)) == State::Unreadable {
+            let state = self.open(source, open, |opened| index = Some(opened));
+            if state != State::Missing {
+                presence = presence.with(source);
+            }
+            if state == State::Unreadable {
                 opened.unreadable.push(source);
             }
             if let Some(index) = index {
@@ -440,10 +481,31 @@ impl Dictionaries {
         let translations = self.open(Source::Freedict, translations, |index| {
             combined.set_translations(index);
         });
+        if definitions != State::Missing {
+            presence = presence.with(Source::Oewn);
+        }
+        if translations != State::Missing {
+            presence = presence.with(Source::Freedict);
+        }
+        for source in Language::ALL
+            .into_iter()
+            .flat_map(|into| pairs::translations(Language::Ru, into))
+            .copied()
+        {
+            let open = opened.russian.iter().any(|(kept, _)| *kept == source);
+            if open
+                || self
+                    .path(source)
+                    .is_some_and(|path| path.try_exists().unwrap_or(true))
+            {
+                presence = presence.with(source);
+            }
+        }
         opened.languages(Indexes {
             definitions,
             translations,
-            ..Indexes::OPEN
+            presence,
+            ..Indexes::MISSING
         })
     }
 
@@ -996,6 +1058,7 @@ pub mod tests {
         let dictionaries = dir.dictionaries();
         let all = Indexes {
             spanish: State::Open,
+            presence: Indexes::OPEN.presence.with(Source::KaikkiEs),
             ..Indexes::OPEN
         };
         assert_eq!(dictionaries.indexes(), all);
@@ -1172,12 +1235,51 @@ pub mod tests {
         }
     }
 
-    const NEITHER: Indexes = Indexes {
-        definitions: State::Missing,
-        translations: State::Missing,
-        spanish: State::Missing,
-        catalan: State::Missing,
-    };
+    const NEITHER: Indexes = Indexes::MISSING;
+
+    #[test]
+    fn required_index_presence_keeps_russian_indexes_lazy() {
+        let dir = DataDir::new("required");
+        let dictionaries = dir.dictionaries();
+        let empty = dictionaries.indexes();
+        for my in Language::ALL {
+            assert!(empty.required_indexes_missing(my), "{my:?}");
+        }
+
+        dir.import(Source::WikdictRuEs);
+        let present = dictionaries.indexes();
+        assert!(present.required_indexes_missing(Language::En));
+        assert!(!present.required_indexes_missing(Language::Ru));
+        assert!(!present.required_indexes_missing(Language::Es));
+        assert!(dictionaries.open.lock().unwrap().russian.is_empty());
+
+        std::fs::remove_file(dir.index(Source::WikdictRuEs)).unwrap();
+        assert!(
+            dictionaries
+                .indexes()
+                .required_indexes_missing(Language::Ru)
+        );
+        std::fs::create_dir(dir.index(Source::WikdictRuEs)).unwrap();
+        assert!(
+            !dictionaries
+                .indexes()
+                .required_indexes_missing(Language::Ru)
+        );
+        assert!(dictionaries.open.lock().unwrap().russian.is_empty());
+
+        std::fs::write(dir.index(Source::WikdictEnCa), b"not an index").unwrap();
+        assert!(
+            !dictionaries
+                .indexes()
+                .required_indexes_missing(Language::En)
+        );
+        dir.import(Source::WikdictEnCa);
+        assert!(
+            !dictionaries
+                .indexes()
+                .required_indexes_missing(Language::En)
+        );
+    }
 
     #[test]
     fn the_files_have_the_names_the_user_sees() {
@@ -1257,9 +1359,8 @@ pub mod tests {
             looked.indexes,
             Indexes {
                 definitions: State::Open,
-                translations: State::Missing,
-                spanish: State::Missing,
-                catalan: State::Missing,
+                presence: Indexes::MISSING.presence.with(Source::Oewn),
+                ..Indexes::MISSING
             }
         );
     }
@@ -1270,10 +1371,9 @@ pub mod tests {
         dir.import(Source::Freedict);
         let dictionaries = dir.dictionaries();
         let alone = Indexes {
-            definitions: State::Missing,
             translations: State::Open,
-            spanish: State::Missing,
-            catalan: State::Missing,
+            presence: Indexes::MISSING.presence.with(Source::Freedict),
+            ..Indexes::MISSING
         };
         for word in ["bank", "banks"] {
             let looked = dictionaries.look_up(word);
@@ -1326,9 +1426,7 @@ pub mod tests {
         dir.import(Source::Freedict);
         let stands = Indexes {
             definitions: State::Unreadable,
-            translations: State::Open,
-            spanish: State::Missing,
-            catalan: State::Missing,
+            ..Indexes::OPEN
         };
         // A truncated index, a foreign file and a directory in its place.
         let whole = encode(&english()).expect("encode");
@@ -1369,10 +1467,9 @@ pub mod tests {
         assert_eq!(
             looked.indexes,
             Indexes {
-                definitions: State::Missing,
                 translations: State::Unreadable,
-                spanish: State::Missing,
-                catalan: State::Missing,
+                presence: Indexes::MISSING.presence.with(Source::Freedict),
+                ..Indexes::MISSING
             }
         );
         std::fs::write(dir.index(Source::Oewn), b"not an index").expect("write");
@@ -2070,8 +2167,18 @@ pub mod tests {
         let dir = with_russian("russian", &RUSSIAN);
         let dictionaries = dir.dictionaries();
         let indexes = dictionaries.indexes();
-        // The Russian indexes change none of the states.
-        assert_eq!(indexes, without);
+        // Russian indexes add presence without changing the view summaries.
+        assert_eq!(
+            indexes,
+            Indexes {
+                presence: RUSSIAN
+                    .into_iter()
+                    .fold(without.presence, |presence, source| {
+                        presence.with(source)
+                    }),
+                ..without
+            }
+        );
         let russian = |into, word| dictionaries.look_up_russian(into, word);
         for (into, word, translations) in [
             (Language::Es, "собака", &["perro", "cachorro", "arroba"][..]),

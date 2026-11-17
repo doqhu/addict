@@ -584,7 +584,7 @@ struct Session {
     /// Whether the user chose my language in this session: the read of the
     /// file, should it come later, changes nothing then.
     my_language_chosen: bool,
-    /// The read or the write of the my-language file on the runner.
+    /// The pending startup read, or the write after `my_language_chosen`.
     my_language_job: Option<Job>,
     /// The spelling of English: an English target is spelled so, and any
     /// other target ignores it.
@@ -610,6 +610,7 @@ struct Session {
 struct IndexCache {
     generation: u64,
     known: Option<Indexes>,
+    known_generation: u64,
 }
 
 impl IndexCache {
@@ -618,7 +619,13 @@ impl IndexCache {
             return false;
         }
         self.known = Some(indexes);
+        self.known_generation = generation;
         true
+    }
+
+    fn current(&self) -> Option<Indexes> {
+        self.known
+            .filter(|_| self.known_generation == self.generation)
     }
 
     fn begin_import(&mut self) -> u64 {
@@ -640,12 +647,12 @@ impl ImportCompletion {
     }
 }
 
-/// Where the first-run offer of a [`Session`] stands. It is decided once, at
-/// the first answer of the indexes check: with every index missing, the
-/// choice file is read and the manifest fetched on the runner; the dialog
-/// shows once the window is, which a `--background` launch delays.
+/// Where the first-run offer of a [`Session`] stands. When the index check
+/// and my-language read have resolved, the runner reads the choice file and
+/// fetches the manifest if all required indexes are missing. The dialog
+/// waits for a visible window on a `--background` launch.
 enum FirstRun {
-    /// The indexes have not been checked yet.
+    /// Waiting for the startup results.
     Unasked,
     /// The choice file is read and the manifest fetched; dropping the job
     /// gives them up.
@@ -805,6 +812,7 @@ impl Copying {
 impl Session {
     fn handle(&mut self, event: Event) {
         self.dispatch(event);
+        self.first_indexes();
         self.offer_when_shown();
     }
 
@@ -889,7 +897,6 @@ impl Session {
                 if self.indexes.update(generation, indexes) {
                     self.check = None;
                     self.view.render_indexes(indexes, self.my_language);
-                    self.first_indexes(indexes);
                 }
             }
             Event::ImportRefreshing(ready) => {
@@ -900,7 +907,6 @@ impl Session {
                 if self.indexes.update(generation, indexes) {
                     self.check = None;
                     self.view.render_indexes(indexes, self.my_language);
-                    self.first_indexes(indexes);
                 }
             }),
             Event::SettingsDownload => self.settings_download(),
@@ -934,24 +940,41 @@ impl Session {
         }
     }
 
-    /// The indexes as a check found them: the first answer decides whether
-    /// the first-run offer is asked for, on the runner; a later one that
-    /// finds an index drops an offer that still waits for the window.
-    fn first_indexes(&mut self, indexes: Indexes) {
+    /// Asks for the offer once startup has the language and index results.
+    /// An offer still waiting for the manifest or window uses the latest
+    /// accepted index snapshot.
+    fn first_indexes(&mut self) {
+        if !matches!(
+            self.first_run,
+            FirstRun::Unasked | FirstRun::Asking { .. } | FirstRun::Pending(_)
+        ) || (!self.my_language_chosen && self.my_language_job.is_some())
+        {
+            return;
+        }
+        let Some(indexes) = self.indexes.current() else {
+            return;
+        };
+        let my = self.my_language;
+        let due = first_run::should_offer(&indexes, my, false);
         match self.first_run {
-            FirstRun::Unasked if first_run::should_offer(&indexes, false) => {
+            FirstRun::Unasked if self.check.is_some() => {}
+            FirstRun::Unasked if due => {
                 self.download_run += 1;
                 self.first_run =
                     self.work
                         .upgrade()
                         .map_or(FirstRun::Done, |work| FirstRun::Asking {
-                            _job: start_first_run(&work, indexes, &self.sender, self.download_run),
+                            _job: start_first_run(
+                                &work,
+                                indexes,
+                                my,
+                                &self.sender,
+                                self.download_run,
+                            ),
                         });
             }
             FirstRun::Unasked => self.first_run = FirstRun::Done,
-            FirstRun::Pending(_) | FirstRun::Asking { .. }
-                if !first_run::should_offer(&indexes, false) =>
-            {
+            FirstRun::Pending(_) | FirstRun::Asking { .. } if !due => {
                 self.first_run = FirstRun::Done;
             }
             _ => {}
@@ -974,7 +997,10 @@ impl Session {
 
     /// Shows the dialog of a pending offer once the window is shown.
     fn offer_when_shown(&mut self) {
-        if !matches!(self.first_run, FirstRun::Pending(_)) || !self.window.is_visible() {
+        if !matches!(self.first_run, FirstRun::Pending(_))
+            || !self.window.is_visible()
+            || self.indexes.current().is_none()
+        {
             return;
         }
         let FirstRun::Pending(manifest) = std::mem::replace(&mut self.first_run, FirstRun::Done)
@@ -3150,10 +3176,12 @@ fn start_my_language(
         language::FILE_LIMIT,
         async move { my_language::read(path.as_deref()) },
         move |outcome| {
-            if let Outcome::Finished(language) = outcome {
-                // On the worker: the UI thread wakes for the event.
-                let _ = read.unbounded_send(Event::MyLanguageRead(language));
-            }
+            let language = match outcome {
+                Outcome::Finished(language) => language,
+                _ => Language::Ru,
+            };
+            // On the worker: the UI thread wakes for the event.
+            let _ = read.unbounded_send(Event::MyLanguageRead(language));
         },
     );
     Some(job)
@@ -3189,6 +3217,7 @@ fn start_english(
 fn start_first_run(
     work: &Work,
     indexes: Indexes,
+    my: Language,
     sender: &UnboundedSender<Event>,
     run: u64,
 ) -> Job {
@@ -3198,7 +3227,7 @@ fn start_first_run(
         download::MANIFEST_LIMIT,
         async move {
             let chosen = first_run::read(path.as_deref());
-            first_run::offered_manifest(indexes, chosen, &Downloader::new()).await
+            first_run::offered_manifest(indexes, my, chosen, &Downloader::new()).await
         },
         move |outcome| match outcome {
             Outcome::Finished(Ok(Some(manifest))) => {
@@ -4092,9 +4121,9 @@ mod tests {
         let (mut session, _events, _work) = test_session("io.github.doqhu.Addict.MyTextsTest");
         let indexes = Indexes {
             definitions: State::Open,
-            translations: State::Missing,
             spanish: State::Open,
             catalan: State::Open,
+            ..Indexes::MISSING
         };
         session.handle(Event::Indexes {
             generation: 0,
@@ -4129,6 +4158,110 @@ mod tests {
             session.view.definition_action_text(),
             "Translate definition into English"
         );
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn first_run_uses_the_saved_language_in_either_order() {
+        use super::*;
+        use addict_dictionary::{import::Source, release::Published};
+
+        gtk::init().expect("a display");
+        let (mut session, _events, work) = test_session("io.github.doqhu.Addict.FirstRunTest");
+        // Observe request IDs without contacting the release server.
+        session.work = Weak::new();
+        let pending = || work.run(language::FILE_LIMIT, std::future::pending::<()>(), |_| {});
+        let indexes = Indexes {
+            presence: Indexes::MISSING.presence.with(Source::WikdictRuEs),
+            ..Indexes::MISSING
+        };
+        for my in [Language::En, Language::Ru] {
+            for indexes_first in [false, true] {
+                session.first_run = FirstRun::Unasked;
+                session.download_run = 0;
+                session.my_language = Language::Ru;
+                session.my_language_job = Some(pending());
+                session.indexes = IndexCache::default();
+                session.check = Some(pending());
+                let indexes = Event::Indexes {
+                    generation: 0,
+                    indexes,
+                };
+                let language = Event::MyLanguageRead(my);
+                let [first, second] = if indexes_first {
+                    [indexes, language]
+                } else {
+                    [language, indexes]
+                };
+                session.handle(first);
+                assert!(matches!(session.first_run, FirstRun::Unasked));
+                assert_eq!(session.download_run, 0);
+                session.handle(second);
+                assert!(matches!(session.first_run, FirstRun::Done));
+                assert_eq!(session.download_run, u64::from(my == Language::En));
+            }
+        }
+
+        // A stale snapshot cannot dismiss a pending offer, and an unrelated
+        // file in the latest accepted snapshot keeps the offer due.
+        session.my_language = Language::En;
+        let manifest = Manifest {
+            format: addict_dictionary::format::VERSION,
+            indexes: vec![Published::of("oewn", b"xz")],
+        };
+        session.first_run = FirstRun::Pending(manifest.clone());
+        let current = session.indexes.begin_import();
+        session.handle(Event::Indexes {
+            generation: current - 1,
+            indexes: Indexes::OPEN,
+        });
+        assert!(matches!(session.first_run, FirstRun::Pending(_)));
+        let (ready, _) = oneshot::channel();
+        session.handle(Event::Imported(ImportCompletion {
+            generation: current,
+            indexes,
+            ready,
+        }));
+        assert!(matches!(session.first_run, FirstRun::Pending(_)));
+
+        // A manifest arriving while the main window is visible must wait
+        // for the current generation before the offer can open.
+        session.first_run = FirstRun::Asking { _job: pending() };
+        session.window.set_visible(true);
+        assert!(session.window.is_visible());
+        let (ready, mut generation) = oneshot::channel();
+        session.handle(Event::ImportRefreshing(ready));
+        let current = generation.try_recv().unwrap().unwrap();
+        assert_eq!(session.indexes.known, Some(indexes));
+        session.handle(Event::FirstRunOffer(session.download_run, manifest));
+        assert!(matches!(session.first_run, FirstRun::Pending(_)));
+        let (ready, _) = oneshot::channel();
+        session.handle(Event::Imported(ImportCompletion {
+            generation: current,
+            indexes: Indexes::OPEN,
+            ready,
+        }));
+        assert!(matches!(session.first_run, FirstRun::Done));
+
+        // The initial decision also waits when there is a stale snapshot.
+        session.first_run = FirstRun::Unasked;
+        assert!(session.indexes.update(current, indexes));
+        let run = session.download_run;
+        let (ready, mut generation) = oneshot::channel();
+        session.handle(Event::ImportRefreshing(ready));
+        let current = generation.try_recv().unwrap().unwrap();
+        assert!(matches!(session.first_run, FirstRun::Unasked));
+        assert_eq!(session.download_run, run);
+        let (ready, _) = oneshot::channel();
+        session.handle(Event::Imported(ImportCompletion {
+            generation: current,
+            indexes: Indexes::OPEN,
+            ready,
+        }));
+        assert!(matches!(session.first_run, FirstRun::Done));
+        assert_eq!(session.download_run, run);
         session.settings.window().destroy();
         session.window.destroy();
     }
