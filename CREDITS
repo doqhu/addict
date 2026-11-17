@@ -84,7 +84,7 @@ OCR
 tessdata
   Credit:   Tesseract OCR
   License:  Apache-2.0
-  Upstream: tessdata eng/spa/cat
+  Upstream: tessdata eng/spa/cat/rus
 
 tesseract
   Credit:   Tesseract OCR; Leptonica

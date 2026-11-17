@@ -313,6 +313,13 @@ pub(crate) mod tests {
         "/../addict-platform/tests/data/ocr-fixture.png"
     );
 
+    /// The Russian fixture and its sentence.
+    const RUSSIAN_FIXTURE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../addict-platform/tests/data/ocr-fixture-rus.png"
+    );
+    const RUSSIAN_SENTENCE: &str = "Банк стоит на берегу реки.";
+
     /// Held by every test that starts a child process, so a test that counts
     /// the children of this process sees none of another test's.
     pub(crate) fn children() -> MutexGuard<'static, ()> {
@@ -324,11 +331,16 @@ pub(crate) mod tests {
 
     /// A copy of the fixture in a place of its own, as a snapshot would be.
     fn snapshot(name: &str) -> PathBuf {
+        snapshot_of(FIXTURE, name)
+    }
+
+    /// A copy of `fixture` in a place of its own, as a snapshot would be.
+    fn snapshot_of(fixture: &str, name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "addict-capture-test-{name}-{}.png",
             std::process::id()
         ));
-        std::fs::copy(FIXTURE, &path).expect("copy");
+        std::fs::copy(fixture, &path).expect("copy");
         path
     }
 
@@ -541,6 +553,29 @@ pub(crate) mod tests {
             Language::ALL.map(ocr_language),
             ["eng", "spa", "cat", "rus"]
         );
+    }
+
+    /// With Ru pressed, the Russian data reads Russian text. Not skipped
+    /// without the data: CI and the README install `rus`.
+    #[test]
+    fn a_russian_snapshot_is_recognized_with_the_russian_data() {
+        let _children = children();
+        let path = snapshot_of(RUSSIAN_FIXTURE, "russian");
+        let work = Work::start().expect("runner");
+        let (sender, receiver) = mpsc::channel();
+        let params = Params::in_language(ocr_language(Language::Ru));
+        let shot = path.clone();
+        let _job = work.run(
+            JOB_LIMIT,
+            async move { recognize_snapshot(&tesseract(), shot, &params, || {}).await },
+            move |outcome| {
+                let _ = sender.send(outcome);
+            },
+        );
+        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
+        let (captured, _) = captured_result(outcome).expect("shown");
+        assert_eq!(captured, Captured::Text(RUSSIAN_SENTENCE.to_owned()));
+        assert!(!path.exists());
     }
 
     /// Whether the Tesseract of the rule lists the data `language` as
