@@ -176,7 +176,11 @@ impl Answer {
                 (!grouped.entries.is_empty() || !grouped.sense_metadata.is_empty())
                     && grouped.verb.is_none()
                     && !grouped.definitions.iter().flatten().any(sense)
-                    && !grouped.russian.iter().flatten().any(text)
+                    && !grouped
+                        .translations
+                        .iter()
+                        .flat_map(|(_, texts)| texts)
+                        .any(text)
                     && !grouped.english.iter().flatten().any(text)
                     && !grouped
                         .synonyms
@@ -441,8 +445,8 @@ impl Dictionaries {
 
     /// What the indexes of `language`, not English, say about `word` for
     /// someone whose own language is `my`: what each open one gives, by its
-    /// kind, with no English index asked, and a Russian index only when the
-    /// pair (`language`, `my`) has it. A file
+    /// kind, with no English index asked, and an index of translations only
+    /// when the pair (`language`, `my`) has it. A file
     /// of the language that is there and is no index is named, and no
     /// article is given, so that it is imported again. An index that could
     /// not be read is closed and opened again by the next call, as an
@@ -533,12 +537,13 @@ impl Dictionaries {
 }
 
 /// Whether `source`, of a language beside English, is asked for someone
-/// whose own language is `my`: a source of Russian translations only when
-/// the pair (its language, `my`) has it, any other kind always. No wildcard
-/// arm: a new kind does not compile until it is given its answer.
+/// whose own language is `my`: a source of translations, into whichever
+/// target, only when the pair (its language, `my`) has it, any other kind
+/// always. No wildcard arm: a new kind does not compile until it is given
+/// its answer.
 fn asked_for(source: Source, my: Language) -> bool {
     match source.kind() {
-        Kind::Russian => source
+        Kind::Translation(_) => source
             .language()
             .is_some_and(|language| pairs::translations(language, my).contains(&source)),
         Kind::Definitions | Kind::Synonyms | Kind::English | Kind::FromRussian => true,
@@ -633,7 +638,8 @@ impl Dictionaries {
                         | Source::KaikkiEnCatalan
                         | Source::WikdictRuEn
                         | Source::WikdictRuEs
-                        | Source::WikdictRuCa => {
+                        | Source::WikdictRuCa
+                        | Source::WikdictEsCa => {
                             indexes.definitions = State::Unreadable;
                             Answer::Unreadable(definitions)
                         }
@@ -753,6 +759,7 @@ pub mod tests {
                 Source::Freedict => russian(),
                 Source::KaikkiEs => spanish(),
                 Source::WikdictEsRu => headwords("es-ru", &[("banco", &[], &["банк"])]),
+                Source::WikdictEsCa => headwords("es-ca", &[("perro", &[], &["gos"])]),
                 Source::OmwEs => {
                     headwords("es-syn", &[("banco", &[("", &["banco", "banca"])], &[])])
                 }
@@ -960,7 +967,7 @@ pub mod tests {
                     synonyms: texts(&["banca"]),
                 },
             ]),
-            russian: None,
+            translations: Vec::new(),
             synonyms: None,
             verb: None,
             english: None,
@@ -1006,10 +1013,10 @@ pub mod tests {
             panic!("bank");
         };
         assert_eq!(
-            bank.definitions.expect("definitions")[0].definition,
+            bank.definitions.as_ref().expect("definitions")[0].definition,
             "Una palabra inventada."
         );
-        assert_eq!(bank.russian, None);
+        assert_eq!(bank.translations_into(Language::Ru), None);
         let english = dictionaries.look_up_in(Language::En, "bank");
         assert_eq!(english.answer, dictionaries.look_up("bank").answer);
         let Answer::Article(english) = english.answer else {
@@ -1539,7 +1546,7 @@ pub mod tests {
         );
         let english = canned(&dir, "es-en.index", &[("banco", &[("bench", &[])], &[])]);
         let indexes = [
-            (Kind::Russian, &russian),
+            (Kind::Translation(Language::Ru), &russian),
             (Kind::Definitions, &definitions),
             (Kind::Synonyms, &synonyms),
             (Kind::English, &english),
@@ -1587,7 +1594,10 @@ pub mod tests {
         // A Russian index without the word says so.
         let mesa = canned(&dir, "es-ru-2.index", &[("mesa", &[], &["стол"])]);
         let found = grouped(
-            &[(Kind::Russian, &mesa), (Kind::Definitions, &definitions)],
+            &[
+                (Kind::Translation(Language::Ru), &mesa),
+                (Kind::Definitions, &definitions),
+            ],
             Language::Es,
             "banco",
         )
@@ -1622,7 +1632,7 @@ pub mod tests {
         assert_eq!(
             catalan,
             [
-                Kind::Russian,
+                Kind::Translation(Language::Ru),
                 Kind::Definitions,
                 Kind::Synonyms,
                 Kind::English
@@ -1641,7 +1651,7 @@ pub mod tests {
                     definition: "Conjunt d'objectes reunits.".to_owned(),
                     synonyms: Vec::new(),
                 }]),
-                russian: Some(texts(&["коллекция"])),
+                translations: vec![(Language::Ru, texts(&["коллекция"]))],
                 synonyms: Some(vec![
                     addict_dictionary::index::SynonymGroup {
                         headword: "col·lecció".to_owned(),
@@ -1664,7 +1674,10 @@ pub mod tests {
         let Answer::Grouped(banc) = dictionaries.look_up_in(Language::Ca, "Banc").answer else {
             panic!("banc");
         };
-        assert_eq!(banc.russian, Some(texts(&["скамья"])));
+        assert_eq!(
+            banc.translations_into(Language::Ru),
+            Some(texts(&["скамья"]).as_slice())
+        );
         assert_eq!(banc.definitions, Some(Vec::new()));
         assert_eq!(banc.synonyms, Some(Vec::new()));
         assert_eq!(banc.english, Some(Vec::new()));
@@ -1672,7 +1685,10 @@ pub mod tests {
         let Answer::Grouped(banco) = dictionaries.look_up_in(Language::Es, "banco").answer else {
             panic!("banco");
         };
-        assert_eq!(banco.russian, Some(texts(&["банк"])));
+        assert_eq!(
+            banco.translations_into(Language::Ru),
+            Some(texts(&["банк"]).as_slice())
+        );
         assert_eq!(
             banco.synonyms.expect("groups")[0].synonyms,
             texts(&["banca"])
@@ -1717,7 +1733,9 @@ pub mod tests {
     /// The Russian of a grouped answer.
     fn russian_of(answer: &Answer) -> Option<Vec<String>> {
         match answer {
-            Answer::Grouped(grouped) => grouped.russian.clone(),
+            Answer::Grouped(grouped) => grouped
+                .translations_into(Language::Ru)
+                .map(<[String]>::to_vec),
             other => panic!("{other:?}"),
         }
     }
@@ -1893,7 +1911,7 @@ pub mod tests {
         let grouped = Grouped {
             entries: vec![LexicalEntry::default()],
             definitions: Some(vec![blank_sense]),
-            russian: Some(texts(&["", " "])),
+            translations: vec![(Language::Ru, texts(&["", " "]))],
             english: Some(texts(&["", "\n"])),
             synonyms: Some(vec![addict_dictionary::index::SynonymGroup {
                 headword: "word".to_owned(),
@@ -1906,7 +1924,7 @@ pub mod tests {
         assert!(Answer::Grouped(grouped.clone()).metadata_only());
         for kind in [
             Kind::Definitions,
-            Kind::Russian,
+            Kind::Translation(Language::Ru),
             Kind::Synonyms,
             Kind::English,
         ] {
@@ -1915,11 +1933,7 @@ pub mod tests {
                 Kind::Definitions => {
                     useful.definitions.as_mut().unwrap()[0].definition = "definition".to_owned()
                 }
-                Kind::Russian => useful
-                    .russian
-                    .as_mut()
-                    .unwrap()
-                    .push("translation".to_owned()),
+                Kind::Translation(_) => useful.translations[0].1.push("translation".to_owned()),
                 Kind::Synonyms => useful.synonyms.as_mut().unwrap()[0]
                     .synonyms
                     .push("synonym".to_owned()),
@@ -2075,7 +2089,10 @@ pub mod tests {
         let Answer::Grouped(banco) = dictionaries.look_up_in(Language::Es, "banco").answer else {
             panic!("banco");
         };
-        assert_eq!(banco.russian, Some(texts(&["банк"])));
+        assert_eq!(
+            banco.translations_into(Language::Ru),
+            Some(texts(&["банк"]).as_slice())
+        );
         assert!(
             !other_sources()
                 .iter()
@@ -2143,17 +2160,20 @@ pub mod tests {
         else {
             panic!("banco with Russian mine");
         };
-        assert_eq!(russian.russian, Some(texts(&["банк"])));
+        assert_eq!(
+            russian.translations_into(Language::Ru),
+            Some(texts(&["банк"]).as_slice())
+        );
         for my in [Language::En, Language::Ca] {
             let Answer::Grouped(banco) = dictionaries.look_up_for(Language::Es, my, "banco").answer
             else {
                 panic!("banco with {my:?} mine");
             };
             // `wikdict-es-ru` is not asked; every other kind is.
-            assert_eq!(banco.russian, None, "{my:?}");
+            assert_eq!(banco.translations_into(Language::Ru), None, "{my:?}");
             assert_eq!(
                 Grouped {
-                    russian: russian.russian.clone(),
+                    translations: russian.translations.clone(),
                     ..banco
                 },
                 russian,
@@ -2166,7 +2186,7 @@ pub mod tests {
         else {
             panic!("col·lecció");
         };
-        assert_eq!(colleccio.russian, None);
+        assert_eq!(colleccio.translations_into(Language::Ru), None);
         assert_eq!(colleccio.english, Some(texts(&["collection", "set"])));
         // `banc` is only in `wikdict-ca-ru`.
         assert_eq!(
@@ -2181,6 +2201,62 @@ pub mod tests {
     }
 
     #[test]
+    fn a_spanish_word_has_catalan_translations_for_catalan_mine() {
+        let dir = with_russian("spanish-catalan", &[]);
+        let dictionaries = dir.dictionaries();
+        // Tracer: `wikdict-es-ca` gives `gos`, and no Russian is asked.
+        let Answer::Grouped(perro) = dictionaries
+            .look_up_for(Language::Es, Language::Ca, "perro")
+            .answer
+        else {
+            panic!("perro with Catalan mine");
+        };
+        assert_eq!(
+            perro.translations_into(Language::Ca),
+            Some(texts(&["gos"]).as_slice())
+        );
+        assert_eq!(perro.translations_into(Language::Ru), None);
+        // A word `wikdict-es-ca` lacks: asked, and empty.
+        let Answer::Grouped(banco) = dictionaries
+            .look_up_for(Language::Es, Language::Ca, "banco")
+            .answer
+        else {
+            panic!("banco with Catalan mine");
+        };
+        assert_eq!(banco.translations_into(Language::Ca), Some(&[][..]));
+        assert_eq!(banco.translations_into(Language::Ru), None);
+        assert!(banco.definitions.is_some());
+        // Russian mine: `wikdict-es-ca` is not asked, `wikdict-es-ru` is.
+        let Answer::Grouped(banco) = dictionaries
+            .look_up_for(Language::Es, Language::Ru, "banco")
+            .answer
+        else {
+            panic!("banco with Russian mine");
+        };
+        assert_eq!(banco.translations_into(Language::Ca), None);
+        assert_eq!(banco.translations, [(Language::Ru, texts(&["банк"]))]);
+        // `perro` is only in `wikdict-es-ca`.
+        for my in [Language::Ru, Language::En] {
+            assert_eq!(
+                dictionaries.look_up_for(Language::Es, my, "perro").answer,
+                Answer::NoEntry,
+                "{my:?}"
+            );
+        }
+        // Not imported: the article stands, with no Catalan entry.
+        std::fs::remove_file(dir.index(Source::WikdictEsCa)).expect("remove");
+        let dictionaries = dir.dictionaries();
+        let Answer::Grouped(banco) = dictionaries
+            .look_up_for(Language::Es, Language::Ca, "banco")
+            .answer
+        else {
+            panic!("banco without wikdict-es-ca");
+        };
+        assert_eq!(banco.translations_into(Language::Ca), None);
+        assert!(banco.definitions.is_some());
+    }
+
+    #[test]
     fn a_damaged_russian_index_is_not_named_for_another_language_mine() {
         let dir = with_russian("damaged-pair", &[]);
         std::fs::write(dir.index(Source::WikdictEsRu), b"no index").expect("write");
@@ -2191,7 +2267,7 @@ pub mod tests {
         else {
             panic!("banco with English mine");
         };
-        assert_eq!(banco.russian, None);
+        assert_eq!(banco.translations_into(Language::Ru), None);
         assert!(banco.definitions.is_some());
         assert_eq!(
             dictionaries
@@ -2266,7 +2342,10 @@ pub mod tests {
         let Answer::Grouped(solo) = looked.answer else {
             panic!("solo");
         };
-        assert_eq!(solo.russian, Some(texts(&["один"])));
+        assert_eq!(
+            solo.translations_into(Language::Ru),
+            Some(texts(&["один"]).as_slice())
+        );
         // A language with only that index has nothing to look it up in.
         let only = DataDir::new("spanish-pair-alone");
         only.write(

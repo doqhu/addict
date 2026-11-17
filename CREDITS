@@ -77,6 +77,11 @@ wikdict-ru-ca
   License:  CC BY-SA 4.0
   Upstream: download.wikdict.com sqlite
 
+wikdict-es-ca
+  Credit:   WikDict by Karl Bartel; Data from Wiktionary via DBnary licensed under the Creative Commons Attribution-ShareAlike License.
+  License:  CC BY-SA 4.0
+  Upstream: download.wikdict.com sqlite
+
 
 OCR
 ---

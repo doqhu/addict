@@ -3716,7 +3716,13 @@ mod tests {
             let Answer::Grouped(grouped) = looked.answer else {
                 panic!("expected the imported language entry");
             };
-            assert!(grouped.russian.iter().flatten().any(|text| text == "банк"));
+            assert!(
+                grouped
+                    .translations_into(addict_core::translation::Source::Ru)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|text| text == "банк")
+            );
         }
     }
 
@@ -3847,9 +3853,9 @@ mod tests {
             };
             assert!(
                 grouped
-                    .russian
+                    .translations_into(addict_core::translation::Source::Ru)
+                    .unwrap_or_default()
                     .iter()
-                    .flatten()
                     .any(|translation| translation == "банк")
             );
         }

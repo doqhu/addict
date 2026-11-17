@@ -755,7 +755,7 @@ pub(crate) mod tests {
                 definition: "Mueble alargado para sentarse.".to_owned(),
                 synonyms: vec!["banca".to_owned()],
             }]),
-            russian: Some(Vec::new()),
+            translations: vec![(addict_core::translation::Source::Ru, Vec::new())],
             synonyms: None,
             verb: None,
             english: None,

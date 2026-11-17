@@ -213,6 +213,16 @@ const WIKDICT_RU_CA: Row = Row {
     license_uri: BY_SA_4,
     link: WIKDICT_LINK,
 };
+const WIKDICT_ES_CA: Row = Row {
+    index: "wikdict-es-ca",
+    upstream: WIKDICT_UPSTREAM,
+    license: WIKDICT_LICENSE,
+    credit: WIKDICT_CREDIT,
+    url: Some("https://download.wikdict.com/dictionaries/sqlite/2_2026-06/es-ca.sqlite3"),
+    author: WIKDICT_AUTHOR,
+    license_uri: BY_SA_4,
+    link: WIKDICT_LINK,
+};
 
 /// The dictionary sources, one row per [`Source`], in the order in which
 /// each source first appears in [`crate::import::KNOWN`].
@@ -230,6 +240,7 @@ pub const ROWS: &[Row] = &[
     WIKDICT_RU_EN,
     WIKDICT_RU_ES,
     WIKDICT_RU_CA,
+    WIKDICT_ES_CA,
 ];
 
 /// The bundled OCR data and engine: credited, never downloaded.
@@ -309,6 +320,7 @@ pub fn row(source: Source) -> &'static Row {
         Source::WikdictRuEn => &WIKDICT_RU_EN,
         Source::WikdictRuEs => &WIKDICT_RU_ES,
         Source::WikdictRuCa => &WIKDICT_RU_CA,
+        Source::WikdictEsCa => &WIKDICT_ES_CA,
     }
 }
 
@@ -330,6 +342,7 @@ mod tests {
         "wikdict-ru-en",
         "wikdict-ru-es",
         "wikdict-ru-ca",
+        "wikdict-es-ca",
         "dbnary-ca",
         "freedict",
         "oewn",
@@ -353,6 +366,7 @@ mod tests {
         Source::WikdictRuEn,
         Source::WikdictRuEs,
         Source::WikdictRuCa,
+        Source::WikdictEsCa,
     ];
 
     /// The table has a row for every documented index and none other.
@@ -490,7 +504,7 @@ mod tests {
             .collect();
         let table: Vec<&str> = ROWS.iter().chain(OCR).map(|row| row.index).collect();
         assert_eq!(listed, table);
-        assert_eq!(listed.len(), 15);
+        assert_eq!(listed.len(), 16);
     }
 
     /// Every index is downloaded by the builder from an `https://` URL that

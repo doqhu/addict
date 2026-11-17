@@ -1328,7 +1328,7 @@ mod tests {
             };
             assert_eq!(article.translations, translations);
             let grouped = crate::lookup::grouped(
-                &[(crate::import::Kind::Russian, &index)],
+                &[(crate::import::Kind::Translation(Language::Ru), &index)],
                 Language::En,
                 word,
             )
@@ -1337,7 +1337,10 @@ mod tests {
             assert!(grouped.definitions.is_none());
             assert!(grouped.sense_metadata.is_empty());
             assert_eq!(grouped.entries, article.entries);
-            assert_eq!(grouped.russian.as_ref().unwrap(), &article.translations);
+            assert_eq!(
+                grouped.translations_into(Language::Ru).unwrap(),
+                article.translations
+            );
         }
     }
 
@@ -1413,7 +1416,7 @@ mod tests {
         let mut indexes = Vec::new();
         for (at, kind) in [
             Kind::Definitions,
-            Kind::Russian,
+            Kind::Translation(Language::Ru),
             Kind::English,
             Kind::Synonyms,
         ]

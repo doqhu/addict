@@ -348,7 +348,10 @@ mod tests {
             // Repeated collection must reuse the shared records without duplicating metadata.
             let index = combined.translations().unwrap();
             let grouped = lookup::grouped(
-                &[(Kind::Russian, index), (Kind::English, index)],
+                &[
+                    (Kind::Translation(Language::Ru), index),
+                    (Kind::English, index),
+                ],
                 Language::En,
                 "Banks",
             )

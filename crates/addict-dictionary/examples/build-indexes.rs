@@ -1,7 +1,8 @@
 //! Builds the assets of the data release of the indexes, which the
 //! application downloads on its first run: for each of the sources in
-//! `addict_dictionary::sources` the upstream file is downloaded from the URL
-//! of its row and imported, as `addict import` does, and the index is
+//! `addict_dictionary::sources` whose index is in
+//! `addict_dictionary::release::PUBLISHED` the upstream file is downloaded
+//! from the URL of its row and imported, as `addict import` does, and the index is
 //! compressed with `xz`. Then `manifest.json`, `WNDB_License.txt` and
 //! `release-body.md` are written beside them. Nothing is uploaded: the
 //! monthly release job (`.github/workflows/indexes.yml`) or the maintainer
@@ -100,7 +101,7 @@ fn run(args: impl Iterator<Item = String>, stdout: &mut dyn Write, stderr: &mut 
         .transpose()
         .and_then(|previous| {
             let http = client()?;
-            build(out, sources::ROWS, &http, previous.as_ref())
+            build(out, &release::published_rows(), &http, previous.as_ref())
         });
     match report {
         Ok(report) => print_report(&report, out, stdout, stderr),
@@ -141,7 +142,7 @@ fn print_report(report: &Report, out: &Path, stdout: &mut dyn Write, stderr: &mu
         stderr,
         "build-indexes: {} of {} sources failed: {}",
         names.len(),
-        sources::ROWS.len(),
+        release::PUBLISHED.len(),
         names.join(", ")
     );
     1
@@ -842,7 +843,7 @@ mod tests {
             lines[2],
             format!(
                 "build-indexes: 1 of {} sources failed: freedict",
-                sources::ROWS.len()
+                release::PUBLISHED.len()
             )
         );
     }

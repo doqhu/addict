@@ -68,13 +68,18 @@ struct Counts {
     english: usize,
 }
 
-/// The four indexes of `language` in `ADDICT_INDEX_DIR`, in `KNOWN` order.
+/// The four indexes of `language` in `ADDICT_INDEX_DIR`, in `KNOWN` order:
+/// of the translations, only those into Russian.
 fn open_indexes(language: Language) -> Vec<(Kind, Index)> {
     let dir = path_from("ADDICT_INDEX_DIR");
     let indexes: Vec<(Kind, Index)> = KNOWN
         .iter()
         .map(|known| known.source)
         .filter(|source| source.language() == Some(language))
+        .filter(|source| match source.kind() {
+            Kind::Translation(target) => target == Language::Ru,
+            Kind::Definitions | Kind::Synonyms | Kind::English | Kind::FromRussian => true,
+        })
         .map(|source| {
             let path = dir.join(source.index_name());
             let index = Index::open(&path).unwrap_or_else(|error| panic!("{error}"));
@@ -108,11 +113,15 @@ fn run(
             continue;
         };
         counts.found += 1;
-        let has = |list: &Option<Vec<String>>| list.as_ref().is_some_and(|list| !list.is_empty());
+        let has = |list: Option<&[String]>| list.is_some_and(|list| !list.is_empty());
         let senses = grouped.definitions.clone().unwrap_or_default();
         let own = senses.iter().any(|sense| !sense.synonyms.is_empty());
         let kinds = [
-            ("RU", has(&grouped.russian), &mut counts.russian),
+            (
+                "RU",
+                has(grouped.translations_into(Language::Ru)),
+                &mut counts.russian,
+            ),
             ("Def", !senses.is_empty(), &mut counts.definitions),
             (
                 "Syn",
@@ -123,7 +132,7 @@ fn run(
                     || own,
                 &mut counts.synonyms,
             ),
-            ("EN", has(&grouped.english), &mut counts.english),
+            ("EN", has(grouped.english.as_deref()), &mut counts.english),
         ];
         for (name, present, count) in kinds {
             if present {

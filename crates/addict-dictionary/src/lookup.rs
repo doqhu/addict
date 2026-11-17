@@ -157,7 +157,8 @@ fn found(
 
 /// What the indexes of one language give for a word, by [`Kind`]. Each
 /// field is `None` when no index of its kind was asked, and empty when the
-/// indexes of its kind have nothing for the word.
+/// indexes of its kind have nothing for the word; `translations` has an
+/// entry for each target asked.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Grouped {
     /// Metadata from every source, independent of displayed definition precedence.
@@ -168,8 +169,10 @@ pub struct Grouped {
     /// the order of the indexes, a sense whose definition and grammar are
     /// already there skipped.
     pub definitions: Option<Vec<Sense>>,
-    /// [`Kind::Russian`]: the translations of the word, each once.
-    pub russian: Option<Vec<String>>,
+    /// [`Kind::Translation`]: the translations of the word by target, one
+    /// entry per target asked, in the order of the indexes; each
+    /// translation once within its target.
+    pub translations: Vec<(Language, Vec<String>)>,
     /// [`Kind::Synonyms`]: independent source meanings in source order,
     /// with headword provenance and metadata; duplicates across meanings stay.
     pub synonyms: Option<Vec<SynonymGroup>>,
@@ -183,6 +186,33 @@ pub struct Grouped {
 }
 
 pub use addict_core::dictionary::SourcedSense;
+
+impl Grouped {
+    /// The translations of the word into `target`; `None` when no index of
+    /// that target was asked, empty when they have nothing for the word.
+    pub fn translations_into(&self, target: Language) -> Option<&[String]> {
+        self.translations
+            .iter()
+            .find(|(into, _)| *into == target)
+            .map(|(_, texts)| texts.as_slice())
+    }
+
+    /// The entry of `target` in `translations`, added empty when absent.
+    fn translations_mut(&mut self, target: Language) -> &mut Vec<String> {
+        let at = match self
+            .translations
+            .iter()
+            .position(|(into, _)| *into == target)
+        {
+            Some(at) => at,
+            None => {
+                self.translations.push((target, Vec::new()));
+                self.translations.len() - 1
+            }
+        };
+        &mut self.translations[at].1
+    }
+}
 
 /// What [`grouped`] says of a word as a verb form.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,11 +373,11 @@ pub fn grouped(
                     ..found
                 }));
             }
-            Kind::Russian => {
+            Kind::Translation(target) => {
                 found_any |= !found.is_empty();
-                let russian = grouped.russian.get_or_insert_with(Vec::new);
+                let into = grouped.translations_mut(*target);
                 let translations = found.iter().flat_map(|found| &found.article.translations);
-                push_new(russian, translations.cloned());
+                push_new(into, translations.cloned());
             }
             Kind::Synonyms => {
                 if analyses.is_none() {
@@ -970,7 +1000,7 @@ mod tests {
         let dir = TempDir::new("grouped-all");
         let set = spanish_set(&dir);
         let indexes = [
-            (Kind::Russian, &set.russian),
+            (Kind::Translation(Language::Ru), &set.russian),
             (Kind::Definitions, &set.definitions),
             (Kind::Synonyms, &set.synonyms),
             (Kind::English, &set.english),
@@ -978,7 +1008,10 @@ mod tests {
         let banco = grouped(&indexes, Language::Es, "«Banco»,")
             .expect("look up")
             .expect("banco");
-        assert_eq!(banco.russian, Some(texts(&["банк", "скамейка"])));
+        assert_eq!(
+            banco.translations_into(Language::Ru),
+            Some(texts(&["банк", "скамейка"]).as_slice())
+        );
         assert_eq!(
             banco.definitions,
             Some(vec![
@@ -1014,10 +1047,47 @@ mod tests {
     fn a_spanish_verb_form_reaches_the_russian_of_its_infinitive() {
         let dir = TempDir::new("grouped-cerro");
         let russian = canned(&dir, "es-ru.index", &[("cerrar", &[], &["закрыть"])]);
-        let cerró = grouped(&[(Kind::Russian, &russian)], Language::Es, "cerró")
+        let cerró = grouped(
+            &[(Kind::Translation(Language::Ru), &russian)],
+            Language::Es,
+            "cerró",
+        )
+        .expect("look up")
+        .expect("cerró");
+        assert_eq!(
+            cerró.translations_into(Language::Ru),
+            Some(texts(&["закрыть"]).as_slice())
+        );
+    }
+
+    /// Translations are kept by target, one entry per target asked in the
+    /// order of the indexes; a target not asked has none.
+    #[test]
+    fn translations_are_kept_by_target() {
+        let dir = TempDir::new("grouped-targets");
+        let catalan = canned(&dir, "es-ca.index", &[("perro", &[], &["gos"])]);
+        let russian = canned(&dir, "es-ru.index", &[("banco", &[], &["банк"])]);
+        let indexes = [
+            (Kind::Translation(Language::Ca), &catalan),
+            (Kind::Translation(Language::Ru), &russian),
+        ];
+        let perro = grouped(&indexes, Language::Es, "perro")
             .expect("look up")
-            .expect("cerró");
-        assert_eq!(cerró.russian, Some(texts(&["закрыть"])));
+            .expect("perro");
+        assert_eq!(
+            perro.translations,
+            [(Language::Ca, texts(&["gos"])), (Language::Ru, Vec::new())]
+        );
+        assert_eq!(
+            perro.translations_into(Language::Ca),
+            Some(texts(&["gos"]).as_slice())
+        );
+        assert_eq!(perro.translations_into(Language::Ru), Some(&[][..]));
+        assert_eq!(perro.translations_into(Language::En), None);
+        let only = grouped(&indexes[..1], Language::Es, "perro")
+            .expect("look up")
+            .expect("perro");
+        assert_eq!(only.translations_into(Language::Ru), None);
     }
 
     #[test]
@@ -1035,12 +1105,18 @@ mod tests {
             &[("ser", &[("Existir.", &[])], &[])],
             &[("fue", &["ser", "ir"])],
         );
-        let indexes = [(Kind::Russian, &russian), (Kind::Definitions, &definitions)];
+        let indexes = [
+            (Kind::Translation(Language::Ru), &russian),
+            (Kind::Definitions, &definitions),
+        ];
         let fue = grouped(&indexes, Language::Es, "fue")
             .expect("look up")
             .expect("fue");
         // The lemmas sorted: `ir`, then `ser`.
-        assert_eq!(fue.russian, Some(texts(&["идти", "быть"])));
+        assert_eq!(
+            fue.translations_into(Language::Ru),
+            Some(texts(&["идти", "быть"]).as_slice())
+        );
         assert_eq!(
             fue.definitions.expect("definitions")[0].definition,
             "Existir."
@@ -1140,7 +1216,7 @@ mod tests {
                     definition: "Conjunt de coses.".to_owned(),
                     synonyms: Vec::new(),
                 }]),
-                russian: None,
+                translations: Vec::new(),
                 synonyms: None,
                 english: None,
                 verb: None,
@@ -1360,13 +1436,13 @@ mod tests {
         let dir = TempDir::new("grouped-lacks");
         let set = spanish_set(&dir);
         let indexes = [
-            (Kind::Russian, &set.russian),
+            (Kind::Translation(Language::Ru), &set.russian),
             (Kind::Definitions, &set.definitions),
         ];
         let cosa = grouped(&indexes, Language::Es, "cosa")
             .expect("look up")
             .expect("cosa");
-        assert_eq!(cosa.russian, Some(Vec::new()));
+        assert_eq!(cosa.translations_into(Language::Ru), Some(&[][..]));
         assert_eq!(cosa.definitions.expect("definitions").len(), 1);
         assert_eq!(cosa.synonyms, None);
         assert_eq!(cosa.english, None);
@@ -1374,7 +1450,10 @@ mod tests {
         let mesa = grouped(&indexes, Language::Es, "mesa")
             .expect("look up")
             .expect("mesa");
-        assert_eq!(mesa.russian, Some(texts(&["стол"])));
+        assert_eq!(
+            mesa.translations_into(Language::Ru),
+            Some(texts(&["стол"]).as_slice())
+        );
         assert_eq!(mesa.definitions, Some(Vec::new()));
     }
 
@@ -1399,7 +1478,7 @@ mod tests {
         let dir = TempDir::new("grouped-none");
         let set = spanish_set(&dir);
         let indexes = [
-            (Kind::Russian, &set.russian),
+            (Kind::Translation(Language::Ru), &set.russian),
             (Kind::Definitions, &set.definitions),
             (Kind::Synonyms, &set.synonyms),
             (Kind::English, &set.english),

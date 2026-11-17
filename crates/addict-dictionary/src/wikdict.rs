@@ -256,6 +256,29 @@ pub(crate) mod tests {
         builder.finish(&[("table", TABLE, root, SQL)])
     }
 
+    /// A database in the shape of `wikdict-es-ca`: `perro` → `gos`, and
+    /// `banco` with two Catalan translations.
+    pub(crate) fn spanish_catalan() -> Vec<u8> {
+        let mut builder = Builder::new(512);
+        let leaf = builder.leaf(&[
+            row(
+                1,
+                "spa/perro__sustantivo_masculino__1",
+                Some("Mamífero."),
+                text("perro"),
+                "gos",
+            ),
+            row(
+                2,
+                "spa/banco__sustantivo_masculino__1",
+                None,
+                text("banco"),
+                "banc | banca",
+            ),
+        ]);
+        builder.finish(&[("table", TABLE, leaf, SQL)])
+    }
+
     fn translations(contents: &Contents) -> Vec<(&str, Vec<String>)> {
         contents
             .headwords
@@ -282,6 +305,18 @@ pub(crate) mod tests {
         assert_eq!(
             format::encode(&parse(&database(false), "wikdict-es").expect("parse")).expect("encode"),
             first
+        );
+    }
+
+    #[test]
+    fn the_spanish_catalan_rows_give_catalan_translations() {
+        let contents = parse(&spanish_catalan(), "wikdict-es-ca").expect("parse");
+        assert_eq!(
+            translations(&contents),
+            [
+                ("banco", texts(&["banc", "banca"])),
+                ("perro", texts(&["gos"])),
+            ]
         );
     }
 

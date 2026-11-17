@@ -57,7 +57,7 @@ pub const PAIRS: [Pair; 12] = [
     Pair {
         reading: Language::Es,
         my: Language::Ca,
-        sources: &[],
+        sources: &[Source::WikdictEsCa],
     },
     Pair {
         reading: Language::Es,
@@ -114,7 +114,7 @@ mod tests {
     /// them in their own language. No wildcard arm.
     fn translates(source: Source) -> bool {
         match source.kind() {
-            Kind::Russian | Kind::English | Kind::FromRussian => true,
+            Kind::Translation(_) | Kind::English | Kind::FromRussian => true,
             Kind::Definitions | Kind::Synonyms => false,
         }
     }
@@ -161,11 +161,18 @@ mod tests {
     }
 
     #[test]
+    fn spanish_catalan() {
+        assert_eq!(
+            translations(Language::Es, Language::Ca),
+            [Source::WikdictEsCa]
+        );
+    }
+
+    #[test]
     fn no_source_today() {
         for (reading, my) in [
             (Language::En, Language::Es),
             (Language::En, Language::Ca),
-            (Language::Es, Language::Ca),
             (Language::Ca, Language::Es),
         ] {
             assert!(translations(reading, my).is_empty(), "{reading:?} {my:?}");
@@ -217,7 +224,7 @@ mod tests {
     /// The sources of a row read words in its reading language and give its
     /// language: a source of Russian headwords translates into my language,
     /// any other has headwords of the reading language, and its kind gives
-    /// Russian or English as my language says.
+    /// the target, or English, as my language says.
     #[test]
     fn rows_agree_with_the_sources() {
         for pair in PAIRS {
@@ -233,7 +240,7 @@ mod tests {
                     }
                 }
                 let my = match source.kind() {
-                    Kind::Russian => Some(Language::Ru),
+                    Kind::Translation(target) => Some(target),
                     Kind::English => Some(Language::En),
                     Kind::FromRussian => source.russian_into(),
                     Kind::Definitions | Kind::Synonyms => None,

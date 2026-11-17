@@ -82,6 +82,8 @@ pub enum Source {
     WikdictRuEs,
     /// WikDict Russian-Catalan: an SQLite database.
     WikdictRuCa,
+    /// WikDict Spanish-Catalan: an SQLite database.
+    WikdictEsCa,
 }
 
 /// What the senses or the translations of an index are.
@@ -89,8 +91,9 @@ pub enum Source {
 pub enum Kind {
     /// Definitions in the language of the words, with synonyms per sense.
     Definitions,
-    /// Russian translations of the words.
-    Russian,
+    /// Translations of the words into the language it holds: the target,
+    /// given by the source, never stored in the index.
+    Translation(Language),
     /// Synonyms of the words in their own language, from the members of the
     /// senses; the definitions of the senses are not shown.
     Synonyms,
@@ -119,6 +122,7 @@ impl Source {
             Self::WikdictRuEn => "wikdict-ru-en.index",
             Self::WikdictRuEs => "wikdict-ru-es.index",
             Self::WikdictRuCa => "wikdict-ru-ca.index",
+            Self::WikdictEsCa => "wikdict-es-ca.index",
         }
     }
 
@@ -129,9 +133,11 @@ impl Source {
     pub fn language(self) -> Option<Language> {
         match self {
             Self::Oewn | Self::Freedict => Some(Language::En),
-            Self::KaikkiEs | Self::WikdictEsRu | Self::OmwEs | Self::KaikkiEnSpanish => {
-                Some(Language::Es)
-            }
+            Self::KaikkiEs
+            | Self::WikdictEsRu
+            | Self::OmwEs
+            | Self::KaikkiEnSpanish
+            | Self::WikdictEsCa => Some(Language::Es),
             Self::WikdictCaRu | Self::DbnaryCa | Self::SinonimsCat | Self::KaikkiEnCatalan => {
                 Some(Language::Ca)
             }
@@ -155,7 +161,8 @@ impl Source {
             | Self::WikdictCaRu
             | Self::DbnaryCa
             | Self::SinonimsCat
-            | Self::KaikkiEnCatalan => None,
+            | Self::KaikkiEnCatalan
+            | Self::WikdictEsCa => None,
         }
     }
 
@@ -175,7 +182,10 @@ impl Source {
     pub fn kind(self) -> Kind {
         match self {
             Self::Oewn | Self::KaikkiEs | Self::DbnaryCa => Kind::Definitions,
-            Self::Freedict | Self::WikdictEsRu | Self::WikdictCaRu => Kind::Russian,
+            Self::Freedict | Self::WikdictEsRu | Self::WikdictCaRu => {
+                Kind::Translation(Language::Ru)
+            }
+            Self::WikdictEsCa => Kind::Translation(Language::Ca),
             Self::OmwEs | Self::SinonimsCat => Kind::Synonyms,
             Self::KaikkiEnSpanish | Self::KaikkiEnCatalan => Kind::English,
             Self::WikdictRuEn | Self::WikdictRuEs | Self::WikdictRuCa => Kind::FromRussian,
@@ -202,7 +212,7 @@ pub struct KnownFile<'a> {
 /// then Spanish, then Catalan, each language in the order Russian,
 /// definitions, synonyms, English. An article shows the kinds of a language
 /// in this order. Then the files of Russian headwords, into English,
-/// Spanish and Catalan.
+/// Spanish and Catalan, then the Spanish-Catalan file.
 pub const KNOWN: &[KnownFile<'static>] = &[
     KnownFile {
         name: "english-wordnet-2025.xml.gz",
@@ -309,6 +319,16 @@ pub const KNOWN: &[KnownFile<'static>] = &[
         source: Source::WikdictRuCa,
         size: 5_771_264,
         sha256: "0275ead1c53cba99d57596100550afeebd62c03e5bddcbe7b92a7dac348c737b",
+    },
+    // `wikdict-es-ca`: WikDict 2_2026-06, published under
+    // `https://download.wikdict.com/dictionaries/sqlite/2_2026-06/es-ca.sqlite3`.
+    // Last, so the order of the files above is untouched.
+    KnownFile {
+        name: "es-ca.sqlite3",
+        edition: "wikdict-es-ca-2026-06",
+        source: Source::WikdictEsCa,
+        size: 5_197_824,
+        sha256: "c79f5c71f6fda274356f2f5ea09f79fd0aa16614904034d0dce135acc5d15966",
     },
 ];
 
@@ -699,7 +719,7 @@ fn import_known(
         Source::KaikkiEs => kaikki_file(&bytes, Language::Es, &edition),
         Source::KaikkiEnSpanish => kaikki_file(&bytes, Language::Es, &edition),
         Source::KaikkiEnCatalan => kaikki_file(&bytes, Language::Ca, &edition),
-        Source::WikdictEsRu | Source::WikdictCaRu => {
+        Source::WikdictEsRu | Source::WikdictCaRu | Source::WikdictEsCa => {
             wikdict::parse(&bytes, &edition).map_err(|error| error.to_string())
         }
         // The `translation` table reads alike whichever way it translates;
@@ -1005,7 +1025,7 @@ mod tests {
         mythes::tests::FIXTURE as THESAURUS,
         oewn::tests::{FIXTURE, OMW},
         testdir::TempDir,
-        wikdict::tests::database as wikdict,
+        wikdict::tests::{database as wikdict, spanish_catalan},
     };
     use addict_core::translation::reading_languages;
 
@@ -1402,7 +1422,7 @@ mod tests {
 
     #[test]
     fn the_known_files_are_the_chosen_wordnet_freedict_and_spanish_kaikki() {
-        assert_eq!(KNOWN.len(), 13);
+        assert_eq!(KNOWN.len(), 14);
         assert_eq!(KNOWN[1].name, "freedict-eng-rus-2025.11.23.src.tar.xz");
         assert_eq!(KNOWN[1].edition, "freedict-eng-rus-2025.11.23");
         assert_eq!(KNOWN[1].size, 3948540);
@@ -1445,7 +1465,7 @@ mod tests {
         assert_eq!(Source::Oewn.language(), Some(Language::En));
         assert_eq!(Source::Oewn.kind(), Kind::Definitions);
         assert_eq!(Source::Freedict.language(), Some(Language::En));
-        assert_eq!(Source::Freedict.kind(), Kind::Russian);
+        assert_eq!(Source::Freedict.kind(), Kind::Translation(Language::Ru));
         // One index file per source.
         let mut names: Vec<_> = KNOWN.iter().map(|k| k.source.index_name()).collect();
         names.dedup();
@@ -1998,7 +2018,7 @@ mod tests {
                 (
                     "wikdict-es-ru.index",
                     Some(Language::Es),
-                    Kind::Russian,
+                    Kind::Translation(Language::Ru),
                     "es-ru.sqlite3"
                 ),
                 (
@@ -2022,7 +2042,7 @@ mod tests {
                 (
                     "wikdict-ca-ru.index",
                     Some(Language::Ca),
-                    Kind::Russian,
+                    Kind::Translation(Language::Ru),
                     "ca-ru.sqlite3"
                 ),
                 (
@@ -2101,6 +2121,7 @@ mod tests {
         match source {
             Source::WikdictEsRu => wikdict(false),
             Source::WikdictCaRu => wikdict(true),
+            Source::WikdictEsCa => spanish_catalan(),
             Source::OmwEs => xz_of(&tar_of(&[
                 ("omw-es/LICENSE", b"a licence"),
                 (OMW_ES_MEMBER, OMW.as_bytes()),
@@ -2184,7 +2205,7 @@ mod tests {
             assert_eq!(notice.sha256, notice.sha256.to_lowercase(), "{source:?}");
             seen.push(source);
         }
-        assert_eq!(seen.len(), 13);
+        assert_eq!(seen.len(), 14);
     }
 
     #[test]
@@ -2211,6 +2232,7 @@ mod tests {
             Source::DbnaryCa,
             Source::SinonimsCat,
             Source::KaikkiEnCatalan,
+            Source::WikdictEsCa,
         ];
         let fixture = Fixture::new("every-source");
         let files: Vec<Archive> = new
@@ -2281,6 +2303,13 @@ mod tests {
             (vec![], vec![], strings(&["колле́кция", "коллекция"]))
         );
         assert_eq!(russian.exception_forms(), 0);
+        // Catalan: the translations of the Spanish words, no senses.
+        let catalan = open(Source::WikdictEsCa);
+        assert_eq!(
+            article(&catalan, "perro"),
+            (vec![], vec![], strings(&["gos"]))
+        );
+        assert_eq!(catalan.exception_forms(), 0);
         // Synonyms: the members of the senses, without the word itself.
         let omw = open(Source::OmwEs);
         assert_eq!(
@@ -2370,9 +2399,29 @@ mod tests {
         )])
     }
 
+    /// The Spanish-Catalan file is pinned last, after the files of Russian
+    /// headwords: it reads Spanish and translates into Catalan.
+    #[test]
+    fn the_spanish_catalan_file_is_known_last() {
+        let known = KNOWN[13];
+        assert_eq!(KNOWN.len(), 14);
+        assert_eq!(known.name, "es-ca.sqlite3");
+        assert_eq!(known.edition, "wikdict-es-ca-2026-06");
+        assert_eq!(known.source, Source::WikdictEsCa);
+        assert_eq!(known.size, 5_197_824);
+        assert_eq!(
+            known.sha256,
+            "c79f5c71f6fda274356f2f5ea09f79fd0aa16614904034d0dce135acc5d15966"
+        );
+        assert_eq!(known.source.index_name(), "wikdict-es-ca.index");
+        assert_eq!(known.source.language(), Some(Language::Es));
+        assert_eq!(known.source.russian_into(), None);
+        assert_eq!(known.source.kind(), Kind::Translation(Language::Ca));
+    }
+
     #[test]
     fn the_russian_files_are_known_each_into_its_language_and_none_is_a_reading_language() {
-        let rows: Vec<_> = KNOWN[10..]
+        let rows: Vec<_> = KNOWN[10..13]
             .iter()
             .map(|known| {
                 let source = known.source;

@@ -343,6 +343,7 @@ pub fn describe(name: &str) -> Option<(&'static str, &'static str)> {
         Source::WikdictRuEn => ("Russian", "WikDict, Russian → English"),
         Source::WikdictRuEs => ("Russian", "WikDict, Russian → Spanish"),
         Source::WikdictRuCa => ("Russian", "WikDict, Russian → Catalan"),
+        Source::WikdictEsCa => ("Spanish", "WikDict, Spanish → Catalan"),
     })
 }
 
@@ -1684,6 +1685,10 @@ mod tests {
         assert_eq!(group_text(&groups[0].indexes), "2 dictionaries · 6 MB");
         assert_eq!(group_text(&groups[1].indexes), "1 dictionary · 40 MB");
         assert_eq!(describe("oewn"), Some(("English", "Open English WordNet")));
+        assert_eq!(
+            describe("wikdict-es-ca"),
+            Some(("Spanish", "WikDict, Spanish → Catalan"))
+        );
         assert_eq!(describe("tessdata"), None);
         assert_eq!(eyebrow_text(false, 13), EYEBROW);
         assert_eq!(eyebrow_text(true, 1), "1 dictionary to restore");
