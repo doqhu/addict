@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/doqhu/addict/compare/v0.3.0...v0.3.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* upload release assets before immutable publication ([#25](https://github.com/doqhu/addict/issues/25)) ([e45682c](https://github.com/doqhu/addict/commit/e45682ccb281415cebb8cc8790eed7408d8a0f01))
+
 ## [0.3.0](https://github.com/doqhu/addict/compare/v0.2.0...v0.3.0) (2026-11-17)
 
 
