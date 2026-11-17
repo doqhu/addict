@@ -132,11 +132,18 @@ impl Downloader {
         format!("{}/{}/{asset}", self.base_url, release::tag())
     }
 
-    /// The manifest of the release.
+    /// Prefers the current manifest and tries the legacy one on HTTP 404.
     pub async fn manifest(&self) -> Result<Manifest, DownloadError> {
-        let body = self
-            .fetch(MANIFEST_WHAT, release::MANIFEST, MANIFEST_MAX, |_| {})
-            .await?;
+        let body = match self
+            .fetch(MANIFEST_WHAT, release::MANIFEST_2, MANIFEST_MAX, |_| {})
+            .await
+        {
+            Err(DownloadError::Status { status: 404, .. }) => {
+                self.fetch(MANIFEST_WHAT, release::MANIFEST, MANIFEST_MAX, |_| {})
+                    .await?
+            }
+            result => result?,
+        };
         Manifest::parse(&body).map_err(|cause| DownloadError::Manifest { cause })
     }
 
@@ -750,7 +757,10 @@ mod tests {
     /// OEWN, which is reached through a redirect, as GitHub's is.
     fn release(manifest: Vec<u8>, asset: Option<Vec<u8>>) -> Stub {
         let tag = release::tag();
-        let mut routes = HashMap::from([(format!("/{tag}/manifest.json"), Route::File(manifest))]);
+        let mut routes = HashMap::from([(
+            format!("/{tag}/{}", release::MANIFEST_2),
+            Route::File(manifest),
+        )]);
         if let Some(asset) = asset {
             routes.insert(
                 format!("/{tag}/oewn.index.xz"),
@@ -783,7 +793,7 @@ mod tests {
         assert_eq!(
             stub.seen(),
             [
-                format!("GET /{tag}/manifest.json HTTP/1.1"),
+                format!("GET /{tag}/{} HTTP/1.1", release::MANIFEST_2),
                 format!("GET /{tag}/oewn.index.xz HTTP/1.1"),
                 "GET /objects/oewn HTTP/1.1".to_owned(),
             ]
@@ -815,10 +825,10 @@ mod tests {
         assert_eq!(
             stub.seen(),
             [
-                format!("GET /{tag}/manifest.json HTTP/1.1"),
+                format!("GET /{tag}/{} HTTP/1.1", release::MANIFEST_2),
                 format!("GET /{tag}/oewn.index.xz HTTP/1.1"),
                 "GET /objects/oewn HTTP/1.1".to_owned(),
-                format!("GET /{tag}/manifest.json HTTP/1.1"),
+                format!("GET /{tag}/{} HTTP/1.1", release::MANIFEST_2),
             ]
         );
     }
@@ -845,7 +855,7 @@ mod tests {
         let manifests = stub
             .seen()
             .iter()
-            .filter(|line| line.contains("manifest.json"))
+            .filter(|line| line.contains(release::MANIFEST_2))
             .count();
         assert_eq!(manifests, 2, "{:?}", stub.seen());
         assert_eq!(stub.seen().len(), 6, "{:?}", stub.seen());
@@ -1018,6 +1028,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_a_404_falls_back_to_the_legacy_manifest() {
+        let tag = release::tag();
+        let current = format!("/{tag}/{}", release::MANIFEST_2);
+        let legacy = format!("/{tag}/{}", release::MANIFEST);
+        let entry = Published::of("oewn", b"legacy");
+        let legacy_route = Route::File(manifest_of(vec![entry.clone()]));
+        let current_request = format!("GET {current} HTTP/1.1");
+        let stub = Stub::start(HashMap::from([(legacy.clone(), legacy_route.clone())])).unwrap();
+        let downloader = Downloader::with_base_url(stub.base_url());
+        assert_eq!(downloader.manifest().await.unwrap().indexes, [entry]);
+        assert_eq!(
+            stub.seen(),
+            [current_request.clone(), format!("GET {legacy} HTTP/1.1")]
+        );
+
+        for (route, expected_status) in [
+            (Route::File(b"invalid JSON".to_vec()), None),
+            (Route::File(br#"{"format":2,"indexes":[]}"#.to_vec()), None),
+            (Route::Status("500 Internal Server Error"), Some(500)),
+        ] {
+            let stub = Stub::start(HashMap::from([
+                (current.clone(), route),
+                (legacy.clone(), legacy_route.clone()),
+            ]))
+            .unwrap();
+            let downloader = Downloader::with_base_url(stub.base_url());
+            let error = downloader.manifest().await.unwrap_err();
+            match expected_status {
+                Some(expected) => assert!(
+                    matches!(error, DownloadError::Status { status, .. } if status == expected),
+                    "{error:?}"
+                ),
+                None => assert!(matches!(error, DownloadError::Manifest { .. }), "{error:?}"),
+            }
+            assert_eq!(stub.seen(), std::slice::from_ref(&current_request));
+        }
+    }
+
+    #[tokio::test]
     async fn an_asset_of_another_size_writes_nothing() {
         let xz = xz_of(&index());
         let dir = DataDir::new("size");
@@ -1105,7 +1154,11 @@ mod tests {
         let downloader = Downloader::new();
         let tag = release::tag();
         assert_eq!(
-            downloader.url("manifest.json"),
+            downloader.url(release::MANIFEST_2),
+            format!("https://github.com/doqhu/addict/releases/download/{tag}/manifest-2.json")
+        );
+        assert_eq!(
+            downloader.url(release::MANIFEST),
             format!("https://github.com/doqhu/addict/releases/download/{tag}/manifest.json")
         );
         assert_eq!(

@@ -1257,7 +1257,7 @@ mod tests {
 
         use crate::stub::{Route, Stub};
 
-        let manifest_path = format!("/{}/manifest.json", addict_dictionary::release::tag());
+        let manifest_path = format!("/{}/{}", release::tag(), release::MANIFEST_2);
         let empty = Stub::start(HashMap::new()).expect("the stub");
         let downloader = Downloader::with_base_url(empty.base_url());
         let error = offered_manifest(MISSING, false, &downloader)
@@ -1320,6 +1320,51 @@ mod tests {
         assert_eq!(good.seen().len(), 1, "the release is asked only when due");
     }
 
+    #[tokio::test]
+    async fn first_run_and_recovery_prefer_the_numbered_manifest_with_legacy_fallback() {
+        use std::collections::HashMap;
+
+        use crate::stub::{Route, Stub};
+
+        let tag = release::tag();
+        let numbered_path = format!("/{tag}/{}", release::MANIFEST_2);
+        let legacy_path = format!("/{tag}/{}", release::MANIFEST);
+        let manifest = |name| Manifest {
+            format: addict_dictionary::format::VERSION,
+            indexes: vec![Published::of(name, b"xz")],
+        };
+        let numbered = manifest("wikdict-es-ca");
+        let legacy = manifest("oewn");
+        let dir = TempDir::new("manifest-selection");
+
+        for has_numbered in [true, false] {
+            let mut routes = HashMap::from([(
+                legacy_path.clone(),
+                Route::File(legacy.to_json().into_bytes()),
+            )]);
+            let mut requests = vec![format!("GET {numbered_path} HTTP/1.1")];
+            let expected = if has_numbered {
+                routes.insert(
+                    numbered_path.clone(),
+                    Route::File(numbered.to_json().into_bytes()),
+                );
+                &numbered
+            } else {
+                requests.push(format!("GET {legacy_path} HTTP/1.1"));
+                &legacy
+            };
+            let stub = Stub::start(routes).unwrap();
+            let downloader = Downloader::with_base_url(stub.base_url());
+            let offer = offered_manifest(MISSING, false, &downloader).await.unwrap();
+            assert_eq!(offer.as_ref(), Some(expected));
+            assert_eq!(stub.seen(), requests);
+
+            let recovery = recovery_manifest(&downloader, dir.0.clone()).await.unwrap();
+            assert_eq!(&recovery, expected);
+            assert_eq!(stub.seen(), [requests.clone(), requests].concat());
+        }
+    }
+
     fn recovery_index(edition: &str) -> Vec<u8> {
         use addict_dictionary::format::{self, AnalysedForm, Contents, Headword, SenseRecord};
         format::encode(&Contents {
@@ -1354,7 +1399,7 @@ mod tests {
             indexes: indexes.clone(),
         };
         let mut routes = std::collections::HashMap::from([(
-            format!("/{tag}/manifest.json"),
+            format!("/{tag}/{}", release::MANIFEST_2),
             Route::File(manifest.to_json().into_bytes()),
         )]);
         for published in indexes {
@@ -1538,10 +1583,11 @@ mod tests {
                 .into_bytes(),
             ),
         ] {
+            let requests_per_attempt = if body.is_some() { 1 } else { 2 };
             let routes = body
                 .map(|body| {
                     (
-                        format!("/{}/manifest.json", release::tag()),
+                        format!("/{}/{}", release::tag(), release::MANIFEST_2),
                         Route::File(body),
                     )
                 })
@@ -1553,7 +1599,11 @@ mod tests {
                 assert!(recovery_manifest(&downloader, dir.0.clone()).await.is_err());
                 assert_eq!(fs::read(dir.0.join("oewn.index")).unwrap(), good);
             }
-            assert_eq!(stub.seen().len(), 2, "retry fetches afresh");
+            assert_eq!(
+                stub.seen().len(),
+                2 * requests_per_attempt,
+                "retry fetches afresh"
+            );
         }
     }
 
@@ -1969,7 +2019,7 @@ mod tests {
         let tag = release::tag();
         let stub = Stub::start(HashMap::from([
             (
-                format!("/{tag}/manifest.json"),
+                format!("/{tag}/{}", release::MANIFEST_2),
                 Route::File(manifest.to_json().into_bytes()),
             ),
             (format!("/{tag}/omw-es.index.xz"), Route::File(good.clone())),
@@ -2030,7 +2080,7 @@ mod tests {
         let manifests = stub
             .seen()
             .iter()
-            .filter(|line| line.contains("manifest.json"))
+            .filter(|line| line.contains(release::MANIFEST_2))
             .count();
         assert_eq!(manifests, 1, "{:?}", stub.seen());
     }

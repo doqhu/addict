@@ -6,8 +6,9 @@
 //!
 //! The indexes of the format [`format::VERSION`] are assets of the release
 //! tagged [`tag`], `indexes-v<VERSION>`: each index compressed with xz as
-//! [`asset_name`], `<name>.index.xz`, and [`MANIFEST`], the JSON of a
-//! [`Manifest`] that gives the size and the SHA-256 of every asset. A release
+//! [`asset_name`], `<name>.index.xz`. [`MANIFEST_2`] lists the current
+//! inventory, and [`MANIFEST`] lists the legacy inventory. Both use the
+//! [`Manifest`] schema for asset sizes and SHA-256 checksums. A release
 //! of an older format is never changed, so an application that reads only
 //! that format keeps finding its indexes.
 //!
@@ -36,14 +37,14 @@ use crate::{
     sources,
 };
 
-/// The name of the manifest asset of the release.
+/// The name of the legacy manifest asset used by apps through 0.2.x.
 pub const MANIFEST: &str = "manifest.json";
 
-/// The indexes the builder publishes: the 13 of the 0.2.0 release, in the
-/// order of their rows. A source added since (`wikdict-es-ca`) is imported
-/// by hand but not built, so `manifest.json` stays as published until the
-/// manifests are numbered.
-pub const PUBLISHED: [&str; 13] = [
+/// The name of the manifest asset listing the full inventory.
+pub const MANIFEST_2: &str = "manifest-2.json";
+
+/// The indexes eligible for the legacy manifest, in source row order.
+pub const LEGACY_PUBLISHED: [&str; 13] = [
     "oewn",
     "freedict",
     "wikdict-es-ru",
@@ -58,16 +59,6 @@ pub const PUBLISHED: [&str; 13] = [
     "wikdict-ru-es",
     "wikdict-ru-ca",
 ];
-
-/// The rows of [`sources::ROWS`] whose index is in [`PUBLISHED`], in row
-/// order: the rows the builder builds.
-pub fn published_rows() -> Vec<sources::Row> {
-    sources::ROWS
-        .iter()
-        .filter(|row| PUBLISHED.contains(&row.index))
-        .copied()
-        .collect()
-}
 
 /// The tag of the data release of the indexes of this format.
 pub fn tag() -> String {
@@ -370,14 +361,14 @@ mod tests {
         assert_eq!(tag(), "indexes-v3");
         assert_eq!(asset_name("oewn"), "oewn.index.xz");
         assert_eq!(MANIFEST, "manifest.json");
+        assert_eq!(MANIFEST_2, "manifest-2.json");
     }
 
-    /// The builder publishes exactly the 13 indexes of 0.2.0, each with a
-    /// row, and not `wikdict-es-ca`.
+    /// The legacy manifest is limited to the 13 indexes of 0.2.0.
     #[test]
-    fn only_the_published_indexes_are_built() {
+    fn the_legacy_inventory_matches_version_0_2_0() {
         assert_eq!(
-            PUBLISHED,
+            LEGACY_PUBLISHED,
             [
                 "oewn",
                 "freedict",
@@ -394,10 +385,12 @@ mod tests {
                 "wikdict-ru-ca",
             ]
         );
-        let built: Vec<&str> = published_rows().iter().map(|row| row.index).collect();
-        assert_eq!(built, PUBLISHED);
-        assert!(!built.contains(&"wikdict-es-ca"));
-        assert!(sources::ROWS.iter().any(|row| row.index == "wikdict-es-ca"));
+        let legacy: Vec<&str> = sources::ROWS
+            .iter()
+            .map(|row| row.index)
+            .filter(|name| LEGACY_PUBLISHED.contains(name))
+            .collect();
+        assert_eq!(legacy, LEGACY_PUBLISHED);
     }
 
     #[test]
