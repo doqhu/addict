@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/doqhu/addict/compare/v0.2.0...v0.3.0) (2026-11-17)
+
+
+### Features
+
+* my language — choose the language of translation (epic 1) ([#21](https://github.com/doqhu/addict/issues/21)) ([5b78563](https://github.com/doqhu/addict/commit/5b78563a9b0a331dc45a397fd9a529c2b68d11d6))
+* Russian Capture — recognize Russian with the rus data (epic 2) ([#23](https://github.com/doqhu/addict/issues/23)) ([ffb0df5](https://github.com/doqhu/addict/commit/ffb0df548ac9de7f3f44275cbc7b31cf7293e60a))
+
 ## [0.2.0](https://github.com/doqhu/addict/compare/v0.1.1...v0.2.0) (2026-11-12)
 
 
