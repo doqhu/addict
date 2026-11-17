@@ -103,7 +103,8 @@ NLOHMANN = [('nlohmann-json-3.12.0.hpp', 'https://github.com/nlohmann/json/relea
             ('nlohmann-json-3.12.0-LICENSE.MIT', 'https://raw.githubusercontent.com/nlohmann/json/v3.12.0/LICENSE.MIT')]
 DWARFS_BUILD = ('dwarfs-source.tar.gz', 'https://github.com/mhx/dwarfs/archive/3945d234619504bc149da18cfb208218779c477d.tar.gz')
 ZIG = ('zig-0.16.0.tar.xz', 'https://ziglang.org/download/0.16.0/zig-0.16.0.tar.xz')
-GPL2 = ('gnu-gpl-2.0.txt', 'https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt')
+# GNU's FTP server, not www.gnu.org: the same file, and some CI runners cannot reach www.
+GPL2 = ('gnu-gpl-2.0.txt', 'https://ftp.gnu.org/gnu/Licenses/gpl-2.0.txt')
 RUST_SRC = {'uruntime': '2026-09-24', 'anylinux-sharun': '2026-09-11'}
 SHARUN_RESOLVED_AT = '2026-11-05T03:42:31Z'
 # std's dependencies on Linux: the non-optional ones and those of the backtrace

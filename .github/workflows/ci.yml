@@ -183,6 +183,23 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The image installs the GNOME runtimes in one of its read-only layers.
+      # When the build updates them, flatpak renames the old deployment's
+      # directory, and on runners whose overlay storage cannot rename a
+      # directory of a lower layer (ubuntu24/20261111.127) that fails with
+      # "Invalid cross-device link", then xvfb-run segfaults; see
+      # flatpak/flatpak-github-actions#267. A copy in the container's own
+      # layer renames freely.
+      - name: Copy the preinstalled runtimes into the writable layer
+        run: |
+          set -eu
+          installation=$(flatpak --installations)
+          test -d "$installation"
+          cp -a "$installation" "$installation.copy"
+          rm -rf "$installation"
+          mv "$installation.copy" "$installation"
+          flatpak list --runtime
+
       # The screenshots mirrored, with full URLs and committed to their own
       # ref, as Flathub's build makes them: the repo lint needs that. The
       # build and the repo stay outside the checkout, which the addict module
