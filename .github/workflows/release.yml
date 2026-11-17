@@ -3,7 +3,8 @@ name: Release
 # Attaches the Flatpak bundle and its SHA-256 file, the source tarball with
 # the crates vendored and its SHA-256 file, and the AppImage with its
 # checksum, its metadata and its corresponding-source set, to the GitHub
-# Release of a vX.Y.Z tag, after every CI job passed in the same run. Started
+# draft of a vX.Y.Z tag, then publishes after every upload succeeds. Every
+# CI job must pass in the same run. Started
 # by hand, it is a dry run that fills the draft release `dry-run` instead.
 # See docs/release.md.
 on:

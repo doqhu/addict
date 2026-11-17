@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # The upload of the release workflow: puts the given files on a GitHub
-# Release, replacing assets of the same name.
+# draft, replacing assets of the same name, then publishes a version release.
 #
 #   release-upload.sh RELEASE FILE...
 #
 # The files are uploaded one at a time in the order given, each under its
 # base name, so the caller puts the AppImage and its checksum last and a
 # failed run never leaves the image on a Release without its sources.
-# RELEASE is a vX.Y.Z tag, whose Release must exist (release-please makes it;
+# RELEASE is a vX.Y.Z tag, whose draft must exist (release-please makes it;
 # it is never created here), or `dry-run`, the draft a dry run fills: it is
 # created when missing, refused when published, and keeps exactly this
 # run's assets. Uses gh with GH_TOKEN and GH_REPO from the environment, and
@@ -46,12 +46,12 @@ done
 err=$(mktemp)
 trap 'rm -f -- "$err"' EXIT
 
-# Find the release. A tag's Release is made by release-please and is never
+# Find the draft. A tag's Release is made by release-please and is never
 # created here. The draft `dry-run` is created when missing; a published
 # release of that name is refused.
 if draft=$(gh release view "$release" --json isDraft --jq .isDraft 2> "$err"); then
-    if [[ $release == dry-run && $draft != true ]]; then
-        echo "::error::The release dry-run is published, not a draft: nothing is uploaded."
+    if [[ $draft != true ]]; then
+        echo "::error::The release $release is published, not a draft: nothing is uploaded. Immutable releases cannot accept assets; use a new version."
         exit 1
     fi
 elif grep -q 'release not found' "$err"; then
@@ -84,4 +84,8 @@ if [[ $release == dry-run ]]; then
     done <<< "$names"
     gh release edit dry-run --target "${GITHUB_SHA:?}" \
         --notes "Dry run of ${GITHUB_REF_NAME:-?} at $GITHUB_SHA, run ${GITHUB_SERVER_URL:-}/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}."
+else
+    # Publishing locks an immutable release. Keep this after every upload:
+    # failures leave a draft whose assets can be replaced by a retry.
+    gh release edit "$release" --draft=false
 fi

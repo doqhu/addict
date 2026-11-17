@@ -2,11 +2,14 @@
 
 Merging the release pull request of
 [release-please](https://github.com/googleapis/release-please) tags the
-release `vX.Y.Z` and publishes its GitHub Release at once. The push of that
-tag starts the workflow `.github/workflows/release.yml`, which attaches the
-builds to the Release. This page says what that run does and what the
-maintainer does when it fails. The dictionary indexes have their own data
-release, `indexes-v<N>`, which [index-release.md](index-release.md)
+release `vX.Y.Z` and creates its GitHub Release as a draft. The config sets
+`draft: true` and `force-tag-creation: true`: draft releases alone do not
+create tags, so explicit tag creation is needed to start the workflow
+`.github/workflows/release.yml`. It builds and checks the assets, attaches
+them to the draft, then publishes it. With immutable releases enabled,
+publication locks the assets; every upload must finish first. This page says
+what that run does and what the maintainer does when it fails. The dictionary
+indexes have their own data release, `indexes-v<N>`, which [index-release.md](index-release.md)
 describes; this workflow never touches it.
 
 ## A tag run
@@ -29,13 +32,17 @@ describes; this workflow never touches it.
   run's `appimage` job built and checked, with no second build.
   `scripts/release-appimage-assets.sh` checks the handoff again and writes
   the AppImage assets, and `scripts/release-upload.sh` uploads everything to
-  the Release of the tag. It is the only job with `contents: write`.
+  the draft Release of the tag, then publishes it only after every upload
+  succeeds. Published releases are refused before any mutation. It is the
+  only job with `contents: write`.
 - **One run at a time:** a run on the same tag waits for the running one.
   GitHub keeps only one waiting run per group: a newer waiting run cancels
   an older one.
-- **Missing Release:** release-please creates the Release before the tag's
-  run starts. If the run finds no Release for the tag, it fails with a
-  message that names the tag, and creates nothing.
+- **Missing Release:** release-please creates the tag before creating the
+  draft. By the time the builds finish, the draft should exist. If draft
+  creation failed and the upload job finds no Release for the tag, it fails
+  with a message that names the tag, and creates nothing. Restore the draft
+  for that existing tag with the correct release notes before retrying.
 
 ## The assets
 
@@ -68,12 +75,12 @@ https://github.com/doqhu/addict/releases/download/v<version>/addict-<version>-ve
 
 With the same cargo, GNU tar and xz, the same commit gives the same bytes:
 the names are sorted, every mtime is the commit time, every owner is 0, and
-xz runs on one thread. So a second run on the same tag, which replaces the
-asset, leaves the checksum a manifest pins valid, as long as the runner
-image has the same versions of those tools; they are not pinned, and a later
-run on a newer image may give other bytes. The upload job checks the
-tarball against its `.sha256` before any upload. Before the upload job gets
-it, `scripts/release-source.sh` unpacks it and runs
+xz runs on one thread. A retry while the release is still a draft can
+replace the asset with identical bytes as long as the runner image has the
+same versions of those tools; they are not pinned, and a later run on a
+newer image may give other bytes. Published assets are never replaced. The
+upload job checks the tarball against its `.sha256` before any upload. Before
+the upload job gets it, `scripts/release-source.sh` unpacks it and runs
 `cargo metadata --offline --locked` in it with an empty `CARGO_HOME`; a
 failure uploads nothing. It refuses a `Cargo.lock` with a source other than
 crates.io (a git dependency), and a tree that already has
@@ -133,21 +140,31 @@ cd Addict-0.2.0-x86_64.AppImage.sources
 sha256sum --check --strict SHA256SUMS
 ```
 
-An upload replaces an asset of the same name, so a second run on the same
-tag succeeds.
+While the release is a draft, an upload replaces an asset of the same
+name, so an interrupted upload can be retried. A run against an already
+published release fails before uploading anything.
 
 ## When a tag run fails
 
-A failed check leaves the Release published without assets: release-please
-has no draft mode here. Then:
+A failed check or upload leaves the Release as a draft. An interrupted
+upload may leave some assets on the draft; a retry replaces them before
+publishing. Then:
 
 - If the failure is not in the code (a network error, a runner problem),
   re-run the failed run in Actions (**Re-run failed jobs**). It builds the
-  same commit and uploads to the same Release.
+  same commit and uploads to the same draft, then publishes after success.
+  A failure to publish also leaves the completed draft retryable.
 - If the fix needs a commit, merge it to `main` and ship it as the next patch
   version through the next release pull request.
 
 A tag is never moved or deleted, and its Release is not deleted either.
+
+The existing `v0.3.0` release was published before this fix and is immutable
+with no uploaded assets. Re-running its old workflow cannot repair it, and
+a rerun uses the workflow from its original commit. Ship the fix and app
+assets through the next patch release. Its successful build artifacts remain
+available from run `44132391755` until their retention expires; these are
+workflow artifacts, not published release assets.
 
 ## The dry run
 
@@ -211,14 +228,17 @@ network and no GitHub access. It needs `python3` with PyYAML, `git` and
 
 - the guard `scripts/release-ref.sh` over the tag names above;
 - in the workflow files: the release trigger is exactly the tag filter
-  `v[0-9]+.[0-9]+.[0-9]+`, CI's push has a branch filter, the upload job
+  `v[0-9]+.[0-9]+.[0-9]+`, release-please enables draft and explicit tag
+  creation, CI's push has a branch filter, the upload job
   needs `guard`, `ci` and `source` with no `if:` (so a failed check skips
   it), it is the only job with `contents: write`, the `source` job needs the
   guard and has `contents: read`, and the concurrency group;
 - `scripts/release-upload.sh`, the upload job's logic, against a stub `gh`
-  that keeps its releases in a temporary directory and records its calls: a
-  real release, a second run, a dry run with and without an older draft, a
-  missing Release, a published `dry-run` and an unexpected `gh` error; and
+  that keeps its releases in a temporary directory and records its calls:
+  a draft version published only after the final upload, retries after upload
+  and publication failures, published releases refused before mutation, dry
+  runs with and without an older draft, a missing Release and an unexpected
+  `gh` error; and
   with many files, one upload call per file in the order given;
 - `scripts/release-source.sh` on a fixture git repository with one crate,
   with a stub `cargo` (a real `cargo vendor` needs the network) whose
@@ -236,7 +256,8 @@ network and no GitHub access. It needs `python3` with PyYAML, `git` and
   source tarball: a complete handoff (every asset uploaded, the Flatpak and
   the source tarball first, the image and its checksum last, every name
   only `A-Za-z0-9._-` and under 2 GiB, the parts reassembling to a set that
-  passes `SHA256SUMS`), a second run, a dry run after an older one, and the
+  passes `SHA256SUMS`), refusal after publication, a dry run after an older
+  one that remains unpublished, and the
   refusals that upload nothing: a source removed, a source and its
   `SHA256SUMS` line removed, a source not in the inventory, a corrupt source,
   a corrupt image, a missing metadata file, a corrupt handoff tar, and an
