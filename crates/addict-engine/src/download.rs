@@ -1166,4 +1166,51 @@ mod tests {
             format!("https://github.com/doqhu/addict/releases/download/{tag}/oewn.index.xz")
         );
     }
+
+    /// The published release, over the network: the current manifest lists
+    /// every source, the legacy one only what apps through 0.2.x know, and
+    /// one WikDict index downloads, matches its entry and opens. Run by hand
+    /// after the indexes workflow published:
+    /// `cargo test -p addict-engine download::tests::live -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs the network and the published indexes release"]
+    async fn live_release_lists_and_installs_the_published_indexes() {
+        let downloader = Downloader::new();
+        let current = downloader.manifest().await.expect("manifest-2.json");
+        let names: Vec<&str> = current.indexes.iter().map(|p| p.name.as_str()).collect();
+        let expected: Vec<&str> = addict_dictionary::sources::ROWS
+            .iter()
+            .map(|row| row.index)
+            .collect();
+        assert_eq!(names, expected, "manifest-2.json lists every source");
+        for published in &current.indexes {
+            assert!(published.size > 0, "{} has a size", published.name);
+            assert_eq!(
+                published.sha256.len(),
+                64,
+                "{} has a sha256",
+                published.name
+            );
+        }
+
+        let body = downloader
+            .fetch("the legacy manifest", release::MANIFEST, 1 << 20, |_| {})
+            .await
+            .expect("manifest.json");
+        let legacy = Manifest::parse(&body).expect("a readable manifest.json");
+        let names: Vec<&str> = legacy.indexes.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, release::LEGACY_PUBLISHED, "manifest.json is 0.2.0's");
+
+        let wikdict = current
+            .indexes
+            .iter()
+            .find(|p| p.name == "wikdict-es-ca")
+            .expect("wikdict-es-ca is published");
+        let dir = DataDir::new("live");
+        let path = downloader
+            .install(wikdict, &dir.data(), |_| {})
+            .await
+            .expect("wikdict-es-ca installs");
+        Index::open(&path).expect("the installed index opens");
+    }
 }
