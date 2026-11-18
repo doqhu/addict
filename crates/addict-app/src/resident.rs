@@ -157,7 +157,7 @@ use addict_deepl::{DeepL, key};
 use addict_dictionary::{import, release::Manifest};
 use addict_platform::{
     ocr::OcrFailure,
-    shortcut::{self, Action, Bindings, ShortcutEvent, ShortcutHandle},
+    shortcut::{self, Action, Bindings, KeyOwner, ShortcutEvent, ShortcutHandle},
     startup,
     tray::{self, TrayEvent, TrayHandle},
     work::{Job, Outcome, Work},
@@ -364,12 +364,19 @@ enum Event {
 fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandle {
     let sender = sender.clone();
     let file = entries::shortcut_file();
-    shortcut::start(APP_ID, TRIGGER, BIND_LIMITS, file, move |event| {
-        // Here, on the worker: the UI thread may be busy when it arrives.
-        let receipt_ns = (timed && matches!(event, ShortcutEvent::Activated { .. }))
-            .then(evidence::monotonic_ns);
-        let _ = sender.unbounded_send(Event::Window(WindowEvent::Shortcut(event, receipt_ns)));
-    })
+    shortcut::start(
+        APP_ID,
+        KeyOwner::detect(),
+        TRIGGER,
+        BIND_LIMITS,
+        file,
+        move |event| {
+            // Here, on the worker: the UI thread may be busy when it arrives.
+            let receipt_ns = (timed && matches!(event, ShortcutEvent::Activated { .. }))
+                .then(evidence::monotonic_ns);
+            let _ = sender.unbounded_send(Event::Window(WindowEvent::Shortcut(event, receipt_ns)));
+        },
+    )
 }
 
 /// How long a hidden window takes to leave the screen: the shell's hide
@@ -2960,6 +2967,7 @@ async fn request_startup_change(enable: bool) -> StartupEnd {
 fn start_settings(
     window: &gtk::ApplicationWindow,
     key_file: Option<&std::path::Path>,
+    owner: KeyOwner,
     articles: Arc<dyn Articles>,
     sender: &UnboundedSender<Event>,
 ) -> Settings {
@@ -2974,6 +2982,7 @@ fn start_settings(
     Settings::new(
         window,
         key_file,
+        owner,
         move || {
             let _ = change.unbounded_send(Event::ChangeShortcut);
         },
@@ -3273,7 +3282,13 @@ fn start(
     let english_file = english::path();
     let english_job = start_english(work.as_deref(), english_file.clone(), &sender);
     let (translator, key_file, cache) = online_translator();
-    let settings = start_settings(&window, key_file.as_deref(), articles.clone(), &sender);
+    let settings = start_settings(
+        &window,
+        key_file.as_deref(),
+        KeyOwner::detect(),
+        articles.clone(),
+        &sender,
+    );
     let about = About::new(&window);
     let session = Session {
         binding,
@@ -3862,7 +3877,14 @@ mod tests {
         let work = Rc::new(Work::start().unwrap());
         let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(None));
         let (translator, key_file, cache) = online_translator();
-        let settings = start_settings(&window, key_file.as_deref(), articles.clone(), &sender);
+        // Not the desktop the tests run on: the portal's dialog, as on GNOME.
+        let settings = start_settings(
+            &window,
+            key_file.as_deref(),
+            KeyOwner::Portal,
+            articles.clone(),
+            &sender,
+        );
         let about = About::new(&window);
         let session = Session {
             binding,

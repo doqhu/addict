@@ -49,6 +49,7 @@ fn child_body() {
     let (sender, receiver) = mpsc::channel();
     let handle = shortcut::start(
         "io.github.doqhu.Test",
+        shortcut::KeyOwner::Portal,
         "LOGO+q",
         shortcut::Limits {
             start: BIND_LIMIT,
