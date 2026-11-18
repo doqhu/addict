@@ -2,7 +2,9 @@
 //!
 //! It tells what the application is set to: the triggers of both shortcuts,
 //! which the portal owns, with a button that asks the portal for its dialog
-//! to change them, and the DeepL key, with a masked field to enter one, the
+//! to change them; on Hyprland, whose configuration binds the keys, each row
+//! names what to bind and the button copies the lines for that configuration.
+//! Then the DeepL key, with a masked field to enter one, the
 //! file it is saved in and the state that file is in. The window writes the
 //! key, on the runner, and never reads it back: the field starts empty and
 //! is cleared once the key is saved. In the General section, a line says how
@@ -15,10 +17,14 @@
 
 use std::{cell::Cell, future::Future, path::Path, rc::Rc, time::Duration};
 
+use addict_core::APP_ID;
 use addict_core::translation::{English, Source};
 use addict_deepl::key::{self, KeyError};
 use addict_platform::{
-    desktop::LoginEntry, shortcut::Bindings, startup::StartupFailure, work::Outcome,
+    desktop::LoginEntry,
+    shortcut::{Bindings, KeyOwner, SCREENSHOT_ID, SHORTCUT_ID},
+    startup::StartupFailure,
+    work::Outcome,
 };
 use gtk::{glib, prelude::*};
 
@@ -347,6 +353,53 @@ pub const CHANGE_UNBOUND: &str =
 /// The line beside Configure shortcuts.
 const CONFIGURE_HINT: &str = "The desktop\u{2019}s dialog sets both.";
 
+/// The line beside Copy Hyprland lines.
+const HYPRLAND_HINT: &str = "Hyprland sets both in hyprland.lua.";
+
+/// The line once the Hyprland lines are on the clipboard.
+pub const HYPRLAND_COPIED: &str =
+    "Copied. Paste the lines into ~/.config/hypr/hyprland.lua; Hyprland reloads it on save.";
+
+/// What Hyprland's `global` dispatcher names for the shortcut `id`.
+pub fn hyprland_target(id: &str) -> String {
+    format!("{APP_ID}:{id}")
+}
+
+/// The line and badge of a row on Hyprland, whose portal never describes a
+/// key: a bound row names what the configuration must bind, as it cannot be
+/// known whether it does. `None` for the rows that read as anywhere else.
+pub fn hyprland_texts(
+    binding: &Binding,
+    trigger: Option<&str>,
+    id: &str,
+) -> Option<(String, (&'static str, &'static str))> {
+    let described = trigger.is_some_and(|trigger| !trigger.trim().is_empty());
+    (matches!(binding, Binding::Bound) && !described).then(|| {
+        (
+            format!("Bind in Hyprland: {}", hyprland_target(id)),
+            ("In Hyprland", "pending"),
+        )
+    })
+}
+
+/// The lines for `hyprland.lua`: Super+Q and Super+Shift+Q for both actions,
+/// and a rule that floats and centres every window of the application at the
+/// size it asks for.
+pub fn hyprland_snippet() -> String {
+    // A Lua string holding the regular expression of the class: `\\.` is `\.`.
+    let class = APP_ID.replace('.', "\\\\.");
+    let clipboard = hyprland_target(SHORTCUT_ID);
+    let screenshot = hyprland_target(SCREENSHOT_ID);
+    format!(
+        "hl.bind(\"SUPER + Q\", hl.dsp.global(\"{clipboard}\"), \
+         {{ description = \"Addict: translate selection or clipboard\" }})\n\
+         hl.bind(\"SUPER + SHIFT + Q\", hl.dsp.global(\"{screenshot}\"), \
+         {{ description = \"Addict: capture a screen region (OCR)\" }})\n\
+         hl.window_rule({{ name = \"addict\", match = {{ class = \"^{class}$\" }}, \
+         float = true, center = true }})\n"
+    )
+}
+
 /// The keys of a trigger the portal described, one cap each: GNOME's
 /// `Press <Super>q` as an accelerator, or a label such as `Super+Q`;
 /// nothing when the description is neither (another sentence, an empty
@@ -443,6 +496,9 @@ fn set_tone(widget: &impl IsA<gtk::Widget>, tone: &str) {
 
 /// One independently assigned action in the portal session.
 struct ShortcutRow {
+    /// The shortcut's ID in generation 0, the one Hyprland binds.
+    id: &'static str,
+    owner: KeyOwner,
     root: gtk::Box,
     keys: gtk::Box,
     trigger: gtk::Label,
@@ -451,7 +507,7 @@ struct ShortcutRow {
 }
 
 impl ShortcutRow {
-    fn new(name: &str) -> Self {
+    fn new(name: &str, id: &'static str, owner: KeyOwner) -> Self {
         let keys = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(6)
@@ -485,6 +541,8 @@ impl ShortcutRow {
         line.append(&badge);
         let root = row(&[line.upcast_ref(), trigger.upcast_ref()]);
         Self {
+            id,
+            owner,
             root,
             keys,
             trigger,
@@ -508,13 +566,15 @@ impl ShortcutRow {
             }
         }
         self.keys.set_visible(caps.is_some());
-        let line = if caps.is_some() {
-            String::new()
-        } else {
-            trigger_text(binding, trigger)
+        let hyprland = (self.owner == KeyOwner::Hyprland)
+            .then(|| hyprland_texts(binding, trigger, self.id))
+            .flatten();
+        let (line, (text, tone)) = match hyprland {
+            Some(texts) => texts,
+            None if caps.is_some() => (String::new(), badge(binding, trigger)),
+            None => (trigger_text(binding, trigger), badge(binding, trigger)),
         };
         say_in(&self.trigger, &line);
-        let (text, tone) = badge(binding, trigger);
         set_tone(&self.trigger, tone);
         self.badge_text.set_label(text);
         self.badge.set_visible(tone != "good");
@@ -533,6 +593,8 @@ pub struct Settings {
     key_state: gtk::Label,
     key_entry: gtk::PasswordEntry,
     change: gtk::Button,
+    /// Who sets the keys: on Hyprland the button copies lines and is always on.
+    owner: KeyOwner,
     status: gtk::Label,
     /// The line of the key's saves, apart from the shortcut's.
     key_status: gtk::Label,
@@ -661,8 +723,9 @@ fn say_in(line: &gtk::Label, text: &str) {
 }
 
 impl Settings {
-    /// Builds the window, hidden, above `parent`. `on_change` runs when
-    /// Configure shortcuts is pressed; `on_save` runs with the text of the key
+    /// Builds the window, hidden, above `parent`. `owner` says who sets the
+    /// keys: on Hyprland the button copies the lines for its configuration
+    /// instead. `on_change` runs when Configure shortcuts is pressed; `on_save` runs with the text of the key
     /// field, trimmed and not empty, when Save key or Enter in the field is
     /// pressed; `on_clear` runs when Clear cache is pressed; `on_startup` runs
     /// with the state asked for when the user moves the Start at login switch;
@@ -673,6 +736,7 @@ impl Settings {
     pub fn new<F: Future<Output = Result<(), String>> + 'static>(
         parent: &impl IsA<gtk::Window>,
         key_file: Option<&Path>,
+        owner: KeyOwner,
         on_change: impl Fn() + 'static,
         on_save: impl Fn(String) + 'static,
         on_clear: impl Fn() + 'static,
@@ -682,15 +746,26 @@ impl Settings {
         on_imported: impl Fn() -> F + 'static,
         on_download: impl Fn() + 'static,
     ) -> Self {
-        let clipboard = ShortcutRow::new("Selection or clipboard");
-        let screenshot = ShortcutRow::new("Screen region (OCR)");
+        let clipboard = ShortcutRow::new("Selection or clipboard", SHORTCUT_ID, owner);
+        let screenshot = ShortcutRow::new("Screen region (OCR)", SCREENSHOT_ID, owner);
+        let hyprland = owner == KeyOwner::Hyprland;
         let change = gtk::Button::builder()
-            .label("Configure shortcuts…")
+            .label(if hyprland {
+                "Copy Hyprland lines"
+            } else {
+                "Configure shortcuts…"
+            })
             .valign(gtk::Align::Center)
             .css_classes(["settings-button"])
             .build();
-        change.connect_clicked(move |_| on_change());
-        let configure_hint = label(CONFIGURE_HINT, &["hint"]);
+        let configure_hint = label(
+            if hyprland {
+                HYPRLAND_HINT
+            } else {
+                CONFIGURE_HINT
+            },
+            &["hint"],
+        );
         configure_hint.set_hexpand(true);
         configure_hint.set_valign(gtk::Align::Center);
         let configure_line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -698,6 +773,15 @@ impl Settings {
         configure_line.append(&change);
         let status = label("", &["hint"]);
         status.set_visible(false);
+        if hyprland {
+            let copied = status.clone();
+            change.connect_clicked(move |button| {
+                button.clipboard().set_text(&hyprland_snippet());
+                say_in(&copied, HYPRLAND_COPIED);
+            });
+        } else {
+            change.connect_clicked(move |_| on_change());
+        }
 
         let key_icon = gtk::Image::builder().valign(gtk::Align::Center).build();
         let key_state = label(key_text(None), &["key-state"]);
@@ -969,6 +1053,7 @@ impl Settings {
             key_state,
             key_entry,
             change,
+            owner,
             status,
             key_status,
             cache_size,
@@ -1022,8 +1107,10 @@ impl Settings {
     }
 
     fn render_change(&self) {
-        self.change
-            .set_sensitive(change_sensitive(self.bound.get(), self.rebinding.get()));
+        self.change.set_sensitive(
+            self.owner == KeyOwner::Hyprland
+                || change_sensitive(self.bound.get(), self.rebinding.get()),
+        );
     }
 
     pub fn render_key(&self, state: Option<KeyState>) {
@@ -1186,6 +1273,7 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
+            super::KeyOwner::Portal,
             || {},
             |_| {},
             || {},
@@ -1251,6 +1339,7 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
+            super::KeyOwner::Portal,
             || {},
             |_| {},
             || {},
@@ -1285,6 +1374,7 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
+            super::KeyOwner::Portal,
             || {},
             |_| {},
             || {},
@@ -1327,6 +1417,7 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
+            super::KeyOwner::Portal,
             || {},
             |_| {},
             || {},
@@ -1367,6 +1458,7 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
+            super::KeyOwner::Portal,
             || {},
             |_| {},
             || {},
@@ -1725,6 +1817,46 @@ mod tests {
             "Binding the shortcut…"
         );
         assert_eq!(trigger_text(&not_bound, Some("Super+Q")), "Not bound: x");
+    }
+
+    #[test]
+    fn on_hyprland_a_bound_row_names_what_its_configuration_binds() {
+        use super::{hyprland_target, hyprland_texts};
+        assert_eq!(hyprland_target("invoke"), "io.github.doqhu.Addict:invoke");
+        let (line, badge) = hyprland_texts(&Binding::Bound, Some(""), "invoke").unwrap();
+        assert_eq!(line, "Bind in Hyprland: io.github.doqhu.Addict:invoke");
+        assert_eq!(badge, ("In Hyprland", "pending"));
+        assert!(hyprland_texts(&Binding::Bound, None, "screenshot").is_some());
+        // A key the portal does describe, and a session that is not there,
+        // read as anywhere else.
+        assert_eq!(
+            hyprland_texts(&Binding::Bound, Some("Super+Q"), "invoke"),
+            None
+        );
+        assert_eq!(hyprland_texts(&Binding::Attempting, None, "invoke"), None);
+        let not_bound = Binding::NotBound {
+            detail: "no portal".to_owned(),
+        };
+        assert_eq!(hyprland_texts(&not_bound, None, "invoke"), None);
+    }
+
+    #[test]
+    fn the_hyprland_lines_bind_both_fixed_ids_and_float_the_application() {
+        let snippet = super::hyprland_snippet();
+        assert_eq!(snippet.lines().count(), 3, "{snippet}");
+        assert!(
+            snippet.contains(
+                r#"hl.bind("SUPER + Q", hl.dsp.global("io.github.doqhu.Addict:invoke"), "#
+            )
+        );
+        assert!(snippet.contains(
+            r#"hl.bind("SUPER + SHIFT + Q", hl.dsp.global("io.github.doqhu.Addict:screenshot"), "#
+        ));
+        // `\\.` in a Lua string: a literal dot in the class's expression.
+        assert!(snippet.contains(r#"class = "^io\\.github\\.doqhu\\.Addict$""#));
+        assert!(snippet.contains("float = true, center = true"));
+        // Settings and About share the class: their own sizes are kept.
+        assert!(!snippet.contains("size"));
     }
 
     #[test]

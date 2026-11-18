@@ -23,6 +23,12 @@
 //! saved in a small file, a cache of what the desktop stores: without it the
 //! dialog opens once more and nothing breaks. If not, the worker binds the IDs
 //! it had, and the keys are as they were.
+//!
+//! On Hyprland ([`KeyOwner::Hyprland`]) none of that applies: its portal has
+//! no dialog, ignores the preferred keys and describes no trigger, and the
+//! keys are bound in Hyprland's own configuration to `<app id>:<shortcut id>`.
+//! Those names must not change, so the IDs there are always generation 0, the
+//! generation file is left alone, and a request for the dialog never rebinds.
 
 use std::{
     cell::Cell,
@@ -53,6 +59,49 @@ pub const SHORTCUT_ID: &str = "invoke";
 /// The screenshot action's identity in generation 0; by default it has no
 /// preferred key.
 pub const SCREENSHOT_ID: &str = "screenshot";
+
+/// Who chooses the keys of the shortcuts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyOwner {
+    /// The portal, by the preferred keys and its dialog, as on GNOME.
+    Portal,
+    /// Hyprland's configuration, which binds its `global` dispatcher to
+    /// `<app id>:<shortcut id>`; the portal can neither choose nor describe
+    /// the keys.
+    Hyprland,
+}
+
+impl KeyOwner {
+    /// From `XDG_CURRENT_DESKTOP` of this process.
+    pub fn detect() -> Self {
+        Self::from_current_desktop(&std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default())
+    }
+
+    /// `Hyprland` when one of the `:`-separated desktop names is Hyprland.
+    pub fn from_current_desktop(desktops: &str) -> Self {
+        if desktops
+            .split(':')
+            .any(|name| name.trim().eq_ignore_ascii_case("hyprland"))
+        {
+            Self::Hyprland
+        } else {
+            Self::Portal
+        }
+    }
+
+    /// The generation file the worker may use: none where the IDs are fixed.
+    fn generation_file(self, file: Option<PathBuf>) -> Option<PathBuf> {
+        match self {
+            Self::Portal => file,
+            Self::Hyprland => None,
+        }
+    }
+}
+
+/// What Settings says when the dialog is asked for on Hyprland, which has
+/// none.
+pub const CONFIGURED_IN_HYPRLAND: &str =
+    "Hyprland sets these keys in its configuration, not through a dialog.";
 
 /// The action requested by an activation from our session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +410,7 @@ enum Phase {
 /// What the attempts have in common, and what changes between them.
 struct Plan<'a> {
     app_id: &'a str,
+    owner: KeyOwner,
     file: Option<&'a Path>,
     generation: u64,
     preferences: Preferences,
@@ -476,10 +526,12 @@ impl Drop for ShortcutHandle {
 /// may take up to `Bound`, the one after a portal restart included; when one
 /// runs out the worker reports `Failed` like for any other failure.
 /// `generation_file` is where the worker keeps which shortcut IDs are current;
-/// with `None`, or with a file it can't read, they are the first ones. `on_event`
-/// runs on the worker thread and must not block.
+/// with `None`, or with a file it can't read, they are the first ones, and
+/// with [`KeyOwner::Hyprland`] they are always the first ones and the file is
+/// not used. `on_event` runs on the worker thread and must not block.
 pub fn start(
     app_id: &str,
+    owner: KeyOwner,
     trigger: &str,
     limits: Limits,
     generation_file: Option<PathBuf>,
@@ -491,6 +543,7 @@ pub fn start(
     // a thread that could not be spawned.
     let (hand_over, handed_over) = std::sync::mpsc::channel::<Callback>();
     let (app_id, trigger) = (app_id.to_owned(), trigger.to_owned());
+    let generation_file = owner.generation_file(generation_file);
     let spawned = std::thread::Builder::new()
         .name("addict-shortcut".to_owned())
         .spawn(move || {
@@ -503,6 +556,7 @@ pub fn start(
             {
                 Ok(runtime) => runtime.block_on(run(
                     &app_id,
+                    owner,
                     &trigger,
                     limits,
                     generation_file.as_deref(),
@@ -545,8 +599,10 @@ type ShortcutSession = Session<GlobalShortcuts>;
 /// left only starts the next attempt: its session went with it, so that one
 /// is dropped unclosed. A rebind closes the session first, or the desktop holds
 /// on to its keys.
+#[allow(clippy::too_many_arguments)]
 async fn run(
     app_id: &str,
+    owner: KeyOwner,
     trigger: &str,
     limits: Limits,
     generation_file: Option<&Path>,
@@ -556,6 +612,7 @@ async fn run(
 ) {
     let mut plan = Plan {
         app_id,
+        owner,
         file: generation_file,
         generation: generation_file.map_or(0, read_generation),
         preferences: Preferences {
@@ -757,6 +814,14 @@ async fn serve(
             // Disabled once the handle is gone; the stop signal ends the
             // worker then.
             Some(Command::Configure) = requests.recv() => {
+                if plan.owner == KeyOwner::Hyprland {
+                    // No dialog, and a rebind would rename the IDs that
+                    // Hyprland's configuration binds.
+                    on_event(ShortcutEvent::ConfigureEnded {
+                        message: Some(CONFIGURED_IN_HYPRLAND.to_owned()),
+                    });
+                    continue;
+                }
                 let asked = tokio::time::timeout(
                     CONFIGURE_LIMIT,
                     portal.configure_shortcuts(
@@ -1045,6 +1110,39 @@ mod tests {
     }
 
     #[test]
+    fn only_hyprland_among_the_desktops_owns_the_keys() {
+        for (desktops, owner) in [
+            ("Hyprland", KeyOwner::Hyprland),
+            ("Hyprland:wlroots", KeyOwner::Hyprland),
+            ("wlroots:hyprland", KeyOwner::Hyprland),
+            ("GNOME", KeyOwner::Portal),
+            ("KDE", KeyOwner::Portal),
+            ("ubuntu:GNOME", KeyOwner::Portal),
+            ("NotHyprland", KeyOwner::Portal),
+            ("", KeyOwner::Portal),
+        ] {
+            assert_eq!(
+                KeyOwner::from_current_desktop(desktops),
+                owner,
+                "{desktops:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn on_hyprland_the_ids_are_the_first_ones_whatever_the_file_holds() {
+        let file = PathBuf::from("/nonexistent/shortcut-generation");
+        assert_eq!(
+            KeyOwner::Portal.generation_file(Some(file.clone())),
+            Some(file.clone())
+        );
+        // No file: `run` reads generation 0 and a rebind could not save one.
+        assert_eq!(KeyOwner::Hyprland.generation_file(Some(file)), None);
+        assert_eq!(Ids::of(0).clipboard, SHORTCUT_ID);
+        assert_eq!(Ids::of(0).screenshot, SCREENSHOT_ID);
+    }
+
+    #[test]
     fn current_ids_are_plain_in_generation_zero_and_numbered_after() {
         let first = Ids::of(0);
         assert_eq!(first.clipboard, "invoke");
@@ -1186,6 +1284,7 @@ mod tests {
     fn only_a_rebind_binds_the_next_generation() {
         let plan = |stage| Plan {
             app_id: "x",
+            owner: KeyOwner::Portal,
             file: None,
             generation: 4,
             preferences: Preferences {

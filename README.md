@@ -43,7 +43,9 @@ a video, can be captured from the screen and read with Tesseract OCR.
 ## Requirements
 
 - Linux with GNOME 48 or later on Wayland, which has the GlobalShortcuts
-  portal. KDE Plasma 6 may work but is not tested.
+  portal. Hyprland works with `xdg-desktop-portal-hyprland` and a few lines of
+  its configuration (see [Hyprland](#hyprland)). KDE Plasma 6 may work but is
+  not tested.
 - GTK 4.20 or later. On a distribution with older GTK, such as Debian 13 or
   Ubuntu 24.04, the build from source fails; use the AppImage or the Flatpak
   bundle (see Install).
@@ -311,6 +313,25 @@ addict keeps its settings as small files in `~/.config/addict`
 
 DeepL answers are cached in `~/.cache/addict`; Settings shows the cache size
 and clears it.
+
+### Hyprland
+
+Hyprland's portal can't choose keys, and Hyprland tiles every window, so
+both are set in Hyprland's configuration. addict registers its two shortcuts
+under fixed names: `io.github.doqhu.Addict:invoke` (selection or clipboard)
+and `io.github.doqhu.Addict:screenshot` (Capture). Settings → Copy Hyprland
+lines puts these lines on the clipboard; add them to
+`~/.config/hypr/hyprland.lua`, with other keys if you like:
+
+```lua
+hl.bind("SUPER + Q", hl.dsp.global("io.github.doqhu.Addict:invoke"), { description = "Addict: translate selection or clipboard" })
+hl.bind("SUPER + SHIFT + Q", hl.dsp.global("io.github.doqhu.Addict:screenshot"), { description = "Addict: capture a screen region (OCR)" })
+hl.window_rule({ name = "addict", match = { class = "^io\\.github\\.doqhu\\.Addict$" }, float = true, center = true })
+```
+
+The rule floats and centres every addict window at the size it opens with.
+`hyprctl globalshortcuts` lists the names addict registered. Capture needs
+`grim` and `slurp`, which the portal runs to choose the area.
 
 ## License
 

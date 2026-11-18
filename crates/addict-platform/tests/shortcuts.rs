@@ -624,6 +624,7 @@ impl Mock {
         self.events = events;
         self.worker = Some(shortcut::start(
             APP_ID,
+            shortcut::KeyOwner::Portal,
             "LOGO+q",
             limits,
             file,
