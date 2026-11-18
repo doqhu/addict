@@ -92,7 +92,8 @@ impl IndexPresence {
         Self(self.0 | (1 << source as u32))
     }
 
-    fn contains(self, source: Source) -> bool {
+    /// Whether `source` is present.
+    pub fn contains(self, source: Source) -> bool {
         self.0 & (1 << source as u32) != 0
     }
 }

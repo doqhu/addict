@@ -6,8 +6,10 @@
 //! holds `declined` once Not now was pressed. Download writes no choice: an
 //! required index that is open or unreadable suppresses the next offer.
 //!
-//! The dialog lists every index of the manifest, which is fetched before it
-//! shows, with its size. Download installs them one after another, as a
+//! The dialog lists the indexes of the manifest, which is fetched before it
+//! shows, with their sizes: on the first run only those that the my language
+//! chosen in it needs ([`offered`]), and it shows that choice, which is
+//! the one Settings shows. Download installs them one after another, as a
 //! [`Queue`] orders them: each row shows its progress and has its own
 //! Cancel, and a source that fails says why on its row while the others go
 //! on. The dialog's Cancel stops them all. The file is read and written on
@@ -16,6 +18,7 @@
 //! without a display.
 
 use std::{
+    cell::{Cell, RefCell},
     fs::{self, File},
     io::{self, Read},
     path::{Path, PathBuf},
@@ -24,6 +27,7 @@ use std::{
 
 use addict_core::translation::Source as Language;
 use addict_dictionary::{
+    pairs,
     release::{self, Manifest, Published},
     sources,
 };
@@ -32,7 +36,7 @@ use gtk::{glib, prelude::*};
 use crate::{
     dictionaries::Indexes,
     download::{DownloadError, Downloader},
-    settings::label,
+    settings::{label, my_language_names},
 };
 
 /// The name of the choice file inside the configuration directory.
@@ -73,6 +77,13 @@ pub const FAILED_HEADING: &str = "The download failed";
 pub const BODY: &str = "Addict looks words up in dictionaries kept on this computer. They come \
                         from the releases of Addict on GitHub and install one after another; \
                         one that fails does not stop the others.";
+
+/// The name of the my-language choice of the first-run offer.
+pub const MY_LANGUAGE: &str = "My language";
+
+/// What the my-language choice of the first-run offer decides.
+pub const MY_LANGUAGE_HINT: &str = "Only the dictionaries for this language are downloaded. \
+                                    Settings can change it later.";
 
 /// What the dialog says while the installs run.
 pub const INSTALLING_BODY: &str = "They install one after another. You can close this window; \
@@ -177,6 +188,30 @@ pub fn write(path: Option<&Path>) -> io::Result<()> {
 /// the user has not declined.
 pub fn should_offer(indexes: &Indexes, my: Language, chosen: bool) -> bool {
     !chosen && indexes.required_indexes_missing(my)
+}
+
+/// The indexes of `manifest` that `my` needs and that are not `present`, by
+/// name, in the order of the manifest: what the first-run offer lists and
+/// installs. A name `my` needs that the manifest lacks is not listed.
+pub fn offered(
+    manifest: &[Published],
+    my: Language,
+    present: impl Fn(&str) -> bool,
+) -> Vec<Published> {
+    let required: Vec<&str> = pairs::required_index_names(my).collect();
+    manifest
+        .iter()
+        .filter(|published| {
+            required.contains(&published.name.as_str()) && !present(&published.name)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether the index `name` is open or unreadable in `indexes`; a name this
+/// build does not know is not.
+pub fn is_present(indexes: &Indexes, name: &str) -> bool {
+    release::source_of(name).is_some_and(|source| indexes.presence.contains(source))
 }
 
 /// The manifest to offer from, when the offer is due for `my` given the
@@ -827,6 +862,17 @@ fn source_row(published: &Published, on_cancel: &std::rc::Rc<dyn Fn(Option<Strin
     }
 }
 
+/// Selects `language` in `dropdown` while `rendering` is set, so that its
+/// handler takes it for no choice.
+fn render_language(dropdown: &gtk::DropDown, rendering: &Cell<bool>, language: Language) {
+    let Some(index) = Language::ALL.iter().position(|one| *one == language) else {
+        return;
+    };
+    rendering.set(true);
+    dropdown.set_selected(index as u32);
+    rendering.set(false);
+}
+
 /// The dialog of the offer.
 pub struct Offer {
     window: gtk::Window,
@@ -836,6 +882,12 @@ pub struct Offer {
     eyebrow: gtk::Label,
     heading: gtk::Label,
     lead: gtk::Label,
+    /// The my-language choice of the first-run offer, and the flag that
+    /// keeps its rendering from being taken for a choice.
+    language: gtk::Box,
+    my_language: gtk::DropDown,
+    rendering: std::rc::Rc<Cell<bool>>,
+    /// Holds the card of the figures.
     figures: gtk::Box,
     progress: gtk::Box,
     current: gtk::Label,
@@ -843,8 +895,10 @@ pub struct Offer {
     bar: gtk::ProgressBar,
     counts: gtk::Label,
     list: gtk::ScrolledWindow,
+    list_box: gtk::Box,
     cards: gtk::Grid,
-    rows: Vec<Row>,
+    rows: RefCell<Vec<Row>>,
+    on_cancel: std::rc::Rc<dyn Fn(Option<String>)>,
     note: gtk::Label,
     credit: gtk::Label,
     footer: gtk::Box,
@@ -860,11 +914,16 @@ impl Offer {
     /// a press of their buttons; Not now also closes the dialog. `on_cancel`
     /// runs at a press of a row's Cancel, with its name, and of the
     /// dialog's, with `None`. Esc and the title bar close it and choose
-    /// nothing.
+    /// nothing. With `my`, the dialog shows the my-language choice at that
+    /// language, and `on_my_language` runs with the language the user
+    /// chooses in it; the caller lists its indexes ([`Offer::list`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         parent: &impl IsA<gtk::Window>,
         indexes: &[Published],
         recovery: bool,
+        my: Option<Language>,
+        on_my_language: impl Fn(Language) + 'static,
         on_download: impl Fn() + 'static,
         on_not_now: impl Fn() + 'static,
         on_cancel: impl Fn(Option<String>) + 'static,
@@ -882,17 +941,34 @@ impl Offer {
             &["first-run-heading"],
         );
         let lead = label(BODY, &["first-run-lead"]);
+
+        let my_language = gtk::DropDown::from_strings(&my_language_names());
+        my_language.set_valign(gtk::Align::Center);
+        my_language.update_property(&[gtk::accessible::Property::Label(MY_LANGUAGE)]);
+        let rendering = std::rc::Rc::new(Cell::new(false));
+        let language_name = single(MY_LANGUAGE, &["strong"]);
+        language_name.set_hexpand(true);
+        let choice = line(12, &[]);
+        choice.append(&language_name);
+        choice.append(&my_language);
+        let language = column(4, &["first-run-language"]);
+        language.set_margin_top(6);
+        language.append(&choice);
+        language.append(&label(MY_LANGUAGE_HINT, &["hint"]));
+        language.set_visible(my.is_some());
+
         let hero = column(8, &[]);
         for widget in [
             done_mark.upcast_ref::<gtk::Widget>(),
             eyebrow.upcast_ref(),
             heading.upcast_ref(),
             lead.upcast_ref(),
+            language.upcast_ref(),
         ] {
             hero.append(widget);
         }
 
-        let figures = figures_card(indexes);
+        let figures = column(0, &[]);
 
         let current = single(INSTALLING, &["strong"]);
         current.set_hexpand(true);
@@ -911,25 +987,7 @@ impl Offer {
         progress.append(&counts);
         progress.set_visible(false);
 
-        let groups = groups(indexes);
         let list_box = column(1, &["first-run-groups"]);
-        let mut rows = Vec::new();
-        for group in &groups {
-            let head = line(12, &["group-head"]);
-            let name = single(group.name, &["section-label"]);
-            name.set_hexpand(true);
-            head.append(&name);
-            head.append(&single(
-                &group_text(&group.indexes),
-                &["hint", "group-size"],
-            ));
-            list_box.append(&head);
-            for published in &group.indexes {
-                let row = source_row(published, &on_cancel);
-                list_box.append(&row.line);
-                rows.push(row);
-            }
-        }
         let list = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
@@ -945,10 +1003,6 @@ impl Offer {
             .column_homogeneous(true)
             .visible(false)
             .build();
-        for (i, group) in groups.iter().enumerate() {
-            let i = i32::try_from(i).unwrap_or(i32::MAX);
-            cards.attach(&group_card(group), i % 2, i / 2, 1, 1);
-        }
 
         let note = label(CREDIT, &["hint"]);
         note.set_hexpand(true);
@@ -1030,6 +1084,17 @@ impl Offer {
         });
         window.add_controller(escape);
 
+        if let Some(my) = my {
+            render_language(&my_language, &rendering, my);
+        }
+        let guard = rendering.clone();
+        my_language.connect_selected_notify(move |dropdown| {
+            if !guard.get()
+                && let Some(chosen) = Language::ALL.get(dropdown.selected() as usize)
+            {
+                on_my_language(*chosen);
+            }
+        });
         download.connect_clicked(move |_| on_download());
         let closing = window.downgrade();
         not_now.connect_clicked(move |_| {
@@ -1038,14 +1103,15 @@ impl Offer {
                 window.close();
             }
         });
-        cancel.connect_clicked(move |_| on_cancel(None));
+        let cancel_all = on_cancel.clone();
+        cancel.connect_clicked(move |_| cancel_all(None));
         let closing = window.downgrade();
         close.connect_clicked(move |_| {
             if let Some(window) = closing.upgrade() {
                 window.close();
             }
         });
-        Self {
+        let offer = Self {
             window,
             recovery,
             hero,
@@ -1053,6 +1119,9 @@ impl Offer {
             eyebrow,
             heading,
             lead,
+            language,
+            my_language,
+            rendering,
             figures,
             progress,
             current,
@@ -1060,8 +1129,10 @@ impl Offer {
             bar,
             counts,
             list,
+            list_box,
             cards,
-            rows,
+            rows: RefCell::new(Vec::new()),
+            on_cancel,
             note,
             credit,
             footer,
@@ -1069,7 +1140,74 @@ impl Offer {
             not_now,
             cancel,
             close,
+        };
+        offer.list(indexes);
+        offer
+    }
+
+    /// The dialog lists `indexes`, grouped by language, in place of what it
+    /// listed, and its figures and cards are theirs.
+    pub fn list(&self, indexes: &[Published]) {
+        for container in [&self.figures, &self.list_box] {
+            while let Some(child) = container.first_child() {
+                container.remove(&child);
+            }
         }
+        while let Some(child) = self.cards.first_child() {
+            self.cards.remove(&child);
+        }
+        self.figures.append(&figures_card(indexes));
+        self.eyebrow
+            .set_label(&eyebrow_text(self.recovery, indexes.len()));
+        let groups = groups(indexes);
+        let mut rows = Vec::new();
+        for group in &groups {
+            let head = line(12, &["group-head"]);
+            let name = single(group.name, &["section-label"]);
+            name.set_hexpand(true);
+            head.append(&name);
+            head.append(&single(
+                &group_text(&group.indexes),
+                &["hint", "group-size"],
+            ));
+            self.list_box.append(&head);
+            for published in &group.indexes {
+                let row = source_row(published, &self.on_cancel);
+                self.list_box.append(&row.line);
+                rows.push(row);
+            }
+        }
+        for (i, group) in groups.iter().enumerate() {
+            let i = i32::try_from(i).unwrap_or(i32::MAX);
+            self.cards.attach(&group_card(group), i % 2, i / 2, 1, 1);
+        }
+        *self.rows.borrow_mut() = rows;
+    }
+
+    /// Shows `language` in the my-language choice without choosing it.
+    pub fn render_my_language(&self, language: Language) {
+        render_language(&self.my_language, &self.rendering, language);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn my_language(&self) -> &gtk::DropDown {
+        &self.my_language
+    }
+
+    /// The names of the rows, in their order.
+    #[cfg(test)]
+    pub(crate) fn listed(&self) -> Vec<String> {
+        self.rows
+            .borrow()
+            .iter()
+            .map(|row| row.name.clone())
+            .collect()
+    }
+
+    /// Whether the my-language choice is shown.
+    #[cfg(test)]
+    pub(crate) fn shows_my_language(&self) -> bool {
+        self.language.is_visible()
     }
 
     #[cfg(test)]
@@ -1090,6 +1228,7 @@ impl Offer {
         self.eyebrow.add_css_class("accent");
         self.heading.set_label(INSTALLING_HEADING);
         self.lead.set_label(INSTALLING_BODY);
+        self.language.set_visible(false);
         self.figures.set_visible(false);
         self.progress.set_visible(true);
         self.note
@@ -1119,7 +1258,8 @@ impl Offer {
     /// The row of `name` says `state`, for an asset of `size` bytes. Its
     /// Cancel is there while the source has not ended.
     pub fn show_row(&self, name: &str, state: &RowState, size: u64) {
-        let Some(row) = self.rows.iter().find(|row| row.name == name) else {
+        let rows = self.rows.borrow();
+        let Some(row) = rows.iter().find(|row| row.name == name) else {
             return;
         };
         row.line.remove_css_class("running");
@@ -1165,7 +1305,7 @@ impl Offer {
         self.eyebrow.set_visible(false);
         self.figures.set_visible(false);
         self.progress.set_visible(false);
-        for row in &self.rows {
+        for row in self.rows.borrow().iter() {
             row.cancel.set_visible(false);
         }
         if complete {
@@ -1704,6 +1844,70 @@ mod tests {
         }
     }
 
+    /// The first run offers my language's set out of the 19 of
+    /// `manifest-2.json`, in manifest order; out of the legacy 13 it offers
+    /// what they have of it, and an index already present is not offered.
+    #[test]
+    fn the_first_run_offers_the_set_of_my_language_only() {
+        let all: Vec<Published> = sources::ROWS
+            .iter()
+            .enumerate()
+            .map(|(i, row)| entry(row.index, i as u64 + 1))
+            .collect();
+        assert_eq!(all.len(), 19);
+        let names = |offered: Vec<Published>| -> Vec<String> {
+            offered
+                .into_iter()
+                .map(|published| published.name)
+                .collect()
+        };
+        for my in Language::ALL {
+            let required: Vec<String> =
+                pairs::required_index_names(my).map(str::to_owned).collect();
+            assert_eq!(names(offered(&all, my, |_| false)), required, "{my:?}");
+            // The manifest's order, not the set's.
+            let reversed: Vec<Published> = all.iter().rev().cloned().collect();
+            let mut backwards = required.clone();
+            backwards.reverse();
+            assert_eq!(names(offered(&reversed, my, |_| false)), backwards);
+        }
+        assert_eq!(
+            names(offered(&all, Language::Ru, |_| false)),
+            release::LEGACY_PUBLISHED
+        );
+        let english = names(offered(&all, Language::En, |_| false));
+        assert!(english.contains(&"wikdict-en-es".to_owned()));
+        assert!(!english.contains(&"wikdict-es-ca".to_owned()));
+        assert!(!english.contains(&"wikdict-ru-es".to_owned()));
+
+        // Only the legacy manifest: English gets what it lists of its set.
+        let legacy: Vec<Published> = all
+            .iter()
+            .filter(|published| release::LEGACY_PUBLISHED.contains(&published.name.as_str()))
+            .cloned()
+            .collect();
+        let english_legacy = names(offered(&legacy, Language::En, |_| false));
+        assert!(!english_legacy.is_empty());
+        assert!(english_legacy.iter().all(
+            |name| english.contains(name) && release::LEGACY_PUBLISHED.contains(&name.as_str())
+        ));
+        assert!(!english_legacy.contains(&"wikdict-en-es".to_owned()));
+
+        // A present index is not offered again.
+        let indexes = Indexes {
+            presence: Indexes::MISSING
+                .presence
+                .with(addict_dictionary::import::Source::WikdictEnEs),
+            ..Indexes::MISSING
+        };
+        let without = names(offered(&all, Language::En, |name| {
+            is_present(&indexes, name)
+        }));
+        assert_eq!(without.len(), english.len() - 1);
+        assert!(!without.contains(&"wikdict-en-es".to_owned()));
+        assert!(!is_present(&indexes, "unknown-index"));
+    }
+
     #[test]
     fn the_offer_counts_every_dictionary_and_sums_their_sizes() {
         let indexes = [
@@ -2124,7 +2328,16 @@ mod tests {
         .into_iter()
         .map(|(name, size)| entry(name, size))
         .collect();
-        let offer = Offer::new(&parent, &indexes, false, || {}, || {}, |_| {});
+        let offer = Offer::new(
+            &parent,
+            &indexes,
+            false,
+            Some(Language::Ru),
+            |_| {},
+            || {},
+            || {},
+            |_| {},
+        );
         offer.present();
         let mut queue = Queue::new(indexes);
         let state = std::env::var("ADDICT_SHOT_STATE");

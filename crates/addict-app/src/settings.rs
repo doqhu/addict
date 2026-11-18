@@ -1169,6 +1169,14 @@ impl Settings {
         self.startup.set_sensitive(sensitive);
     }
 
+    /// The language the My language row shows.
+    #[cfg(test)]
+    pub(crate) fn shown_my_language(&self) -> Option<Source> {
+        Source::ALL
+            .get(self.my_language.selected() as usize)
+            .copied()
+    }
+
     /// Shows `language` in the My language row without asking anything.
     pub fn render_my_language(&self, language: Source) {
         let Some(index) = Source::ALL.iter().position(|one| *one == language) else {

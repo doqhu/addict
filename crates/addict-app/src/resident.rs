@@ -154,7 +154,10 @@ use addict_core::{
     },
 };
 use addict_deepl::{DeepL, key};
-use addict_dictionary::{import, release::Manifest};
+use addict_dictionary::{
+    import,
+    release::{Manifest, Published},
+};
 use addict_platform::{
     ocr::OcrFailure,
     shortcut::{self, Action, Bindings, KeyOwner, ShortcutEvent, ShortcutHandle},
@@ -600,6 +603,9 @@ struct Session {
     /// Where the first-run offer to download a dictionary stands.
     first_run: FirstRun,
     download_run: u64,
+    /// Where the dictionaries are downloaded from: [`download::BASE_URL`],
+    /// a stub in the tests.
+    release: String,
     /// Independent of recovery, which must never cancel a remembered choice.
     first_run_choice: Option<Job>,
 }
@@ -897,6 +903,7 @@ impl Session {
                 if self.indexes.update(generation, indexes) {
                     self.check = None;
                     self.view.render_indexes(indexes, self.my_language);
+                    self.relist_first_run();
                 }
             }
             Event::ImportRefreshing(ready) => {
@@ -907,6 +914,7 @@ impl Session {
                 if self.indexes.update(generation, indexes) {
                     self.check = None;
                     self.view.render_indexes(indexes, self.my_language);
+                    self.relist_first_run();
                 }
             }),
             Event::SettingsDownload => self.settings_download(),
@@ -966,6 +974,7 @@ impl Session {
                         .map_or(FirstRun::Done, |work| FirstRun::Asking {
                             _job: start_first_run(
                                 &work,
+                                Downloader::with_base_url(self.release.clone()),
                                 indexes,
                                 my,
                                 &self.sender,
@@ -1014,7 +1023,13 @@ impl Session {
         let download = self.sender.clone();
         let not_now = self.sender.clone();
         let cancel = self.sender.clone();
+        let chosen = self.sender.clone();
         let run = self.download_run;
+        let (listed, my) = if recovery {
+            (manifest.indexes.clone(), None)
+        } else {
+            (self.first_run_indexes(&manifest), Some(self.my_language))
+        };
         let parent: &gtk::Window = if recovery {
             self.settings.window()
         } else {
@@ -1022,8 +1037,12 @@ impl Session {
         };
         let offer = Offer::new(
             parent,
-            &manifest.indexes,
+            &listed,
             recovery,
+            my,
+            move |language| {
+                let _ = chosen.unbounded_send(Event::MyLanguageChosen(language));
+            },
             move || {
                 let _ = download.unbounded_send(Event::FirstRunDownload(run));
             },
@@ -1044,6 +1063,31 @@ impl Session {
             manifest,
             recovery,
         };
+    }
+
+    /// The indexes of `manifest` that the first-run offer lists and
+    /// installs: those my language needs that the latest accepted snapshot
+    /// does not show present. The rows and the queue both come from here,
+    /// so they agree.
+    fn first_run_indexes(&self, manifest: &Manifest) -> Vec<Published> {
+        let indexes = self.indexes.known;
+        first_run::offered(&manifest.indexes, self.my_language, |name| {
+            indexes.is_some_and(|indexes| first_run::is_present(&indexes, name))
+        })
+    }
+
+    /// A first-run offer that waits for a press lists anew what my
+    /// language needs, after my language or the snapshot changed.
+    fn relist_first_run(&self) {
+        if let FirstRun::Shown {
+            offer,
+            manifest,
+            recovery: false,
+        } = &self.first_run
+        {
+            offer.render_my_language(self.my_language);
+            offer.list(&self.first_run_indexes(manifest));
+        }
     }
 
     /// Explicit recovery supersedes an unstarted automatic offer, while an
@@ -1070,12 +1114,13 @@ impl Session {
         self.download_run += 1;
         let run = self.download_run;
         let prepared = self.sender.clone();
+        let downloader = Downloader::with_base_url(self.release.clone());
         // The manifest has its own deadline inside; the health scan of
         // every installed index needs the longer one.
         let job = work.run(
             download::DOWNLOAD_LIMIT,
             async move {
-                download::recovery_manifest(&Downloader::new(), dir)
+                download::recovery_manifest(&downloader, dir)
                     .await
                     .map_err(|error| error.to_string())
             },
@@ -1125,7 +1170,12 @@ impl Session {
             return;
         };
         offer.installing();
-        let mut queue = first_run::Queue::new(manifest.indexes);
+        let indexes = if recovery {
+            manifest.indexes
+        } else {
+            self.first_run_indexes(&manifest)
+        };
+        let mut queue = first_run::Queue::new(indexes);
         let (Some(_), Some(dir)) = (self.work.upgrade(), import::data_dir()) else {
             let why = first_run::NO_PLACE;
             eprintln!("addict: the dictionary download failed: {why}");
@@ -1183,11 +1233,12 @@ impl Session {
             let recovery = *recovery;
             let articles = self.articles.clone();
             let refresh = self.sender.clone();
+            let downloader = Downloader::with_base_url(self.release.clone());
             let job = work.run(
                 download::DOWNLOAD_LIMIT,
                 async move {
                     install_download(
-                        Downloader::new(),
+                        downloader,
                         published,
                         dir,
                         recovery,
@@ -2232,15 +2283,21 @@ impl Session {
         self.ask_again();
     }
 
-    /// The user chose `language` in Settings: my language from now on, kept
-    /// in the my-language file by a write on the runner, and what the window
-    /// shows of the current word is asked anew into it.
+    /// The user chose `language` in Settings or in the first-run offer: my
+    /// language from now on, kept in the my-language file by a write on the
+    /// runner, and what the window shows of the current word is asked anew
+    /// into it. Settings and a first-run offer that waits for a press show
+    /// it, and the offer lists what it needs.
     fn my_language_chosen(&mut self, language: Language) {
         self.my_language_chosen = true;
         // Saved even when it equals the one in use: the file may still hold
         // another, its read not having come yet.
         self.apply_my_language(language);
         self.save_my_language();
+        // The choice may come from Settings or from the first-run offer:
+        // both show it, and the offer lists what it needs.
+        self.settings.render_my_language(language);
+        self.relist_first_run();
     }
 
     /// Makes `language` the language of the online translations: the switch
@@ -3211,11 +3268,12 @@ fn start_english(
 
 /// Starts the decision of the first-run offer on `work`, for the `indexes`
 /// of the first check: the choice file is read and, when the offer is due,
-/// the manifest is fetched and comes to `sender` as an event. When the
-/// manifest cannot be had, why is written to stderr and nothing is kept, so
-/// the next start asks again.
+/// the manifest is fetched by `downloader` and comes to `sender` as an
+/// event. When the manifest cannot be had, why is written to stderr and
+/// nothing is kept, so the next start asks again.
 fn start_first_run(
     work: &Work,
+    downloader: Downloader,
     indexes: Indexes,
     my: Language,
     sender: &UnboundedSender<Event>,
@@ -3227,7 +3285,7 @@ fn start_first_run(
         download::MANIFEST_LIMIT,
         async move {
             let chosen = first_run::read(path.as_deref());
-            first_run::offered_manifest(indexes, my, chosen, &Downloader::new()).await
+            first_run::offered_manifest(indexes, my, chosen, &downloader).await
         },
         move |outcome| match outcome {
             Outcome::Finished(Ok(Some(manifest))) => {
@@ -3369,6 +3427,7 @@ fn start(
         english_job,
         first_run: FirstRun::Unasked,
         download_run: 0,
+        release: download::BASE_URL.to_owned(),
         first_run_choice: None,
     };
     serve(session, receiver);
@@ -3971,6 +4030,7 @@ mod tests {
             english_job: None,
             first_run: FirstRun::Done,
             download_run: 0,
+            release: download::BASE_URL.to_owned(),
             first_run_choice: None,
         };
         (session, events, work)
@@ -4262,6 +4322,188 @@ mod tests {
         }));
         assert!(matches!(session.first_run, FirstRun::Done));
         assert_eq!(session.download_run, run);
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// On a fresh install the first-run offer, fed `manifest-2.json` by the
+    /// download stub, queues Russian's set when no choice is made, and
+    /// exactly English's when English is chosen in the dialog, which makes
+    /// it my language and shows it in Settings. Nothing is installed: the
+    /// stub has no asset, and the installs are cancelled.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn first_run_queues_the_set_of_the_language_chosen_in_the_offer() {
+        use std::collections::HashMap;
+
+        use super::*;
+        use crate::stub::{Route, Stub};
+        use addict_dictionary::{pairs, release, sources};
+
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = Temp(
+            std::env::temp_dir().join(format!("addict-first-run-language-{}", std::process::id())),
+        );
+        std::fs::create_dir(&temp.0).unwrap();
+        // Put back when the test ends, before `temp` is removed.
+        struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Env {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    // SAFETY: as when they were set below.
+                    unsafe {
+                        match value {
+                            Some(value) => std::env::set_var(key, value),
+                            None => std::env::remove_var(key),
+                        }
+                    }
+                }
+            }
+        }
+        let _env = Env(["XDG_DATA_HOME", "XDG_CONFIG_HOME"]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect());
+        // SAFETY: the display tests run one per process ("run alone"); no
+        // other thread of this test reads the environment meanwhile.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", temp.0.join("data"));
+            std::env::set_var("XDG_CONFIG_HOME", temp.0.join("config"));
+        }
+
+        let manifest = Manifest {
+            format: addict_dictionary::format::VERSION,
+            indexes: sources::ROWS
+                .iter()
+                .map(|row| Published::of(row.index, row.index.as_bytes()))
+                .collect(),
+        };
+        assert_eq!(manifest.indexes.len(), 19);
+        let stub = Stub::start(HashMap::from([(
+            format!("/{}/{}", release::tag(), release::MANIFEST_2),
+            Route::File(manifest.to_json().into_bytes()),
+        )]))
+        .unwrap();
+
+        gtk::init().expect("a display");
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.FirstRunLanguageTest");
+        session.release = stub.base_url();
+        let context = glib::MainContext::default();
+        // Handles the events of the runner until `done` holds.
+        let mut wait = |session: &mut Session, done: &dyn Fn(&Session) -> bool| {
+            while !done(session) {
+                let event = context.block_on(events.next()).expect("an event");
+                session.handle(event);
+            }
+        };
+        let queued = |session: &Session| -> Vec<String> {
+            let FirstRun::Installing { queue, .. } = &session.first_run else {
+                panic!("installing");
+            };
+            queue
+                .rows()
+                .iter()
+                .map(|(published, _)| published.name.clone())
+                .collect()
+        };
+        let set = |my: Language| -> Vec<String> {
+            pairs::required_index_names(my).map(str::to_owned).collect()
+        };
+        // The rows are grouped by language, so they are compared as a set.
+        let sorted = |mut names: Vec<String>| -> Vec<String> {
+            names.sort();
+            names
+        };
+
+        for chosen in [None, Some(Language::En)] {
+            // A fresh start: nothing chosen yet.
+            session.my_language = Language::Ru;
+            session.my_language_chosen = false;
+            session.my_language_job = None;
+            session.first_run = FirstRun::Unasked;
+            session.indexes = IndexCache::default();
+            session.window.set_visible(true);
+            session.handle(Event::MyLanguageRead(Language::Ru));
+            session.handle(Event::Indexes {
+                generation: 0,
+                indexes: Indexes::MISSING,
+            });
+            assert!(matches!(session.first_run, FirstRun::Asking { .. }));
+            wait(&mut session, &|session| {
+                matches!(session.first_run, FirstRun::Shown { .. })
+            });
+            let FirstRun::Shown { offer, .. } = &session.first_run else {
+                unreachable!();
+            };
+            assert_eq!(offer.my_language().selected(), 3, "Russian at first");
+            assert_eq!(sorted(offer.listed()), sorted(set(Language::Ru)));
+            if chosen.is_none() {
+                // A choice in Settings while the offer waits: it shows it
+                // and lists its set, and back to Russian.
+                session.handle(Event::MyLanguageChosen(Language::Es));
+                let FirstRun::Shown { offer, .. } = &session.first_run else {
+                    panic!("the offer stays");
+                };
+                assert_eq!(offer.my_language().selected(), 1);
+                assert_eq!(sorted(offer.listed()), sorted(set(Language::Es)));
+                session.handle(Event::MyLanguageChosen(Language::Ru));
+                let FirstRun::Shown { offer, .. } = &session.first_run else {
+                    panic!("the offer stays");
+                };
+                assert_eq!(sorted(offer.listed()), sorted(set(Language::Ru)));
+            }
+            let FirstRun::Shown { offer, .. } = &session.first_run else {
+                unreachable!();
+            };
+            if let Some(language) = chosen {
+                let index = Language::ALL
+                    .iter()
+                    .position(|one| *one == language)
+                    .unwrap();
+                offer.my_language().set_selected(index as u32);
+                wait(&mut session, &|session| session.my_language == language);
+                assert_eq!(session.settings.shown_my_language(), Some(language));
+                let FirstRun::Shown { offer, .. } = &session.first_run else {
+                    panic!("the offer stays");
+                };
+                assert_eq!(offer.my_language().selected(), index as u32);
+                assert_eq!(sorted(offer.listed()), sorted(set(language)));
+            }
+            let run = session.download_run;
+            session.handle(Event::FirstRunDownload(run));
+            assert_eq!(
+                queued(&session),
+                set(chosen.unwrap_or(Language::Ru)),
+                "{chosen:?}"
+            );
+            // Once Download is pressed the choice is gone, and one in
+            // Settings leaves the queue as it is.
+            let FirstRun::Installing { offer, .. } = &session.first_run else {
+                panic!("installing");
+            };
+            assert!(!offer.shows_my_language());
+            let before = queued(&session);
+            session.handle(Event::MyLanguageChosen(Language::Ca));
+            assert_eq!(queued(&session), before);
+            session.handle(Event::FirstRunCancel(run, None));
+            // At most the first of the set was asked for before the cancel.
+            let allowed = set(chosen.unwrap_or(Language::Ru));
+            for path in stub.seen() {
+                if let Some(asset) = path.rsplit('/').next()
+                    && let Some(name) = asset.strip_suffix(".index.xz")
+                {
+                    assert!(allowed.iter().any(|one| one == name), "{path}");
+                }
+            }
+        }
+        assert_eq!(set(Language::Ru), release::LEGACY_PUBLISHED);
+        assert_ne!(set(Language::En), set(Language::Ru));
         session.settings.window().destroy();
         session.window.destroy();
     }
