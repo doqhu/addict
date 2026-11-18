@@ -50,7 +50,7 @@ work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 (cd "$work" && "$root/target/appimage/$name" --appimage-extract >/dev/null)
 cmp "$root/target/appimage/$name.notices.json" "$work/AppDir/share/licenses/components.json"
-(cd "$work/AppDir" && find . -type f -print0 | sort -z | xargs -0 sha256sum) > "$work/components.sha256"
+(cd "$work/AppDir" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$work/components.sha256"
 cmp --silent "$root/target/appimage/$name.components.sha256" "$work/components.sha256" \
     || { echo 'incomplete or changed component checksum manifest' >&2; exit 1; }
 mkdir -p -- "$out"
