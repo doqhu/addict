@@ -129,13 +129,20 @@ impl Index {
             path: path.to_owned(),
             source,
         };
-        let file = File::open(path).map_err(|source| match source.kind() {
+        let missing = |source: io::Error| match source.kind() {
             io::ErrorKind::NotFound => Error::NotImported(path.to_owned()),
             _ => io(source),
-        })?;
+        };
+        let not_regular = || io(io::Error::other("not a regular file"));
+        // Checked before opening: opening a named pipe with no writer blocks.
+        if !std::fs::metadata(path).map_err(missing)?.is_file() {
+            return Err(not_regular());
+        }
+        let file = File::open(path).map_err(missing)?;
+        // Checked again: the path may have changed since.
         let metadata = file.metadata().map_err(io)?;
         if !metadata.is_file() {
-            return Err(io(io::Error::other("not a regular file")));
+            return Err(not_regular());
         }
         let damaged = |damage: Damage| Error::Damaged {
             path: path.to_owned(),
@@ -459,6 +466,29 @@ mod tests {
 
     fn opened(dir: &TempDir) -> Index {
         Index::open(&written(dir, &encode(&sample()).expect("encode"))).expect("open")
+    }
+
+    #[test]
+    fn a_named_pipe_with_no_writer_is_refused_without_blocking() {
+        let dir = TempDir::new("named-pipe");
+        let path = dir.path().join("wikdict-en-ca.index");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo failed");
+        // Opened on another thread so a regression fails the test instead of
+        // hanging it.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let opening = path.clone();
+        std::thread::spawn(move || sender.send(Index::open(&opening).map(drop)));
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("Index::open blocked on a named pipe");
+        assert!(
+            matches!(result, Err(Error::Io { path: ref failed, .. }) if *failed == path),
+            "{result:?}"
+        );
     }
 
     #[test]
