@@ -208,6 +208,14 @@ pub fn offered(
         .collect()
 }
 
+/// The indexes of my language's set that `indexes` does not show present,
+/// in the set's order: what a change of my language in Settings offers.
+pub fn missing(indexes: &Indexes, my: Language) -> Vec<&'static str> {
+    pairs::required_index_names(my)
+        .filter(|name| !is_present(indexes, name))
+        .collect()
+}
+
 /// Whether the index `name` is open or unreadable in `indexes`; a name this
 /// build does not know is not.
 pub fn is_present(indexes: &Indexes, name: &str) -> bool {
@@ -240,7 +248,14 @@ pub async fn offered_manifest(
 /// A recovery offer must not claim that every dictionary is absent.
 pub const RECOVERY_HEADING: &str = "Restore missing or unreadable dictionaries";
 pub const FETCHING: &str = "Fetching the dictionary list and checking installed files…";
-pub const NOTHING: &str = "All published dictionaries are readable. Nothing to download.";
+
+/// Settings recovery found every dictionary of my language readable.
+pub fn nothing_text(my: Language) -> String {
+    format!(
+        "All {} dictionaries are readable. Nothing to download.",
+        crate::settings::my_language_name(my)
+    )
+}
 pub const RETRY: &str = "You can try again through Settings → Download dictionaries.";
 
 pub fn recovery_failed_text(error: &str) -> String {
@@ -1215,6 +1230,11 @@ impl Offer {
         &self.window
     }
 
+    /// Closes the dialog: a recovery offer left with nothing to list.
+    pub fn close(&self) {
+        self.window.close();
+    }
+
     /// Shows the dialog, with Download focused.
     pub fn present(&self) {
         self.window.present();
@@ -1906,6 +1926,36 @@ mod tests {
         assert_eq!(without.len(), english.len() - 1);
         assert!(!without.contains(&"wikdict-en-es".to_owned()));
         assert!(!is_present(&indexes, "unknown-index"));
+    }
+
+    #[test]
+    fn a_change_of_my_language_misses_only_what_the_new_set_lacks() {
+        let russian = pairs::required_sources(Language::Ru)
+            .fold(Indexes::MISSING.presence, |presence, source| {
+                presence.with(source)
+            });
+        let indexes = Indexes {
+            presence: russian,
+            ..Indexes::MISSING
+        };
+        assert!(missing(&indexes, Language::Ru).is_empty());
+        assert_eq!(
+            missing(&indexes, Language::En),
+            [
+                "wikdict-en-es",
+                "wikdict-en-ca",
+                "wikdict-es-en",
+                "wikdict-ca-en"
+            ]
+        );
+        assert_eq!(
+            missing(&Indexes::MISSING, Language::Es),
+            pairs::required_index_names(Language::Es).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            nothing_text(Language::Ru),
+            "All Russian dictionaries are readable. Nothing to download."
+        );
     }
 
     #[test]

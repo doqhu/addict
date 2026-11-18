@@ -1169,6 +1169,12 @@ impl Settings {
         self.startup.set_sensitive(sensitive);
     }
 
+    /// The line under Download dictionaries.
+    #[cfg(test)]
+    pub(crate) fn download_text(&self) -> String {
+        self.download_status.label().into()
+    }
+
     /// The language the My language row shows.
     #[cfg(test)]
     pub(crate) fn shown_my_language(&self) -> Option<Source> {
@@ -1303,7 +1309,7 @@ mod tests {
         assert!(settings.download_status.is_visible());
         assert_eq!(settings.download_status.label(), crate::first_run::FETCHING);
         for status in [
-            crate::first_run::NOTHING.to_owned(),
+            crate::first_run::nothing_text(super::Source::Ru),
             crate::first_run::recovery_failed_text("cannot read the index manifest: malformed"),
         ] {
             settings.render_download(false, &status);

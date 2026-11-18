@@ -1026,7 +1026,7 @@ impl Session {
         let chosen = self.sender.clone();
         let run = self.download_run;
         let (listed, my) = if recovery {
-            (manifest.indexes.clone(), None)
+            (self.recovery_indexes(&manifest), None)
         } else {
             (self.first_run_indexes(&manifest), Some(self.my_language))
         };
@@ -1076,17 +1076,72 @@ impl Session {
         })
     }
 
-    /// A first-run offer that waits for a press lists anew what my
-    /// language needs, after my language or the snapshot changed.
-    fn relist_first_run(&self) {
+    /// The indexes of a recovery manifest that the Settings offer lists
+    /// and installs: those of my language's set. The manifest holds only
+    /// what is missing or unreadable, so no presence is asked; indexes of
+    /// other languages stay out, and none is removed.
+    fn recovery_indexes(&self, manifest: &Manifest) -> Vec<Published> {
+        first_run::offered(&manifest.indexes, self.my_language, |_| false)
+    }
+
+    /// An offer that waits for a press lists anew what my language needs,
+    /// after my language or the snapshot changed. A recovery offer left
+    /// with nothing to list closes, and Settings says why.
+    fn relist_first_run(&mut self) {
+        match &self.first_run {
+            FirstRun::Shown {
+                offer,
+                manifest,
+                recovery: false,
+            } => {
+                offer.render_my_language(self.my_language);
+                offer.list(&self.first_run_indexes(manifest));
+            }
+            FirstRun::Shown {
+                offer,
+                manifest,
+                recovery: true,
+            } => {
+                let listed = self.recovery_indexes(manifest);
+                if listed.is_empty() {
+                    offer.close();
+                    self.first_run = FirstRun::Done;
+                    self.settings
+                        .render_download(false, &first_run::nothing_text(self.my_language));
+                } else {
+                    offer.list(&listed);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A change of my language in Settings offers what the new language's
+    /// set lacks, through the Settings offer for missing indexes. Only when
+    /// no offer, preparation or install is under way: the first-run offer
+    /// decides for itself, and a waiting offer follows by
+    /// [`Self::relist_first_run`].
+    fn offer_missing_for_my_language(&mut self) {
+        // A waiting recovery offer, re-listed already, may have been closed
+        // (it only hides): it is shown again.
         if let FirstRun::Shown {
             offer,
-            manifest,
-            recovery: false,
+            recovery: true,
+            ..
         } = &self.first_run
         {
-            offer.render_my_language(self.my_language);
-            offer.list(&self.first_run_indexes(manifest));
+            offer.present();
+            return;
+        }
+        if !matches!(self.first_run, FirstRun::Done | FirstRun::Ended { .. }) {
+            return;
+        }
+        let lacks = self
+            .indexes
+            .known
+            .is_some_and(|indexes| !first_run::missing(&indexes, self.my_language).is_empty());
+        if lacks {
+            self.settings_download();
         }
     }
 
@@ -1138,8 +1193,9 @@ impl Session {
         }
         self.first_run = FirstRun::Done;
         match outcome {
-            Outcome::Finished(Ok(manifest)) if manifest.indexes.is_empty() => {
-                self.settings.render_download(false, first_run::NOTHING);
+            Outcome::Finished(Ok(manifest)) if self.recovery_indexes(&manifest).is_empty() => {
+                self.settings
+                    .render_download(false, &first_run::nothing_text(self.my_language));
             }
             Outcome::Finished(Ok(manifest)) => self.show_download_offer(manifest, true),
             outcome => {
@@ -1171,7 +1227,7 @@ impl Session {
         };
         offer.installing();
         let indexes = if recovery {
-            manifest.indexes
+            self.recovery_indexes(&manifest)
         } else {
             self.first_run_indexes(&manifest)
         };
@@ -2289,6 +2345,7 @@ impl Session {
     /// into it. Settings and a first-run offer that waits for a press show
     /// it, and the offer lists what it needs.
     fn my_language_chosen(&mut self, language: Language) {
+        let changed = language != self.my_language;
         self.my_language_chosen = true;
         // Saved even when it equals the one in use: the file may still hold
         // another, its read not having come yet.
@@ -2298,6 +2355,12 @@ impl Session {
         // both show it, and the offer lists what it needs.
         self.settings.render_my_language(language);
         self.relist_first_run();
+        if changed {
+            // The first-run decision for the new language first: an offer
+            // it ends leaves the set to the Settings offer.
+            self.first_indexes();
+            self.offer_missing_for_my_language();
+        }
     }
 
     /// Makes `language` the language of the online translations: the switch
@@ -4504,6 +4567,272 @@ mod tests {
         }
         assert_eq!(set(Language::Ru), release::LEGACY_PUBLISHED);
         assert_ne!(set(Language::En), set(Language::Ru));
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// With Russian's set installed, a change of my language in Settings to
+    /// English opens the Settings offer for missing indexes listing exactly
+    /// the four indexes English lacks, and Download queues them; a waiting
+    /// offer follows a later change; back to Russian nothing is offered and
+    /// nothing is asked of the network. A change while the first-run offer
+    /// owns the decision starts nothing. No file is removed.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_change_of_my_language_in_settings_offers_what_the_new_set_lacks() {
+        use std::collections::HashMap;
+
+        use super::*;
+        use crate::stub::{Route, Stub};
+        use addict_dictionary::{import, pairs, release, sources};
+
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = Temp(
+            std::env::temp_dir().join(format!("addict-language-change-{}", std::process::id())),
+        );
+        std::fs::create_dir(&temp.0).unwrap();
+        // Put back when the test ends, before `temp` is removed.
+        struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Env {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    // SAFETY: as when they were set below.
+                    unsafe {
+                        match value {
+                            Some(value) => std::env::set_var(key, value),
+                            None => std::env::remove_var(key),
+                        }
+                    }
+                }
+            }
+        }
+        let _env = Env(["XDG_DATA_HOME", "XDG_CONFIG_HOME"]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect());
+        // SAFETY: the display tests run one per process ("run alone"); no
+        // other thread of this test reads the environment meanwhile.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", temp.0.join("data"));
+            std::env::set_var("XDG_CONFIG_HOME", temp.0.join("config"));
+        }
+
+        // Russian's set, readable on disk and present in the snapshot.
+        let dir = import::data_dir().unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = addict_dictionary::format::encode(&addict_dictionary::format::Contents {
+            source: "installed".to_owned(),
+            senses: vec![addict_dictionary::format::SenseRecord {
+                definition: "a bank".to_owned(),
+                members: vec!["bank".to_owned()],
+                ..Default::default()
+            }],
+            headwords: vec![addict_dictionary::format::Headword {
+                word: "bank".to_owned(),
+                senses: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let russian: Vec<_> = pairs::required_sources(Language::Ru).collect();
+        for source in &russian {
+            std::fs::write(import::index_path(&dir, *source), &index).unwrap();
+        }
+        let indexes = Indexes {
+            presence: russian
+                .iter()
+                .fold(Indexes::MISSING.presence, |presence, source| {
+                    presence.with(*source)
+                }),
+            ..Indexes::MISSING
+        };
+
+        let manifest = Manifest {
+            format: addict_dictionary::format::VERSION,
+            indexes: sources::ROWS
+                .iter()
+                .map(|row| Published::of(row.index, row.index.as_bytes()))
+                .collect(),
+        };
+        assert_eq!(manifest.indexes.len(), 19);
+        let stub = Stub::start(HashMap::from([(
+            format!("/{}/{}", release::tag(), release::MANIFEST_2),
+            Route::File(manifest.to_json().into_bytes()),
+        )]))
+        .unwrap();
+
+        gtk::init().expect("a display");
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.LanguageChangeTest");
+        session.release = stub.base_url();
+        session.my_language = Language::Ru;
+        session.first_run = FirstRun::Done;
+        assert!(session.indexes.update(0, indexes));
+        let context = glib::MainContext::default();
+        let mut wait = |session: &mut Session, done: &dyn Fn(&Session) -> bool| {
+            while !done(session) {
+                let event = context.block_on(events.next()).expect("an event");
+                session.handle(event);
+            }
+        };
+        let lacks = |my: Language| -> Vec<String> {
+            first_run::missing(&indexes, my)
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        };
+        let sorted = |mut names: Vec<String>| -> Vec<String> {
+            names.sort();
+            names
+        };
+        let shown = |session: &Session| -> Vec<String> {
+            let FirstRun::Shown {
+                offer,
+                recovery: true,
+                ..
+            } = &session.first_run
+            else {
+                panic!("the Settings offer");
+            };
+            offer.listed()
+        };
+
+        // The same language again, and Russian's set present: nothing.
+        session.handle(Event::MyLanguageChosen(Language::Ru));
+        assert!(matches!(session.first_run, FirstRun::Done));
+        // On a fresh install the first-run offer owns the decision while it
+        // is due (a `--background` start, the window not yet shown).
+        assert!(session.indexes.update(0, Indexes::MISSING));
+        session.first_run = FirstRun::Pending(manifest.clone());
+        session.handle(Event::MyLanguageChosen(Language::Es));
+        assert!(matches!(session.first_run, FirstRun::Pending(_)));
+        assert!(session.indexes.update(0, indexes));
+        session.first_run = FirstRun::Done;
+        session.handle(Event::MyLanguageChosen(Language::Ru));
+        assert!(matches!(session.first_run, FirstRun::Done));
+        assert!(stub.seen().is_empty(), "no request: {:?}", stub.seen());
+
+        // Download dictionaries with Russian's set readable: only other
+        // languages' indexes are missing, so no dialog opens.
+        session.handle(Event::SettingsDownload);
+        wait(&mut session, &|session| {
+            !matches!(session.first_run, FirstRun::Preparing { .. })
+        });
+        assert!(matches!(session.first_run, FirstRun::Done));
+        assert_eq!(
+            session.settings.download_text(),
+            first_run::nothing_text(Language::Ru)
+        );
+
+        // Russian → English: exactly the four English lacks.
+        assert_eq!(
+            lacks(Language::En),
+            [
+                "wikdict-en-es",
+                "wikdict-en-ca",
+                "wikdict-es-en",
+                "wikdict-ca-en"
+            ]
+        );
+        session.handle(Event::MyLanguageChosen(Language::En));
+        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
+        // A change while preparing keeps the preparation, which lists for
+        // the language in use when it ends.
+        let run = session.download_run;
+        session.handle(Event::MyLanguageChosen(Language::Es));
+        session.handle(Event::MyLanguageChosen(Language::En));
+        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
+        assert_eq!(session.download_run, run);
+        wait(&mut session, &|session| {
+            matches!(session.first_run, FirstRun::Shown { .. })
+        });
+        assert_eq!(sorted(shown(&session)), sorted(lacks(Language::En)));
+        // The waiting offer follows a change to Catalan, and closes on
+        // Russian, whose set is whole.
+        // Closed (it hides), it is shown again by a change.
+        let FirstRun::Shown { offer, .. } = &session.first_run else {
+            unreachable!();
+        };
+        let window = offer.window().clone();
+        window.close();
+        assert!(!window.is_visible());
+        session.handle(Event::MyLanguageChosen(Language::Ca));
+        assert_eq!(sorted(shown(&session)), sorted(lacks(Language::Ca)));
+        assert!(window.is_visible(), "the waiting offer is shown again");
+        session.handle(Event::MyLanguageChosen(Language::Ru));
+        assert!(matches!(session.first_run, FirstRun::Done));
+        assert!(!window.is_visible(), "the empty offer closes");
+
+        // English again, accepted: the queue is what English lacks, in
+        // manifest order.
+        session.handle(Event::MyLanguageChosen(Language::En));
+        wait(&mut session, &|session| {
+            matches!(session.first_run, FirstRun::Shown { .. })
+        });
+        let run = session.download_run;
+        session.handle(Event::FirstRunDownload(run));
+        let FirstRun::Installing {
+            queue, recovery, ..
+        } = &session.first_run
+        else {
+            panic!("installing");
+        };
+        assert!(*recovery);
+        let queued: Vec<String> = queue
+            .rows()
+            .iter()
+            .map(|(published, _)| published.name.clone())
+            .collect();
+        assert_eq!(queued, lacks(Language::En));
+        // A change while installing leaves the install as it is.
+        session.handle(Event::MyLanguageChosen(Language::Ca));
+        assert!(matches!(session.first_run, FirstRun::Installing { .. }));
+        session.handle(Event::FirstRunCancel(run, None));
+        // English's set present too, back to Russian: nothing is offered.
+        let english = pairs::required_sources(Language::En)
+            .fold(indexes.presence, |presence, source| presence.with(source));
+        assert!(session.indexes.update(
+            0,
+            Indexes {
+                presence: english,
+                ..indexes
+            }
+        ));
+        let run = session.download_run;
+        session.handle(Event::MyLanguageChosen(Language::Ru));
+        assert!(matches!(session.first_run, FirstRun::Ended { .. }));
+        assert_eq!(session.download_run, run);
+
+        // A first-run offer waiting under `--background` for Russian, with
+        // one index of English's set on disk: English ends it (entry 4),
+        // and the Settings offer takes over for the rest.
+        assert!(
+            session.indexes.update(
+                0,
+                Indexes {
+                    presence: Indexes::MISSING
+                        .presence
+                        .with(addict_dictionary::import::Source::WikdictEnEs),
+                    ..Indexes::MISSING
+                }
+            )
+        );
+        session.first_run = FirstRun::Pending(manifest.clone());
+        session.handle(Event::MyLanguageChosen(Language::En));
+        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
+        session.first_run = FirstRun::Done;
+        for source in &russian {
+            assert!(
+                import::index_path(&dir, *source).exists(),
+                "nothing removed: {source:?}"
+            );
+        }
         session.settings.window().destroy();
         session.window.destroy();
     }
