@@ -360,6 +360,41 @@ fn look_up_russian(
     ))
 }
 
+/// Starts the lookup of the Russian `word` read in Russian by someone whose
+/// own language is `my`, not Russian, in `articles` on `work`, with a
+/// deadline, through [`Articles::look_up_for`]: the Russian article with
+/// its translations into `my`, and no other language after a miss.
+/// `on_outcome` runs once on the worker thread with Russian, or with `my`
+/// when nothing Russian is imported, so the line that says so names the
+/// pair as before. Without a runner nothing starts and the result to show
+/// is given back.
+fn look_up_russian_article(
+    work: Option<&Work>,
+    articles: Arc<dyn Articles>,
+    word: String,
+    my: Language,
+    on_outcome: impl FnOnce(Language, Outcome<Looked>) + Send + 'static,
+) -> Result<Job, Box<Lookup>> {
+    let work = work.ok_or_else(|| Box::new(Lookup::Unfinished))?;
+    Ok(work.run(
+        LOOKUP_LIMIT,
+        async move { articles.look_up_for(Language::Ru, my, &word) },
+        move |outcome| {
+            let language = match &outcome {
+                Outcome::Finished(Looked {
+                    answer: Answer::NotImported,
+                    ..
+                }) => my,
+                Outcome::Finished(_)
+                | Outcome::Cancelled
+                | Outcome::TimedOut
+                | Outcome::Panicked => Language::Ru,
+            };
+            on_outcome(language, outcome);
+        },
+    ))
+}
+
 /// The language that answered in `outcome` and the outcome of the lookup
 /// alone; `chosen` when the lookup did not finish.
 fn answering(
@@ -382,15 +417,18 @@ fn answering(
 /// named. The lookup tries the chosen language first and, when it has no
 /// entry for the word, my language before the other reading languages
 /// ([`Articles::look_up_first`]); `on_outcome` is given the language that
-/// answered. With Russian pressed, a Latin word can reach this fallback
-/// even though Russian has no article index yet.
+/// answered. With Russian pressed, a Latin word, which no Russian index
+/// has, reaches this fallback.
 /// Otherwise nothing starts and nothing is asked of `articles`: the line
 /// that says there is no dictionary is given back, so no article of a word
 /// spelt alike in another language is shown. A Russian word
-/// ([`is_russian`]) is looked up first of all, whatever `known` says, and
-/// only in the Russian index of the language it is translated into
-/// ([`russian_into`]), which `on_outcome` is given. No wildcard arm: a new
-/// language does not compile until it is given its offline result.
+/// ([`is_russian`]) is looked up first of all, whatever `known` says. With
+/// Russian pressed and my language another, it is looked up as a Russian
+/// word, its article with its translations into my language
+/// ([`look_up_russian_article`]). Otherwise it is looked up only in the
+/// Russian index of the language it is translated into ([`russian_into`]),
+/// which `on_outcome` is given. No wildcard arm: a new language does not
+/// compile until it is given its offline result.
 pub fn offline(
     work: Option<&Work>,
     articles: Arc<dyn Articles>,
@@ -401,6 +439,9 @@ pub fn offline(
     on_outcome: impl FnOnce(Language, Outcome<Looked>) + Send + 'static,
 ) -> Result<Job, Box<Lookup>> {
     if is_russian(&word) {
+        if chosen == Language::Ru && my != Language::Ru {
+            return look_up_russian_article(work, articles, word, my, on_outcome);
+        }
         let into = russian_into(chosen, my);
         return look_up_russian(work, articles, word, into, on_outcome);
     }
@@ -460,9 +501,9 @@ pub fn check_indexes(
 /// [`lookup_result`]. For another language what its indexes gave is shown
 /// by kind, in that language, and a language whose indexes were not there
 /// after all has the line that says there is no dictionary. A Russian word
-/// has its translations into `language`, or the line that says there is no
-/// Russian dictionary of it. No wildcard arm: a new language does not
-/// compile until it is given its result.
+/// has its Russian article, or its translations into `language`, or the
+/// line that says there is no Russian dictionary of it. No wildcard arm: a
+/// new language does not compile until it is given its result.
 pub fn result_in(outcome: Outcome<Looked>, word: &str, language: Language) -> Option<Lookup> {
     if is_russian(word) {
         return Some(match lookup_result(outcome, word)? {
@@ -470,6 +511,7 @@ pub fn result_in(outcome: Outcome<Looked>, word: &str, language: Language) -> Op
                 language,
                 translations,
             },
+            Lookup::Grouped { grouped, .. } => Lookup::Grouped { language, grouped },
             Lookup::NotImported { .. } => Lookup::NoRussianDictionary(language),
             other => other,
         });
@@ -1010,7 +1052,6 @@ pub(crate) mod tests {
         for (pressed, my, into) in [
             (Language::Es, Language::En, Language::En),
             (Language::Ca, Language::En, Language::En),
-            (Language::Ru, Language::Ca, Language::Ca),
             (Language::En, Language::Es, Language::Es),
             // Russian mine: the pressed language, as in 0.2.0.
             (Language::Ca, Language::Ru, Language::Ca),
@@ -1043,6 +1084,97 @@ pub(crate) mod tests {
             result_in(finished, "ёж", into),
             Some(Lookup::NoRussianDictionary(Language::Ca))
         );
+    }
+
+    /// A source of articles that answers a Russian word read in Russian
+    /// with `answer` and keeps each language and target asked; the list of
+    /// a Russian index alone is never asked.
+    struct RussianArticle(
+        Answer,
+        std::sync::Arc<std::sync::Mutex<Vec<(Language, Language)>>>,
+    );
+
+    impl Articles for RussianArticle {
+        fn indexes(&self) -> Indexes {
+            Indexes::OPEN
+        }
+
+        fn look_up(&self, word: &str) -> Looked {
+            panic!("{word} was looked up in English")
+        }
+
+        fn look_up_for(&self, language: Language, target: Language, _word: &str) -> Looked {
+            self.1.lock().expect("asked").push((language, target));
+            Looked {
+                answer: self.0.clone(),
+                indexes: Indexes::OPEN,
+            }
+        }
+
+        fn look_up_russian(&self, into: Language, word: &str) -> Looked {
+            panic!("{word} was looked up in the Russian index into {into:?}")
+        }
+    }
+
+    /// With Russian pressed and my language another, a Russian word is
+    /// looked up as a Russian word into my language, once, with no other
+    /// language after it; Russian answers, unless nothing Russian is
+    /// imported, which names the pair as before.
+    #[test]
+    fn a_russian_word_with_russian_pressed_gets_its_russian_article() {
+        let grouped = addict_dictionary::lookup::Grouped {
+            definitions: Some(Vec::new()),
+            translations: vec![(Language::En, vec!["dog".to_owned()])],
+            ..Default::default()
+        };
+        let file = crate::dictionaries::IndexFile::of(addict_dictionary::import::Source::KaikkiRu);
+        for my in [Language::En, Language::Es, Language::Ca] {
+            for (answer, answered, shown) in [
+                (
+                    Answer::Grouped(grouped.clone()),
+                    Language::Ru,
+                    Lookup::Grouped {
+                        language: Language::Ru,
+                        grouped: grouped.clone(),
+                    },
+                ),
+                (
+                    Answer::NoEntry,
+                    Language::Ru,
+                    Lookup::NoEntry {
+                        word: "соба\u{301}ка".to_owned(),
+                    },
+                ),
+                (
+                    Answer::Unreadable(file),
+                    Language::Ru,
+                    Lookup::Unreadable(file),
+                ),
+                (Answer::NotImported, my, Lookup::NoRussianDictionary(my)),
+            ] {
+                let asked = std::sync::Arc::default();
+                let articles = RussianArticle(answer, Arc::clone(&asked));
+                let (language, outcome) = answered_for(articles, Language::Ru, my, "соба\u{301}ка");
+                assert_eq!(language, answered, "{my:?}");
+                assert_eq!(*asked.lock().expect("asked"), [(Language::Ru, my)]);
+                assert_eq!(
+                    result_in(outcome, "соба\u{301}ка", language),
+                    Some(shown),
+                    "{my:?}"
+                );
+            }
+        }
+        // Without a runner nothing is asked.
+        let started = offline(
+            None,
+            std::sync::Arc::new(Unasked),
+            "собака".to_owned(),
+            Language::Ru,
+            Language::En,
+            None,
+            |_, _| panic!("a lookup ended"),
+        );
+        assert_eq!(started.err(), Some(Box::new(Lookup::Unfinished)));
     }
 
     /// A source of articles that records each source and target and can

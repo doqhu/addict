@@ -60,6 +60,32 @@ pub const LEGACY_PUBLISHED: [&str; 13] = [
     "wikdict-ru-ca",
 ];
 
+/// The indexes eligible for the current manifest, [`MANIFEST_2`], in source
+/// row order: the 19 of 0.4.1. A row outside it, such as `kaikki-ru-Russkiy`,
+/// is neither built nor published, nor required for any language, until a
+/// manifest of its own lists it.
+pub const MANIFEST_2_PUBLISHED: [&str; 19] = [
+    "oewn",
+    "freedict",
+    "wikdict-es-ru",
+    "kaikki-es-Espanol",
+    "omw-es",
+    "kaikki-en-Spanish",
+    "wikdict-ca-ru",
+    "dbnary-ca",
+    "sinonims-cat",
+    "kaikki-en-Catalan",
+    "wikdict-ru-en",
+    "wikdict-ru-es",
+    "wikdict-ru-ca",
+    "wikdict-es-ca",
+    "wikdict-en-es",
+    "wikdict-en-ca",
+    "wikdict-es-en",
+    "wikdict-ca-en",
+    "wikdict-ca-es",
+];
+
 /// The tag of the data release of the indexes of this format.
 pub fn tag() -> String {
     format!("indexes-v{}", format::VERSION)
@@ -393,11 +419,32 @@ mod tests {
         assert_eq!(legacy, LEGACY_PUBLISHED);
     }
 
+    /// The current manifest is frozen at the 19 indexes of 0.4.1, in row
+    /// order, the legacy ones among them; the Russian article index is not
+    /// in it.
+    #[test]
+    fn the_current_inventory_matches_version_0_4_1() {
+        let eligible: Vec<&str> = sources::ROWS
+            .iter()
+            .map(|row| row.index)
+            .filter(|name| MANIFEST_2_PUBLISHED.contains(name))
+            .collect();
+        assert_eq!(eligible, MANIFEST_2_PUBLISHED);
+        assert!(
+            LEGACY_PUBLISHED
+                .iter()
+                .all(|name| MANIFEST_2_PUBLISHED.contains(name))
+        );
+        assert!(!MANIFEST_2_PUBLISHED.contains(&"kaikki-ru-Russkiy"));
+        assert_eq!(sources::ROWS.len(), MANIFEST_2_PUBLISHED.len() + 1);
+    }
+
     #[test]
     fn a_name_is_the_source_of_its_row() {
         assert_eq!(source_of("oewn"), Some(Source::Oewn));
         assert_eq!(source_of("freedict"), Some(Source::Freedict));
         assert_eq!(source_of("wikdict-ru-ca"), Some(Source::WikdictRuCa));
+        assert_eq!(source_of("kaikki-ru-Russkiy"), Some(Source::KaikkiRu));
         assert_eq!(source_of("oewn.index"), None);
         assert_eq!(source_of("tessdata"), None);
         assert_eq!(source_of(""), None);

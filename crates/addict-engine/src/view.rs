@@ -1953,7 +1953,9 @@ fn article_texts<'a>(
 /// said by its own line. `choice` is a sense of the definitions or an
 /// English gloss, and the online translation `definition` stands under it.
 /// The translations row is for `target`, as in [`choice_texts`]; the
-/// definition is translated into `my` language.
+/// definition is translated into `my` language. English and Russian have
+/// their senses, translations and pronunciations alone: no synonyms of the
+/// word, no English glosses and no analysis.
 fn grouped_texts<'a>(
     language: Language,
     grouped: &'a Grouped,
@@ -1968,7 +1970,8 @@ fn grouped_texts<'a>(
         Some(Choice::Sense(index)) => Some(index),
         Some(Choice::Gloss(_)) | None => None,
     };
-    let groups = if language == Language::En {
+    let senses_only = matches!(language, Language::En | Language::Ru);
+    let groups = if senses_only {
         &[]
     } else {
         grouped.synonyms.as_deref().unwrap_or_default()
@@ -2001,7 +2004,7 @@ fn grouped_texts<'a>(
         gloss: None,
         pronunciations: pronunciation_texts(&grouped.entries),
     };
-    if language == Language::En {
+    if senses_only {
         return texts;
     }
     let in_senses = senses.iter().any(|sense| !sense.synonyms.is_empty());
@@ -4575,6 +4578,128 @@ mod tests {
                 label: SYNONYMS_LABEL,
                 items: Cow::Owned(vec!["banca".to_owned()]),
             }
+        );
+    }
+
+    /// English mine, Russian pressed: the Russian article has its
+    /// definitions with their synonyms, the English translations and the
+    /// pronunciations, and no line of word synonyms, English glosses or
+    /// analysis.
+    #[test]
+    fn a_russian_article_shows_its_senses_translations_and_pronunciations() {
+        use addict_core::dictionary::{Audio, EntryIdentity, LexicalEntry, Pronunciation};
+        let ogg = "https://commons.wikimedia.org/wiki/Special:FilePath/Ru-собака.ogg";
+        let article = |translations: Vec<(Language, Vec<String>)>| Lookup::Grouped {
+            language: Language::Ru,
+            grouped: Grouped {
+                entries: vec![LexicalEntry {
+                    identity: EntryIdentity {
+                        source: "kaikki-ru".to_owned(),
+                        headword: "собака".to_owned(),
+                        id: "line-1".to_owned(),
+                    },
+                    part_of_speech: None,
+                    pronunciations: vec![Pronunciation {
+                        text: Some("[sɐˈbakə]".to_owned()),
+                        notation: Some("IPA".to_owned()),
+                        audio: vec![Audio {
+                            url: ogg.to_owned(),
+                            format: Some("ogg".to_owned()),
+                        }],
+                        ..Default::default()
+                    }],
+                }],
+                definitions: Some(vec![
+                    Sense {
+                        part_of_speech: None,
+                        entries: Vec::new(),
+                        definition: "Домашнее животное.".to_owned(),
+                        synonyms: vec!["пёс".to_owned(), "псина".to_owned()],
+                    },
+                    Sense {
+                        part_of_speech: None,
+                        entries: Vec::new(),
+                        definition: "Презренный человек.".to_owned(),
+                        synonyms: Vec::new(),
+                    },
+                ]),
+                translations,
+                ..Grouped::default()
+            },
+        };
+        fn texts_of(lookup: &Lookup, chosen: Option<usize>) -> ResultTexts<'_> {
+            let english = Translating {
+                my: Language::En,
+                pressed: Language::Ru,
+            };
+            super::choice_texts(
+                lookup,
+                chosen.map(super::Choice::Sense),
+                None,
+                None,
+                None,
+                english,
+            )
+        }
+        let lookup = article(vec![(
+            Language::En,
+            vec!["dog".to_owned(), "hound".to_owned()],
+        )]);
+        let texts = texts_of(&lookup, None);
+        assert_eq!(texts.senses_label, "Russian definitions");
+        assert_eq!(texts.senses.len(), 2);
+        assert_eq!(texts.senses[0].definition, "Домашнее животное.");
+        assert!(texts.senses[0].count.is_some());
+        assert_eq!(texts.senses[1].count, None);
+        assert_eq!(
+            sections(&texts),
+            [
+                Some("English, for the word as a whole: dog, hound".to_owned()),
+                None,
+                None,
+            ]
+        );
+        assert_eq!(texts.analysis, super::Analysis::default());
+        assert_eq!(texts.elsewhere, None);
+        assert_eq!(texts.pronunciations.len(), 1);
+        assert_eq!(texts.pronunciations[0].transcription, Some("[sɐˈbakə]"));
+        assert_eq!(texts.pronunciations[0].audio, Some(ogg));
+        let chosen = texts_of(&lookup, Some(0));
+        let explained = chosen.senses[0].explained.as_ref().expect("explained");
+        assert_eq!(
+            explained.synonyms,
+            Listed::Items {
+                label: SYNONYMS_LABEL,
+                items: Cow::Owned(vec!["пёс".to_owned(), "псина".to_owned()]),
+            }
+        );
+        // No `wikdict-ru-en`: the pair is named missing.
+        let unpaired = article(Vec::new());
+        let texts = texts_of(&unpaired, None);
+        assert_eq!(
+            sections(&texts)[0].as_deref(),
+            Some("No Russian-English dictionary is imported.")
+        );
+        // No Russian article index: its line, and the translations.
+        let translations_only = Lookup::Grouped {
+            language: Language::Ru,
+            grouped: Grouped {
+                translations: vec![(Language::En, vec!["dog".to_owned()])],
+                ..Grouped::default()
+            },
+        };
+        let texts = texts_of(&translations_only, None);
+        assert_eq!(
+            texts.hint,
+            Some("No dictionary of Russian definitions is imported.")
+        );
+        assert_eq!(
+            sections(&texts),
+            [
+                Some("English, for the word as a whole: dog".to_owned()),
+                None,
+                None,
+            ]
         );
     }
 

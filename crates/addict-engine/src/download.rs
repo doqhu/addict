@@ -1168,7 +1168,7 @@ mod tests {
     }
 
     /// The published release, over the network: the current manifest lists
-    /// every source, the legacy one only what apps through 0.2.x know, and
+    /// the indexes of `MANIFEST_2_PUBLISHED`, the legacy one only what apps through 0.2.x know, and
     /// one WikDict index downloads, matches its entry and opens. Run by hand
     /// after the indexes workflow published:
     /// `cargo test -p addict-engine download::tests::live -- --ignored`.
@@ -1178,11 +1178,11 @@ mod tests {
         let downloader = Downloader::new();
         let current = downloader.manifest().await.expect("manifest-2.json");
         let names: Vec<&str> = current.indexes.iter().map(|p| p.name.as_str()).collect();
-        let expected: Vec<&str> = addict_dictionary::sources::ROWS
-            .iter()
-            .map(|row| row.index)
-            .collect();
-        assert_eq!(names, expected, "manifest-2.json lists every source");
+        let expected = addict_dictionary::release::MANIFEST_2_PUBLISHED;
+        assert_eq!(
+            names, expected,
+            "manifest-2.json lists its frozen inventory"
+        );
         for published in &current.indexes {
             assert!(published.size > 0, "{} has a size", published.name);
             assert_eq!(

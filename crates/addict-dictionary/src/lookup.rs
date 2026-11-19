@@ -29,11 +29,14 @@
 //! [`grouped`] also gives the analyses of the word as a verb form, from the
 //! analysis tables of the indexes it asks ([`analyses_of`]).
 //!
-//! A Russian word has a hook of its own, [`russian`], outside
-//! [`headwords`]: its spellings without stress marks, as written, in
-//! lowercase and with `ё` and `е` taken as one letter
-//! ([`russian_spellings`]). It has no dictionary
-//! forms: an inflected form finds nothing.
+//! - Russian: the spellings of [`russian_spellings`], without stress marks,
+//!   as written, in lowercase and with `ё` and `е` taken as one letter. It
+//!   has no dictionary forms: an inflected form finds nothing. Each index
+//!   answers with the first of them it has.
+//!
+//! [`russian`] reads one index of Russian headwords through the same
+//! spellings, for a Russian word translated by someone whose own language
+//! is Russian.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -62,6 +65,9 @@ pub type Lemmas = BTreeMap<String, Vec<String>>;
 /// names. No wildcard arm: a new language does not compile until it is
 /// given its hook.
 pub fn headwords(language: Language, word: &str, lemmas: &Lemmas) -> Vec<String> {
+    if language == Language::Ru {
+        return russian_spellings(word);
+    }
     let written = reduction::stripped(word);
     if written.is_empty() {
         return Vec::new();
@@ -139,7 +145,9 @@ pub fn article(index: &Index, language: Language, word: &str) -> Result<Option<A
 }
 
 /// The headwords of `index` that [`headwords`] gives for `word` read in
-/// `language` with `lemmas`, with their articles, in that order.
+/// `language` with `lemmas`, with their articles, in that order. An index
+/// of Russian answers with the first spelling it has alone, as [`russian`]
+/// does.
 fn found(
     index: &Index,
     language: Language,
@@ -150,6 +158,9 @@ fn found(
     for headword in headwords(language, word, lemmas) {
         if let Some(article) = index.find(&headword)? {
             found.push(Found { headword, article });
+            if language == Language::Ru {
+                break;
+            }
         }
     }
     Ok(found)
@@ -321,7 +332,7 @@ fn union<'a>(
 /// all the indexes together, read once. Every sense of every headword found
 /// is kept; only the definitions are merged, a sense whose definition and
 /// grammar are already there skipped. The entries and sense metadata of
-/// every index but a Russian one are kept, each once.
+/// every index but a Russian translation index are kept, each once.
 /// `None` when no index has a headword for the word. An error of an index
 /// is the error of the lookup; it carries the path of that index.
 pub fn grouped(
@@ -347,7 +358,9 @@ pub fn grouped(
     let found_in = |index: &Index| found(index, language, word, &lemmas);
     for (kind, index) in indexes {
         let found = found_in(index)?;
-        if !matches!(kind, Kind::FromRussian) {
+        // Of an index of Russian translations only the translations are
+        // kept: the article's entries are those of its definitions.
+        if !(language == Language::Ru && matches!(kind, Kind::Translation(_))) {
             crate::combined::append_unique(
                 &mut grouped.entries,
                 found
@@ -423,9 +436,6 @@ pub fn grouped(
                     .filter(|sense| !sense.definition.trim().is_empty());
                 push_new(english, glosses.map(|sense| sense.definition.clone()));
             }
-            // Never among the indexes of a reading language: a Russian
-            // index is asked by [`russian`] alone. Nothing of it is kept.
-            Kind::FromRussian => found_any |= !found.is_empty(),
         }
     }
     if !found_any {
@@ -1489,6 +1499,69 @@ mod tests {
         );
         assert_eq!(grouped(&indexes, Language::Es, "…").expect("look up"), None);
         assert_eq!(grouped(&[], Language::Es, "banco").expect("look up"), None);
+    }
+
+    /// A Russian word, stressed or not, reaches the Russian definitions
+    /// and the translations of its first spelling; the entries are those
+    /// of the definitions index alone.
+    #[test]
+    fn a_russian_word_gets_its_definitions_and_translations_grouped() {
+        let dir = TempDir::new("grouped-ru");
+        let contents = wikdict::unstressed(
+            crate::kaikki::parse(crate::kaikki::tests::RUSSIAN.as_bytes(), "ru", "kaikki-ru")
+                .expect("parse"),
+        );
+        let definitions = written(&dir, "kaikki-ru.index", &contents);
+        let english = russian_index(
+            &dir,
+            "ru-en.index",
+            &[("собака", &["dog", "hound"]), ("дом", &["house"])],
+        );
+        let indexes = [
+            (Kind::Definitions, &definitions),
+            (Kind::Translation(Language::En), &english),
+        ];
+        for word in ["собака", "соба\u{301}ка", "«Собака»,"] {
+            let found = grouped(&indexes, Language::Ru, word)
+                .expect("look up")
+                .unwrap_or_else(|| panic!("{word}"));
+            let senses = found.definitions.as_deref().expect("definitions");
+            let definitions: Vec<_> = senses.iter().map(|s| s.definition.as_str()).collect();
+            assert_eq!(
+                definitions,
+                ["домашнее животное семейства псовых", "презренный человек"],
+                "{word}"
+            );
+            assert_eq!(senses[0].synonyms, texts(&["пёс", "псина"]));
+            assert_eq!(
+                found.translations_into(Language::En),
+                Some(texts(&["dog", "hound"]).as_slice())
+            );
+            assert_eq!(found.entries.len(), 1, "{word}");
+            assert_eq!(
+                found.entries[0].pronunciations[0].text.as_deref(),
+                Some("[sɐˈbakə]")
+            );
+            assert_eq!(found.verb, None);
+        }
+        // The headword imported with a stress mark is keyed without it.
+        let house = grouped(&indexes, Language::Ru, "дом")
+            .expect("look up")
+            .expect("дом");
+        assert_eq!(
+            house.definitions.as_deref().map(|senses| senses.len()),
+            Some(1)
+        );
+        // An inflected form finds nothing yet.
+        assert_eq!(
+            grouped(&indexes, Language::Ru, "собаки").expect("look up"),
+            None
+        );
+        assert_eq!(
+            headwords(Language::Ru, "Ёж", &Lemmas::new()),
+            russian_spellings("Ёж")
+        );
+        assert_eq!(asked_forms(Language::Ru, "Ёж"), texts(&["ёж"]));
     }
 
     #[test]

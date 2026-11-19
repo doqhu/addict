@@ -183,6 +183,19 @@ const KAIKKI_EN_CATALAN: Row = Row {
     license_uri: BY_SA_4,
     link: KAIKKI_LINK,
 };
+// The extract holds every language of the Russian Wiktionary; only the
+// Russian entries are read. Kaikki states no data licence, so the row takes
+// the terms of `kaikki-es-Espanol` (epic-russian-article, spike 1).
+const KAIKKI_RU: Row = Row {
+    index: "kaikki-ru-Russkiy",
+    upstream: "kaikki.org ruwiktionary extract",
+    license: KAIKKI_LICENSE,
+    credit: KAIKKI_CREDIT,
+    url: Some("https://kaikki.org/ruwiktionary/raw-wiktextract-data.jsonl.gz"),
+    author: KAIKKI_AUTHOR,
+    license_uri: BY_SA_4,
+    link: KAIKKI_LINK,
+};
 const WIKDICT_RU_EN: Row = Row {
     index: "wikdict-ru-en",
     upstream: WIKDICT_UPSTREAM,
@@ -263,6 +276,7 @@ pub const ROWS: &[Row] = &[
     DBNARY_CA,
     SINONIMS_CAT,
     KAIKKI_EN_CATALAN,
+    KAIKKI_RU,
     WIKDICT_RU_EN,
     WIKDICT_RU_ES,
     WIKDICT_RU_CA,
@@ -348,6 +362,7 @@ pub fn row(source: Source) -> &'static Row {
         Source::DbnaryCa => &DBNARY_CA,
         Source::SinonimsCat => &SINONIMS_CAT,
         Source::KaikkiEnCatalan => &KAIKKI_EN_CATALAN,
+        Source::KaikkiRu => &KAIKKI_RU,
         Source::WikdictRuEn => &WIKDICT_RU_EN,
         Source::WikdictRuEs => &WIKDICT_RU_ES,
         Source::WikdictRuCa => &WIKDICT_RU_CA,
@@ -369,10 +384,13 @@ mod tests {
 
     /// The indexes named in the notes on the dictionary sources, typed in
     /// here because those notes are not in the repository.
+    /// `kaikki-ru-Russkiy` is listed ahead of its row in the notes, which
+    /// entry 7 of epic-russian-article adds.
     const DOCUMENTED: &[&str] = &[
         "kaikki-es-Espanol",
         "kaikki-en-Spanish",
         "kaikki-en-Catalan",
+        "kaikki-ru-Russkiy",
         "wikdict-es-ru",
         "wikdict-ca-ru",
         "wikdict-ru-en",
@@ -404,6 +422,7 @@ mod tests {
         Source::DbnaryCa,
         Source::SinonimsCat,
         Source::KaikkiEnCatalan,
+        Source::KaikkiRu,
         Source::WikdictRuEn,
         Source::WikdictRuEs,
         Source::WikdictRuCa,
@@ -550,7 +569,7 @@ mod tests {
             .collect();
         let table: Vec<&str> = ROWS.iter().chain(OCR).map(|row| row.index).collect();
         assert_eq!(listed, table);
-        assert_eq!(listed.len(), 21);
+        assert_eq!(listed.len(), 22);
     }
 
     /// Every index is downloaded by the builder from an `https://` URL that
@@ -577,6 +596,42 @@ mod tests {
             assert!(pinned || kaikki, "{}: {url}", row.index);
         }
         assert!(OCR.iter().all(|row| row.url.is_none()));
+    }
+
+    /// The Russian article index is credited as the Spanish Wiktionary's
+    /// is, downloaded from the raw ruwiktionary extract, and placed before
+    /// the WikDict files of Russian headwords.
+    #[test]
+    fn the_russian_article_row_has_the_kaikki_terms() {
+        let row = row(Source::KaikkiRu);
+        assert_eq!(row.index, "kaikki-ru-Russkiy");
+        assert_eq!(row.upstream, "kaikki.org ruwiktionary extract");
+        assert_eq!(
+            row.url,
+            Some("https://kaikki.org/ruwiktionary/raw-wiktextract-data.jsonl.gz")
+        );
+        assert_eq!(
+            (
+                row.credit,
+                row.license,
+                row.author,
+                row.link,
+                row.license_uri
+            ),
+            (
+                KAIKKI_ES.credit,
+                KAIKKI_ES.license,
+                KAIKKI_ES.author,
+                KAIKKI_ES.link,
+                KAIKKI_ES.license_uri
+            )
+        );
+        let at = |index: &str| ROWS.iter().position(|row| row.index == index);
+        assert_eq!(
+            at("kaikki-ru-Russkiy").map(|at| at + 1),
+            at("wikdict-ru-en")
+        );
+        assert!(credits().contains("\nkaikki-ru-Russkiy\n  Credit:   "));
     }
 
     /// No index has two rows.

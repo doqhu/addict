@@ -4443,6 +4443,7 @@ mod tests {
             format: addict_dictionary::format::VERSION,
             indexes: sources::ROWS
                 .iter()
+                .filter(|row| addict_dictionary::release::MANIFEST_2_PUBLISHED.contains(&row.index))
                 .map(|row| Published::of(row.index, row.index.as_bytes()))
                 .collect(),
         };
@@ -4657,6 +4658,7 @@ mod tests {
             format: addict_dictionary::format::VERSION,
             indexes: sources::ROWS
                 .iter()
+                .filter(|row| addict_dictionary::release::MANIFEST_2_PUBLISHED.contains(&row.index))
                 .map(|row| Published::of(row.index, row.index.as_bytes()))
                 .collect(),
         };

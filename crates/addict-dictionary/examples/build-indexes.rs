@@ -1,8 +1,9 @@
 //! Builds the assets of the data release of the indexes, which the
 //! application downloads on its first run: for each of the sources in
-//! `addict_dictionary::sources::ROWS` the upstream file is downloaded
+//! `addict_dictionary::sources::ROWS` that the current manifest publishes
+//! (`release::MANIFEST_2_PUBLISHED`) the upstream file is downloaded
 //! from the URL of its row and imported, as `addict import` does, and the index is
-//! compressed with `xz`. Then `manifest.json`, `manifest-2.json`, `WNDB_License.txt` and
+//! compressed with `xz`. Any other row is neither downloaded nor built. Then `manifest.json`, `manifest-2.json`, `WNDB_License.txt` and
 //! `release-body.md` are written beside them. Nothing is uploaded: the
 //! monthly release job (`.github/workflows/indexes.yml`) or the maintainer
 //! does that, as `docs/index-release.md` says.
@@ -45,7 +46,9 @@ use std::{
 use addict_dictionary::{
     format,
     import::{self, Day, KNOWN, Origin},
-    release::{self, LEGACY_PUBLISHED, MANIFEST, MANIFEST_2, Manifest, Published},
+    release::{
+        self, LEGACY_PUBLISHED, MANIFEST, MANIFEST_2, MANIFEST_2_PUBLISHED, Manifest, Published,
+    },
     sources::{self, Row},
 };
 
@@ -235,7 +238,8 @@ fn client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|error| format!("cannot start the HTTP client: {error}"))
 }
 
-/// Builds the index of every row of `rows` into `out`, going on after a
+/// Builds the index of every row of `rows` that [`MANIFEST_2_PUBLISHED`]
+/// lists into `out`, skipping the others unbuilt, going on after a
 /// source that fails, then writes both manifests, the Princeton license and
 /// the release page. Each manifest keeps eligible entries for failed sources
 /// from its own previous copy, and the release page includes their notices.
@@ -256,6 +260,9 @@ fn build(
     let mut failed = Vec::new();
     let mut kept = Vec::new();
     for row in rows {
+        if !MANIFEST_2_PUBLISHED.contains(&row.index) {
+            continue;
+        }
         let in_legacy = LEGACY_PUBLISHED.contains(&row.index);
         match build_one(row, out) {
             Ok((published, edition)) => {
@@ -689,15 +696,22 @@ mod tests {
         })
         .expect("the run");
 
-        let expected: Vec<_> = sources::ROWS.iter().map(|row| row.index).collect();
+        let expected: Vec<_> = sources::ROWS
+            .iter()
+            .map(|row| row.index)
+            .filter(|index| *index != "kaikki-ru-Russkiy")
+            .collect();
         assert_eq!(expected.len(), 19);
+        assert_eq!(expected, MANIFEST_2_PUBLISHED);
+        // The Russian article index is neither downloaded nor built.
         assert_eq!(attempts, expected);
         assert_eq!(report.rebuilt, expected);
         assert!(report.failed.is_empty());
         let legacy = read_previous(&out.join(MANIFEST)).unwrap();
         let numbered = read_previous(&out.join(MANIFEST_2)).unwrap();
         assert_eq!(names(&legacy), LEGACY_PUBLISHED);
-        assert_eq!(names(&numbered), expected);
+        assert_eq!(names(&numbered), MANIFEST_2_PUBLISHED);
+        assert!(!out.join("kaikki-ru-Russkiy.index.xz").exists());
         for entry in legacy.indexes {
             assert!(numbered.indexes.contains(&entry), "{entry:?}");
         }

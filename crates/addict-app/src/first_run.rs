@@ -382,6 +382,7 @@ pub fn describe(name: &str) -> Option<(&'static str, &'static str)> {
         Source::DbnaryCa => ("Catalan", "Catalan Wiktionary, via DBnary"),
         Source::SinonimsCat => ("Catalan", "Softcatalà thesaurus"),
         Source::KaikkiEnCatalan => ("Catalan", "English Wiktionary, via Kaikki"),
+        Source::KaikkiRu => ("Russian", "Russian Wiktionary, via Kaikki"),
         Source::WikdictRuEn => ("Russian", "WikDict, Russian → English"),
         Source::WikdictRuEs => ("Russian", "WikDict, Russian → Spanish"),
         Source::WikdictRuCa => ("Russian", "WikDict, Russian → Catalan"),
@@ -1871,6 +1872,7 @@ mod tests {
     fn the_first_run_offers_the_set_of_my_language_only() {
         let all: Vec<Published> = sources::ROWS
             .iter()
+            .filter(|row| release::MANIFEST_2_PUBLISHED.contains(&row.index))
             .enumerate()
             .map(|(i, row)| entry(row.index, i as u64 + 1))
             .collect();
@@ -1997,6 +1999,10 @@ mod tests {
         assert_eq!(
             describe("wikdict-es-ca"),
             Some(("Spanish", "WikDict, Spanish → Catalan"))
+        );
+        assert_eq!(
+            describe("kaikki-ru-Russkiy"),
+            Some(("Russian", "Russian Wiktionary, via Kaikki"))
         );
         assert_eq!(describe("tessdata"), None);
         assert_eq!(eyebrow_text(false, 13), EYEBROW);
