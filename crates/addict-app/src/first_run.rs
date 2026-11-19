@@ -1,14 +1,15 @@
 //! The first-run offer to download the published dictionaries.
 //!
-//! The offer is due when no index is there, of any language, and the user
-//! has not answered it before: the choice file, `first-run-download` in the
+//! The offer is due when all indexes required for my language are missing
+//! and the user has not declined it. The choice file, `first-run-download` in the
 //! product's configuration directory ([`addict_deepl::key::config_dir`]),
 //! holds `declined` once Not now was pressed. Download writes no choice: an
-//! install that fails is offered again at the next start, and one that
-//! succeeds leaves an index, so nothing is offered again.
+//! required index that is open or unreadable suppresses the next offer.
 //!
-//! The dialog lists every index of the manifest, which is fetched before it
-//! shows, with its size. Download installs them one after another, as a
+//! The dialog lists the indexes of the manifest, which is fetched before it
+//! shows, with their sizes: on the first run only those that the my language
+//! chosen in it needs ([`offered`]), and it shows that choice, which is
+//! the one Settings shows. Download installs them one after another, as a
 //! [`Queue`] orders them: each row shows its progress and has its own
 //! Cancel, and a source that fails says why on its row while the others go
 //! on. The dialog's Cancel stops them all. The file is read and written on
@@ -17,22 +18,25 @@
 //! without a display.
 
 use std::{
+    cell::{Cell, RefCell},
     fs::{self, File},
     io::{self, Read},
     path::{Path, PathBuf},
     time::Duration,
 };
 
+use addict_core::translation::Source as Language;
 use addict_dictionary::{
+    pairs,
     release::{self, Manifest, Published},
     sources,
 };
 use gtk::{glib, prelude::*};
 
 use crate::{
-    dictionaries::{Indexes, State},
+    dictionaries::Indexes,
     download::{DownloadError, Downloader},
-    settings::label,
+    settings::{label, my_language_names},
 };
 
 /// The name of the choice file inside the configuration directory.
@@ -73,6 +77,13 @@ pub const FAILED_HEADING: &str = "The download failed";
 pub const BODY: &str = "Addict looks words up in dictionaries kept on this computer. They come \
                         from the releases of Addict on GitHub and install one after another; \
                         one that fails does not stop the others.";
+
+/// The name of the my-language choice of the first-run offer.
+pub const MY_LANGUAGE: &str = "My language";
+
+/// What the my-language choice of the first-run offer decides.
+pub const MY_LANGUAGE_HINT: &str = "Only the dictionaries for this language are downloaded. \
+                                    Settings can change it later.";
 
 /// What the dialog says while the installs run.
 pub const INSTALLING_BODY: &str = "They install one after another. You can close this window; \
@@ -173,32 +184,56 @@ pub fn write(path: Option<&Path>) -> io::Result<()> {
     fs::write(path, format!("{DECLINED}\n"))
 }
 
-/// Whether the offer is due: every index is missing, none merely
-/// unreadable, and the user has not `chosen` before.
-pub fn should_offer(indexes: &Indexes, chosen: bool) -> bool {
-    let Indexes {
-        definitions,
-        translations,
-        spanish,
-        catalan,
-    } = *indexes;
-    !chosen
-        && [definitions, translations, spanish, catalan]
-            .iter()
-            .all(|state| *state == State::Missing)
+/// Whether the offer is due for `my`: every required index is missing and
+/// the user has not declined.
+pub fn should_offer(indexes: &Indexes, my: Language, chosen: bool) -> bool {
+    !chosen && indexes.required_indexes_missing(my)
 }
 
-/// The manifest to offer from, when the offer is due for `indexes` and the
-/// `chosen` answer: `Ok(None)` when it is not due, which asks nothing of
+/// The indexes of `manifest` that `my` needs and that are not `present`, by
+/// name, in the order of the manifest: what the first-run offer lists and
+/// installs. A name `my` needs that the manifest lacks is not listed.
+pub fn offered(
+    manifest: &[Published],
+    my: Language,
+    present: impl Fn(&str) -> bool,
+) -> Vec<Published> {
+    let required: Vec<&str> = pairs::required_index_names(my).collect();
+    manifest
+        .iter()
+        .filter(|published| {
+            required.contains(&published.name.as_str()) && !present(&published.name)
+        })
+        .cloned()
+        .collect()
+}
+
+/// The indexes of my language's set that `indexes` does not show present,
+/// in the set's order: what a change of my language in Settings offers.
+pub fn missing(indexes: &Indexes, my: Language) -> Vec<&'static str> {
+    pairs::required_index_names(my)
+        .filter(|name| !is_present(indexes, name))
+        .collect()
+}
+
+/// Whether the index `name` is open or unreadable in `indexes`; a name this
+/// build does not know is not.
+pub fn is_present(indexes: &Indexes, name: &str) -> bool {
+    release::source_of(name).is_some_and(|source| indexes.presence.contains(source))
+}
+
+/// The manifest to offer from, when the offer is due for `my` given the
+/// `indexes` and the `chosen` answer: `Ok(None)` when it is not due, which asks nothing of
 /// `downloader`, and an error when the manifest cannot be had or lists no
 /// index, which shows no dialog and keeps no choice, so the next start asks
 /// again.
 pub async fn offered_manifest(
     indexes: Indexes,
+    my: Language,
     chosen: bool,
     downloader: &Downloader,
 ) -> Result<Option<Manifest>, DownloadError> {
-    if !should_offer(&indexes, chosen) {
+    if !should_offer(&indexes, my, chosen) {
         return Ok(None);
     }
     let manifest = downloader.manifest().await?;
@@ -213,7 +248,14 @@ pub async fn offered_manifest(
 /// A recovery offer must not claim that every dictionary is absent.
 pub const RECOVERY_HEADING: &str = "Restore missing or unreadable dictionaries";
 pub const FETCHING: &str = "Fetching the dictionary list and checking installed files…";
-pub const NOTHING: &str = "All published dictionaries are readable. Nothing to download.";
+
+/// Settings recovery found every dictionary of my language readable.
+pub fn nothing_text(my: Language) -> String {
+    format!(
+        "All {} dictionaries are readable. Nothing to download.",
+        crate::settings::my_language_name(my)
+    )
+}
 pub const RETRY: &str = "You can try again through Settings → Download dictionaries.";
 
 pub fn recovery_failed_text(error: &str) -> String {
@@ -343,6 +385,12 @@ pub fn describe(name: &str) -> Option<(&'static str, &'static str)> {
         Source::WikdictRuEn => ("Russian", "WikDict, Russian → English"),
         Source::WikdictRuEs => ("Russian", "WikDict, Russian → Spanish"),
         Source::WikdictRuCa => ("Russian", "WikDict, Russian → Catalan"),
+        Source::WikdictEsCa => ("Spanish", "WikDict, Spanish → Catalan"),
+        Source::WikdictEnEs => ("English", "WikDict, English → Spanish"),
+        Source::WikdictEnCa => ("English", "WikDict, English → Catalan"),
+        Source::WikdictEsEn => ("Spanish", "WikDict, Spanish → English"),
+        Source::WikdictCaEn => ("Catalan", "WikDict, Catalan → English"),
+        Source::WikdictCaEs => ("Catalan", "WikDict, Catalan → Spanish"),
     })
 }
 
@@ -829,6 +877,17 @@ fn source_row(published: &Published, on_cancel: &std::rc::Rc<dyn Fn(Option<Strin
     }
 }
 
+/// Selects `language` in `dropdown` while `rendering` is set, so that its
+/// handler takes it for no choice.
+fn render_language(dropdown: &gtk::DropDown, rendering: &Cell<bool>, language: Language) {
+    let Some(index) = Language::ALL.iter().position(|one| *one == language) else {
+        return;
+    };
+    rendering.set(true);
+    dropdown.set_selected(index as u32);
+    rendering.set(false);
+}
+
 /// The dialog of the offer.
 pub struct Offer {
     window: gtk::Window,
@@ -838,6 +897,12 @@ pub struct Offer {
     eyebrow: gtk::Label,
     heading: gtk::Label,
     lead: gtk::Label,
+    /// The my-language choice of the first-run offer, and the flag that
+    /// keeps its rendering from being taken for a choice.
+    language: gtk::Box,
+    my_language: gtk::DropDown,
+    rendering: std::rc::Rc<Cell<bool>>,
+    /// Holds the card of the figures.
     figures: gtk::Box,
     progress: gtk::Box,
     current: gtk::Label,
@@ -845,8 +910,10 @@ pub struct Offer {
     bar: gtk::ProgressBar,
     counts: gtk::Label,
     list: gtk::ScrolledWindow,
+    list_box: gtk::Box,
     cards: gtk::Grid,
-    rows: Vec<Row>,
+    rows: RefCell<Vec<Row>>,
+    on_cancel: std::rc::Rc<dyn Fn(Option<String>)>,
     note: gtk::Label,
     credit: gtk::Label,
     footer: gtk::Box,
@@ -862,11 +929,16 @@ impl Offer {
     /// a press of their buttons; Not now also closes the dialog. `on_cancel`
     /// runs at a press of a row's Cancel, with its name, and of the
     /// dialog's, with `None`. Esc and the title bar close it and choose
-    /// nothing.
+    /// nothing. With `my`, the dialog shows the my-language choice at that
+    /// language, and `on_my_language` runs with the language the user
+    /// chooses in it; the caller lists its indexes ([`Offer::list`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         parent: &impl IsA<gtk::Window>,
         indexes: &[Published],
         recovery: bool,
+        my: Option<Language>,
+        on_my_language: impl Fn(Language) + 'static,
         on_download: impl Fn() + 'static,
         on_not_now: impl Fn() + 'static,
         on_cancel: impl Fn(Option<String>) + 'static,
@@ -884,17 +956,34 @@ impl Offer {
             &["first-run-heading"],
         );
         let lead = label(BODY, &["first-run-lead"]);
+
+        let my_language = gtk::DropDown::from_strings(&my_language_names());
+        my_language.set_valign(gtk::Align::Center);
+        my_language.update_property(&[gtk::accessible::Property::Label(MY_LANGUAGE)]);
+        let rendering = std::rc::Rc::new(Cell::new(false));
+        let language_name = single(MY_LANGUAGE, &["strong"]);
+        language_name.set_hexpand(true);
+        let choice = line(12, &[]);
+        choice.append(&language_name);
+        choice.append(&my_language);
+        let language = column(4, &["first-run-language"]);
+        language.set_margin_top(6);
+        language.append(&choice);
+        language.append(&label(MY_LANGUAGE_HINT, &["hint"]));
+        language.set_visible(my.is_some());
+
         let hero = column(8, &[]);
         for widget in [
             done_mark.upcast_ref::<gtk::Widget>(),
             eyebrow.upcast_ref(),
             heading.upcast_ref(),
             lead.upcast_ref(),
+            language.upcast_ref(),
         ] {
             hero.append(widget);
         }
 
-        let figures = figures_card(indexes);
+        let figures = column(0, &[]);
 
         let current = single(INSTALLING, &["strong"]);
         current.set_hexpand(true);
@@ -913,25 +1002,7 @@ impl Offer {
         progress.append(&counts);
         progress.set_visible(false);
 
-        let groups = groups(indexes);
         let list_box = column(1, &["first-run-groups"]);
-        let mut rows = Vec::new();
-        for group in &groups {
-            let head = line(12, &["group-head"]);
-            let name = single(group.name, &["section-label"]);
-            name.set_hexpand(true);
-            head.append(&name);
-            head.append(&single(
-                &group_text(&group.indexes),
-                &["hint", "group-size"],
-            ));
-            list_box.append(&head);
-            for published in &group.indexes {
-                let row = source_row(published, &on_cancel);
-                list_box.append(&row.line);
-                rows.push(row);
-            }
-        }
         let list = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
@@ -947,10 +1018,6 @@ impl Offer {
             .column_homogeneous(true)
             .visible(false)
             .build();
-        for (i, group) in groups.iter().enumerate() {
-            let i = i32::try_from(i).unwrap_or(i32::MAX);
-            cards.attach(&group_card(group), i % 2, i / 2, 1, 1);
-        }
 
         let note = label(CREDIT, &["hint"]);
         note.set_hexpand(true);
@@ -1032,6 +1099,17 @@ impl Offer {
         });
         window.add_controller(escape);
 
+        if let Some(my) = my {
+            render_language(&my_language, &rendering, my);
+        }
+        let guard = rendering.clone();
+        my_language.connect_selected_notify(move |dropdown| {
+            if !guard.get()
+                && let Some(chosen) = Language::ALL.get(dropdown.selected() as usize)
+            {
+                on_my_language(*chosen);
+            }
+        });
         download.connect_clicked(move |_| on_download());
         let closing = window.downgrade();
         not_now.connect_clicked(move |_| {
@@ -1040,14 +1118,15 @@ impl Offer {
                 window.close();
             }
         });
-        cancel.connect_clicked(move |_| on_cancel(None));
+        let cancel_all = on_cancel.clone();
+        cancel.connect_clicked(move |_| cancel_all(None));
         let closing = window.downgrade();
         close.connect_clicked(move |_| {
             if let Some(window) = closing.upgrade() {
                 window.close();
             }
         });
-        Self {
+        let offer = Self {
             window,
             recovery,
             hero,
@@ -1055,6 +1134,9 @@ impl Offer {
             eyebrow,
             heading,
             lead,
+            language,
+            my_language,
+            rendering,
             figures,
             progress,
             current,
@@ -1062,8 +1144,10 @@ impl Offer {
             bar,
             counts,
             list,
+            list_box,
             cards,
-            rows,
+            rows: RefCell::new(Vec::new()),
+            on_cancel,
             note,
             credit,
             footer,
@@ -1071,12 +1155,84 @@ impl Offer {
             not_now,
             cancel,
             close,
+        };
+        offer.list(indexes);
+        offer
+    }
+
+    /// The dialog lists `indexes`, grouped by language, in place of what it
+    /// listed, and its figures and cards are theirs.
+    pub fn list(&self, indexes: &[Published]) {
+        for container in [&self.figures, &self.list_box] {
+            while let Some(child) = container.first_child() {
+                container.remove(&child);
+            }
         }
+        while let Some(child) = self.cards.first_child() {
+            self.cards.remove(&child);
+        }
+        self.figures.append(&figures_card(indexes));
+        self.eyebrow
+            .set_label(&eyebrow_text(self.recovery, indexes.len()));
+        let groups = groups(indexes);
+        let mut rows = Vec::new();
+        for group in &groups {
+            let head = line(12, &["group-head"]);
+            let name = single(group.name, &["section-label"]);
+            name.set_hexpand(true);
+            head.append(&name);
+            head.append(&single(
+                &group_text(&group.indexes),
+                &["hint", "group-size"],
+            ));
+            self.list_box.append(&head);
+            for published in &group.indexes {
+                let row = source_row(published, &self.on_cancel);
+                self.list_box.append(&row.line);
+                rows.push(row);
+            }
+        }
+        for (i, group) in groups.iter().enumerate() {
+            let i = i32::try_from(i).unwrap_or(i32::MAX);
+            self.cards.attach(&group_card(group), i % 2, i / 2, 1, 1);
+        }
+        *self.rows.borrow_mut() = rows;
+    }
+
+    /// Shows `language` in the my-language choice without choosing it.
+    pub fn render_my_language(&self, language: Language) {
+        render_language(&self.my_language, &self.rendering, language);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn my_language(&self) -> &gtk::DropDown {
+        &self.my_language
+    }
+
+    /// The names of the rows, in their order.
+    #[cfg(test)]
+    pub(crate) fn listed(&self) -> Vec<String> {
+        self.rows
+            .borrow()
+            .iter()
+            .map(|row| row.name.clone())
+            .collect()
+    }
+
+    /// Whether the my-language choice is shown.
+    #[cfg(test)]
+    pub(crate) fn shows_my_language(&self) -> bool {
+        self.language.is_visible()
     }
 
     #[cfg(test)]
     pub(crate) fn window(&self) -> &gtk::Window {
         &self.window
+    }
+
+    /// Closes the dialog: a recovery offer left with nothing to list.
+    pub fn close(&self) {
+        self.window.close();
     }
 
     /// Shows the dialog, with Download focused.
@@ -1092,6 +1248,7 @@ impl Offer {
         self.eyebrow.add_css_class("accent");
         self.heading.set_label(INSTALLING_HEADING);
         self.lead.set_label(INSTALLING_BODY);
+        self.language.set_visible(false);
         self.figures.set_visible(false);
         self.progress.set_visible(true);
         self.note
@@ -1121,7 +1278,8 @@ impl Offer {
     /// The row of `name` says `state`, for an asset of `size` bytes. Its
     /// Cancel is there while the source has not ended.
     pub fn show_row(&self, name: &str, state: &RowState, size: u64) {
-        let Some(row) = self.rows.iter().find(|row| row.name == name) else {
+        let rows = self.rows.borrow();
+        let Some(row) = rows.iter().find(|row| row.name == name) else {
             return;
         };
         row.line.remove_css_class("running");
@@ -1167,7 +1325,7 @@ impl Offer {
         self.eyebrow.set_visible(false);
         self.figures.set_visible(false);
         self.progress.set_visible(false);
-        for row in &self.rows {
+        for row in self.rows.borrow().iter() {
             row.cancel.set_visible(false);
         }
         if complete {
@@ -1236,13 +1394,6 @@ mod tests {
         }
     }
 
-    const MISSING: Indexes = Indexes {
-        definitions: State::Missing,
-        translations: State::Missing,
-        spanish: State::Missing,
-        catalan: State::Missing,
-    };
-
     /// A missing or garbled manifest gives an error, so no dialog shows and
     /// nothing is kept; with an index or a choice, the release is not asked.
     #[tokio::test]
@@ -1251,10 +1402,10 @@ mod tests {
 
         use crate::stub::{Route, Stub};
 
-        let manifest_path = format!("/{}/manifest.json", addict_dictionary::release::tag());
+        let manifest_path = format!("/{}/{}", release::tag(), release::MANIFEST_2);
         let empty = Stub::start(HashMap::new()).expect("the stub");
         let downloader = Downloader::with_base_url(empty.base_url());
-        let error = offered_manifest(MISSING, false, &downloader)
+        let error = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader)
             .await
             .expect_err("no manifest");
         assert!(
@@ -1268,7 +1419,7 @@ mod tests {
         )]))
         .expect("the stub");
         let downloader = Downloader::with_base_url(garbled.base_url());
-        let error = offered_manifest(MISSING, false, &downloader)
+        let error = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader)
             .await
             .expect_err("garbled");
         assert!(matches!(error, DownloadError::Manifest { .. }), "{error:?}");
@@ -1284,7 +1435,7 @@ mod tests {
         )]))
         .expect("the stub");
         let downloader = Downloader::with_base_url(empty_list.base_url());
-        let error = offered_manifest(MISSING, false, &downloader)
+        let error = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader)
             .await
             .expect_err("no index");
         assert!(matches!(error, DownloadError::Manifest { .. }), "{error:?}");
@@ -1300,18 +1451,61 @@ mod tests {
         )]))
         .expect("the stub");
         let downloader = Downloader::with_base_url(good.base_url());
-        let due = offered_manifest(MISSING, false, &downloader).await;
+        let due = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader).await;
         assert_eq!(due.expect("due"), Some(published));
         assert_eq!(good.seen().len(), 1);
-        let installed = Indexes {
-            definitions: State::Open,
-            ..MISSING
-        };
-        for (indexes, chosen) in [(MISSING, true), (installed, false)] {
-            let due = offered_manifest(indexes, chosen, &downloader).await;
+        for (indexes, chosen) in [(Indexes::MISSING, true), (Indexes::OPEN, false)] {
+            let due = offered_manifest(indexes, Language::Ru, chosen, &downloader).await;
             assert_eq!(due.expect("not due"), None);
         }
         assert_eq!(good.seen().len(), 1, "the release is asked only when due");
+    }
+
+    #[tokio::test]
+    async fn first_run_and_recovery_prefer_the_numbered_manifest_with_legacy_fallback() {
+        use std::collections::HashMap;
+
+        use crate::stub::{Route, Stub};
+
+        let tag = release::tag();
+        let numbered_path = format!("/{tag}/{}", release::MANIFEST_2);
+        let legacy_path = format!("/{tag}/{}", release::MANIFEST);
+        let manifest = |name| Manifest {
+            format: addict_dictionary::format::VERSION,
+            indexes: vec![Published::of(name, b"xz")],
+        };
+        let numbered = manifest("wikdict-es-ca");
+        let legacy = manifest("oewn");
+        let dir = TempDir::new("manifest-selection");
+
+        for has_numbered in [true, false] {
+            let mut routes = HashMap::from([(
+                legacy_path.clone(),
+                Route::File(legacy.to_json().into_bytes()),
+            )]);
+            let mut requests = vec![format!("GET {numbered_path} HTTP/1.1")];
+            let expected = if has_numbered {
+                routes.insert(
+                    numbered_path.clone(),
+                    Route::File(numbered.to_json().into_bytes()),
+                );
+                &numbered
+            } else {
+                requests.push(format!("GET {legacy_path} HTTP/1.1"));
+                &legacy
+            };
+            let stub = Stub::start(routes).unwrap();
+            let downloader = Downloader::with_base_url(stub.base_url());
+            let offer = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader)
+                .await
+                .unwrap();
+            assert_eq!(offer.as_ref(), Some(expected));
+            assert_eq!(stub.seen(), requests);
+
+            let recovery = recovery_manifest(&downloader, dir.0.clone()).await.unwrap();
+            assert_eq!(&recovery, expected);
+            assert_eq!(stub.seen(), [requests.clone(), requests].concat());
+        }
     }
 
     fn recovery_index(edition: &str) -> Vec<u8> {
@@ -1348,7 +1542,7 @@ mod tests {
             indexes: indexes.clone(),
         };
         let mut routes = std::collections::HashMap::from([(
-            format!("/{tag}/manifest.json"),
+            format!("/{tag}/{}", release::MANIFEST_2),
             Route::File(manifest.to_json().into_bytes()),
         )]);
         for published in indexes {
@@ -1532,10 +1726,11 @@ mod tests {
                 .into_bytes(),
             ),
         ] {
+            let requests_per_attempt = if body.is_some() { 1 } else { 2 };
             let routes = body
                 .map(|body| {
                     (
-                        format!("/{}/manifest.json", release::tag()),
+                        format!("/{}/{}", release::tag(), release::MANIFEST_2),
                         Route::File(body),
                     )
                 })
@@ -1547,7 +1742,11 @@ mod tests {
                 assert!(recovery_manifest(&downloader, dir.0.clone()).await.is_err());
                 assert_eq!(fs::read(dir.0.join("oewn.index")).unwrap(), good);
             }
-            assert_eq!(stub.seen().len(), 2, "retry fetches afresh");
+            assert_eq!(
+                stub.seen().len(),
+                2 * requests_per_attempt,
+                "retry fetches afresh"
+            );
         }
     }
 
@@ -1573,32 +1772,49 @@ mod tests {
     }
 
     #[test]
-    fn the_offer_is_due_only_with_every_index_missing_and_no_choice() {
-        assert!(should_offer(&MISSING, false));
-        assert!(!should_offer(&MISSING, true));
-        for state in [State::Open, State::Unreadable] {
-            for indexes in [
-                Indexes {
-                    definitions: state,
-                    ..MISSING
-                },
-                Indexes {
-                    translations: state,
-                    ..MISSING
-                },
-                Indexes {
-                    spanish: state,
-                    ..MISSING
-                },
-                Indexes {
-                    catalan: state,
-                    ..MISSING
-                },
-            ] {
-                assert!(!should_offer(&indexes, false), "{indexes:?}");
-            }
+    fn the_offer_checks_only_required_indexes_and_respects_decline() {
+        use addict_dictionary::{
+            format::{Contents, encode},
+            pairs,
+        };
+        use addict_engine::dictionaries::{Articles, Dictionaries};
+
+        let dir = TempDir::new("required-offer");
+        let dictionaries = Dictionaries::new(Some(dir.0.clone()));
+        let empty = dictionaries.indexes();
+        for my in Language::ALL {
+            assert!(should_offer(&empty, my, false));
+            assert!(!should_offer(&empty, my, true));
         }
-        assert!(!should_offer(&Indexes::OPEN, false));
+
+        let install = |name: &str| {
+            let index = encode(&Contents {
+                source: name.to_owned(),
+                headwords: Vec::new(),
+                senses: Vec::new(),
+                forms: Vec::new(),
+                analyses: Vec::new(),
+            })
+            .expect("encode");
+            fs::write(dir.0.join(format!("{name}.index")), index).expect("install");
+        };
+        install("wikdict-ru-es");
+        let indexes = dictionaries.indexes();
+        assert!(should_offer(&indexes, Language::En, false));
+        assert!(!should_offer(&indexes, Language::En, true));
+        assert!(!should_offer(&indexes, Language::Ru, false));
+
+        let oewn = dir.0.join("oewn.index");
+        fs::write(&oewn, b"not an index").expect("write corrupt index");
+        assert!(!should_offer(&dictionaries.indexes(), Language::En, false));
+        install("oewn");
+        assert!(!should_offer(&dictionaries.indexes(), Language::En, false));
+
+        for name in pairs::required_index_names(Language::En) {
+            install(name);
+        }
+        assert!(!dir.0.join("wikdict-ca-es.index").exists());
+        assert!(!should_offer(&dictionaries.indexes(), Language::En, false));
     }
 
     #[test]
@@ -1648,6 +1864,100 @@ mod tests {
         }
     }
 
+    /// The first run offers my language's set out of the 19 of
+    /// `manifest-2.json`, in manifest order; out of the legacy 13 it offers
+    /// what they have of it, and an index already present is not offered.
+    #[test]
+    fn the_first_run_offers_the_set_of_my_language_only() {
+        let all: Vec<Published> = sources::ROWS
+            .iter()
+            .enumerate()
+            .map(|(i, row)| entry(row.index, i as u64 + 1))
+            .collect();
+        assert_eq!(all.len(), 19);
+        let names = |offered: Vec<Published>| -> Vec<String> {
+            offered
+                .into_iter()
+                .map(|published| published.name)
+                .collect()
+        };
+        for my in Language::ALL {
+            let required: Vec<String> =
+                pairs::required_index_names(my).map(str::to_owned).collect();
+            assert_eq!(names(offered(&all, my, |_| false)), required, "{my:?}");
+            // The manifest's order, not the set's.
+            let reversed: Vec<Published> = all.iter().rev().cloned().collect();
+            let mut backwards = required.clone();
+            backwards.reverse();
+            assert_eq!(names(offered(&reversed, my, |_| false)), backwards);
+        }
+        assert_eq!(
+            names(offered(&all, Language::Ru, |_| false)),
+            release::LEGACY_PUBLISHED
+        );
+        let english = names(offered(&all, Language::En, |_| false));
+        assert!(english.contains(&"wikdict-en-es".to_owned()));
+        assert!(!english.contains(&"wikdict-es-ca".to_owned()));
+        assert!(!english.contains(&"wikdict-ru-es".to_owned()));
+
+        // Only the legacy manifest: English gets what it lists of its set.
+        let legacy: Vec<Published> = all
+            .iter()
+            .filter(|published| release::LEGACY_PUBLISHED.contains(&published.name.as_str()))
+            .cloned()
+            .collect();
+        let english_legacy = names(offered(&legacy, Language::En, |_| false));
+        assert!(!english_legacy.is_empty());
+        assert!(english_legacy.iter().all(
+            |name| english.contains(name) && release::LEGACY_PUBLISHED.contains(&name.as_str())
+        ));
+        assert!(!english_legacy.contains(&"wikdict-en-es".to_owned()));
+
+        // A present index is not offered again.
+        let indexes = Indexes {
+            presence: Indexes::MISSING
+                .presence
+                .with(addict_dictionary::import::Source::WikdictEnEs),
+            ..Indexes::MISSING
+        };
+        let without = names(offered(&all, Language::En, |name| {
+            is_present(&indexes, name)
+        }));
+        assert_eq!(without.len(), english.len() - 1);
+        assert!(!without.contains(&"wikdict-en-es".to_owned()));
+        assert!(!is_present(&indexes, "unknown-index"));
+    }
+
+    #[test]
+    fn a_change_of_my_language_misses_only_what_the_new_set_lacks() {
+        let russian = pairs::required_sources(Language::Ru)
+            .fold(Indexes::MISSING.presence, |presence, source| {
+                presence.with(source)
+            });
+        let indexes = Indexes {
+            presence: russian,
+            ..Indexes::MISSING
+        };
+        assert!(missing(&indexes, Language::Ru).is_empty());
+        assert_eq!(
+            missing(&indexes, Language::En),
+            [
+                "wikdict-en-es",
+                "wikdict-en-ca",
+                "wikdict-es-en",
+                "wikdict-ca-en"
+            ]
+        );
+        assert_eq!(
+            missing(&Indexes::MISSING, Language::Es),
+            pairs::required_index_names(Language::Es).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            nothing_text(Language::Ru),
+            "All Russian dictionaries are readable. Nothing to download."
+        );
+    }
+
     #[test]
     fn the_offer_counts_every_dictionary_and_sums_their_sizes() {
         let indexes = [
@@ -1684,6 +1994,10 @@ mod tests {
         assert_eq!(group_text(&groups[0].indexes), "2 dictionaries · 6 MB");
         assert_eq!(group_text(&groups[1].indexes), "1 dictionary · 40 MB");
         assert_eq!(describe("oewn"), Some(("English", "Open English WordNet")));
+        assert_eq!(
+            describe("wikdict-es-ca"),
+            Some(("Spanish", "WikDict, Spanish → Catalan"))
+        );
         assert_eq!(describe("tessdata"), None);
         assert_eq!(eyebrow_text(false, 13), EYEBROW);
         assert_eq!(eyebrow_text(true, 1), "1 dictionary to restore");
@@ -1959,7 +2273,7 @@ mod tests {
         let tag = release::tag();
         let stub = Stub::start(HashMap::from([
             (
-                format!("/{tag}/manifest.json"),
+                format!("/{tag}/{}", release::MANIFEST_2),
                 Route::File(manifest.to_json().into_bytes()),
             ),
             (format!("/{tag}/omw-es.index.xz"), Route::File(good.clone())),
@@ -2020,7 +2334,7 @@ mod tests {
         let manifests = stub
             .seen()
             .iter()
-            .filter(|line| line.contains("manifest.json"))
+            .filter(|line| line.contains(release::MANIFEST_2))
             .count();
         assert_eq!(manifests, 1, "{:?}", stub.seen());
     }
@@ -2064,7 +2378,16 @@ mod tests {
         .into_iter()
         .map(|(name, size)| entry(name, size))
         .collect();
-        let offer = Offer::new(&parent, &indexes, false, || {}, || {}, |_| {});
+        let offer = Offer::new(
+            &parent,
+            &indexes,
+            false,
+            Some(Language::Ru),
+            |_| {},
+            || {},
+            || {},
+            |_| {},
+        );
         offer.present();
         let mut queue = Queue::new(indexes);
         let state = std::env::var("ADDICT_SHOT_STATE");

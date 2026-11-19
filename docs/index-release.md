@@ -40,7 +40,10 @@ which both the builder and the app read.
 - **Assets:**
   - `<name>.index.xz`: the index `<name>.index`, compressed with xz. The
     name is the index name of `addict_dictionary::sources`, such as `oewn`.
-  - `manifest.json`: the size and the SHA-256 of every `.index.xz` asset.
+  - `manifest-2.json`: asset sizes and SHA-256 checksums for the current
+    inventory of 19 dictionary indexes.
+  - `manifest.json`: the same fields for the 13 indexes supported by apps
+    through 0.2.x.
   - `WNDB_License.txt`: the Princeton WordNet license, which ships with any
     copy of the OEWN index.
   - The release notes (`release-body.md`) hold each index's credit, author,
@@ -52,10 +55,17 @@ which both the builder and the app read.
   one exception is a release that no released app ever read, such as the
   `indexes-v2` test release, which may be deleted. A new index format gets a
   new tag.
-- **Order:** upload `manifest.json` last. The app reads the manifest first,
-  so every asset it lists must already be there.
+- **Order:** upload the indexes and license before the manifests. Each
+  manifest must point to assets already on the release.
 
-## The manifest
+## The manifests
+
+First run, Settings recovery and checksum refresh all try `manifest-2.json`
+first and fall back to `manifest.json` on HTTP 404. A malformed or
+incompatible numbered manifest, a network failure, or any other HTTP error
+follows the existing download error path.
+
+Both manifests use this schema:
 
 ```json
 {
@@ -122,58 +132,77 @@ format 1 or 2 have no notice; the app still opens them.
 ## Building and uploading
 
 Build the assets. This needs `xz` on `PATH` and network access, and takes
-minutes: it downloads all 13 upstream files, from the URLs in
+minutes: it downloads all 19 upstream files, from the URLs in
 `crates/addict-dictionary/src/sources.rs`.
 
-```sh
-cargo run --release -p addict-dictionary --example build-indexes -- --out target/indexes
-xz -t target/indexes/*.index.xz
+```bash
+mkdir -p target
+cargo run --release -p addict-dictionary --example build-indexes -- \
+  --out target/indexes > target/indexes-assets.txt
 ```
 
-`target/indexes` then holds one `<name>.index.xz` per index, `manifest.json`,
-`WNDB_License.txt` and `release-body.md`, plus the uncompressed `.index`
-files, which are not uploaded.
+`target/indexes` then holds one `<name>.index.xz` per rebuilt index,
+`manifest.json`, `manifest-2.json`, `WNDB_License.txt` and `release-body.md`.
+The builder reports their paths on stdout. The uncompressed `.index` files
+stay local.
 
 A source that fails (its upstream file is gone, the importer refuses it, `xz`
 fails) does not stop the run. The builder goes on with the next source and
 exits with status 1. It prints one `build-indexes: <index>: <error>` line per
-failed source to stderr, then a line naming all of them. `manifest.json` and
-`release-body.md` then list only the indexes that were built. Do not upload
-that manifest over a release that still serves the failed indexes: the app
-would no longer see them. Fix the source (a new pin in `import::KNOWN` and a
-new URL in `sources.rs`, for example) and build again, or leave the release as
-it is. The monthly release job keeps the published index of a failed source
-instead; see [The monthly release job](#the-monthly-release-job).
+failed source to stderr, then a line naming all of them. A partial build for
+an existing release needs the published manifests to retain failed sources.
+Use the refresh commands below with the previous manifest files, or fix the
+failed sources and rebuild before uploading.
 
-For a new format, create the release with the indexes, then upload the
-manifest. `--latest=false` keeps the app's own release marked as the latest
-one:
+After a successful build for a new format, create the release with the
+indexes, then upload the manifests. `--latest=false` keeps the app's own
+release marked as the latest one:
 
-```sh
-gh release create indexes-v3 --repo doqhu/addict --target main --latest=false \
-  --title "Dictionary indexes, format 3" \
-  --notes-file target/indexes/release-body.md \
-  target/indexes/*.index.xz target/indexes/WNDB_License.txt
-gh release upload indexes-v3 --repo doqhu/addict target/indexes/manifest.json
+```bash
+if grep -Fxq target/indexes/manifest.json target/indexes-assets.txt &&
+   grep -Fxq target/indexes/manifest-2.json target/indexes-assets.txt; then
+  mapfile -t rebuilt < <(grep '\.index\.xz$' target/indexes-assets.txt)
+  (( ${#rebuilt[@]} > 0 )) &&
+  xz -t "${rebuilt[@]}" &&
+  gh release create indexes-v3 --repo doqhu/addict --target main --latest=false \
+    --title "Dictionary indexes, format 3" \
+    --notes-file target/indexes/release-body.md \
+    "${rebuilt[@]}" target/indexes/WNDB_License.txt &&
+  gh release upload indexes-v3 --repo doqhu/addict \
+    target/indexes/manifest.json target/indexes/manifest-2.json
+fi
 ```
 
-To refresh the indexes of an existing release, replace the indexes first, then
-the manifest. Between the two uploads, an app that reads the old manifest sees
-a checksum mismatch, fetches the manifest again and still finds the old entry,
-so that index fails on its row and the download is offered again at the next
-start when no index got installed.
+To refresh an existing release, download the available manifests into a
+fresh directory and pass each to the matching builder option. Omit the
+numbered download and option when publishing it for the first time.
 
-```sh
-gh release upload indexes-v3 --repo doqhu/addict --clobber \
-  target/indexes/*.index.xz target/indexes/WNDB_License.txt
-gh release upload indexes-v3 --repo doqhu/addict --clobber target/indexes/manifest.json
-gh release edit indexes-v3 --repo doqhu/addict --notes-file target/indexes/release-body.md
+```bash
+previous=$(mktemp -d)
+gh release download indexes-v3 --repo doqhu/addict \
+  --pattern manifest.json --pattern manifest-2.json --dir "$previous"
+mkdir -p target
+cargo run --release -p addict-dictionary --example build-indexes -- \
+  --out target/indexes \
+  --previous "$previous/manifest.json" --previous-2 "$previous/manifest-2.json" \
+  > target/indexes-assets.txt
 ```
 
-With `--previous <FILE>`, the `manifest.json` of the published release, the
-builder keeps the published entry of each failed source that the file lists,
-as the monthly release job does. Download it first with
-`gh release download indexes-v3 --repo doqhu/addict --pattern manifest.json --dir <DIR>`.
+Once the builder reports both manifests, upload the rebuilt indexes and
+license, then both manifests and the notes. During the upload, an app that
+fetches a rebuilt index using an old manifest may report a checksum mismatch.
+
+```bash
+if grep -Fxq target/indexes/manifest.json target/indexes-assets.txt &&
+   grep -Fxq target/indexes/manifest-2.json target/indexes-assets.txt; then
+  mapfile -t rebuilt < <(grep '\.index\.xz$' target/indexes-assets.txt)
+  gh release upload indexes-v3 --repo doqhu/addict --clobber \
+    "${rebuilt[@]}" target/indexes/WNDB_License.txt &&
+  gh release upload indexes-v3 --repo doqhu/addict --clobber \
+    target/indexes/manifest.json target/indexes/manifest-2.json &&
+  gh release edit indexes-v3 --repo doqhu/addict --notes-file target/indexes/release-body.md
+fi
+```
 
 After the upload, check by hand that the first-run download works from a
 clean profile: with no index and no choice file, start addict and press
@@ -201,25 +230,22 @@ The job:
 1. Asks the builder for the tag (`build-indexes --print-tag`), so it writes
    only the release of the current index format. A release of an older
    format is never read or written.
-2. Downloads the release's `manifest.json`, when the release exists and has
-   one. If that download fails, the job stops before it uploads anything.
-3. Runs the builder with `--previous` set to that manifest.
-4. Uploads the indexes built and `WNDB_License.txt`, then `manifest.json`,
-   then replaces the release notes with `release-body.md`. A missing release
-   is created first, with `--latest=false`. When the builder wrote no
-   manifest (it could not start, or the previous manifest was unreadable),
-   nothing is uploaded.
+2. Downloads `manifest.json` and `manifest-2.json` when present. Failure to
+   download a listed manifest stops publication.
+3. Passes available manifests to the builder through `--previous` and
+   `--previous-2`, respectively.
+4. Requires the current build to report both manifest paths. Creates the
+   release if needed with `--latest=false`, uploads the rebuilt indexes and
+   `WNDB_License.txt`, uploads both manifests, then replaces the release
+   notes with `release-body.md`.
 5. Lists the indexes built, kept and failed, with each failure's error, in
    the run's summary.
 
-**Kept indexes.** When a source fails and the published manifest lists its
-index, the builder copies that entry unchanged into the new manifest, at the
-source's place in `sources::ROWS`, and writes its notice into the release
-notes. Its upstream line then says that it is the index of an earlier run;
-the edition is in the notice inside the file. Its asset is not uploaded, so
-the published one stays and still matches the entry. The app goes on
-downloading it. A failed source that the published manifest does not list
-stays out of the new one.
+**Kept indexes.** When a source fails, each manifest can keep an eligible
+entry from its own published copy at the source's position in
+`sources::ROWS`. The published asset stays in place, and the release notes
+credit it as an index from an earlier run. When publishing the numbered
+manifest for the first time, it lists that run's successful builds.
 
 **A red run.** The job ends with the builder's status: red when any source
 failed, kept or not, after the other indexes were published. Read the

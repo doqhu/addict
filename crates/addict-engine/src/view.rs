@@ -34,6 +34,7 @@ use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
 use addict_dictionary::{
     analysis::{Analyses, Number, Person, Shape, TenseMood},
+    import::Kind,
     lookup::Grouped,
     pairs,
 };
@@ -411,7 +412,7 @@ pub enum Lookup {
     Pending,
     /// The English dictionaries have this article of the word.
     Article(Article),
-    /// The indexes of `language`, not English, gave this for the word, by
+    /// The indexes of `language` gave this for the word, by
     /// kind: one of them at least has it.
     Grouped {
         language: Language,
@@ -534,15 +535,11 @@ const SYNONYMS_LABEL: &str = "Synonyms of this sense:";
 /// The line of a chosen sense without synonyms.
 const NO_SYNONYMS: &str = "The dictionary gives no synonyms for this sense.";
 
-/// What stands before the translations. They belong to the word, not to a
-/// sense.
-const RUSSIAN_LABEL: &str = "Russian, for the word as a whole:";
-
-/// What stands before the translations of a Russian word into `language`,
-/// as [`RUSSIAN_LABEL`] stands before those of a word into Russian. No
-/// wildcard arm, as in [`definitions_label`].
-fn from_russian_label(language: Language) -> &'static str {
-    match language {
+/// What stands before the translations of a word into `target`, whether
+/// the word is Russian or read in another language. They belong to the
+/// word, not to a sense. No wildcard arm, as in [`definitions_label`].
+fn translations_label(target: Language) -> &'static str {
+    match target {
         Language::En => "English, for the word as a whole:",
         Language::Es => "Spanish, for the word as a whole:",
         Language::Ca => "Catalan, for the word as a whole:",
@@ -551,7 +548,7 @@ fn from_russian_label(language: Language) -> &'static str {
 }
 
 /// The first sentence of the line of a Russian word read with no Russian
-/// index of `language` imported, as [`missing_russian`] is for the other
+/// index of `language` imported, as [`missing_pair`] is for the other
 /// way; [`recovery_text`] follows it. No wildcard arm,
 /// as in [`definitions_label`].
 fn missing_from_russian(language: Language) -> &'static str {
@@ -563,8 +560,16 @@ fn missing_from_russian(language: Language) -> &'static str {
     }
 }
 
-/// The line of an article without translations.
-const NO_TRANSLATION: &str = "The dictionary has no Russian translation of this word.";
+/// The line of an article without translations into `target`. No wildcard
+/// arm, as in [`definitions_label`].
+fn no_translation(target: Language) -> &'static str {
+    match target {
+        Language::En => "The dictionary has no English translation of this word.",
+        Language::Es => "The dictionary has no Spanish translation of this word.",
+        Language::Ca => "The dictionary has no Catalan translation of this word.",
+        Language::Ru => "The dictionary has no Russian translation of this word.",
+    }
+}
 
 /// The line of an article without senses.
 const NO_DEFINITIONS: &str = "The dictionary has no English definitions of this word.";
@@ -595,36 +600,23 @@ fn no_definitions(language: Language) -> &'static str {
     }
 }
 
-/// The line of a language beside English with no Russian index imported.
-/// No wildcard arm, as in [`definitions_label`].
-fn missing_russian(language: Language) -> &'static str {
-    match language {
-        Language::En => "No English-Russian dictionary is imported.",
-        Language::Es => "No Spanish-Russian dictionary is imported.",
-        Language::Ca => "No Catalan-Russian dictionary is imported.",
-        Language::Ru => "There is no offline dictionary for Russian.",
-    }
-}
-
-/// The line of a pair with no offline source of translations: the language
-/// a word is read in and the one it would be translated into. The pair of a
-/// language with itself needs none, and has no line of its own. No wildcard
-/// arm, as in [`definitions_label`].
-fn no_pair(reading: Language, target: Language) -> &'static str {
+/// The line of a word read in `reading` whose pair with `target` has a
+/// source of translations, none of which is imported. The pair of a
+/// language with itself needs none, and has no line of its own. No
+/// wildcard arm, as in [`definitions_label`].
+fn missing_pair(reading: Language, target: Language) -> &'static str {
     macro_rules! line {
         ($reading:literal, $target:literal) => {
-            concat!(
-                "There is no ",
-                $reading,
-                " → ",
-                $target,
-                " offline dictionary yet."
-            )
+            concat!("No ", $reading, "-", $target, " dictionary is imported.")
         };
     }
     match (reading, target) {
-        (Language::En, Language::Es) => line!("English", "Spanish"),
-        (Language::En, Language::Ca) => line!("English", "Catalan"),
+        (Language::En, Language::Es) => {
+            "No English-Spanish dictionary is imported (wikdict-en-es.index)."
+        }
+        (Language::En, Language::Ca) => {
+            "No English-Catalan dictionary is imported (wikdict-en-ca.index)."
+        }
         (Language::En, Language::Ru) => line!("English", "Russian"),
         (Language::Es, Language::En) => line!("Spanish", "English"),
         (Language::Es, Language::Ca) => line!("Spanish", "Catalan"),
@@ -642,15 +634,28 @@ fn no_pair(reading: Language, target: Language) -> &'static str {
     }
 }
 
-/// The translations row of a word read in `language` for the `target`
-/// language beside Russian: none when the word is in the target language
-/// already or when the pair has a source, whose translations stand under
-/// their own label (the English glosses); else the line that says the pair
-/// has no offline dictionary. What the result carries is not shown: a
-/// result looked up for Russian may still be on screen.
-fn pair_row(language: Language, target: Language) -> Option<Listed<'static>> {
-    (language != target && pairs::translations(language, target).is_empty())
-        .then(|| Listed::Missing(no_pair(language, target)))
+/// The translations into `target`, or a line naming the missing pair
+/// dictionary. A word already in the target language needs no row.
+fn translations_row<'a>(
+    language: Language,
+    grouped: &'a Grouped,
+    target: Language,
+) -> Option<Listed<'a>> {
+    if language == target {
+        return None;
+    }
+    let sources = pairs::translations(language, target);
+    let translates = sources
+        .iter()
+        .any(|source| source.kind() == Kind::Translation(target));
+    translates.then(|| match grouped.translations_into(target) {
+        None => Listed::Missing(missing_pair(language, target)),
+        Some(translations) => Listed::of(
+            translations_label(target),
+            translations,
+            no_translation(target),
+        ),
+    })
 }
 
 /// Whom the shown result is for: my language and the pressed reading
@@ -1788,10 +1793,9 @@ pub fn result_texts<'a>(
 /// word the chosen language `elsewhere.0` had no entry for has the line
 /// that names both. The translations row of an article is for the target
 /// `translating` gives its language ([`Translating::target`]): the
-/// dictionary's Russian translations for Russian, and for another language
-/// the line that its pair has no offline dictionary, or no row when the
-/// pair's translations are the English glosses. No wildcard arm: a new
-/// variant does not compile until it is given its text.
+/// dictionary's translations for that target, or a line naming the
+/// missing pair dictionary. No wildcard arm: a new variant does not
+/// compile until it is given its text.
 pub fn choice_texts<'a>(
     lookup: &'a Lookup,
     choice: Option<Choice>,
@@ -1870,7 +1874,7 @@ fn lookup_texts<'a>(
         } => ResultTexts {
             line: None,
             translations: Some(Listed::Items {
-                label: from_russian_label(*language),
+                label: translations_label(*language),
                 items: Cow::Borrowed(translations),
             }),
             ..line(Cow::Borrowed(""))
@@ -1928,11 +1932,14 @@ fn article_texts<'a>(
         senses,
         translations: match target {
             Language::Ru => Some(Listed::of(
-                RUSSIAN_LABEL,
+                translations_label(Language::Ru),
                 &article.translations,
-                NO_TRANSLATION,
+                no_translation(Language::Ru),
             )),
-            Language::En | Language::Es | Language::Ca => pair_row(Language::En, target),
+            Language::Es | Language::Ca => {
+                Some(Listed::Missing(missing_pair(Language::En, target)))
+            }
+            Language::En => None,
         },
         word_synonyms: None,
         glosses: None,
@@ -1941,7 +1948,7 @@ fn article_texts<'a>(
     }
 }
 
-/// The parts of what the indexes of `language`, not English, gave, each
+/// The parts of what the indexes of `language` gave, each
 /// kind in its own part, a kind with no index or with nothing for the word
 /// said by its own line. `choice` is a sense of the definitions or an
 /// English gloss, and the online translation `definition` stands under it.
@@ -1961,7 +1968,11 @@ fn grouped_texts<'a>(
         Some(Choice::Sense(index)) => Some(index),
         Some(Choice::Gloss(_)) | None => None,
     };
-    let groups = grouped.synonyms.as_deref().unwrap_or_default();
+    let groups = if language == Language::En {
+        &[]
+    } else {
+        grouped.synonyms.as_deref().unwrap_or_default()
+    };
     let (hint, rows) = sense_texts(
         senses,
         &grouped.entries,
@@ -1972,17 +1983,27 @@ fn grouped_texts<'a>(
         my,
     );
     let hint = match &grouped.definitions {
+        None if language == Language::En => Some(NO_DEFINITIONS),
         None => Some(missing_definitions(language)),
         Some(senses) if senses.is_empty() => Some(no_definitions(language)),
         Some(_) => hint.filter(|_| !matches!(choice, Some(Choice::Gloss(_)))),
     };
-    let translations = match target {
-        Language::Ru => Some(match &grouped.russian {
-            None => Listed::Missing(missing_russian(language)),
-            Some(russian) => Listed::of(RUSSIAN_LABEL, russian, NO_TRANSLATION),
-        }),
-        Language::En | Language::Es | Language::Ca => pair_row(language, target),
+    let texts = ResultTexts {
+        line: None,
+        analysis: Analysis::default(),
+        elsewhere: None,
+        senses_label: definitions_label(language),
+        hint,
+        senses: rows,
+        translations: translations_row(language, grouped, target),
+        word_synonyms: None,
+        glosses: None,
+        gloss: None,
+        pronunciations: pronunciation_texts(&grouped.entries),
     };
+    if language == Language::En {
+        return texts;
+    }
     let in_senses = senses.iter().any(|sense| !sense.synonyms.is_empty());
     // A meaning that a sense took stands under that sense: only the others
     // are the word's.
@@ -2038,17 +2059,11 @@ fn grouped_texts<'a>(
         Some(Choice::Sense(_)) | None => None,
     };
     ResultTexts {
-        line: None,
         analysis,
-        elsewhere: None,
-        senses_label: definitions_label(language),
-        hint,
-        senses: rows,
-        translations,
         word_synonyms,
         glosses: Some(glosses),
         gloss,
-        pronunciations: pronunciation_texts(&grouped.entries),
+        ..texts
     }
 }
 
@@ -2279,7 +2294,7 @@ pub fn answer_texts<'a>(
         None => (None, &[][..], None),
     };
     let label = label
-        .unwrap_or(from_russian_label(language))
+        .unwrap_or(translations_label(language))
         .trim_end_matches(':');
     let sentence = find(OnlineKind::Sentence);
     if let Some(word) = find(OnlineKind::Word) {
@@ -2593,9 +2608,12 @@ impl Shown {
     /// the shown result is an article of a language beside English that has
     /// the gloss. Choosing the chosen gloss again is `true`.
     pub fn choose_gloss(&mut self, index: usize) -> bool {
-        let Some(Lookup::Grouped { grouped, .. }) = &self.lookup else {
+        let Some(Lookup::Grouped { language, grouped }) = &self.lookup else {
             return false;
         };
+        if *language == Language::En {
+            return false;
+        }
         if index >= grouped.english.as_ref().map_or(0, Vec::len) {
             return false;
         }
@@ -2726,11 +2744,10 @@ mod tests {
     use super::{
         AnalysisGroup, AnalysisLine, Binding, CAPTURE_LABEL, CHOOSE_SENSE, ENGLISH_LABEL,
         EXPLANATION_MARK, FIELD_PLACEHOLDER, Listed, Lookup, NO_DEFINITIONS, NO_GLOSS, NO_SYNONYMS,
-        NO_TRANSLATION, NO_WORD_SYNONYMS, ONLINE_LONE_LABEL, ONLINE_PENDING, ONLINE_SENTENCE_LABEL,
-        ONLINE_SOURCE, ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online, OnlineState,
-        OnlineTexts, PENDING, RUSSIAN_LABEL, ResultTexts, SYNONYMS_LABEL, Shown, SynonymTexts,
-        Translating, UNFINISHED, Whole, binding_texts, indexes_text, online_rows, result_texts,
-        sentence_markup, texts,
+        NO_WORD_SYNONYMS, ONLINE_LONE_LABEL, ONLINE_PENDING, ONLINE_SENTENCE_LABEL, ONLINE_SOURCE,
+        ONLINE_TOO_LONG, ONLINE_UNAVAILABLE, ONLINE_WORD_LABEL, Online, OnlineState, OnlineTexts,
+        PENDING, ResultTexts, SYNONYMS_LABEL, Shown, SynonymTexts, Translating, UNFINISHED, Whole,
+        binding_texts, indexes_text, online_rows, result_texts, sentence_markup, texts,
     };
     use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
@@ -2738,6 +2755,13 @@ mod tests {
         Held, NOTHING_SELECTED_TEXT, command_in, failure_text, install_language, install_tesseract,
         too_long_text,
     };
+
+    /// The label of the Russian translations, as 0.3.0 shows it.
+    const RUSSIAN_LABEL: &str = "Russian, for the word as a whole:";
+
+    /// The line of an article without Russian translations, as 0.3.0
+    /// shows it.
+    const NO_TRANSLATION: &str = "The dictionary has no Russian translation of this word.";
     use crate::{
         capture::Failure,
         dictionaries::{
@@ -3987,12 +4011,11 @@ mod tests {
                 let indexes = Indexes {
                     definitions,
                     translations,
-                    spanish: State::Missing,
-                    catalan: State::Missing,
+                    ..Indexes::MISSING
                 };
                 assert_eq!(
                     indexes_text(indexes, Language::Ru).is_empty(),
-                    indexes == Indexes::OPEN,
+                    indexes.files() == Indexes::OPEN.files(),
                     "{indexes:?}"
                 );
             }
@@ -4001,15 +4024,7 @@ mod tests {
 
     #[test]
     fn with_nothing_imported_the_line_says_so_and_names_both_files() {
-        let line = indexes_text(
-            Indexes {
-                definitions: State::Missing,
-                translations: State::Missing,
-                spanish: State::Missing,
-                catalan: State::Missing,
-            },
-            Language::Ru,
-        );
+        let line = indexes_text(Indexes::MISSING, Language::Ru);
         assert_eq!(
             line,
             "The dictionaries are not imported. Use Settings → Download dictionaries, or import each downloaded file through \
@@ -4026,8 +4041,7 @@ mod tests {
                     Indexes {
                         definitions,
                         translations,
-                        spanish: State::Missing,
-                        catalan: State::Missing,
+                        ..Indexes::MISSING
                     },
                     Language::Ru,
                 );
@@ -4064,8 +4078,7 @@ mod tests {
             Indexes {
                 definitions: State::Open,
                 translations: State::Missing,
-                spanish: State::Missing,
-                catalan: State::Missing,
+                ..Indexes::MISSING
             },
             Language::Ru,
         );
@@ -4078,8 +4091,7 @@ mod tests {
             Indexes {
                 definitions: State::Unreadable,
                 translations: State::Open,
-                spanish: State::Missing,
-                catalan: State::Missing,
+                ..Indexes::MISSING
             },
             Language::Ru,
         );
@@ -4209,7 +4221,7 @@ mod tests {
                 entries: Vec::new(),
                 sense_metadata: Vec::new(),
                 definitions: Some(spanish_senses()),
-                russian: Some(vec!["банк".to_owned(), "скамейка".to_owned()]),
+                translations: vec![(Language::Ru, vec!["банк".to_owned(), "скамейка".to_owned()])],
                 synonyms: Some(vec![addict_dictionary::index::SynonymGroup {
                     headword: "banco".to_owned(),
                     definition: String::new(),
@@ -4602,7 +4614,7 @@ mod tests {
                 entries: Vec::new(),
                 sense_metadata: Vec::new(),
                 definitions: Some(spanish_senses()),
-                russian: Some(Vec::new()),
+                translations: vec![(Language::Ru, Vec::new())],
                 synonyms: Some(Vec::new()),
                 verb: None,
                 english: Some(Vec::new()),
@@ -4625,7 +4637,7 @@ mod tests {
             language: Language::Es,
             grouped: Grouped {
                 definitions: Some(Vec::new()),
-                russian: Some(vec!["стол".to_owned()]),
+                translations: vec![(Language::Ru, vec!["стол".to_owned()])],
                 ..Grouped::default()
             },
         };
@@ -4638,7 +4650,7 @@ mod tests {
         let unimported = Lookup::Grouped {
             language: Language::Es,
             grouped: Grouped {
-                russian: Some(vec!["стол".to_owned()]),
+                translations: vec![(Language::Ru, vec!["стол".to_owned()])],
                 ..Grouped::default()
             },
         };
@@ -5445,8 +5457,7 @@ mod tests {
                 let english = Indexes {
                     definitions,
                     translations,
-                    spanish: State::Missing,
-                    catalan: State::Missing,
+                    ..Indexes::MISSING
                 };
                 for spanish in STATES {
                     assert_eq!(
@@ -6270,14 +6281,19 @@ mod tests {
         let asked = Lookup::Grouped {
             language: Language::Es,
             grouped: Grouped {
-                russian: None,
+                translations: Vec::new(),
                 ..grouped
             },
         };
         // And one looked up with Russian mine before, still shown.
         for lookup in [asked, spanish_all()] {
             let texts = for_pair(&lookup, Language::En, Language::Es);
-            assert_eq!(texts.translations, None);
+            assert_eq!(
+                texts.translations,
+                Some(Listed::Missing(
+                    "No Spanish-English dictionary is imported."
+                ))
+            );
             let said = translations_and_glosses(&texts);
             assert!(said.contains("bench"), "{said}");
             assert!(!cyrillic(&said), "{said}");
@@ -6292,43 +6308,51 @@ mod tests {
             .answer_language(Some(&lookup));
             assert_eq!(language, Language::En);
             assert_eq!(
-                super::answer_texts(texts.translations.as_ref(), &[], language),
-                None
+                super::answer_texts(texts.translations.as_ref(), &[], language)
+                    .and_then(|answer| answer.missing),
+                Some("No Spanish-English dictionary is imported.")
             );
         }
     }
 
     #[test]
-    fn a_pair_without_a_source_says_so() {
+    fn an_unimported_pair_names_the_dictionary() {
         let english = Lookup::Article(article());
+        let catalan = || match spanish_all() {
+            Lookup::Grouped { grouped, .. } => Lookup::Grouped {
+                language: Language::Ca,
+                grouped,
+            },
+            other => other,
+        };
         for (lookup, my, pressed, line) in [
-            // A Spanish word, Catalan mine.
+            // A Catalan word, Spanish mine.
             (
-                spanish_all(),
-                Language::Ca,
+                catalan(),
                 Language::Es,
-                "There is no Spanish → Catalan offline dictionary yet.",
+                Language::Ca,
+                "No Catalan-Spanish dictionary is imported.",
             ),
             // An English word, Spanish mine.
             (
                 english.clone(),
                 Language::Es,
                 Language::En,
-                "There is no English → Spanish offline dictionary yet.",
+                "No English-Spanish dictionary is imported (wikdict-en-es.index).",
             ),
             // An English word, English mine: into the pressed language.
             (
                 english.clone(),
                 Language::En,
                 Language::Es,
-                "There is no English → Spanish offline dictionary yet.",
+                "No English-Spanish dictionary is imported (wikdict-en-es.index).",
             ),
             // A word of my language found by the fallback.
             (
-                spanish_all(),
-                Language::Es,
+                catalan(),
                 Language::Ca,
-                "There is no Spanish → Catalan offline dictionary yet.",
+                Language::Es,
+                "No Catalan-Spanish dictionary is imported.",
             ),
         ] {
             let texts = for_pair(&lookup, my, pressed);
@@ -6367,6 +6391,132 @@ mod tests {
         let lookup = spanish_all();
         let texts = for_pair(&lookup, Language::Ca, Language::Es);
         assert!(translations_and_glosses(&texts).contains("bench"));
+    }
+
+    /// `banco` of [`spanish_all`] with the Catalan translations `catalan`
+    /// beside the Russian ones; `None` when no Spanish-Catalan index was
+    /// asked.
+    fn spanish_with_catalan(catalan: Option<&[&str]>) -> Lookup {
+        let Lookup::Grouped { language, grouped } = spanish_all() else {
+            panic!("spanish_all is grouped");
+        };
+        let mut translations = grouped.translations.clone();
+        if let Some(catalan) = catalan {
+            let catalan = catalan.iter().map(|text| (*text).to_owned()).collect();
+            translations.insert(0, (Language::Ca, catalan));
+        }
+        Lookup::Grouped {
+            language,
+            grouped: Grouped {
+                translations,
+                ..grouped
+            },
+        }
+    }
+
+    #[test]
+    fn a_spanish_word_for_catalan_mine_has_its_catalan_translations() {
+        // Tracer: the es-ca index gives `gos`.
+        let lookup = spanish_with_catalan(Some(&["gos"]));
+        let texts = for_pair(&lookup, Language::Ca, Language::Es);
+        assert_eq!(
+            texts.translations,
+            Some(Listed::Items {
+                label: "Catalan, for the word as a whole:",
+                items: Cow::Owned(vec!["gos".to_owned()]),
+            })
+        );
+        let said = translations_and_glosses(&texts);
+        assert!(
+            said.starts_with("Catalan, for the word as a whole: gos\n"),
+            "{said}"
+        );
+        assert!(!cyrillic(&said), "{said}");
+        // The article itself is as for Russian mine.
+        assert_eq!(texts.senses.len(), 2);
+        assert!(texts.word_synonyms.is_some());
+        // The top card names Catalan.
+        let language = Translating {
+            my: Language::Ca,
+            pressed: Language::Es,
+        }
+        .answer_language(Some(&lookup));
+        let answer =
+            super::answer_texts(texts.translations.as_ref(), &[], language).expect("an answer");
+        assert_eq!(answer.label, "Catalan, for the word as a whole");
+
+        // The pair has a source, but no index of it is imported.
+        let not_imported = spanish_with_catalan(None);
+        let texts = for_pair(&not_imported, Language::Ca, Language::Es);
+        assert_eq!(
+            texts.translations,
+            Some(Listed::Missing(
+                "No Spanish-Catalan dictionary is imported."
+            ))
+        );
+        assert_eq!(texts.senses.len(), 2);
+
+        // The index is imported and has no entry for the word.
+        let no_entry = spanish_with_catalan(Some(&[]));
+        let texts = for_pair(&no_entry, Language::Ca, Language::Es);
+        assert_eq!(
+            texts.translations,
+            Some(Listed::Missing(
+                "The dictionary has no Catalan translation of this word."
+            ))
+        );
+    }
+
+    #[test]
+    fn a_word_of_my_language_shows_its_translations_into_the_pressed_language() {
+        let lookup = spanish_with_catalan(Some(&["gos"]));
+        let texts = for_pair(&lookup, Language::Es, Language::Ca);
+        assert_eq!(
+            translations_and_glosses(&texts).lines().next(),
+            Some("Catalan, for the word as a whole: gos")
+        );
+        assert_eq!(texts.senses.len(), 2);
+    }
+
+    #[test]
+    fn catalan_translations_change_nothing_for_russian_or_english_mine() {
+        let lookup = spanish_with_catalan(Some(&["banc"]));
+        // Russian mine: exactly as 0.3.0, the Catalan entry unseen.
+        let texts = for_pair(&lookup, Language::Ru, Language::Es);
+        assert_eq!(
+            translations_and_glosses(&texts).lines().next(),
+            Some(format!("{RUSSIAN_LABEL} банк, скамейка").as_str())
+        );
+        let russian_only = spanish_all();
+        assert_eq!(texts, for_pair(&russian_only, Language::Ru, Language::Es));
+        assert_eq!(texts, result_texts(&russian_only, None, None, None));
+        // English mine: the glosses and the English translation row.
+        let texts = for_pair(&lookup, Language::En, Language::Es);
+        assert_eq!(
+            texts.translations,
+            Some(Listed::Missing(
+                "No Spanish-English dictionary is imported."
+            ))
+        );
+        assert!(!translations_and_glosses(&texts).contains("banc,"));
+    }
+
+    #[test]
+    fn the_translation_lines_of_russian_read_as_in_0_3_0() {
+        assert_eq!(super::translations_label(Language::Ru), RUSSIAN_LABEL);
+        assert_eq!(super::no_translation(Language::Ru), NO_TRANSLATION);
+        assert_eq!(
+            super::missing_pair(Language::Es, Language::Ru),
+            "No Spanish-Russian dictionary is imported."
+        );
+        assert_eq!(
+            super::missing_pair(Language::Ca, Language::Ru),
+            "No Catalan-Russian dictionary is imported."
+        );
+        assert_eq!(
+            super::missing_pair(Language::En, Language::Ru),
+            "No English-Russian dictionary is imported."
+        );
     }
 
     #[test]
@@ -6462,7 +6612,7 @@ mod tests {
         assert_eq!(
             after.translations,
             Some(Listed::Missing(
-                "There is no English → Spanish offline dictionary yet."
+                "No English-Spanish dictionary is imported (wikdict-en-es.index)."
             ))
         );
         // The pressed language changes nothing else that is shown.
@@ -6600,8 +6750,7 @@ mod tests {
             let freedict_missing = Indexes {
                 definitions: State::Open,
                 translations: State::Missing,
-                spanish: State::Missing,
-                catalan: State::Missing,
+                ..Indexes::MISSING
             };
             let both_missing = Indexes {
                 definitions: State::Missing,
@@ -6713,8 +6862,7 @@ mod tests {
                     Indexes {
                         definitions,
                         translations: State::Missing,
-                        spanish: State::Missing,
-                        catalan: State::Missing,
+                        ..Indexes::MISSING
                     },
                     my,
                 ));

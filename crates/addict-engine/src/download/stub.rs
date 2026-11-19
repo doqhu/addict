@@ -23,6 +23,8 @@ pub enum Route {
     File(Vec<u8>),
     /// 302 to this path of the stub.
     Redirect(String),
+    /// An HTTP status line with an empty body.
+    Status(&'static str),
     /// 200 that declares these bytes and closes after the first half.
     Short(Vec<u8>),
     /// 200 that declares these bytes, sends the first half and then
@@ -134,6 +136,7 @@ async fn answer(
             ("200 OK", String::new(), bytes)
         }
         Some(Route::Redirect(to)) => ("302 Found", format!("location: {to}\r\n"), b""),
+        Some(Route::Status(status)) => (status, String::new(), b""),
         None => ("404 Not Found", String::new(), b"Not Found"),
     };
     let head = format!(
