@@ -1254,6 +1254,20 @@ pub const PLAY_TOOLTIP: &str = "Play the pronunciation";
 /// the media backend's message may be translated.
 pub const PLAYBACK_FAILED: &str = "Playback failed.";
 
+/// The tooltip of an HTTP(S) recording when the network is unavailable.
+pub const RECORDING_NEEDS_NETWORK: &str = "This recording needs the network.";
+
+/// The link to the played recording's file and licence.
+pub const COMMONS_FILE_LABEL: &str = "Commons file";
+
+pub fn recording_credit_text(credit: &crate::recording::Credit) -> Option<String> {
+    match (credit.author.as_deref(), credit.license.as_deref()) {
+        (Some(author), Some(license)) => Some(format!("{author} · {license}")),
+        (Some(text), None) | (None, Some(text)) => Some(text.to_owned()),
+        (None, None) => None,
+    }
+}
+
 /// One pronunciation of an article: plain texts, never markup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PronunciationText<'a> {

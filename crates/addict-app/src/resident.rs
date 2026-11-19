@@ -139,6 +139,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    future::Future,
     process::ExitCode,
     rc::{Rc, Weak},
     sync::Arc,
@@ -158,6 +159,7 @@ use addict_dictionary::{
     import,
     release::{Manifest, Published},
 };
+use addict_engine::recording::{AUDIO_LIMIT, AudioFailure, CREDIT_LIMIT, fetch_audio};
 use addict_platform::{
     ocr::OcrFailure,
     shortcut::{self, Action, Bindings, KeyOwner, ShortcutEvent, ShortcutHandle},
@@ -3243,6 +3245,25 @@ fn start_work() -> Option<Rc<Work>> {
     }
 }
 
+/// Moves the outcome of a recording request from the worker to GTK.
+fn start_recording_job<T: Send + 'static>(
+    work: &Work,
+    limit: Duration,
+    run: impl Future<Output = T> + Send + 'static,
+    ready: impl FnOnce(Outcome<T>) + 'static,
+) -> Job {
+    let (send, receive) = oneshot::channel();
+    let job = work.run(limit, run, move |outcome| {
+        let _ = send.send(outcome);
+    });
+    glib::spawn_future_local(async move {
+        if let Ok(outcome) = receive.await {
+            ready(outcome);
+        }
+    });
+    job
+}
+
 /// Starts the check of the indexes in `articles` on `work`; where they stand
 /// comes to `sender` as an event.
 fn start_check(
@@ -3419,6 +3440,49 @@ fn start(
     let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed))));
     let events = sender.clone();
     let work = start_work();
+    if let Some(work) = &work {
+        let work = Rc::downgrade(work);
+        view.connect_recording_audio({
+            let work = work.clone();
+            move |url, ready| {
+                let Some(work) = work.upgrade() else {
+                    ready(Err(AudioFailure::Failed));
+                    return None;
+                };
+                Some(start_recording_job(
+                    &work,
+                    AUDIO_LIMIT,
+                    fetch_audio(url),
+                    move |outcome| {
+                        let result = match outcome {
+                            Outcome::Finished(audio) => audio,
+                            Outcome::Cancelled => return,
+                            Outcome::TimedOut => Err(AudioFailure::Network),
+                            Outcome::Panicked => Err(AudioFailure::Failed),
+                        };
+                        ready(result.map(|audio| {
+                            let bytes = glib::Bytes::from_owned(audio);
+                            let input = gio::MemoryInputStream::from_bytes(&bytes);
+                            gtk::MediaFile::for_input_stream(&input)
+                        }));
+                    },
+                ))
+            }
+        });
+        view.connect_recording_credit(move |file, ready| {
+            let work = work.upgrade()?;
+            Some(start_recording_job(
+                &work,
+                CREDIT_LIMIT,
+                async move { file.fetch_credit().await },
+                move |outcome| {
+                    if let Outcome::Finished(credit) = outcome {
+                        ready(credit);
+                    }
+                },
+            ))
+        });
+    }
     // Nothing is opened here: the indexes are files, and files are the
     // runner's.
     let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());

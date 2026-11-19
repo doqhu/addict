@@ -38,21 +38,24 @@ use addict_core::{
     sentence,
     translation::{Source as Language, reading_languages},
 };
+use addict_engine::recording::{AudioFailure, CommonsFile, Credit};
+use addict_platform::work::Job;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     dictionaries::Indexes,
     view::{
         ADD_KEY_LABEL, ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, AnalysisGroup, Answer,
-        AnswerLine, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COPIED_LABEL, COPY_LABEL,
-        ChosenGloss, Explained, FIELD_PLACEHOLDER, FORM_TAG, FORWARD_TOOLTIP, FormRow,
+        AnswerLine, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COMMONS_FILE_LABEL, COPIED_LABEL,
+        COPY_LABEL, ChosenGloss, Explained, FIELD_PLACEHOLDER, FORM_TAG, FORWARD_TOOLTIP, FormRow,
         GLOSS_NO_KEY, GlossRow, GlossTexts, LANGUAGE_TOOLTIP, LONE_WORD_TIP, LOOK_UP_ENGLISH,
         Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE, OnlineRow,
         OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
-        PronunciationText, RETRY_LABEL, ResultTexts, SENSES_LABEL, SHOW_LESS, SYNONYM_PREVIEW,
-        SenseText, Shown, SynonymTexts, WHOLE_WORD_LABEL, answer_texts, binding_texts,
-        choice_texts, command_in, definition_action_label, indexes_text, language_label,
-        online_rows, sentence_markup, show_more, synonym_class, synonym_description, texts,
+        PronunciationText, RECORDING_NEEDS_NETWORK, RETRY_LABEL, ResultTexts, SENSES_LABEL,
+        SHOW_LESS, SYNONYM_PREVIEW, SenseText, Shown, SynonymTexts, WHOLE_WORD_LABEL, answer_texts,
+        binding_texts, choice_texts, command_in, definition_action_label, indexes_text,
+        language_label, online_rows, recording_credit_text, sentence_markup, show_more,
+        synonym_class, synonym_description, texts,
     },
     wrap::Wrap,
 };
@@ -645,14 +648,46 @@ fn show_more_toggle(
     toggle
 }
 
-/// The stream that plays now, if any: one at a time.
-type Player = Rc<RefCell<Option<gtk::MediaFile>>>;
+pub type CreditReady = Box<dyn FnOnce(Credit)>;
+type FetchCredit = dyn Fn(CommonsFile, CreditReady) -> Option<Job>;
+pub type AudioReady = Box<dyn FnOnce(Result<gtk::MediaFile, AudioFailure>)>;
+type FetchAudio = dyn Fn(String, AudioReady) -> Option<Job>;
 
-/// Stops the stream of `player`, if one plays, and lets it go.
-fn stop(player: &Player) {
-    if let Some(stream) = player.borrow_mut().take() {
-        stream.set_playing(false);
-        stream.clear();
+/// One stream and its credit request, if any.
+struct Player {
+    current: RefCell<Option<Rc<Playback>>>,
+    fetch_audio: RefCell<Option<Rc<FetchAudio>>>,
+    fetch_credit: RefCell<Option<Rc<FetchCredit>>>,
+    network_available: Box<dyn Fn() -> bool>,
+}
+
+#[derive(Default)]
+struct Playback {
+    stream: RefCell<Option<gtk::MediaFile>>,
+    failed: Cell<bool>,
+    job: RefCell<Option<Job>>,
+}
+
+impl Player {
+    fn new() -> Self {
+        Self {
+            current: RefCell::new(None),
+            fetch_audio: RefCell::new(None),
+            fetch_credit: RefCell::new(None),
+            network_available: Box::new(|| gio::NetworkMonitor::default().is_network_available()),
+        }
+    }
+
+    fn stop(&self) {
+        if let Some(attempt) = self.current.take() {
+            let stream = attempt.stream.take();
+            // Invalidate callbacks and cancel the pending job before notifying GTK.
+            drop(attempt);
+            if let Some(stream) = stream {
+                stream.pause();
+                stream.clear();
+            }
+        }
     }
 }
 
@@ -666,7 +701,7 @@ fn fill_pronunciations(
     rest: &gtk::Box,
     pronunciations: &[PronunciationText<'_>],
     word: &str,
-    player: &Player,
+    player: &Rc<Player>,
 ) {
     clear(lead);
     clear(rest);
@@ -696,7 +731,7 @@ fn fill_pronunciations(
 fn pronunciation_row(
     pronunciation: &PronunciationText<'_>,
     word: &str,
-    player: &Player,
+    player: &Rc<Player>,
 ) -> gtk::Box {
     let row = gtk::Box::builder()
         .spacing(8)
@@ -709,7 +744,19 @@ fn pronunciation_row(
             .build()
     };
     if let Some(url) = pronunciation.audio {
-        row.append(&play_button(url, player));
+        let commons = CommonsFile::from_recording_url(url).map(|file| {
+            let link = gtk::LinkButton::builder()
+                .uri(file.page_url().as_str())
+                .label(COMMONS_FILE_LABEL)
+                .focusable(true)
+                .visible(false)
+                .build();
+            (file, link)
+        });
+        row.append(&play_button(url, player, commons.as_ref()));
+        if let Some((_, link)) = commons {
+            row.append(&link);
+        }
     }
     if let Some(headword) = pronunciation.prefix(word) {
         row.append(&part(headword, "pronunciation-headword"));
@@ -729,7 +776,11 @@ fn pronunciation_row(
 /// The button that plays the recording at `url` through `player`: the
 /// stream that played before stops. A failed playback says why in the
 /// button's tooltip.
-fn play_button(url: &str, player: &Player) -> gtk::Button {
+fn play_button(
+    url: &str,
+    player: &Rc<Player>,
+    commons: Option<&(CommonsFile, gtk::LinkButton)>,
+) -> gtk::Button {
     let button = gtk::Button::builder()
         .icon_name("media-playback-start-symbolic")
         .tooltip_text(PLAY_TOOLTIP)
@@ -739,27 +790,163 @@ fn play_button(url: &str, player: &Player) -> gtk::Button {
         .build();
     button.update_property(&[gtk::accessible::Property::Label(PLAY_TOOLTIP)]);
     let (url, player) = (url.to_owned(), player.clone());
+    let commons = commons.map(|(file, link)| (file.clone(), link.downgrade()));
     button.connect_clicked(move |button| {
-        stop(&player);
+        player.stop();
         button.set_tooltip_text(Some(PLAY_TOOLTIP));
+        button.reset_property(gtk::AccessibleProperty::Description);
         button.remove_css_class("failed");
-        let stream = gtk::MediaFile::for_file(&gio::File::for_uri(&url));
-        let failed = {
+        let link = commons.as_ref().and_then(|(_, link)| link.upgrade());
+        if let Some(link) = &link {
+            link.set_visible(false);
+        }
+        let remote = glib::Uri::peek_scheme(&url)
+            .as_deref()
+            .is_some_and(|scheme| {
+                scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http")
+            });
+        if remote && !(player.network_available)() {
+            playback_failed(button, RECORDING_NEEDS_NETWORK);
+            return;
+        }
+        let attempt = Rc::new(Playback::default());
+        player.current.replace(Some(attempt.clone()));
+        let opened = {
             let button = button.downgrade();
-            move |stream: &gtk::MediaFile| {
-                let Some(button) = button.upgrade().filter(|_| stream.error().is_some()) else {
+            let player = Rc::downgrade(&player);
+            let attempt = Rc::downgrade(&attempt);
+            let commons = commons.clone();
+            move |result| {
+                let (Some(button), Some(player), Some(attempt)) =
+                    (button.upgrade(), player.upgrade(), attempt.upgrade())
+                else {
                     return;
                 };
-                button.set_tooltip_text(Some(PLAYBACK_FAILED));
-                button.add_css_class("failed");
+                attempt.job.take();
+                match result {
+                    Ok(stream) => play_stream(stream, &player, &attempt, &button, commons, remote),
+                    Err(failure) => {
+                        let text =
+                            if !(player.network_available)() || failure == AudioFailure::Network {
+                                RECORDING_NEEDS_NETWORK
+                            } else {
+                                PLAYBACK_FAILED
+                            };
+                        playback_failed(&button, text);
+                    }
+                }
             }
         };
-        failed(&stream);
-        stream.connect_error_notify(failed);
-        stream.play();
-        player.replace(Some(stream));
+        if remote {
+            if let Some(fetch) = player.fetch_audio.borrow().clone() {
+                let job = fetch(url.clone(), Box::new(opened));
+                attempt.job.replace(job);
+            } else {
+                opened(Err(AudioFailure::Failed));
+            }
+        } else {
+            opened(Ok(gtk::MediaFile::for_file(&gio::File::for_uri(&url))));
+        }
     });
     button
+}
+
+type CommonsLink = (CommonsFile, glib::WeakRef<gtk::LinkButton>);
+
+fn play_stream(
+    stream: gtk::MediaFile,
+    player: &Rc<Player>,
+    attempt: &Rc<Playback>,
+    button: &gtk::Button,
+    commons: Option<CommonsLink>,
+    remote: bool,
+) {
+    attempt.stream.replace(Some(stream.clone()));
+    let link = commons.as_ref().map(|(_, link)| link.clone());
+    let failed = {
+        let button = button.downgrade();
+        let attempt = Rc::downgrade(attempt);
+        move |stream: &gtk::MediaFile| {
+            let (Some(button), Some(attempt), Some(error)) =
+                (button.upgrade(), attempt.upgrade(), stream.error())
+            else {
+                return;
+            };
+            attempt.failed.set(true);
+            attempt.job.take();
+            if let Some(link) = link.as_ref().and_then(glib::WeakRef::upgrade) {
+                link.set_visible(false);
+            }
+            let text = if remote && network_error(&error) {
+                RECORDING_NEEDS_NETWORK
+            } else {
+                PLAYBACK_FAILED
+            };
+            playback_failed(&button, text);
+        }
+    };
+    failed(&stream);
+    stream.connect_error_notify(failed);
+    if let Some((file, link)) = commons {
+        let button = button.downgrade();
+        let attempt = Rc::downgrade(attempt);
+        let fetch_credit = player.fetch_credit.borrow().clone();
+        stream.connect_ended_notify(move |stream| {
+            let Some(current) = attempt.upgrade() else {
+                return;
+            };
+            if !stream.is_ended() || current.failed.get() {
+                return;
+            }
+            if let Some(link) = link.upgrade() {
+                link.set_visible(true);
+            }
+            if let Some(fetch) = &fetch_credit {
+                let (button, attempt) = (button.clone(), attempt.clone());
+                let job = fetch(
+                    file.clone(),
+                    Box::new(move |credit| {
+                        let (Some(button), Some(attempt)) = (button.upgrade(), attempt.upgrade())
+                        else {
+                            return;
+                        };
+                        attempt.job.take();
+                        if !attempt.failed.get()
+                            && let Some(text) = recording_credit_text(&credit)
+                        {
+                            button.set_tooltip_text(Some(&text));
+                            button
+                                .update_property(&[gtk::accessible::Property::Description(&text)]);
+                        }
+                    }),
+                );
+                current.job.replace(job);
+            }
+        });
+    }
+    stream.play();
+}
+
+fn playback_failed(button: &gtk::Button, text: &str) {
+    button.set_tooltip_text(Some(text));
+    button.update_property(&[gtk::accessible::Property::Description(text)]);
+    button.add_css_class("failed");
+}
+
+fn network_error(error: &glib::Error) -> bool {
+    matches!(
+        error.kind(),
+        Some(
+            gio::IOErrorEnum::HostNotFound
+                | gio::IOErrorEnum::HostUnreachable
+                | gio::IOErrorEnum::NetworkUnreachable
+                | gio::IOErrorEnum::ConnectionRefused
+                | gio::IOErrorEnum::TimedOut
+        )
+    ) || matches!(
+        error.kind(),
+        Some(gio::ResolverError::NotFound | gio::ResolverError::TemporaryFailure)
+    )
 }
 
 /// Puts `analysis` into `container`: a line per lemma, which wraps between
@@ -1613,7 +1800,7 @@ pub struct View {
     /// clicked.
     look_up_english: Rc<RefCell<Option<LookUp>>>,
     /// The recording that plays now; a new result stops it.
-    player: Player,
+    player: Rc<Player>,
     /// The [`Shown::generation`] of the result whose pronunciations are
     /// shown: a choice in the same result leaves them, and their playback,
     /// as they are.
@@ -1705,7 +1892,7 @@ impl View {
             sense_chosen: Rc::new(RefCell::new(None)),
             gloss_chosen: Rc::new(RefCell::new(None)),
             look_up_english: Rc::new(RefCell::new(None)),
-            player: Rc::new(RefCell::new(None)),
+            player: Rc::new(Player::new()),
             pronounced: Cell::new(None),
             translations: RefCell::new(None),
             online: RefCell::new(Vec::new()),
@@ -1984,6 +2171,22 @@ impl View {
         self.result.add_key.connect_clicked(move |_| add());
     }
 
+    /// Opens an HTTP(S) recording off the GTK thread.
+    pub fn connect_recording_audio(
+        &self,
+        fetch: impl Fn(String, AudioReady) -> Option<Job> + 'static,
+    ) {
+        self.player.fetch_audio.replace(Some(Rc::new(fetch)));
+    }
+
+    /// Requests the credit of a Commons recording after it finishes playing.
+    pub fn connect_recording_credit(
+        &self,
+        fetch: impl Fn(CommonsFile, CreditReady) -> Option<Job> + 'static,
+    ) {
+        self.player.fetch_credit.replace(Some(Rc::new(fetch)));
+    }
+
     /// The text the field holds now.
     pub fn field_text(&self) -> String {
         self.field.text().into()
@@ -2058,7 +2261,7 @@ impl View {
         result.line.set_text(line.unwrap_or_default());
         result.line.set_visible(line.is_some());
         if self.pronounced.replace(Some(shown.generation())) != Some(shown.generation()) {
-            stop(&self.player);
+            self.player.stop();
             self.synonyms_open.set(false);
             fill_pronunciations(
                 &result.lead,
@@ -2117,7 +2320,7 @@ impl View {
     /// the glosses.
     fn hide_result(&self) {
         let result = &self.result;
-        stop(&self.player);
+        self.player.stop();
         self.pronounced.set(None);
         clear(&result.lead);
         clear(&result.pronunciations);
@@ -2239,12 +2442,13 @@ mod tests {
         sentence::words,
         translation::{Source as Language, reading_languages},
     };
-    use gtk::{glib, prelude::*};
+    use addict_engine::recording::{AudioFailure, CommonsFile, Credit};
+    use gtk::{gio, glib, prelude::*};
 
-    use super::{View, fill_listed};
+    use super::{CreditReady, View, fill_listed};
     use crate::view::{
         BACK_TOOLTIP, COPIED_LABEL, COPY_LABEL, FORWARD_TOOLTIP, Listed, PLAY_TOOLTIP,
-        PLAYBACK_FAILED, SHOW_LESS,
+        PLAYBACK_FAILED, RECORDING_NEEDS_NETWORK, SHOW_LESS,
     };
     use crate::{
         style,
@@ -2454,7 +2658,7 @@ mod tests {
         view.render_result(&shown, None);
         let play = buttons(&lead, "play").remove(0);
         play.emit_clicked();
-        assert!(view.player.borrow().is_some());
+        assert!(view.player.current.borrow().is_some());
         let context = glib::MainContext::default();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !play.has_css_class("failed") && std::time::Instant::now() < until {
@@ -2465,13 +2669,13 @@ mod tests {
         // A choice keeps the rows and the stream; a new result stops it.
         shown.choose(0);
         view.render_result(&shown, None);
-        assert!(view.player.borrow().is_some());
+        assert!(view.player.current.borrow().is_some());
         assert!(play.parent().is_some());
         shown.show(Some(Lookup::Article(
             Sample.lookup("bank").expect("the sample article"),
         )));
         view.render_result(&shown, None);
-        assert!(view.player.borrow().is_none());
+        assert!(view.player.current.borrow().is_none());
         assert!(lead.first_child().is_none());
         assert!(rest.first_child().is_none());
         assert!(!rest.is_visible());
@@ -2497,6 +2701,155 @@ mod tests {
         toggle.set_active(true);
         assert!(rest.is_visible());
         assert_eq!(toggle_text(&toggle), SHOW_LESS);
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn recording_keeps_the_article_and_credits_only_the_current_playback() {
+        gtk::init().expect("a display");
+        let mut view = View::new(WindowState::Empty, &Binding::Bound);
+        let online = Rc::new(Cell::new(false));
+        let player = Rc::get_mut(&mut view.player).expect("no playback controls yet");
+        player.network_available = Box::new({
+            let online = online.clone();
+            move || online.get()
+        });
+        // Exercise the real media stream signals without making any requests.
+        let fetch_error = Rc::new(Cell::new(None));
+        view.connect_recording_audio({
+            let (online, fetch_error) = (online.clone(), fetch_error.clone());
+            move |_, ready| {
+                if let Some(failure) = fetch_error.take() {
+                    online.set(false);
+                    ready(Err(failure));
+                } else {
+                    ready(Ok(gtk::MediaFile::new()));
+                }
+                None
+            }
+        });
+        let requested = Rc::new(RefCell::new(Vec::<(CommonsFile, CreditReady)>::new()));
+        view.connect_recording_credit({
+            let requested = requested.clone();
+            move |file, ready| {
+                requested.borrow_mut().push((file, ready));
+                None
+            }
+        });
+
+        let mut article = pronounced_bank();
+        article.entries[0].pronunciations[0].audio[0].url =
+            "https://commons.wikimedia.org/wiki/Special:FilePath/Ru-собака.ogg".into();
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(article)));
+        view.render_result(&shown, None);
+        let row = view.result.lead.first_child().expect("pronunciation row");
+        let play = buttons(&row, "play").remove(0);
+        let link = children(&row)
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::LinkButton>().ok())
+            .expect("Commons link");
+        let transcription = children(&row)
+            .into_iter()
+            .find(|widget| widget.has_css_class("transcription"))
+            .expect("transcription");
+        let assert_failure = |text| {
+            assert_eq!(play.tooltip_text().as_deref(), Some(text));
+            assert!(gtk::test_accessible_has_property(
+                &play,
+                gtk::AccessibleProperty::Description
+            ));
+            assert!(play.has_css_class("failed"));
+            assert!(!link.is_visible());
+            assert!(view.result.article.is_visible());
+            assert!(transcription.is_visible());
+            assert!(view.result.senses.is_visible());
+            assert!(play.parent().is_some());
+            assert!(play.is_sensitive());
+        };
+        let stream = || {
+            view.player
+                .current
+                .borrow()
+                .as_ref()
+                .expect("active stream")
+                .stream
+                .borrow()
+                .as_ref()
+                .expect("opened stream")
+                .clone()
+        };
+        let finish = || {
+            let stream = stream();
+            stream.stream_prepared(true, false, false, 1_000_000);
+            stream.stream_ended();
+            assert!(link.is_visible());
+            assert!(link.is_focusable());
+            assert_eq!(
+                link.uri(),
+                "https://commons.wikimedia.org/wiki/File:Ru-%D1%81%D0%BE%D0%B1%D0%B0%D0%BA%D0%B0.ogg"
+            );
+            assert_eq!(requested.borrow().len(), 1);
+            requested.borrow_mut().pop().expect("credit lookup").1
+        };
+        let credit = || Credit {
+            author: Some("The Shtooka Project".into()),
+            license: Some("CC BY 2.0 FR".into()),
+        };
+
+        play.emit_clicked();
+        assert!(view.player.current.borrow().is_none());
+        assert_failure(RECORDING_NEEDS_NETWORK);
+        online.set(true);
+        play.emit_clicked();
+        assert_eq!(play.tooltip_text().as_deref(), Some(PLAY_TOOLTIP));
+        stream().set_error(glib::Error::new(
+            gio::IOErrorEnum::NetworkUnreachable,
+            "injected",
+        ));
+        assert_failure(RECORDING_NEEDS_NETWORK);
+        assert!(requested.borrow().is_empty());
+        fetch_error.set(Some(AudioFailure::Failed));
+        play.emit_clicked();
+        assert_failure(RECORDING_NEEDS_NETWORK);
+        assert!(requested.borrow().is_empty());
+
+        online.set(true);
+        play.emit_clicked();
+        assert!(requested.borrow().is_empty());
+        assert!(!link.is_visible());
+        let superseded_by_retry = finish();
+        play.emit_clicked();
+        online.set(false);
+        stream().set_error(glib::Error::new(gio::IOErrorEnum::InvalidData, "injected"));
+        assert!(requested.borrow().is_empty());
+        superseded_by_retry(credit());
+        assert_failure(PLAYBACK_FAILED);
+
+        online.set(true);
+        play.emit_clicked();
+        finish()(credit());
+        assert_eq!(
+            play.tooltip_text().as_deref(),
+            Some("The Shtooka Project · CC BY 2.0 FR")
+        );
+        play.emit_clicked();
+        finish()(Credit {
+            author: None,
+            license: Some("CC BY 2.0 FR".into()),
+        });
+        assert_eq!(play.tooltip_text().as_deref(), Some("CC BY 2.0 FR"));
+
+        play.emit_clicked();
+        let superseded_by_article = finish();
+        shown.show(Some(Lookup::Article(
+            Sample.lookup("bank").expect("a different article"),
+        )));
+        view.render_result(&shown, None);
+        superseded_by_article(credit());
+        assert!(view.player.current.borrow().is_none());
+        assert_eq!(play.tooltip_text().as_deref(), Some(PLAY_TOOLTIP));
+        assert!(view.result.lead.first_child().is_none());
     }
 
     /// The pronunciations of a new result, shown after those of the last

@@ -18,6 +18,8 @@ addict-platform = { path = "../addict-platform" }
 clap = { version = "=4.6.7", features = ["derive"] }
 futures-channel = "=0.3.34"
 libc = "=0.2.190"
+percent-encoding = "=2.3.2"
+quick-xml = { version = "=0.41.0", features = ["escape-html"] }
 # The download of the published indexes, as addict-deepl's: no default
 # features, rustls with the bundled Mozilla roots.
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-webpki-roots"] }

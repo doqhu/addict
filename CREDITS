@@ -2,7 +2,7 @@ Credits of addict
 =================
 
 addict is licensed under the MIT License (see LICENSES/MIT.txt).
-It uses the dictionary data and the OCR data and software below,
+It uses the dictionary data, OCR data and software, and recordings below,
 each under its own license.
 
 This file is generated from crates/addict-dictionary/src/sources.rs;
@@ -125,3 +125,12 @@ tesseract
   Credit:   Tesseract OCR; Leptonica
   License:  Apache-2.0; BSD-2-Clause
   Upstream: tesseract and leptonica
+
+
+Recordings
+----------
+
+Wikimedia Commons
+  Credit:   Wikimedia Commons contributors
+  License:  Each recording is available under the licence on its Commons file page.
+  Upstream: https://commons.wikimedia.org/
