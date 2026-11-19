@@ -98,9 +98,11 @@ pub const STRESS_MARKS: [char; 2] = ['\u{0301}', '\u{0300}'];
 /// `word` without its [`STRESS_MARKS`]; `кни́га` is `книга`. A grave
 /// stress written precomposed, as in the NFC files, is dropped too: `ѐ`,
 /// `ѝ`, `Ѐ` and `Ѝ` (U+0450, U+045D, U+0400, U+040D) are written `е`, `и`,
-/// `Е` and `И`; `бѝотехнология` is `биотехнология`.
+/// `Е` and `И`; `бѝотехнология` is `биотехнология`. The two spellings of
+/// `ё` and `Ё` with a separate diaeresis are composed for indexing.
 pub fn unstressed_word(word: &str) -> String {
-    word.chars()
+    let mut letters = word
+        .chars()
         .filter(|letter| !STRESS_MARKS.contains(letter))
         .map(|letter| match letter {
             '\u{0450}' => 'е',
@@ -109,7 +111,23 @@ pub fn unstressed_word(word: &str) -> String {
             '\u{040D}' => 'И',
             other => other,
         })
-        .collect()
+        .peekable();
+    let mut normalized = String::with_capacity(word.len());
+    while let Some(letter) = letters.next() {
+        let letter = match letter {
+            'е' if letters.next_if_eq(&'\u{0308}').is_some() => 'ё',
+            'Е' if letters.next_if_eq(&'\u{0308}').is_some() => 'Ё',
+            other => other,
+        };
+        normalized.push(letter);
+    }
+    normalized
+}
+
+/// A Russian form-table key, with stress removed and `ё` folded into `е`.
+/// Case is preserved so lookup can try the written case first.
+pub(crate) fn russian_form_key(word: &str) -> String {
+    unstressed_word(word).replace('ё', "е").replace('Ё', "Е")
 }
 
 /// The `contents` of a file of Russian headwords, each headword keyed

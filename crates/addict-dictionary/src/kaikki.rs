@@ -25,6 +25,9 @@
 //!   sense points at, and the `forms` list of an entry without the forms
 //!   that are table tags, inflection templates, classes, romanizations or
 //!   canonical spellings. Both sides of a pair are one word ([`is_word`]);
+//!   Before that check, Russian pairs lose their stress and trailing
+//!   table marker, and decomposed `ё` is composed. The form key folds
+//!   `ё` into `е`;
 //! - of a Spanish or Catalan entry whose `pos` is `verb`, its `forms` again
 //!   with their
 //!   `tags`: the conjugation table, each form with what
@@ -37,14 +40,15 @@
 //! synonyms as members: the format's way for a source without synsets. A
 //! word whose entries give no sense is no headword. The headwords have no
 //! translations. The pairs go into the form table, a form with its lemmas in
-//! the order first seen; the lookups do not read them yet. The analyses go
-//! into the analysis table: per form its lemmas sorted, per lemma its
+//! the order first seen. The analyses go into the analysis table: per
+//! form its lemmas sorted, per lemma its
 //! shapes sorted, each once, so two rows of one analysis are one.
 //!
 //! The file is read as a stream; the headwords are held until its end,
 //! because the entries are not in the order of the index.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fmt,
     io::{self, BufRead},
@@ -56,6 +60,7 @@ use serde::{Deserialize, Deserializer};
 use crate::{
     analysis::{self, Analyses, Shape},
     format::{self, AnalysedForm, Contents, EntryRecord, ExceptionForm, SenseRecord},
+    wikdict,
 };
 
 /// The analyses being gathered: per form, per lemma, the shapes.
@@ -290,7 +295,13 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
         };
         entries += 1;
 
-        add_pairs(&mut forms, &word, &entry.senses, &entry.forms);
+        add_pairs(
+            &mut forms,
+            &word,
+            &entry.senses,
+            &entry.forms,
+            language == "ru",
+        );
         if entry.pos.as_deref() == Some("verb") && ANALYSED.contains(&language) {
             add_analyses(&mut analyses, &word, &entry.forms);
         }
@@ -351,11 +362,12 @@ fn add_pairs(
     word: &str,
     senses: &[Sense],
     forms_of_entry: &[Form],
+    russian: bool,
 ) {
     for sense in senses {
         for target in sense.form_of.iter().chain(&sense.alt_of) {
             if let Some(lemma) = &target.word {
-                pair(forms, word, lemma);
+                pair(forms, word, lemma, russian);
             }
         }
     }
@@ -365,7 +377,7 @@ fn add_pairs(
             .iter()
             .any(|tag| FORMS_SKIPPED.contains(&tag.as_str()));
         if let (Some(text), false) = (&form.form, skipped) {
-            pair(forms, text, word);
+            pair(forms, text, word, russian);
         }
     }
 }
@@ -396,13 +408,31 @@ fn add_analyses(analyses: &mut Gathered, lemma: &str, forms_of_entry: &[Form]) {
 
 /// Adds `lemma` to the lemmas of `form` in `forms`, once, when the two
 /// differ and both are one word.
-fn pair(forms: &mut BTreeMap<String, Vec<String>>, form: &str, lemma: &str) {
-    if form != lemma && is_word(form) && is_word(lemma) {
-        let lemmas = forms.entry(form.to_owned()).or_default();
-        if !lemmas.iter().any(|known| known == lemma) {
-            lemmas.push(lemma.to_owned());
+fn pair(forms: &mut BTreeMap<String, Vec<String>>, form: &str, lemma: &str, russian: bool) {
+    let (form, lemma) = if russian {
+        let form = wikdict::russian_form_key(russian_form_text(form));
+        let lemma = russian_form_text(lemma);
+        if form == wikdict::russian_form_key(lemma) {
+            return;
+        }
+        (
+            Cow::Owned(form),
+            Cow::Owned(wikdict::unstressed_word(lemma)),
+        )
+    } else {
+        (Cow::Borrowed(form), Cow::Borrowed(lemma))
+    };
+    if form != lemma && is_word(&form) && is_word(&lemma) {
+        let lemmas = forms.entry(form.into_owned()).or_default();
+        if !lemmas.iter().any(|known| known == lemma.as_ref()) {
+            lemmas.push(lemma.into_owned());
         }
     }
+}
+
+fn russian_form_text(text: &str) -> &str {
+    let text = text.trim_end();
+    text.strip_suffix("^△").unwrap_or(text).trim_end()
 }
 
 /// The sense records of the entry of `word` with `senses` and `synonyms`:

@@ -2,9 +2,9 @@
 //! reading language, and the lookup of one index through them.
 //!
 //! [`headwords`] is the one place that says how a word reaches its
-//! headwords in each language. Each gives the word without the punctuation
-//! around it, then its lowercase, then the dictionary forms of the
-//! lowercase word, each once:
+//! headwords in each language. English, Spanish and Catalan try the word
+//! without the punctuation around it, then its lowercase, then the
+//! dictionary forms of the lowercase word, each once:
 //!
 //! - English: the forms of `addict_core::reduction`, the lemmas of an
 //!   exception list first. [`Combined`](crate::Combined) looks up through
@@ -29,10 +29,11 @@
 //! [`grouped`] also gives the analyses of the word as a verb form, from the
 //! analysis tables of the indexes it asks ([`analyses_of`]).
 //!
-//! - Russian: the spellings of [`russian_spellings`], without stress marks,
-//!   as written, in lowercase and with `ё` and `е` taken as one letter. It
-//!   has no dictionary forms: an inflected form finds nothing. Each index
-//!   answers with the first of them it has.
+//! - Russian: [`article`] and [`grouped`] try lemmas that resolve in the
+//!   definition index first, then the spellings of the picked word. Without
+//!   a usable exception, a past-tense form can reach its infinitive when
+//!   the definition index has it as a verb. Paired translations follow
+//!   the definition readings.
 //!
 //! [`russian`] reads one index of Russian headwords through the same
 //! spellings, for a Russian word translated by someone whose own language
@@ -41,7 +42,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use addict_core::{
-    dictionary::{Article, Sense},
+    dictionary::{Article, Pos, Sense},
     reduction, reduction_es_ca,
     translation::Source as Language,
 };
@@ -62,8 +63,8 @@ pub type Lemmas = BTreeMap<String, Vec<String>>;
 /// empty when nothing of the word is left: the word without the punctuation
 /// around it, its lowercase, then the dictionary forms of the lowercase
 /// word. `lemmas` holds the exception lemmas of the forms [`asked_forms`]
-/// names. No wildcard arm: a new language does not compile until it is
-/// given its hook.
+/// names. For Russian this gives only the direct spellings: [`article`]
+/// and [`grouped`] check dictionary forms against the definition index.
 pub fn headwords(language: Language, word: &str, lemmas: &Lemmas) -> Vec<String> {
     if language == Language::Ru {
         return russian_spellings(word);
@@ -89,11 +90,24 @@ pub fn headwords(language: Language, word: &str, lemmas: &Lemmas) -> Vec<String>
     candidates
 }
 
-/// The forms whose exception lemmas [`headwords`] reads for `word` read in
-/// `language`: the lowercase word, and in Spanish and Catalan its bases as
-/// well. Empty when nothing of the word is left. No wildcard arm, as in
-/// [`headwords`].
+/// The keys to read from the form tables for `word` read in `language`.
+/// English, Spanish and Catalan use the lowercase word, plus its bases in
+/// Spanish and Catalan. Russian tries its folded key in written case and
+/// lowercase. Empty when nothing of the word is left.
 pub fn asked_forms(language: Language, word: &str) -> Vec<String> {
+    if language == Language::Ru {
+        let normalized = wikdict::russian_form_key(word);
+        let written = reduction::stripped(&normalized);
+        if written.is_empty() {
+            return Vec::new();
+        }
+        let lowercase = reduction::lowercase(written);
+        return if written == lowercase {
+            vec![lowercase]
+        } else {
+            vec![written.to_owned(), lowercase]
+        };
+    }
     let written = reduction::stripped(word);
     if written.is_empty() {
         return Vec::new();
@@ -137,28 +151,29 @@ pub fn lemmas_of<'a>(
 /// and translations of every headword [`headwords`] gives that the index
 /// has, merged in that order, a sense whose definition and grammar are
 /// already there skipped; the exception lemmas are those of this index's form table.
-/// `None` when the index has none of them. An error of the index is the
-/// error of the lookup.
+/// Russian uses the same lemma and direct readings as [`grouped`], treating
+/// `index` as its definitions. `None` when the index has none of the
+/// candidates. An error of the index is the error of the lookup.
 pub fn article(index: &Index, language: Language, word: &str) -> Result<Option<Article>, Error> {
-    let lemmas = lemmas_of([index], language, word)?;
-    Ok(merged(found(index, language, word, &lemmas)?))
+    let headwords = if language == Language::Ru {
+        russian_readings([index], word)?.headwords
+    } else {
+        headwords(language, word, &lemmas_of([index], language, word)?)
+    };
+    Ok(merged(found(index, &headwords, false)?))
 }
 
-/// The headwords of `index` that [`headwords`] gives for `word` read in
-/// `language` with `lemmas`, with their articles, in that order. An index
-/// of Russian answers with the first spelling it has alone, as [`russian`]
-/// does.
-fn found(
-    index: &Index,
-    language: Language,
-    word: &str,
-    lemmas: &Lemmas,
-) -> Result<Vec<Found>, Error> {
+/// The headwords present in `index`, with their articles, in lookup order.
+/// `first_only` selects one spelling from a Russian translation reading.
+fn found(index: &Index, headwords: &[String], first_only: bool) -> Result<Vec<Found>, Error> {
     let mut found = Vec::new();
-    for headword in headwords(language, word, lemmas) {
-        if let Some(article) = index.find(&headword)? {
-            found.push(Found { headword, article });
-            if language == Language::Ru {
+    for headword in headwords {
+        if let Some(article) = index.find(headword)? {
+            found.push(Found {
+                headword: headword.clone(),
+                article,
+            });
+            if first_only {
                 break;
             }
         }
@@ -328,8 +343,10 @@ fn union<'a>(
 
 /// What `indexes`, each with its kind, give for `word` read in `language`,
 /// grouped by kind in the order of the list. Every index is asked for the
-/// same headwords: those [`headwords`] gives with the exception lemmas of
-/// all the indexes together, read once. Every sense of every headword found
+/// same readings. Russian definition indexes supply and resolve lemmas,
+/// and translation indexes choose one spelling per reading. Other
+/// languages read the exception lemmas of all the indexes together.
+/// Every sense of every headword found
 /// is kept; only the definitions are merged, a sense whose definition and
 /// grammar are already there skipped. The entries and sense metadata of
 /// every index but a Russian translation index are kept, each once.
@@ -343,7 +360,16 @@ pub fn grouped(
     let mut grouped = Grouped::default();
     let mut found_any = false;
     let mut definitions = Vec::new();
-    let lemmas = lemmas_of(indexes.iter().map(|(_, index)| *index), language, word)?;
+    let (headwords, russian_translations) = if language == Language::Ru {
+        let definitions = indexes
+            .iter()
+            .filter_map(|(kind, index)| (*kind == Kind::Definitions).then_some(*index));
+        let readings = russian_readings(definitions, word)?;
+        (readings.headwords, readings.translations)
+    } else {
+        let lemmas = lemmas_of(indexes.iter().map(|(_, index)| *index), language, word)?;
+        (headwords(language, word, &lemmas), Vec::new())
+    };
     // Read once, and only when needed: by a synonyms index, or once the
     // word is found.
     let mut analyses: Option<Vec<Analyses>> = None;
@@ -355,9 +381,16 @@ pub fn grouped(
     // the synonyms of the word.
     let written = reduction::stripped(word);
     let itself = [written.to_owned(), reduction::lowercase(written)];
-    let found_in = |index: &Index| found(index, language, word, &lemmas);
     for (kind, index) in indexes {
-        let found = found_in(index)?;
+        let found = if language == Language::Ru && matches!(kind, Kind::Translation(_)) {
+            let mut translated = Vec::new();
+            for spellings in &russian_translations {
+                translated.extend(found(index, spellings, true)?);
+            }
+            translated
+        } else {
+            found(index, &headwords, false)?
+        };
         // Of an index of Russian translations only the translations are
         // kept: the article's entries are those of its definitions.
         if !(language == Language::Ru && matches!(kind, Kind::Translation(_))) {
@@ -398,17 +431,17 @@ pub fn grouped(
                 }
                 let analyses = analyses.as_deref().unwrap_or_default();
                 let groups = grouped.synonyms.get_or_insert_with(Vec::new);
-                for headword in headwords(language, word, &lemmas) {
-                    let Some(meanings) = index.synonym_groups(&headword)? else {
+                for headword in &headwords {
+                    let Some(meanings) = index.synonym_groups(headword)? else {
                         continue;
                     };
                     found_any = true;
                     // Only this candidate's positive verb analysis constrains its
                     // meanings; other headwords can supply independent readings.
                     // Exact spellings still keep their independent readings.
-                    let derived_verb = !itself.contains(&headword)
+                    let derived_verb = !itself.contains(headword)
                         && analyses.iter().any(|analysis| {
-                            analysis.lemma == headword && !analysis.shapes.is_empty()
+                            analysis.lemma == *headword && !analysis.shapes.is_empty()
                         });
                     for mut meaning in meanings {
                         if derived_verb
@@ -456,6 +489,105 @@ pub fn grouped(
         }));
     }
     Ok(Some(grouped))
+}
+
+#[derive(Default)]
+struct RussianReadings {
+    headwords: Vec<String>,
+    translations: Vec<Vec<String>>,
+}
+
+impl RussianReadings {
+    fn add(&mut self, spellings: Vec<String>) {
+        if let Some(headword) = spellings.first()
+            && !self.headwords.contains(headword)
+        {
+            self.headwords.push(headword.clone());
+            self.translations.push(spellings);
+        }
+    }
+}
+
+/// Keep one Russian headword per definition-backed reading, with lemmas
+/// first. A translation index can use any spelling of each reading. If
+/// there are no definition readings, it can still look up the picked word.
+fn russian_readings<'a>(
+    definitions: impl IntoIterator<Item = &'a Index> + Clone,
+    word: &str,
+) -> Result<RussianReadings, Error> {
+    let lemmas = lemmas_of(definitions.clone(), Language::Ru, word)?;
+    let mut readings = RussianReadings::default();
+    for form in asked_forms(Language::Ru, word) {
+        for lemma in lemmas.get(&form).into_iter().flatten() {
+            let spellings = validated_russian_spellings(definitions.clone(), lemma, false)?;
+            readings.add(spellings);
+        }
+    }
+    if readings.headwords.is_empty()
+        && let Some(infinitive) = russian_past_infinitive(word)
+    {
+        readings.add(validated_russian_spellings(
+            definitions.clone(),
+            &infinitive,
+            true,
+        )?);
+    }
+    readings.add(validated_russian_spellings(definitions, word, false)?);
+    if readings.headwords.is_empty() {
+        readings.translations.push(russian_spellings(word));
+    }
+    Ok(readings)
+}
+
+/// Resolve the best spelling in the definitions and give it first. Keep
+/// the other spellings of that lemma for paired translation indexes.
+fn validated_russian_spellings<'a>(
+    definitions: impl IntoIterator<Item = &'a Index> + Clone,
+    lemma: &str,
+    verb_only: bool,
+) -> Result<Vec<String>, Error> {
+    let mut spellings = russian_spellings(lemma);
+    for (position, spelling) in spellings.iter().enumerate() {
+        for index in definitions.clone() {
+            if let Some(article) = index.find(spelling)?
+                && (!verb_only || is_verb(&article))
+            {
+                spellings[..=position].rotate_right(1);
+                return Ok(spellings);
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+fn is_verb(article: &Article) -> bool {
+    article
+        .entries
+        .iter()
+        .filter_map(|entry| entry.part_of_speech.as_ref())
+        .chain(
+            article
+                .senses
+                .iter()
+                .filter_map(|sense| sense.part_of_speech.as_ref()),
+        )
+        .any(|pos| pos.category == Some(Pos::Verb))
+}
+
+fn russian_past_infinitive(word: &str) -> Option<String> {
+    let unstressed = wikdict::unstressed_word(word);
+    let written = reduction::stripped(&unstressed);
+    if !written
+        .chars()
+        .all(|letter| letter.is_alphabetic() && ('\u{0400}'..='\u{04ff}').contains(&letter))
+    {
+        return None;
+    }
+    let lowercase = reduction::lowercase(written);
+    let stem = ["ла", "ло", "ли", "л"]
+        .iter()
+        .find_map(|ending| lowercase.strip_suffix(ending))?;
+    (!stem.is_empty()).then(|| format!("{stem}ть"))
 }
 
 /// The headwords to try for the Russian `word`, in order, each once; empty
@@ -1521,7 +1653,7 @@ mod tests {
             (Kind::Definitions, &definitions),
             (Kind::Translation(Language::En), &english),
         ];
-        for word in ["собака", "соба\u{301}ка", "«Собака»,"] {
+        for word in ["собака", "соба\u{301}ка", "«Собака»,", "собаки"] {
             let found = grouped(&indexes, Language::Ru, word)
                 .expect("look up")
                 .unwrap_or_else(|| panic!("{word}"));
@@ -1552,16 +1684,202 @@ mod tests {
             house.definitions.as_deref().map(|senses| senses.len()),
             Some(1)
         );
-        // An inflected form finds nothing yet.
-        assert_eq!(
-            grouped(&indexes, Language::Ru, "собаки").expect("look up"),
-            None
-        );
         assert_eq!(
             headwords(Language::Ru, "Ёж", &Lemmas::new()),
             russian_spellings("Ёж")
         );
-        assert_eq!(asked_forms(Language::Ru, "Ёж"), texts(&["ёж"]));
+        assert_eq!(asked_forms(Language::Ru, "Ёж"), texts(&["Еж", "еж"]));
+        assert_eq!(
+            asked_forms(Language::Ru, "Е\u{0308}ж"),
+            texts(&["Еж", "еж"])
+        );
+    }
+
+    #[test]
+    fn russian_forms_prefer_kaikki_lemmas_and_fall_back_to_confirmed_verbs() {
+        const FORMS: &str = r#"
+{"lang_code":"ru","word":"собаки","pos":"noun","senses":[{"glosses":["форма слова собака"]}]}
+{"lang_code":"ru","word":"краси́вый","pos":"adj","senses":[{"glosses":["приятный на вид"]}]}
+{"lang_code":"ru","word":"красѝвую","pos":"adj","senses":[{"form_of":[{"word":"краси́вый"}],"glosses":["форма слова красивый"]}]}
+{"lang_code":"ru","word":"читала","pos":"verb","senses":[{"form_of":[{"word":"несуществующий"}],"glosses":["форма слова читать"]}]}
+{"lang_code":"ru","word":"плеть","pos":"noun","senses":[{"glosses":["кнут"]}]}
+{"lang_code":"ru","word":"плела","pos":"verb","senses":[{"glosses":["форма слова плести"]}]}
+{"lang_code":"ru","word":"петь","pos":"verb","senses":[{"glosses":["исполнять песню"]}]}
+{"lang_code":"ru","word":"спеть","pos":"verb","senses":[{"glosses":["исполнить песню"]}]}
+{"lang_code":"ru","word":"запеть","pos":"verb","senses":[{"glosses":["начать петь"]}]}
+{"lang_code":"ru","word":"Пела","pos":"verb","senses":[{"alt_of":[{"word":"спеть"}]}]}
+{"lang_code":"ru","word":"пела","pos":"verb","senses":[{"form_of":[{"word":"запеть"}]}]}
+{"lang_code":"ru","word":"чиtать","pos":"verb","senses":[{"glosses":["смешанное написание"]}]}
+{"lang_code":"ru","word":"ещё","pos":"adv","senses":[{"glosses":["до сих пор"]}],"forms":[{"form":"ещѐ ^△"}]}
+{"lang_code":"ru","word":"трёхзвёздный","pos":"adj","senses":[{"glosses":["с тремя звёздами"]}],"forms":[{"form":"трѐхзве\u0308здного^△"}]}
+{"lang_code":"ru","word":"замо́кнуть","pos":"verb","senses":[{"glosses":["пропитаться влагой"]}],"forms":[{"form":"замо́к"}]}
+{"lang_code":"ru","word":"за́мок","pos":"noun","senses":[{"glosses":["укреплённое жилище"]}]}
+{"lang_code":"ru","word":"пить","pos":"verb","senses":[{"glosses":["глотать жидкость"]}]}
+{"lang_code":"ru","word":"пила","pos":"noun","senses":[{"glosses":["инструмент для резки"]}]}
+{"lang_code":"ru","word":"сен","pos":"noun","senses":[{"glosses":["денежная единица"]}],"forms":[{"form":"сена"}]}
+{"lang_code":"ru","word":"сено","pos":"noun","senses":[{"glosses":["высушенная трава"]}],"forms":[{"form":"сена"}]}
+"#;
+        let dir = TempDir::new("ru-forms");
+        let fixture = format!("{}{FORMS}", crate::kaikki::tests::RUSSIAN);
+        let contents = wikdict::unstressed(
+            crate::kaikki::parse(fixture.as_bytes(), "ru", "kaikki-ru").expect("parse"),
+        );
+        let definitions = written(&dir, "kaikki-ru.index", &contents);
+        assert_eq!(
+            definitions.exception_lemmas("читала").expect("orphan"),
+            texts(&["несуществующий"])
+        );
+        assert!(
+            definitions
+                .exception_lemmas("еще")
+                .expect("form")
+                .is_empty()
+        );
+        let english = russian_index(
+            &dir,
+            "ru-en.index",
+            &[
+                ("собака", &["dog"]),
+                ("собаки", &["dogs"]),
+                ("красивый", &["beautiful"]),
+                ("читать", &["read"]),
+                ("петь", &["sing"]),
+                ("спеть", &["sing a song"]),
+                ("запеть", &["start singing"]),
+                ("плеть", &["whip"]),
+                ("плела", &["wove"]),
+                ("ещё", &["still"]),
+                ("еще", &["yet"]),
+                ("трехзвездный", &["three-star"]),
+                ("замокнуть", &["soak through"]),
+                ("замок", &["castle"]),
+                ("пить", &["drink"]),
+                ("пила", &["saw"]),
+                ("сено", &["hay"]),
+                ("сена", &["unbacked spelling"]),
+            ],
+        );
+        let indexes = [
+            (Kind::Definitions, &definitions),
+            (Kind::Translation(Language::En), &english),
+        ];
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            ("собаки", &["собака", "собаки"], &["dog", "dogs"]),
+            ("«Соба́ки»,", &["собака", "собаки"], &["dog", "dogs"]),
+            ("красивую", &["красивый", "красивую"], &["beautiful"]),
+            ("Красѝвую", &["красивый", "красивую"], &["beautiful"]),
+            ("читал", &["читать"], &["read"]),
+            ("читала", &["читать", "читала"], &["read"]),
+            ("читало", &["читать"], &["read"]),
+            ("читали", &["читать"], &["read"]),
+            (
+                "Пела",
+                &["спеть", "запеть", "Пела"],
+                &["sing a song", "start singing"],
+            ),
+            ("ПЕЛА", &["запеть", "пела"], &["start singing"]),
+            ("плела", &["плела"], &["wove"]),
+            ("ещё", &["ещё"], &["still"]),
+            ("еще", &["ещё"], &["still"]),
+            ("трехзвездного", &["трёхзвёздный"], &["three-star"]),
+            (
+                "замок",
+                &["замокнуть", "замок"],
+                &["soak through", "castle"],
+            ),
+            ("пила", &["пить", "пила"], &["drink", "saw"]),
+            ("сена", &["сен", "сено"], &["hay"]),
+        ];
+        for &(word, headwords, translations) in cases {
+            let expected = merged(
+                headwords
+                    .iter()
+                    .map(|&headword| Found {
+                        headword: headword.to_owned(),
+                        article: definitions
+                            .find(headword)
+                            .expect("find headword")
+                            .expect(headword),
+                    })
+                    .collect(),
+            )
+            .expect("expected article");
+            let grouped = grouped(&indexes, Language::Ru, word)
+                .expect("grouped lookup")
+                .unwrap_or_else(|| panic!("no result for {word}"));
+            assert_eq!(
+                grouped.definitions.as_deref(),
+                Some(expected.senses.as_slice()),
+                "{word}"
+            );
+            assert_eq!(grouped.entries, expected.entries, "{word}");
+            assert_eq!(
+                grouped.translations_into(Language::En),
+                Some(texts(translations).as_slice()),
+                "{word}"
+            );
+            assert_eq!(
+                article(&definitions, Language::Ru, word).expect("single-index lookup"),
+                Some(expected),
+                "{word}"
+            );
+        }
+        for word in ["плело", "чиtала"] {
+            assert_eq!(
+                grouped(&indexes, Language::Ru, word).expect("lookup"),
+                None,
+                "{word}"
+            );
+            assert_eq!(
+                article(&definitions, Language::Ru, word).expect("lookup"),
+                None,
+                "{word}"
+            );
+        }
+        assert_eq!(
+            russian(&english, "собаки").expect("legacy lookup"),
+            Some(texts(&["dogs"]))
+        );
+
+        let broken = dir.path().join("kaikki-ru.index");
+        std::fs::write(&broken, b"").expect("truncate");
+        let error = grouped(&indexes, Language::Ru, "собаки").expect_err("unreadable");
+        let (Error::NotImported(path) | Error::Io { path, .. } | Error::Damaged { path, .. }) =
+            &error;
+        assert_eq!(path, &broken, "{error}");
+    }
+
+    #[test]
+    fn a_russian_translation_index_cannot_authorize_the_past_tense_rule() {
+        let dir = TempDir::new("ru-translation-verb");
+        let mut contents =
+            crate::kaikki::parse(crate::kaikki::tests::RUSSIAN.as_bytes(), "ru", "ru-en")
+                .expect("parse");
+        let verb = contents
+            .headwords
+            .iter_mut()
+            .find(|headword| headword.word == "читать")
+            .expect("читать");
+        verb.translations = texts(&["read"]);
+        let index = written(&dir, "ru-en.index", &contents);
+        let translations = [(Kind::Translation(Language::En), &index)];
+        assert_eq!(
+            grouped(&translations, Language::Ru, "читать")
+                .expect("direct lookup")
+                .expect("читать")
+                .translations_into(Language::En),
+            Some(texts(&["read"]).as_slice())
+        );
+        assert_eq!(
+            grouped(&translations, Language::Ru, "читала").expect("translations alone"),
+            None
+        );
+        let definitions = grouped(&[(Kind::Definitions, &index)], Language::Ru, "читала")
+            .expect("definition lookup")
+            .expect("читала")
+            .definitions
+            .expect("definitions");
+        assert_eq!(definitions[0].definition, "воспринимать написанное");
     }
 
     #[test]

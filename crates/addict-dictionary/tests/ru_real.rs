@@ -107,3 +107,38 @@ fn a_russian_word_gets_its_article_and_english_translations_from_the_real_indexe
         );
     }
 }
+
+#[test]
+#[ignore = "needs a rebuilt kaikki-ru-Russkiy; set ADDICT_INDEX_DIR"]
+fn russian_word_forms_get_their_lemmas_definitions_from_the_real_index() {
+    let path = path_from("ADDICT_INDEX_DIR").join(Source::KaikkiRu.index_name());
+    let index = Index::open(&path).unwrap_or_else(|error| panic!("{error}"));
+    let indexes = [(Kind::Definitions, &index)];
+    for (word, lemma) in [
+        ("собаки", "собака"),
+        ("читала", "читать"),
+        ("красивую", "красивый"),
+    ] {
+        let lookup = |word| {
+            lookup::grouped(&indexes, Language::Ru, word)
+                .expect("lookup")
+                .unwrap_or_else(|| panic!("no article for {word}"))
+        };
+        let found = lookup(word);
+        let definitions = found.definitions.as_deref().expect("definitions");
+        let expected = lookup(lemma).definitions.expect("lemma definitions");
+        assert!(!expected.is_empty(), "{lemma}: no definitions");
+        assert!(
+            definitions.starts_with(&expected),
+            "{word}: expected definitions from {lemma} first"
+        );
+        assert_eq!(
+            found
+                .sense_metadata
+                .first()
+                .map(|sense| sense.headword.as_str()),
+            Some(lemma),
+            "{word}: expected senses from {lemma} first"
+        );
+    }
+}
