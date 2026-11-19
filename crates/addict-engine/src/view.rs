@@ -723,7 +723,7 @@ fn missing_definitions(language: Language) -> &'static str {
         Language::En => "No dictionary of English definitions is imported.",
         Language::Es => "No dictionary of Spanish definitions is imported.",
         Language::Ca => "No dictionary of Catalan definitions is imported.",
-        Language::Ru => "No dictionary of Russian definitions is imported.",
+        Language::Ru => "The Russian article is not downloaded.",
     }
 }
 
@@ -1823,6 +1823,12 @@ pub fn choice_texts<'a>(
         .map(|(chosen, found)| elsewhere_text(chosen, found));
     let texts = lookup_texts(lookup, choice, definition, key_file, translating);
     match lookup {
+        // Without the Russian article only its translations show, and the
+        // hint says the article is not downloaded: no line names it.
+        Lookup::Grouped {
+            language: Language::Ru,
+            grouped,
+        } if grouped.definitions.is_none() => texts,
         Lookup::Article(_) | Lookup::Grouped { .. } => ResultTexts { elsewhere, ..texts },
         // A Russian word is answered by the chosen language only.
         Lookup::FromRussian { .. }
@@ -4703,10 +4709,49 @@ mod tests {
             },
         };
         let texts = texts_of(&translations_only, None);
+        assert_eq!(texts.hint, Some("The Russian article is not downloaded."));
         assert_eq!(
-            texts.hint,
-            Some("No dictionary of Russian definitions is imported.")
+            sections(&texts),
+            [
+                Some("English, for the word as a whole: dog".to_owned()),
+                None,
+                None,
+            ]
         );
+        // Spanish pressed: the Russian article, with the line that names
+        // both, and its translations into my language.
+        let spanish = Translating {
+            my: Language::En,
+            pressed: Language::Es,
+        };
+        let texts = super::choice_texts(
+            &lookup,
+            None,
+            None,
+            None,
+            Some((Language::Es, Language::Ru)),
+            spanish,
+        );
+        assert_eq!(
+            texts.elsewhere.as_deref(),
+            Some("Not in the Spanish dictionaries: the Russian article.")
+        );
+        assert_eq!(
+            sections(&texts)[0].as_deref(),
+            Some("English, for the word as a whole: dog, hound")
+        );
+        // Spanish pressed and no Russian article index: the hint alone, no
+        // line that names an article.
+        let texts = super::choice_texts(
+            &translations_only,
+            None,
+            None,
+            None,
+            Some((Language::Es, Language::Ru)),
+            spanish,
+        );
+        assert_eq!(texts.elsewhere, None);
+        assert_eq!(texts.hint, Some("The Russian article is not downloaded."));
         assert_eq!(
             sections(&texts),
             [

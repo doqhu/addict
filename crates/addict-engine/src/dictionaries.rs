@@ -2442,6 +2442,110 @@ pub mod tests {
         );
     }
 
+    /// The language that answered the offline lookup of `word` in
+    /// `dictionaries` with `pressed` pressed and `my` mine, and what the
+    /// window shows of it.
+    fn shown_offline(
+        dictionaries: Dictionaries,
+        pressed: Language,
+        my: Language,
+        word: &str,
+    ) -> (Language, Option<crate::view::Lookup>) {
+        let work = addict_platform::work::Work::start().expect("runner");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let known = dictionaries.indexes();
+        let job = crate::manual::offline(
+            Some(&work),
+            std::sync::Arc::new(dictionaries),
+            word.to_owned(),
+            pressed,
+            my,
+            Some(known),
+            move |answered, outcome| {
+                let _ = sender.send((answered, outcome));
+            },
+        )
+        .expect("job");
+        let (answered, outcome) = receiver
+            .recv_timeout(crate::manual::tests::WAIT)
+            .expect("outcome");
+        drop(job);
+        (answered, crate::manual::result_in(outcome, word, answered))
+    }
+
+    /// English mine, Spanish, Catalan or English pressed: `собака` is its
+    /// Russian article with the English translations, and nothing of the
+    /// Spanish indexes; without the article index, the translations alone.
+    #[test]
+    fn a_russian_word_gets_its_russian_article_whatever_is_pressed() {
+        use crate::view::Lookup;
+        let dir = with_russian(
+            "russian-any-pressed",
+            &[Source::KaikkiRu, Source::WikdictRuEn],
+        );
+        for pressed in [Language::Es, Language::Ca, Language::En] {
+            let (answered, shown) =
+                shown_offline(dir.dictionaries(), pressed, Language::En, "собака");
+            assert_eq!(answered, Language::Ru, "{pressed:?}");
+            let Some(Lookup::Grouped { language, grouped }) = shown else {
+                panic!("{pressed:?}: {shown:?}");
+            };
+            assert_eq!(language, Language::Ru);
+            assert_eq!(grouped.definitions, Some(dog_senses()));
+            assert_eq!(
+                grouped.translations,
+                [(Language::En, texts(&["dog", "hound"]))]
+            );
+        }
+        // Russian mine: the list of `wikdict-ru-es`, as before.
+        let mut russian = RUSSIAN.to_vec();
+        russian.push(Source::KaikkiRu);
+        let mine = with_russian("russian-any-pressed-mine", &russian);
+        assert_eq!(
+            shown_offline(mine.dictionaries(), Language::Es, Language::Ru, "собака"),
+            (
+                Language::Es,
+                Some(Lookup::FromRussian {
+                    language: Language::Es,
+                    translations: texts(&["perro", "cachorro", "arroba"]),
+                })
+            )
+        );
+        // No article index: the English translations alone, still Russian.
+        let translations = with_russian("russian-any-pressed-no-article", &[Source::WikdictRuEn]);
+        let (answered, shown) = shown_offline(
+            translations.dictionaries(),
+            Language::Es,
+            Language::En,
+            "собака",
+        );
+        assert_eq!(answered, Language::Ru);
+        let Some(Lookup::Grouped { language, grouped }) = shown else {
+            panic!("{shown:?}");
+        };
+        assert_eq!(language, Language::Ru);
+        assert_eq!(
+            grouped.translations,
+            [(Language::En, texts(&["dog", "hound"]))]
+        );
+        assert_eq!(grouped.definitions, None);
+        assert!(grouped.entries.is_empty());
+        assert_eq!(grouped.translations_into(Language::Es), None);
+        assert_eq!(
+            (grouped.synonyms, grouped.english, grouped.verb),
+            (None, None, None)
+        );
+        // Nothing Russian: the pair is named, in my language.
+        let neither = with_russian("russian-any-pressed-neither", &[]);
+        assert_eq!(
+            shown_offline(neither.dictionaries(), Language::Es, Language::En, "собака"),
+            (
+                Language::En,
+                Some(Lookup::NoRussianDictionary(Language::En))
+            )
+        );
+    }
+
     /// The answers of every reading language for `word` with Russian mine
     /// are those of [`Articles::look_up_in`], as before my language was
     /// asked.
@@ -2459,7 +2563,7 @@ pub mod tests {
     fn a_russian_word_is_translated_into_the_source_of_its_pair() {
         let dir = with_russian("russian-pair", &RUSSIAN);
         let dictionaries = dir.dictionaries();
-        // English mine, Spanish pressed: `wikdict-ru-en` alone.
+        // The list into English: `wikdict-ru-en` alone.
         let into = crate::manual::russian_into(Language::Es, Language::En);
         assert_eq!(into, Language::En);
         assert_eq!(

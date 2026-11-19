@@ -360,14 +360,14 @@ fn look_up_russian(
     ))
 }
 
-/// Starts the lookup of the Russian `word` read in Russian by someone whose
-/// own language is `my`, not Russian, in `articles` on `work`, with a
-/// deadline, through [`Articles::look_up_for`]: the Russian article with
-/// its translations into `my`, and no other language after a miss.
-/// `on_outcome` runs once on the worker thread with Russian, or with `my`
-/// when nothing Russian is imported, so the line that says so names the
-/// pair as before. Without a runner nothing starts and the result to show
-/// is given back.
+/// Starts the lookup of the Russian `word`, whatever language is pressed,
+/// by someone whose own language is `my`, not Russian, in `articles` on
+/// `work`, with a deadline, through [`Articles::look_up_for`]: the Russian
+/// article with its translations into `my`, and no other language after a
+/// miss. `on_outcome` runs once on the worker thread with Russian, or with
+/// `my` when nothing Russian is imported, so the line that says so names
+/// the pair as before. Without a runner nothing starts and the result to
+/// show is given back.
 fn look_up_russian_article(
     work: Option<&Work>,
     articles: Arc<dyn Articles>,
@@ -422,12 +422,13 @@ fn answering(
 /// Otherwise nothing starts and nothing is asked of `articles`: the line
 /// that says there is no dictionary is given back, so no article of a word
 /// spelt alike in another language is shown. A Russian word
-/// ([`is_russian`]) is looked up first of all, whatever `known` says. With
-/// Russian pressed and my language another, it is looked up as a Russian
-/// word, its article with its translations into my language
-/// ([`look_up_russian_article`]). Otherwise it is looked up only in the
-/// Russian index of the language it is translated into ([`russian_into`]),
-/// which `on_outcome` is given. No wildcard arm: a new language does not
+/// ([`is_russian`]) is looked up first of all, whatever `known` says, and
+/// read as Russian whatever is pressed. With my language not Russian, it is
+/// looked up as a Russian word, its article with its translations into my
+/// language ([`look_up_russian_article`]), and no other language is asked.
+/// With Russian mine, it is looked up only in the Russian index of the
+/// language it is translated into ([`russian_into`]), which `on_outcome`
+/// is given. No wildcard arm: a new language does not
 /// compile until it is given its offline result.
 pub fn offline(
     work: Option<&Work>,
@@ -439,7 +440,7 @@ pub fn offline(
     on_outcome: impl FnOnce(Language, Outcome<Looked>) + Send + 'static,
 ) -> Result<Job, Box<Lookup>> {
     if is_russian(&word) {
-        if chosen == Language::Ru && my != Language::Ru {
+        if my != Language::Ru {
             return look_up_russian_article(work, articles, word, my, on_outcome);
         }
         let into = russian_into(chosen, my);
@@ -1023,6 +1024,22 @@ pub(crate) mod tests {
         my: Language,
         word: &str,
     ) -> (Language, Outcome<Looked>) {
+        let known = Indexes {
+            spanish: State::Open,
+            catalan: State::Open,
+            ..Indexes::OPEN
+        };
+        answered_knowing(articles, pressed, my, Some(known), word)
+    }
+
+    /// [`answered_for`] with the indexes known to stand at `known`.
+    fn answered_knowing(
+        articles: impl Articles + 'static,
+        pressed: Language,
+        my: Language,
+        known: Option<Indexes>,
+        word: &str,
+    ) -> (Language, Outcome<Looked>) {
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
         let job = offline(
@@ -1031,11 +1048,7 @@ pub(crate) mod tests {
             word.to_owned(),
             pressed,
             my,
-            Some(Indexes {
-                spanish: State::Open,
-                catalan: State::Open,
-                ..Indexes::OPEN
-            }),
+            known,
             move |answered, outcome| {
                 let _ = sender.send((answered, outcome));
             },
@@ -1046,14 +1059,14 @@ pub(crate) mod tests {
         reported
     }
 
+    /// With Russian mine, a Russian word is the list of the Russian index
+    /// of the pressed language, as in 0.2.0; with another language mine it
+    /// is its Russian article ([`a_russian_word_gets_its_russian_article_whatever_is_pressed`]).
     #[test]
-    fn a_russian_word_is_looked_up_into_my_language_unless_russian_is_mine() {
+    fn a_russian_word_for_russian_mine_is_looked_up_into_the_pressed_language() {
         let translations = vec!["dog".to_owned()];
         for (pressed, my, into) in [
-            (Language::Es, Language::En, Language::En),
-            (Language::Ca, Language::En, Language::En),
-            (Language::En, Language::Es, Language::Es),
-            // Russian mine: the pressed language, as in 0.2.0.
+            (Language::Es, Language::Ru, Language::Es),
             (Language::Ca, Language::Ru, Language::Ca),
             (Language::En, Language::Ru, Language::En),
         ] {
@@ -1116,19 +1129,22 @@ pub(crate) mod tests {
         }
     }
 
-    /// With Russian pressed and my language another, a Russian word is
-    /// looked up as a Russian word into my language, once, with no other
-    /// language after it; Russian answers, unless nothing Russian is
+    /// With my language not Russian, a Russian word is looked up as a
+    /// Russian word into my language whatever is pressed, once, with no
+    /// other language after it; Russian answers, unless nothing Russian is
     /// imported, which names the pair as before.
     #[test]
-    fn a_russian_word_with_russian_pressed_gets_its_russian_article() {
+    fn a_russian_word_gets_its_russian_article_whatever_is_pressed() {
         let grouped = addict_dictionary::lookup::Grouped {
             definitions: Some(Vec::new()),
             translations: vec![(Language::En, vec!["dog".to_owned()])],
             ..Default::default()
         };
         let file = crate::dictionaries::IndexFile::of(addict_dictionary::import::Source::KaikkiRu);
-        for my in [Language::En, Language::Es, Language::Ca] {
+        for (my, pressed) in [Language::En, Language::Es, Language::Ca]
+            .into_iter()
+            .flat_map(|my| Language::ALL.map(|pressed| (my, pressed)))
+        {
             for (answer, answered, shown) in [
                 (
                     Answer::Grouped(grouped.clone()),
@@ -1154,13 +1170,40 @@ pub(crate) mod tests {
             ] {
                 let asked = std::sync::Arc::default();
                 let articles = RussianArticle(answer, Arc::clone(&asked));
-                let (language, outcome) = answered_for(articles, Language::Ru, my, "соба\u{301}ка");
-                assert_eq!(language, answered, "{my:?}");
+                let (language, outcome) = answered_for(articles, pressed, my, "соба\u{301}ка");
+                assert_eq!(language, answered, "{my:?} {pressed:?}");
                 assert_eq!(*asked.lock().expect("asked"), [(Language::Ru, my)]);
                 assert_eq!(
                     result_in(outcome, "соба\u{301}ка", language),
                     Some(shown),
-                    "{my:?}"
+                    "{my:?} {pressed:?}"
+                );
+            }
+        }
+        // Whatever the indexes of the pressed language stand at, also
+        // unknown: a missing or damaged Spanish index hides nothing.
+        for known in [
+            None,
+            Some(with_spanish(State::Missing)),
+            Some(with_spanish(State::Unreadable)),
+            Some(with_catalan(State::Missing)),
+        ] {
+            for pressed in [Language::Es, Language::Ca] {
+                let asked = std::sync::Arc::default();
+                let articles = RussianArticle(Answer::Grouped(grouped.clone()), Arc::clone(&asked));
+                let (language, outcome) =
+                    answered_knowing(articles, pressed, Language::En, known, "собака");
+                assert_eq!(language, Language::Ru, "{pressed:?} {known:?}");
+                assert_eq!(
+                    *asked.lock().expect("asked"),
+                    [(Language::Ru, Language::En)]
+                );
+                assert_eq!(
+                    result_in(outcome, "собака", language),
+                    Some(Lookup::Grouped {
+                        language: Language::Ru,
+                        grouped: grouped.clone(),
+                    })
                 );
             }
         }
@@ -1169,7 +1212,7 @@ pub(crate) mod tests {
             None,
             std::sync::Arc::new(Unasked),
             "собака".to_owned(),
-            Language::Ru,
+            Language::Es,
             Language::En,
             None,
             |_, _| panic!("a lookup ended"),
