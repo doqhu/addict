@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/doqhu/addict/compare/v0.4.0...v0.4.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **appimage:** pin libaom 3.15.3, as Koji dropped the signed 3.15.2 copy ([#30](https://github.com/doqhu/addict/issues/30)) ([4ad29f9](https://github.com/doqhu/addict/commit/4ad29f9c73a21fa6bdc66c0c9b49e2c333563988))
+
 ## [0.4.0](https://github.com/doqhu/addict/compare/v0.3.1...v0.4.0) (2026-11-19)
 
 
