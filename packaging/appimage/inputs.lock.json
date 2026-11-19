@@ -741,9 +741,9 @@
       "sha256": "942fa1f926548271b4a7879ed1f123e0af6cac7d04aa5886826374b6e1bf9d38"
     },
     {
-      "file": "libaom-3.15.2-1.fc43.x86_64.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/aom/3.15.2/1.fc43/data/signed/31645531/x86_64/libaom-3.15.2-1.fc43.x86_64.rpm",
-      "sha256": "4f1c1de71bd9eb8849b0f240dfee67e9bd80a7d532956761f6e5c3f3085e43a6"
+      "file": "libaom-3.15.3-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/aom/3.15.3/1.fc43/data/signed/31645531/x86_64/libaom-3.15.3-1.fc43.x86_64.rpm",
+      "sha256": "21d907b6b2f13d33df4c471ed36df3df38bc3fc7c219cfbc3939679ae6a61302"
     },
     {
       "file": "libattr-2.6.0-1.fc43.x86_64.rpm",
