@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/doqhu/addict/compare/v0.3.1...v0.4.0) (2026-11-19)
+
+
+### Features
+
+* keep the shortcut names fixed on Hyprland and say how to bind them ([#28](https://github.com/doqhu/addict/issues/28)) ([fd1dc4f](https://github.com/doqhu/addict/commit/fd1dc4f608eb1c6ff5353d6e62303066194d79cb))
+* offline pairs — offline translations for all 12 pairs (epic 3) ([#27](https://github.com/doqhu/addict/issues/27)) ([5b04e19](https://github.com/doqhu/addict/commit/5b04e194fbec33e9eb87adb3d8178cf206c30fc6))
+
 ## [0.3.1](https://github.com/doqhu/addict/compare/v0.3.0...v0.3.1) (2026-11-17)
 
 
