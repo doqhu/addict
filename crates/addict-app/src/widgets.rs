@@ -29,7 +29,9 @@
 
 use std::{
     cell::{Cell, RefCell},
+    fs::File,
     ops::Range,
+    os::fd::AsRawFd,
     rc::Rc,
 };
 
@@ -650,8 +652,31 @@ fn show_more_toggle(
 
 pub type CreditReady = Box<dyn FnOnce(Credit)>;
 type FetchCredit = dyn Fn(CommonsFile, CreditReady) -> Option<Job>;
-pub type AudioReady = Box<dyn FnOnce(Result<gtk::MediaFile, AudioFailure>)>;
+pub type AudioReady = Box<dyn FnOnce(Result<PlaybackMedia, AudioFailure>)>;
 type FetchAudio = dyn Fn(String, AudioReady) -> Option<Job>;
+
+pub struct PlaybackMedia {
+    stream: gtk::MediaFile,
+    // Keep the anonymous file open until GTK has stopped using its URI.
+    _recording: Option<File>,
+}
+
+impl PlaybackMedia {
+    pub fn from_recording(recording: File) -> Self {
+        let filename = format!("/proc/self/fd/{}", recording.as_raw_fd());
+        Self {
+            stream: gtk::MediaFile::for_filename(filename),
+            _recording: Some(recording),
+        }
+    }
+
+    fn from_stream(stream: gtk::MediaFile) -> Self {
+        Self {
+            stream,
+            _recording: None,
+        }
+    }
+}
 
 /// One stream and its credit request, if any.
 struct Player {
@@ -663,7 +688,7 @@ struct Player {
 
 #[derive(Default)]
 struct Playback {
-    stream: RefCell<Option<gtk::MediaFile>>,
+    stream: RefCell<Option<PlaybackMedia>>,
     failed: Cell<bool>,
     job: RefCell<Option<Job>>,
 }
@@ -683,9 +708,9 @@ impl Player {
             let stream = attempt.stream.take();
             // Invalidate callbacks and cancel the pending job before notifying GTK.
             drop(attempt);
-            if let Some(stream) = stream {
-                stream.pause();
-                stream.clear();
+            if let Some(media) = stream {
+                media.stream.pause();
+                media.stream.clear();
             }
         }
     }
@@ -824,7 +849,7 @@ fn play_button(
                 };
                 attempt.job.take();
                 match result {
-                    Ok(stream) => play_stream(stream, &player, &attempt, &button, commons, remote),
+                    Ok(media) => play_stream(media, &player, &attempt, &button, commons, remote),
                     Err(failure) => {
                         let text =
                             if !(player.network_available)() || failure == AudioFailure::Network {
@@ -845,7 +870,9 @@ fn play_button(
                 opened(Err(AudioFailure::Failed));
             }
         } else {
-            opened(Ok(gtk::MediaFile::for_file(&gio::File::for_uri(&url))));
+            opened(Ok(PlaybackMedia::from_stream(gtk::MediaFile::for_file(
+                &gio::File::for_uri(&url),
+            ))));
         }
     });
     button
@@ -854,14 +881,15 @@ fn play_button(
 type CommonsLink = (CommonsFile, glib::WeakRef<gtk::LinkButton>);
 
 fn play_stream(
-    stream: gtk::MediaFile,
+    media: PlaybackMedia,
     player: &Rc<Player>,
     attempt: &Rc<Playback>,
     button: &gtk::Button,
     commons: Option<CommonsLink>,
     remote: bool,
 ) {
-    attempt.stream.replace(Some(stream.clone()));
+    let stream = media.stream.clone();
+    attempt.stream.replace(Some(media));
     let link = commons.as_ref().map(|(_, link)| link.clone());
     let failed = {
         let button = button.downgrade();
@@ -2445,7 +2473,7 @@ mod tests {
     use addict_engine::recording::{AudioFailure, CommonsFile, Credit};
     use gtk::{gio, glib, prelude::*};
 
-    use super::{CreditReady, View, fill_listed};
+    use super::{CreditReady, PlaybackMedia, View, fill_listed};
     use crate::view::{
         BACK_TOOLTIP, COPIED_LABEL, COPY_LABEL, FORWARD_TOOLTIP, Listed, PLAY_TOOLTIP,
         PLAYBACK_FAILED, RECORDING_NEEDS_NETWORK, SHOW_LESS,
@@ -2723,7 +2751,7 @@ mod tests {
                     online.set(false);
                     ready(Err(failure));
                 } else {
-                    ready(Ok(gtk::MediaFile::new()));
+                    ready(Ok(PlaybackMedia::from_stream(gtk::MediaFile::new())));
                 }
                 None
             }
@@ -2777,6 +2805,7 @@ mod tests {
                 .borrow()
                 .as_ref()
                 .expect("opened stream")
+                .stream
                 .clone()
         };
         let finish = || {

@@ -139,7 +139,10 @@
 
 use std::{
     cell::{Cell, RefCell},
+    fs::File,
     future::Future,
+    io::{self, Write},
+    os::fd::FromRawFd,
     process::ExitCode,
     rc::{Rc, Weak},
     sync::Arc,
@@ -195,7 +198,7 @@ use crate::{
         Binding, Choice, Held, Lookup, NOTHING_SELECTED_TEXT, Online, Shown, command_in,
         failure_text, too_long_text,
     },
-    widgets::View,
+    widgets::{PlaybackMedia, View},
 };
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
@@ -3245,6 +3248,30 @@ fn start_work() -> Option<Rc<Work>> {
     }
 }
 
+/// GTK 4.20's GStreamer backend needs a file URI even for buffered audio.
+/// An anonymous file gives it a seekable source and disappears when closed.
+fn buffer_recording(audio: &[u8]) -> io::Result<File> {
+    let create = |flags| {
+        // SAFETY: The name is NUL-terminated. A nonnegative result is a new fd.
+        let fd = unsafe { libc::memfd_create(c"addict-recording".as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: This takes sole ownership of the newly created fd.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    };
+    let mut file = create(libc::MFD_CLOEXEC | libc::MFD_NOEXEC_SEAL).or_else(|error| {
+        if error.raw_os_error() == Some(libc::EINVAL) {
+            // Older kernels do not recognize MFD_NOEXEC_SEAL.
+            create(libc::MFD_CLOEXEC)
+        } else {
+            Err(error)
+        }
+    })?;
+    file.write_all(audio)?;
+    Ok(file)
+}
+
 /// Moves the outcome of a recording request from the worker to GTK.
 fn start_recording_job<T: Send + 'static>(
     work: &Work,
@@ -3452,7 +3479,13 @@ fn start(
                 Some(start_recording_job(
                     &work,
                     AUDIO_LIMIT,
-                    fetch_audio(url),
+                    async move {
+                        let audio = fetch_audio(url).await?;
+                        buffer_recording(&audio).map_err(|error| {
+                            eprintln!("addict: could not buffer recording: {error}");
+                            AudioFailure::Failed
+                        })
+                    },
                     move |outcome| {
                         let result = match outcome {
                             Outcome::Finished(audio) => audio,
@@ -3460,11 +3493,7 @@ fn start(
                             Outcome::TimedOut => Err(AudioFailure::Network),
                             Outcome::Panicked => Err(AudioFailure::Failed),
                         };
-                        ready(result.map(|audio| {
-                            let bytes = glib::Bytes::from_owned(audio);
-                            let input = gio::MemoryInputStream::from_bytes(&bytes);
-                            gtk::MediaFile::for_input_stream(&input)
-                        }));
+                        ready(result.map(PlaybackMedia::from_recording));
                     },
                 ))
             }
@@ -3814,6 +3843,16 @@ mod tests {
         Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
     };
     use addict_core::translation::Source as Language;
+
+    #[test]
+    fn buffered_recording_can_be_reopened_from_the_beginning() {
+        use std::os::fd::AsRawFd;
+
+        let audio = b"buffered recording";
+        let file = super::buffer_recording(audio).expect("recording descriptor");
+        let path = format!("/proc/self/fd/{}", file.as_raw_fd());
+        assert_eq!(std::fs::read(path).unwrap(), audio);
+    }
 
     #[tokio::test]
     async fn import_completion_refreshes_missing_languages_before_the_next_lookup() {
