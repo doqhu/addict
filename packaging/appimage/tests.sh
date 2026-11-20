@@ -143,6 +143,8 @@ files = ['AppRun', 'AppRun.sh', 'sharun', 'dash', 'bin/addict', 'shared/bin/addi
          'share/licenses/ocr/tesseract/LICENSE', 'share/licenses/ocr/leptonica/LICENSE',
          'share/licenses/ocr/tessdata-LICENSE',
          'lib/libgtk-4.so.1', 'lib/libGLESv2.so.2', 'lib/libvulkan_lvp.so',
+         'lib/gstreamer-1.0/libgstautodetect.so', 'lib/gstreamer-1.0/libgstpulseaudio.so',
+         'lib/gstreamer-1.0/libgstogg.so', 'lib/gstreamer-1.0/libgstvorbis.so',
          'share/vulkan/icd.d/lvp_icd.x86_64.json', 'lib/libc.so.6', 'lib/ld-linux-x86-64.so.2',
          'share/glib-2.0/schemas/gschemas.compiled', 'etc/fonts/fonts.conf',
          'share/fonts/test.ttf', 'share/icons/hicolor/256x256/apps/io.github.doqhu.Addict.png',
@@ -194,6 +196,12 @@ inventory.write_text(json.dumps({'schema': 1, 'components': components, 'files':
 PY
 check=("$root/scripts/check-appimage.sh" --appdir "$work/AppDir")
 "${check[@]}" > /dev/null
+for plugin in autodetect pulseaudio ogg vorbis; do
+    path="lib/gstreamer-1.0/libgst$plugin.so"
+    mv "$work/AppDir/$path" "$work/removed"
+    refuse "missing component: $path" "${check[@]}"
+    mv "$work/removed" "$work/AppDir/$path"
+done
 for path in bin/tesseract shared/bin/tesseract lib/libtesseract.so.5 lib/libleptonica.so.6 share/tessdata/eng.traineddata share/tessdata/spa.traineddata share/tessdata/cat.traineddata share/tessdata/rus.traineddata lib/libgtk-4.so.1 lib/libGLESv2.so.2 lib/libvulkan_lvp.so lib/libc.so.6 lib/ld-linux-x86-64.so.2 share/glib-2.0/schemas/gschemas.compiled etc/fonts/fonts.conf; do
     mv "$work/AppDir/$path" "$work/removed"
     refuse 'missing \(component\|OCR dependency\):' "${check[@]}"

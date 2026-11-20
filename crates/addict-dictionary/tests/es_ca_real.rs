@@ -78,7 +78,7 @@ fn open_indexes(language: Language) -> Vec<(Kind, Index)> {
         .filter(|source| source.language() == Some(language))
         .filter(|source| match source.kind() {
             Kind::Translation(target) => target == Language::Ru,
-            Kind::Definitions | Kind::Synonyms | Kind::English | Kind::FromRussian => true,
+            Kind::Definitions | Kind::Synonyms | Kind::English => true,
         })
         .map(|source| {
             let path = dir.join(source.index_name());

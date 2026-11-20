@@ -26,12 +26,13 @@
 //! for a word of my language. Definitions, synonyms and English glosses
 //! are asked regardless of the target.
 //!
-//! A Russian word is looked up in the one index of Russian headwords
-//! translated into a language ([`Articles::look_up_russian`]), the source of
-//! the pair (Russian, that language), and in nothing else: no other language
-//! is asked for it, and no other index for a word read in a language. The
-//! Russian indexes are opened when they are first asked. [`Indexes`] records
-//! their presence without opening them.
+//! Russian is grouped as Spanish and Catalan are: a Cyrillic word read in
+//! Russian by someone whose own language is another is looked up in the
+//! Russian definitions and in the translations of the pair (Russian, my
+//! language) ([`Articles::look_up_for`]); a Latin word is never looked up in
+//! a Russian index. With Russian as my language, a Russian word is looked
+//! up in the one index of Russian headwords translated into the pressed
+//! language ([`Articles::look_up_russian`]), and in nothing else.
 //!
 //! Everything here opens or reads files, so it is called on the work runner
 //! and never on the UI thread. Starting a lookup there is
@@ -42,7 +43,10 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-use addict_core::{dictionary::Article, translation::Source as Language};
+use addict_core::{
+    dictionary::Article,
+    translation::{Source as Language, is_russian},
+};
 use addict_dictionary::{
     Combined, Error, Index,
     import::{self, Kind, Source},
@@ -349,9 +353,6 @@ struct Opened {
     /// The sources in `grouped_sources` whose file could not be opened by
     /// the last check, or failed a lookup since.
     unreadable: Vec<Source>,
-    /// The open indexes of Russian headwords, by source: each is opened by
-    /// the first lookup that asks it, and closed when it fails one.
-    russian: Vec<(Source, Index)>,
 }
 
 impl Opened {
@@ -391,8 +392,10 @@ impl Opened {
 fn grouped_sources() -> Vec<Source> {
     let mut sources = Vec::new();
     for known in import::KNOWN {
-        let grouped = matches!(known.source.language(), Some(Language::Es | Language::Ca))
-            || matches!(known.source, Source::WikdictEnEs | Source::WikdictEnCa);
+        let grouped = matches!(
+            known.source.language(),
+            Some(Language::Es | Language::Ca | Language::Ru)
+        ) || matches!(known.source, Source::WikdictEnEs | Source::WikdictEnCa);
         if grouped && !sources.contains(&known.source) {
             sources.push(known.source);
         }
@@ -488,20 +491,6 @@ impl Dictionaries {
         if translations != State::Missing {
             presence = presence.with(Source::Freedict);
         }
-        for source in Language::ALL
-            .into_iter()
-            .flat_map(|into| pairs::translations(Language::Ru, into))
-            .copied()
-        {
-            let open = opened.russian.iter().any(|(kept, _)| *kept == source);
-            if open
-                || self
-                    .path(source)
-                    .is_some_and(|path| path.try_exists().unwrap_or(true))
-            {
-                presence = presence.with(source);
-            }
-        }
         opened.languages(Indexes {
             definitions,
             translations,
@@ -590,38 +579,36 @@ impl Dictionaries {
     }
 
     /// What the Russian index translated into `into` says about the Russian
-    /// `word`; see [`Articles::look_up_russian`]. It is opened when it is
-    /// not open yet; one that could not be read is closed, and opened again
-    /// by the next call. Where the other indexes stand is checked as by
-    /// every call, and the Russian index changes none of it.
+    /// `word`; see [`Articles::look_up_russian`]. It is read among the
+    /// grouped indexes, as [`Dictionaries::look_up_language`] reads them:
+    /// one that could not be read is named, closed, and opened again by the
+    /// next call.
     fn look_up_russian_in(&self, into: Language, word: &str) -> Looked {
         let mut opened = self.open.lock().unwrap_or_else(PoisonError::into_inner);
         let indexes = self.open_missing(&mut opened);
-        let looked = |answer| Looked { answer, indexes };
+        let looked = |answer, opened: &Opened| Looked {
+            answer,
+            indexes: opened.languages(indexes),
+        };
         let Some(&source) = pairs::translations(Language::Ru, into).first() else {
-            return looked(Answer::NotImported);
+            return looked(Answer::NotImported, &opened);
         };
-        let open = opened.russian.iter().any(|(kept, _)| *kept == source);
-        let mut index = None;
-        match self.open(source, open, |opened| index = Some(opened)) {
-            State::Open => {}
-            State::Missing => return looked(Answer::NotImported),
-            State::Unreadable => return looked(Answer::Unreadable(IndexFile::of(source))),
+        if opened.unreadable.contains(&source) {
+            return looked(Answer::Unreadable(IndexFile::of(source)), &opened);
         }
-        if let Some(index) = index {
-            opened.russian.push((source, index));
-        }
-        let Some((_, index)) = opened.russian.iter().find(|(kept, _)| *kept == source) else {
-            return looked(Answer::NotImported);
+        let Some((_, index)) = opened.grouped.iter().find(|(kept, _)| *kept == source) else {
+            return looked(Answer::NotImported, &opened);
         };
-        looked(match lookup::russian(index, word) {
+        let answer = match lookup::russian(index, word) {
             Ok(Some(translations)) => Answer::FromRussian(translations),
             Ok(None) => Answer::NoEntry,
             Err(_) => {
-                opened.russian.retain(|(kept, _)| *kept != source);
+                opened.grouped.retain(|(kept, _)| *kept != source);
+                opened.unreadable.push(source);
                 Answer::Unreadable(IndexFile::of(source))
             }
-        })
+        };
+        looked(answer, &opened)
     }
 }
 
@@ -635,7 +622,7 @@ fn asked_for(source: Source, my: Language) -> bool {
         Kind::Translation(_) => source
             .language()
             .is_some_and(|language| pairs::translations(language, my).contains(&source)),
-        Kind::Definitions | Kind::Synonyms | Kind::English | Kind::FromRussian => true,
+        Kind::Definitions | Kind::Synonyms | Kind::English => true,
     }
 }
 
@@ -658,7 +645,19 @@ impl Articles for Dictionaries {
             (Language::En, Language::Es | Language::Ca) | (Language::Es | Language::Ca, _) => {
                 self.look_up_language(language, target, word)
             }
-            (Language::Ru, _) => Looked {
+            // A Latin word is never asked of a Russian index, and Russian
+            // has no pair with itself.
+            (Language::Ru, Language::En | Language::Es | Language::Ca) => {
+                if is_russian(word) {
+                    self.look_up_language(language, target, word)
+                } else {
+                    Looked {
+                        answer: Answer::NotImported,
+                        indexes: self.indexes(),
+                    }
+                }
+            }
+            (Language::Ru, Language::Ru) => Looked {
                 answer: Answer::NotImported,
                 indexes: self.indexes(),
             },
@@ -734,11 +733,13 @@ pub mod tests {
     };
 
     use addict_core::{
-        dictionary::{Article, Dictionary, Sample, Sense},
+        dictionary::{
+            Article, Audio, Dictionary, EntryIdentity, LexicalEntry, Pronunciation, Sample, Sense,
+        },
         translation::{Source as Language, reading_languages},
     };
     use addict_dictionary::{
-        format::{Contents, ExceptionForm, Headword, SenseRecord, encode},
+        format::{Contents, EntryRecord, ExceptionForm, Headword, SenseRecord, encode},
         import::{self, Source},
     };
 
@@ -858,11 +859,13 @@ pub mod tests {
                     "ca-en",
                     &[("col·lecció", &[("collection", &[]), ("set", &[])], &[])],
                 ),
+                Source::KaikkiRu => russian_article(),
                 Source::WikdictRuEn => headwords(
                     "ru-en",
                     &[
                         ("Москва", &[], &["Moscow", "Moskva"]),
                         ("банк", &[], &["bank"]),
+                        ("собака", &[], &["dog", "hound"]),
                     ],
                 ),
                 Source::WikdictRuEs => headwords(
@@ -970,6 +973,56 @@ pub mod tests {
             forms: Vec::new(),
         }
     }
+
+    /// What a `kaikki-ru-Russkiy` import writes, in small: `собака` with
+    /// two senses, synonyms in the first, and a transcription with a
+    /// recording; `дом` with one sense.
+    fn russian_article() -> Contents {
+        let mut contents = headwords(
+            "ru-def",
+            &[
+                (
+                    "собака",
+                    &[
+                        ("Домашнее животное.", &["пёс", "псина"]),
+                        ("Презренный человек.", &[]),
+                    ],
+                    &[],
+                ),
+                ("дом", &[("Жилое здание.", &[])], &[]),
+            ],
+        );
+        let dog = contents
+            .headwords
+            .iter_mut()
+            .find(|headword| headword.word == "собака")
+            .expect("собака");
+        dog.entries = vec![EntryRecord {
+            entry: LexicalEntry {
+                identity: EntryIdentity {
+                    source: "ru-def".to_owned(),
+                    headword: "собака".to_owned(),
+                    id: "line-1".to_owned(),
+                },
+                part_of_speech: None,
+                pronunciations: vec![Pronunciation {
+                    text: Some("[sɐˈbakə]".to_owned()),
+                    notation: Some("IPA".to_owned()),
+                    audio: vec![Audio {
+                        url: RU_DOG_OGG.to_owned(),
+                        format: Some("ogg".to_owned()),
+                    }],
+                    ..Default::default()
+                }],
+            },
+            senses: dog.senses.clone(),
+        }];
+        contents
+    }
+
+    /// The recording of `собака` in [`russian_article`].
+    pub(crate) const RU_DOG_OGG: &str =
+        "https://commons.wikimedia.org/wiki/Special:FilePath/Ru-собака.ogg";
 
     /// What a `kaikki-es-Espanol` import writes, in small: `bank` is a
     /// Spanish word too here, to show that no English article is read.
@@ -1239,7 +1292,7 @@ pub mod tests {
     const NEITHER: Indexes = Indexes::MISSING;
 
     #[test]
-    fn required_index_presence_keeps_russian_indexes_lazy() {
+    fn required_index_presence_follows_the_files() {
         let dir = DataDir::new("required");
         let dictionaries = dir.dictionaries();
         let empty = dictionaries.indexes();
@@ -1252,21 +1305,25 @@ pub mod tests {
         assert!(present.required_indexes_missing(Language::En));
         assert!(!present.required_indexes_missing(Language::Ru));
         assert!(!present.required_indexes_missing(Language::Es));
-        assert!(dictionaries.open.lock().unwrap().russian.is_empty());
 
+        // The Russian indexes are opened as the Spanish ones are: an open
+        // one stays present for this instance, a new one sees the files.
         std::fs::remove_file(dir.index(Source::WikdictRuEs)).unwrap();
+        let dictionaries = dir.dictionaries();
         assert!(
             dictionaries
                 .indexes()
                 .required_indexes_missing(Language::Ru)
         );
+        // The Russian article index is present once imported.
+        dir.import(Source::KaikkiRu);
+        assert!(dictionaries.indexes().presence.contains(Source::KaikkiRu));
         std::fs::create_dir(dir.index(Source::WikdictRuEs)).unwrap();
         assert!(
             !dictionaries
                 .indexes()
                 .required_indexes_missing(Language::Ru)
         );
-        assert!(dictionaries.open.lock().unwrap().russian.is_empty());
 
         std::fs::write(dir.index(Source::WikdictEnCa), b"not an index").unwrap();
         assert!(
@@ -2046,7 +2103,6 @@ pub mod tests {
                     .synonyms
                     .push("synonym".to_owned()),
                 Kind::English => useful.english.as_mut().unwrap().push("gloss".to_owned()),
-                Kind::FromRussian => unreachable!("not a reading-language content kind"),
             }
             assert!(!Answer::Grouped(useful).metadata_only(), "{kind:?}");
         }
@@ -2144,7 +2200,11 @@ pub mod tests {
     fn with_russian(tag: &str, russian: &[Source]) -> DataDir {
         let dir = DataDir::new(tag);
         for known in import::KNOWN {
-            if known.source.language().is_some() {
+            if known
+                .source
+                .language()
+                .is_some_and(|language| language != Language::Ru)
+            {
                 dir.import(known.source);
             }
         }
@@ -2196,7 +2256,7 @@ pub mod tests {
             assert_eq!(looked.indexes, indexes, "{word}");
         }
         // Only the chosen language answers: no fallback to the others.
-        assert_eq!(russian(Language::En, "собака").answer, Answer::NoEntry);
+        assert_eq!(russian(Language::En, "дом").answer, Answer::NoEntry);
         assert_eq!(russian(Language::Ca, "Москва").answer, Answer::NoEntry);
         assert_eq!(russian(Language::Es, "собаки").answer, Answer::NoEntry);
         // A word read in a language never reaches a Russian index.
@@ -2211,10 +2271,278 @@ pub mod tests {
             banco.translations_into(Language::Ru),
             Some(texts(&["банк"]).as_slice())
         );
+        // They are grouped as the Spanish and Catalan ones are.
         assert!(
-            !grouped_sources()
+            RUSSIAN
                 .iter()
-                .any(|source| RUSSIAN.contains(source))
+                .all(|source| grouped_sources().contains(source))
+        );
+    }
+
+    /// The Russian article of `собака` from [`russian_article`].
+    fn dog_senses() -> Vec<Sense> {
+        let entry = vec![EntryIdentity {
+            source: "ru-def".to_owned(),
+            headword: "собака".to_owned(),
+            id: "line-1".to_owned(),
+        }];
+        vec![
+            Sense {
+                part_of_speech: None,
+                entries: entry.clone(),
+                definition: "Домашнее животное.".to_owned(),
+                synonyms: texts(&["пёс", "псина"]),
+            },
+            Sense {
+                part_of_speech: None,
+                entries: entry,
+                definition: "Презренный человек.".to_owned(),
+                synonyms: Vec::new(),
+            },
+        ]
+    }
+
+    /// English mine, Russian pressed: a Cyrillic word, stressed or not, is
+    /// looked up as a Russian word in the Russian article and
+    /// `wikdict-ru-en`, and in nothing else.
+    #[test]
+    fn a_russian_word_gets_its_article_and_the_translations_into_my_language() {
+        let dir = with_russian("russian-article", &[Source::KaikkiRu, Source::WikdictRuEn]);
+        let dictionaries = dir.dictionaries();
+        for word in ["собака", "соба\u{301}ка", "«Собака»,"] {
+            let Answer::Grouped(dog) = dictionaries
+                .look_up_for(Language::Ru, Language::En, word)
+                .answer
+            else {
+                panic!("{word}");
+            };
+            assert_eq!(dog.definitions, Some(dog_senses()), "{word}");
+            assert_eq!(dog.translations, [(Language::En, texts(&["dog", "hound"]))]);
+            assert_eq!(dog.entries.len(), 1, "{word}");
+            assert_eq!(
+                dog.entries[0].pronunciations[0].audio[0].url, RU_DOG_OGG,
+                "{word}"
+            );
+            assert_eq!((dog.synonyms, dog.english, dog.verb), (None, None, None));
+        }
+        // Not in either: no entry, and no other language is asked.
+        assert_eq!(
+            dictionaries
+                .look_up_for(Language::Ru, Language::En, "кошка")
+                .answer,
+            Answer::NoEntry
+        );
+        // A Latin word is never asked of a Russian index, and falls back.
+        assert_eq!(
+            dictionaries
+                .look_up_for(Language::Ru, Language::En, "bank")
+                .answer,
+            Answer::NotImported
+        );
+        let (language, looked) = dictionaries.look_up_first(Language::Ru, Language::En, "bank");
+        assert_eq!(language, Language::En);
+        assert!(matches!(looked.answer, Answer::Article(_)), "{looked:?}");
+        // Russian has no pair with itself.
+        assert_eq!(
+            dictionaries
+                .look_up_for(Language::Ru, Language::Ru, "собака")
+                .answer,
+            Answer::NotImported
+        );
+    }
+
+    /// Either Russian index alone answers with its part; neither is
+    /// nothing to look the word up in.
+    #[test]
+    fn a_russian_word_has_the_part_of_each_russian_index_there_is() {
+        let article = with_russian("russian-article-only", &[Source::KaikkiRu]);
+        let Answer::Grouped(dog) = article
+            .dictionaries()
+            .look_up_for(Language::Ru, Language::En, "собака")
+            .answer
+        else {
+            panic!("the article alone");
+        };
+        assert_eq!(dog.definitions, Some(dog_senses()));
+        assert_eq!(dog.translations_into(Language::En), None);
+
+        let translations = with_russian("russian-translations-only", &[Source::WikdictRuEn]);
+        let Answer::Grouped(dog) = translations
+            .dictionaries()
+            .look_up_for(Language::Ru, Language::En, "собака")
+            .answer
+        else {
+            panic!("the translations alone");
+        };
+        assert_eq!(dog.definitions, None);
+        assert_eq!(
+            dog.translations_into(Language::En),
+            Some(texts(&["dog", "hound"]).as_slice())
+        );
+        assert!(dog.entries.is_empty());
+
+        // The other pairs' Russian indexes are not asked for English mine.
+        let neither = with_russian("russian-neither", &[Source::WikdictRuEs]);
+        assert_eq!(
+            neither
+                .dictionaries()
+                .look_up_for(Language::Ru, Language::En, "собака")
+                .answer,
+            Answer::NotImported
+        );
+    }
+
+    /// A damaged Russian article index is named, closed, and opened again
+    /// by the next lookup once it is imported again.
+    #[test]
+    fn a_damaged_russian_article_index_is_named_closed_and_opened_again() {
+        let dir = with_russian("russian-damaged", &[Source::KaikkiRu, Source::WikdictRuEn]);
+        let dictionaries = dir.dictionaries();
+        assert!(matches!(
+            dictionaries
+                .look_up_for(Language::Ru, Language::En, "собака")
+                .answer,
+            Answer::Grouped(_)
+        ));
+        std::fs::write(dir.index(Source::KaikkiRu), b"no index").expect("damage");
+        let damaged = Dictionaries::new(Some(dir.path().to_owned()));
+        let file = IndexFile::of(Source::KaikkiRu);
+        assert_eq!(file.index, "kaikki-ru-Russkiy.index");
+        assert_eq!(
+            damaged
+                .look_up_for(Language::Ru, Language::En, "собака")
+                .answer,
+            Answer::Unreadable(file)
+        );
+        // Not named for Russian mine, which does not ask it.
+        assert_eq!(
+            damaged.look_up_russian(Language::En, "собака").answer,
+            Answer::FromRussian(texts(&["dog", "hound"]))
+        );
+        dir.import(Source::KaikkiRu);
+        assert!(matches!(
+            damaged
+                .look_up_for(Language::Ru, Language::En, "собака")
+                .answer,
+            Answer::Grouped(_)
+        ));
+    }
+
+    /// Russian mine, Spanish pressed: `собака` is the list of
+    /// `wikdict-ru-es`, as in 0.4.1, whatever the Russian article index.
+    #[test]
+    fn a_russian_word_for_russian_mine_is_the_list_of_the_pressed_language() {
+        let mut russian = RUSSIAN.to_vec();
+        russian.push(Source::KaikkiRu);
+        let dir = with_russian("russian-mine", &russian);
+        let into = crate::manual::russian_into(Language::Es, Language::Ru);
+        assert_eq!(
+            dir.dictionaries().look_up_russian(into, "собака").answer,
+            Answer::FromRussian(texts(&["perro", "cachorro", "arroba"]))
+        );
+    }
+
+    /// The language that answered the offline lookup of `word` in
+    /// `dictionaries` with `pressed` pressed and `my` mine, and what the
+    /// window shows of it.
+    fn shown_offline(
+        dictionaries: Dictionaries,
+        pressed: Language,
+        my: Language,
+        word: &str,
+    ) -> (Language, Option<crate::view::Lookup>) {
+        let work = addict_platform::work::Work::start().expect("runner");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let known = dictionaries.indexes();
+        let job = crate::manual::offline(
+            Some(&work),
+            std::sync::Arc::new(dictionaries),
+            word.to_owned(),
+            pressed,
+            my,
+            Some(known),
+            move |answered, outcome| {
+                let _ = sender.send((answered, outcome));
+            },
+        )
+        .expect("job");
+        let (answered, outcome) = receiver
+            .recv_timeout(crate::manual::tests::WAIT)
+            .expect("outcome");
+        drop(job);
+        (answered, crate::manual::result_in(outcome, word, answered))
+    }
+
+    /// English mine, Spanish, Catalan or English pressed: `собака` is its
+    /// Russian article with the English translations, and nothing of the
+    /// Spanish indexes; without the article index, the translations alone.
+    #[test]
+    fn a_russian_word_gets_its_russian_article_whatever_is_pressed() {
+        use crate::view::Lookup;
+        let dir = with_russian(
+            "russian-any-pressed",
+            &[Source::KaikkiRu, Source::WikdictRuEn],
+        );
+        for pressed in [Language::Es, Language::Ca, Language::En] {
+            let (answered, shown) =
+                shown_offline(dir.dictionaries(), pressed, Language::En, "собака");
+            assert_eq!(answered, Language::Ru, "{pressed:?}");
+            let Some(Lookup::Grouped { language, grouped }) = shown else {
+                panic!("{pressed:?}: {shown:?}");
+            };
+            assert_eq!(language, Language::Ru);
+            assert_eq!(grouped.definitions, Some(dog_senses()));
+            assert_eq!(
+                grouped.translations,
+                [(Language::En, texts(&["dog", "hound"]))]
+            );
+        }
+        // Russian mine: the list of `wikdict-ru-es`, as before.
+        let mut russian = RUSSIAN.to_vec();
+        russian.push(Source::KaikkiRu);
+        let mine = with_russian("russian-any-pressed-mine", &russian);
+        assert_eq!(
+            shown_offline(mine.dictionaries(), Language::Es, Language::Ru, "собака"),
+            (
+                Language::Es,
+                Some(Lookup::FromRussian {
+                    language: Language::Es,
+                    translations: texts(&["perro", "cachorro", "arroba"]),
+                })
+            )
+        );
+        // No article index: the English translations alone, still Russian.
+        let translations = with_russian("russian-any-pressed-no-article", &[Source::WikdictRuEn]);
+        let (answered, shown) = shown_offline(
+            translations.dictionaries(),
+            Language::Es,
+            Language::En,
+            "собака",
+        );
+        assert_eq!(answered, Language::Ru);
+        let Some(Lookup::Grouped { language, grouped }) = shown else {
+            panic!("{shown:?}");
+        };
+        assert_eq!(language, Language::Ru);
+        assert_eq!(
+            grouped.translations,
+            [(Language::En, texts(&["dog", "hound"]))]
+        );
+        assert_eq!(grouped.definitions, None);
+        assert!(grouped.entries.is_empty());
+        assert_eq!(grouped.translations_into(Language::Es), None);
+        assert_eq!(
+            (grouped.synonyms, grouped.english, grouped.verb),
+            (None, None, None)
+        );
+        // Nothing Russian: the pair is named, in my language.
+        let neither = with_russian("russian-any-pressed-neither", &[]);
+        assert_eq!(
+            shown_offline(neither.dictionaries(), Language::Es, Language::En, "собака"),
+            (
+                Language::En,
+                Some(Lookup::NoRussianDictionary(Language::En))
+            )
         );
     }
 
@@ -2235,7 +2563,7 @@ pub mod tests {
     fn a_russian_word_is_translated_into_the_source_of_its_pair() {
         let dir = with_russian("russian-pair", &RUSSIAN);
         let dictionaries = dir.dictionaries();
-        // English mine, Spanish pressed: `wikdict-ru-en` alone.
+        // The list into English: `wikdict-ru-en` alone.
         let into = crate::manual::russian_into(Language::Es, Language::En);
         assert_eq!(into, Language::En);
         assert_eq!(
@@ -2243,7 +2571,7 @@ pub mod tests {
             Answer::FromRussian(texts(&["Moscow", "Moskva"]))
         );
         assert_eq!(
-            dictionaries.look_up_russian(into, "собака").answer,
+            dictionaries.look_up_russian(into, "дом").answer,
             Answer::NoEntry
         );
         // Russian mine: the pressed language's, as in 0.2.0.

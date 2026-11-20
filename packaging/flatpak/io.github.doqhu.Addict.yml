@@ -37,6 +37,8 @@ finish-args:
   - --share=ipc
   - --socket=wayland
   - --socket=fallback-x11
+  # Play dictionary pronunciations through the desktop audio server.
+  - --socket=pulseaudio
   - --device=dri
   # DeepL, for the online translations.
   - --share=network

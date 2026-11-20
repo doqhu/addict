@@ -2,7 +2,11 @@
 //!
 //! Each line is one entry: one word of one language in one part of speech.
 //! Only the entries of the language asked for are read, by their
-//! `lang_code`; the others are skipped. Of an entry, these fields are read,
+//! `lang_code`; the others are skipped. A line is first read for its
+//! `lang_code` alone, so the other fields of an entry of another language,
+//! which a raw extract of an edition holds in shapes of its own, are never
+//! checked; a line that is no JSON object is an error whatever its language.
+//! Of an entry, these fields are read,
 //! the same ones the selection experiment counted
 //! (EXP-9 `sources.py`, `kaikki`):
 //!
@@ -12,7 +16,8 @@
 //!   `alt_of`), such as «Plural de banco.», is a sense like the others. A
 //!   sense without a gloss is skipped;
 //! - `synonyms[]`, each with the `sense_index` of the sense it belongs to,
-//!   1-based within the entry: it is matched with the `sense_index` of the
+//!   1-based within the entry, a string or, as in the Russian edition, a
+//!   number: it is matched with the `sense_index` of the
 //!   senses, and with the place of the sense when no sense has one. A
 //!   synonym without an index, or with one that names no sense of the entry,
 //!   is dropped, and so is the word itself;
@@ -20,7 +25,11 @@
 //!   sense points at, and the `forms` list of an entry without the forms
 //!   that are table tags, inflection templates, classes, romanizations or
 //!   canonical spellings. Both sides of a pair are one word ([`is_word`]);
-//! - of an entry whose `pos` is `verb`, its `forms` again with their
+//!   Before that check, Russian pairs lose their stress and trailing
+//!   table marker, and decomposed `ё` is composed. The form key folds
+//!   `ё` into `е`;
+//! - of a Spanish or Catalan entry whose `pos` is `verb`, its `forms` again
+//!   with their
 //!   `tags`: the conjugation table, each form with what
 //!   [`analysis::from_tags`] makes of its tags, the word as its lemma. A
 //!   form that is the word itself, or not one word, or whose tags give no
@@ -31,25 +40,27 @@
 //! synonyms as members: the format's way for a source without synsets. A
 //! word whose entries give no sense is no headword. The headwords have no
 //! translations. The pairs go into the form table, a form with its lemmas in
-//! the order first seen; the lookups do not read them yet. The analyses go
-//! into the analysis table: per form its lemmas sorted, per lemma its
+//! the order first seen. The analyses go into the analysis table: per
+//! form its lemmas sorted, per lemma its
 //! shapes sorted, each once, so two rows of one analysis are one.
 //!
 //! The file is read as a stream; the headwords are held until its end,
 //! because the entries are not in the order of the index.
 
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fmt,
     io::{self, BufRead},
 };
 
 use addict_core::dictionary::{Audio, EntryIdentity, LexicalEntry, PartOfSpeech, Pronunciation};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use crate::{
     analysis::{self, Analyses, Shape},
     format::{self, AnalysedForm, Contents, EntryRecord, ExceptionForm, SenseRecord},
+    wikdict,
 };
 
 /// The analyses being gathered: per form, per lemma, the shapes.
@@ -89,12 +100,22 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// The languages whose verb tables give analyses ([`analysis::from_tags`]
+/// reads Spanish and Catalan tags).
+const ANALYSED: [&str; 2] = ["es", "ca"];
+
+/// A line read for its language alone; every other field is skipped
+/// unread.
+#[derive(Deserialize)]
+struct LangCode {
+    #[serde(default)]
+    lang_code: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct Entry {
     #[serde(default)]
     word: Option<String>,
-    #[serde(default)]
-    lang_code: Option<String>,
     #[serde(default)]
     pos: Option<String>,
     #[serde(default)]
@@ -111,7 +132,7 @@ struct Entry {
 struct Sense {
     #[serde(default)]
     glosses: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "sense_index")]
     sense_index: Option<String>,
     #[serde(default)]
     form_of: Vec<Target>,
@@ -123,8 +144,24 @@ struct Sense {
 struct Synonym {
     #[serde(default)]
     word: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "sense_index")]
     sense_index: Option<String>,
+}
+
+/// A `sense_index` as text: a string as it is, a number in decimal.
+fn sense_index<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Index {
+        Text(String),
+        Number(serde_json::Number),
+    }
+    Ok(
+        Option::<Index>::deserialize(deserializer)?.map(|index| match index {
+            Index::Text(text) => text,
+            Index::Number(number) => number.to_string(),
+        }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -244,20 +281,28 @@ pub fn parse(reader: impl BufRead, language: &str, source: &str) -> Result<Conte
         if line.trim().is_empty() {
             continue;
         }
-        let entry: Entry = serde_json::from_str(&line).map_err(|error| ParseError::Line {
+        let not_entry = |error: serde_json::Error| ParseError::Line {
             number: at + 1,
             cause: error.to_string(),
-        })?;
-        if entry.lang_code.as_deref() != Some(language) {
+        };
+        let of: LangCode = serde_json::from_str(&line).map_err(not_entry)?;
+        if of.lang_code.as_deref() != Some(language) {
             continue;
         }
+        let entry: Entry = serde_json::from_str(&line).map_err(not_entry)?;
         let Some(word) = entry.word.filter(|word| !word.trim().is_empty()) else {
             continue;
         };
         entries += 1;
 
-        add_pairs(&mut forms, &word, &entry.senses, &entry.forms);
-        if entry.pos.as_deref() == Some("verb") {
+        add_pairs(
+            &mut forms,
+            &word,
+            &entry.senses,
+            &entry.forms,
+            language == "ru",
+        );
+        if entry.pos.as_deref() == Some("verb") && ANALYSED.contains(&language) {
             add_analyses(&mut analyses, &word, &entry.forms);
         }
         let mut senses = sense_records(&word, &entry.senses, &entry.synonyms);
@@ -317,11 +362,12 @@ fn add_pairs(
     word: &str,
     senses: &[Sense],
     forms_of_entry: &[Form],
+    russian: bool,
 ) {
     for sense in senses {
         for target in sense.form_of.iter().chain(&sense.alt_of) {
             if let Some(lemma) = &target.word {
-                pair(forms, word, lemma);
+                pair(forms, word, lemma, russian);
             }
         }
     }
@@ -331,7 +377,7 @@ fn add_pairs(
             .iter()
             .any(|tag| FORMS_SKIPPED.contains(&tag.as_str()));
         if let (Some(text), false) = (&form.form, skipped) {
-            pair(forms, text, word);
+            pair(forms, text, word, russian);
         }
     }
 }
@@ -362,13 +408,31 @@ fn add_analyses(analyses: &mut Gathered, lemma: &str, forms_of_entry: &[Form]) {
 
 /// Adds `lemma` to the lemmas of `form` in `forms`, once, when the two
 /// differ and both are one word.
-fn pair(forms: &mut BTreeMap<String, Vec<String>>, form: &str, lemma: &str) {
-    if form != lemma && is_word(form) && is_word(lemma) {
-        let lemmas = forms.entry(form.to_owned()).or_default();
-        if !lemmas.iter().any(|known| known == lemma) {
-            lemmas.push(lemma.to_owned());
+fn pair(forms: &mut BTreeMap<String, Vec<String>>, form: &str, lemma: &str, russian: bool) {
+    let (form, lemma) = if russian {
+        let form = wikdict::russian_form_key(russian_form_text(form));
+        let lemma = russian_form_text(lemma);
+        if form == wikdict::russian_form_key(lemma) {
+            return;
+        }
+        (
+            Cow::Owned(form),
+            Cow::Owned(wikdict::unstressed_word(lemma)),
+        )
+    } else {
+        (Cow::Borrowed(form), Cow::Borrowed(lemma))
+    };
+    if form != lemma && is_word(&form) && is_word(&lemma) {
+        let lemmas = forms.entry(form.into_owned()).or_default();
+        if !lemmas.iter().any(|known| known == lemma.as_ref()) {
+            lemmas.push(lemma.into_owned());
         }
     }
+}
+
+fn russian_form_text(text: &str) -> &str {
+    let text = text.trim_end();
+    text.strip_suffix("^△").unwrap_or(text).trim_end()
 }
 
 /// The sense records of the entry of `word` with `senses` and `synonyms`:
@@ -469,6 +533,22 @@ pub(crate) mod tests {
         r#"{"word": "ir", "pos": "verb", "lang_code": "es", "senses": [{"glosses": ["to go"]}], "forms": [{"form": "fue", "tags": ["third-person", "singular", "indicative", "present", "perfect"]}]}"#,
         "\n",
         r#"{"word": "casa", "pos": "noun", "lang_code": "es", "senses": [{"glosses": ["house"]}], "forms": [{"form": "casas", "tags": ["plural", "indicative", "present", "third-person", "singular"]}]}"#,
+        "\n",
+    );
+
+    /// Lines in the shape of the raw ruwiktionary extract: `собака` with
+    /// synonyms whose `sense_index` is a number, an IPA and an `ogg_url`;
+    /// a headword written with a stress mark; a verb whose forms carry
+    /// tags a Spanish table would analyse; and an entry of another
+    /// language whose fields a full parse would refuse.
+    pub(crate) const RUSSIAN: &str = concat!(
+        r#"{"word": "собака", "pos": "noun", "lang_code": "ru", "senses": [{"glosses": ["домашнее животное семейства псовых"]}, {"glosses": ["презренный человек"]}], "synonyms": [{"word": "пёс", "sense_index": 1}, {"word": "псина", "sense_index": 1}, {"word": "негодяй", "sense_index": 2}, {"word": "собака", "sense_index": 1}, {"word": "шавка", "sense_index": 7}, {"word": "барбос"}], "sounds": [{"ipa": "[sɐˈbakə]", "ogg_url": "https://commons.wikimedia.org/wiki/Special:FilePath/Ru-собака.ogg", "audio": "Ru-собака.ogg"}], "forms": [{"form": "соба́ки", "tags": ["genitive", "singular"]}]}"#,
+        "\n",
+        r#"{"word": "до\u0301м", "pos": "noun", "lang_code": "ru", "senses": [{"glosses": ["жилое здание"]}]}"#,
+        "\n",
+        r#"{"word": "читать", "pos": "verb", "lang_code": "ru", "senses": [{"glosses": ["воспринимать написанное"]}], "forms": [{"form": "читаю", "tags": ["first-person", "indicative", "present", "singular"]}]}"#,
+        "\n",
+        r#"{"word": "dog", "pos": "noun", "lang_code": "en", "senses": "not a list", "synonyms": [{"word": "hound", "sense_index": {"a": 1}}]}"#,
         "\n",
     );
 
@@ -660,6 +740,66 @@ pub(crate) mod tests {
             parse(&b""[..], "es", "x"),
             Err(ParseError::NoEntry)
         ));
+    }
+
+    #[test]
+    fn only_the_lines_of_the_language_are_parsed_in_full() {
+        let contents = parse(RUSSIAN.as_bytes(), "ru", "fixture-ru").expect("parse");
+        let words: Vec<_> = contents.headwords.iter().map(|h| h.word.as_str()).collect();
+        // No `dog`, whose senses are no list; the stress mark stays here.
+        assert_eq!(words, ["до\u{301}м", "собака", "читать"]);
+        // The `en` line is no error for another language either, but the
+        // English entry itself is refused once it is read in full.
+        let error = parse(RUSSIAN.as_bytes(), "en", "x").expect_err("en");
+        assert!(
+            matches!(error, ParseError::Line { number: 4, .. }),
+            "{error}"
+        );
+        // A line that is no JSON is an error whatever the language.
+        let broken = format!("{RUSSIAN}not json\n");
+        let error = parse(broken.as_bytes(), "ru", "x").expect_err("broken");
+        assert!(
+            matches!(error, ParseError::Line { number: 5, .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_numbered_sense_index_names_the_sense_of_its_place() {
+        let contents = parse(RUSSIAN.as_bytes(), "ru", "fixture-ru").expect("parse");
+        let dog = senses_of(&contents, "собака");
+        let definitions: Vec<_> = dog.iter().map(|s| s.definition.as_str()).collect();
+        assert_eq!(
+            definitions,
+            ["домашнее животное семейства псовых", "презренный человек"]
+        );
+        // The word itself, one of no sense and one without an index are
+        // dropped.
+        assert_eq!(dog[0].members, texts(&["пёс", "псина"]));
+        assert_eq!(dog[1].members, texts(&["негодяй"]));
+        let headword = contents
+            .headwords
+            .iter()
+            .find(|headword| headword.word == "собака")
+            .expect("собака");
+        let pronunciations = &headword.entries[0].entry.pronunciations;
+        assert_eq!(pronunciations.len(), 1);
+        assert_eq!(pronunciations[0].text.as_deref(), Some("[sɐˈbakə]"));
+        assert_eq!(pronunciations[0].notation.as_deref(), Some("IPA"));
+        assert_eq!(
+            pronunciations[0].audio[0].url,
+            "https://commons.wikimedia.org/wiki/Special:FilePath/Ru-собака.ogg"
+        );
+    }
+
+    #[test]
+    fn a_russian_verb_table_gives_no_analyses() {
+        let contents = parse(RUSSIAN.as_bytes(), "ru", "fixture-ru").expect("parse");
+        assert!(contents.analyses.is_empty());
+        // The same table read as Spanish would give one.
+        let spanish = RUSSIAN.replace("\"lang_code\": \"ru\"", "\"lang_code\": \"es\"");
+        let spanish = parse(spanish.as_bytes(), "es", "x").expect("parse");
+        assert!(!spanish.analyses.is_empty());
     }
 
     #[test]

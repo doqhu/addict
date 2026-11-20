@@ -139,6 +139,10 @@
 
 use std::{
     cell::{Cell, RefCell},
+    fs::File,
+    future::Future,
+    io::{self, Write},
+    os::fd::FromRawFd,
     process::ExitCode,
     rc::{Rc, Weak},
     sync::Arc,
@@ -158,6 +162,7 @@ use addict_dictionary::{
     import,
     release::{Manifest, Published},
 };
+use addict_engine::recording::{AUDIO_LIMIT, AudioFailure, CREDIT_LIMIT, fetch_audio};
 use addict_platform::{
     ocr::OcrFailure,
     shortcut::{self, Action, Bindings, KeyOwner, ShortcutEvent, ShortcutHandle},
@@ -193,7 +198,7 @@ use crate::{
         Binding, Choice, Held, Lookup, NOTHING_SELECTED_TEXT, Online, Shown, command_in,
         failure_text, too_long_text,
     },
-    widgets::View,
+    widgets::{PlaybackMedia, View},
 };
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
@@ -3243,6 +3248,49 @@ fn start_work() -> Option<Rc<Work>> {
     }
 }
 
+/// GTK 4.20's GStreamer backend needs a file URI even for buffered audio.
+/// An anonymous file gives it a seekable source and disappears when closed.
+fn buffer_recording(audio: &[u8]) -> io::Result<File> {
+    let create = |flags| {
+        // SAFETY: The name is NUL-terminated. A nonnegative result is a new fd.
+        let fd = unsafe { libc::memfd_create(c"addict-recording".as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: This takes sole ownership of the newly created fd.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    };
+    let mut file = create(libc::MFD_CLOEXEC | libc::MFD_NOEXEC_SEAL).or_else(|error| {
+        if error.raw_os_error() == Some(libc::EINVAL) {
+            // Older kernels do not recognize MFD_NOEXEC_SEAL.
+            create(libc::MFD_CLOEXEC)
+        } else {
+            Err(error)
+        }
+    })?;
+    file.write_all(audio)?;
+    Ok(file)
+}
+
+/// Moves the outcome of a recording request from the worker to GTK.
+fn start_recording_job<T: Send + 'static>(
+    work: &Work,
+    limit: Duration,
+    run: impl Future<Output = T> + Send + 'static,
+    ready: impl FnOnce(Outcome<T>) + 'static,
+) -> Job {
+    let (send, receive) = oneshot::channel();
+    let job = work.run(limit, run, move |outcome| {
+        let _ = send.send(outcome);
+    });
+    glib::spawn_future_local(async move {
+        if let Ok(outcome) = receive.await {
+            ready(outcome);
+        }
+    });
+    job
+}
+
 /// Starts the check of the indexes in `articles` on `work`; where they stand
 /// comes to `sender` as an event.
 fn start_check(
@@ -3419,6 +3467,51 @@ fn start(
     let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed))));
     let events = sender.clone();
     let work = start_work();
+    if let Some(work) = &work {
+        let work = Rc::downgrade(work);
+        view.connect_recording_audio({
+            let work = work.clone();
+            move |url, ready| {
+                let Some(work) = work.upgrade() else {
+                    ready(Err(AudioFailure::Failed));
+                    return None;
+                };
+                Some(start_recording_job(
+                    &work,
+                    AUDIO_LIMIT,
+                    async move {
+                        let audio = fetch_audio(url).await?;
+                        buffer_recording(&audio).map_err(|error| {
+                            eprintln!("addict: could not buffer recording: {error}");
+                            AudioFailure::Failed
+                        })
+                    },
+                    move |outcome| {
+                        let result = match outcome {
+                            Outcome::Finished(audio) => audio,
+                            Outcome::Cancelled => return,
+                            Outcome::TimedOut => Err(AudioFailure::Network),
+                            Outcome::Panicked => Err(AudioFailure::Failed),
+                        };
+                        ready(result.map(PlaybackMedia::from_recording));
+                    },
+                ))
+            }
+        });
+        view.connect_recording_credit(move |file, ready| {
+            let work = work.upgrade()?;
+            Some(start_recording_job(
+                &work,
+                CREDIT_LIMIT,
+                async move { file.fetch_credit().await },
+                move |outcome| {
+                    if let Outcome::Finished(credit) = outcome {
+                        ready(credit);
+                    }
+                },
+            ))
+        });
+    }
     // Nothing is opened here: the indexes are files, and files are the
     // runner's.
     let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());
@@ -3750,6 +3843,16 @@ mod tests {
         Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
     };
     use addict_core::translation::Source as Language;
+
+    #[test]
+    fn buffered_recording_can_be_reopened_from_the_beginning() {
+        use std::os::fd::AsRawFd;
+
+        let audio = b"buffered recording";
+        let file = super::buffer_recording(audio).expect("recording descriptor");
+        let path = format!("/proc/self/fd/{}", file.as_raw_fd());
+        assert_eq!(std::fs::read(path).unwrap(), audio);
+    }
 
     #[tokio::test]
     async fn import_completion_refreshes_missing_languages_before_the_next_lookup() {
@@ -4389,7 +4492,7 @@ mod tests {
         session.window.destroy();
     }
 
-    /// On a fresh install the first-run offer, fed `manifest-2.json` by the
+    /// On a fresh install the first-run offer, fed `manifest-3.json` by the
     /// download stub, queues Russian's set when no choice is made, and
     /// exactly English's when English is chosen in the dialog, which makes
     /// it my language and shows it in Settings. Nothing is installed: the
@@ -4443,12 +4546,13 @@ mod tests {
             format: addict_dictionary::format::VERSION,
             indexes: sources::ROWS
                 .iter()
+                .filter(|row| addict_dictionary::release::MANIFEST_3_PUBLISHED.contains(&row.index))
                 .map(|row| Published::of(row.index, row.index.as_bytes()))
                 .collect(),
         };
-        assert_eq!(manifest.indexes.len(), 19);
+        assert_eq!(manifest.indexes.len(), 20);
         let stub = Stub::start(HashMap::from([(
-            format!("/{}/{}", release::tag(), release::MANIFEST_2),
+            format!("/{}/{}", release::tag(), release::MANIFEST_3),
             Route::File(manifest.to_json().into_bytes()),
         )]))
         .unwrap();
@@ -4573,7 +4677,8 @@ mod tests {
 
     /// With Russian's set installed, a change of my language in Settings to
     /// English opens the Settings offer for missing indexes listing exactly
-    /// the four indexes English lacks, and Download queues them; a waiting
+    /// the five indexes English lacks (four pairs and the Russian article),
+    /// and Download queues them; a waiting
     /// offer follows a later change; back to Russian nothing is offered and
     /// nothing is asked of the network. A change while the first-run offer
     /// owns the decision starts nothing. No file is removed.
@@ -4657,12 +4762,13 @@ mod tests {
             format: addict_dictionary::format::VERSION,
             indexes: sources::ROWS
                 .iter()
+                .filter(|row| addict_dictionary::release::MANIFEST_3_PUBLISHED.contains(&row.index))
                 .map(|row| Published::of(row.index, row.index.as_bytes()))
                 .collect(),
         };
-        assert_eq!(manifest.indexes.len(), 19);
+        assert_eq!(manifest.indexes.len(), 20);
         let stub = Stub::start(HashMap::from([(
-            format!("/{}/{}", release::tag(), release::MANIFEST_2),
+            format!("/{}/{}", release::tag(), release::MANIFEST_3),
             Route::File(manifest.to_json().into_bytes()),
         )]))
         .unwrap();
@@ -4730,10 +4836,12 @@ mod tests {
             first_run::nothing_text(Language::Ru)
         );
 
-        // Russian → English: exactly the four English lacks.
+        // Russian → English: exactly the four pairs English lacks, and the
+        // Russian article.
         assert_eq!(
             lacks(Language::En),
             [
+                "kaikki-ru-Russkiy",
                 "wikdict-en-es",
                 "wikdict-en-ca",
                 "wikdict-es-en",

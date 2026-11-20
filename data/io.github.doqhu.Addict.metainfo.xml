@@ -30,7 +30,14 @@
       <li>Offline translations from the dictionaries between Russian and English, Spanish or Catalan, and English glosses of Spanish and Catalan words</li>
       <li>A separate screenshot shortcut opens a region picker to read text in an image or a video with Tesseract OCR; assign its key in Settings</li>
       <li>Normal launches show the main window, with Settings available directly; use --background for a silent login launch</li>
-      <li>A Russian word is translated into your language, or, with Russian as your language, into the reading language</li>
+      <li>
+        With English, Spanish or Catalan as your language, look up Russian words
+        offline, including from inflected forms. The article uses Kaikki.org’s
+        extract of Russian Wiktionary and gives Russian definitions by sense,
+        synonyms and IPA transcriptions. Pronunciation recordings, when available,
+        play online from Wikimedia Commons. With Russian as your language, Russian
+        words are translated into the reading language.
+      </li>
     </ul>
   </description>
 

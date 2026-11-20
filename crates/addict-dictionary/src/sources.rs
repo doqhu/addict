@@ -6,25 +6,25 @@
 //!
 //! [`ROWS`] has one row per [`Source`], reached by [`row`] through a match
 //! with no wildcard arm, so a new source does not compile until it has a
-//! row. [`OCR`] holds the bundled OCR data and engine, which CREDITS and
-//! About list but the downloader skips. A credit line is the attribution
+//! row. [`OCR`] and [`RECORDINGS`] are displayed in CREDITS and About.
+//! A credit line is the attribution
 //! only; what a license asks beyond it is a comment on the row.
 //!
 //! [`credits`] is the text of the `CREDITS` file at the root of the
-//! repository, made from both tables; a test keeps the file equal to it.
+//! repository, made from the tables; a test keeps the file equal to it.
 //!
 //! The author, the license URI and the link of a row, with [`MODIFIED`] and
 //! [`DISCLAIMER`], go into the license notice of every index the importer
 //! writes and onto the release page of the published indexes. No index
-//! carries an OCR row, so those three are empty there.
+//! carries an OCR or recordings row.
 
 use crate::import::Source;
 
 /// One source in the credits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Row {
-    /// The name of the index file without `.index`, or a name for an OCR
-    /// row.
+    /// The name of the index file without `.index`, or the name of
+    /// a non-index source.
     pub index: &'static str,
     /// The file the index is built from, as published upstream.
     pub upstream: &'static str,
@@ -34,8 +34,7 @@ pub struct Row {
     /// Where the builder of the published indexes downloads the upstream
     /// file: it ends with the name of the file in
     /// [`crate::import::KNOWN`], or for a Kaikki file with a name in
-    /// [`crate::import::KAIKKI_NAMES`]. `None` for OCR, which is never
-    /// downloaded.
+    /// [`crate::import::KAIKKI_NAMES`]. `None` for non-index sources.
     pub url: Option<&'static str>,
     /// The authors of the data; empty for OCR.
     pub author: &'static str,
@@ -183,6 +182,19 @@ const KAIKKI_EN_CATALAN: Row = Row {
     license_uri: BY_SA_4,
     link: KAIKKI_LINK,
 };
+// The extract holds every language of the Russian Wiktionary; only the
+// Russian entries are read. Kaikki states no data licence, so the row takes
+// the terms of `kaikki-es-Espanol` (epic-russian-article, spike 1).
+const KAIKKI_RU: Row = Row {
+    index: "kaikki-ru-Russkiy",
+    upstream: "kaikki.org ruwiktionary extract",
+    license: KAIKKI_LICENSE,
+    credit: KAIKKI_CREDIT,
+    url: Some("https://kaikki.org/ruwiktionary/raw-wiktextract-data.jsonl.gz"),
+    author: KAIKKI_AUTHOR,
+    license_uri: BY_SA_4,
+    link: KAIKKI_LINK,
+};
 const WIKDICT_RU_EN: Row = Row {
     index: "wikdict-ru-en",
     upstream: WIKDICT_UPSTREAM,
@@ -263,6 +275,7 @@ pub const ROWS: &[Row] = &[
     DBNARY_CA,
     SINONIMS_CAT,
     KAIKKI_EN_CATALAN,
+    KAIKKI_RU,
     WIKDICT_RU_EN,
     WIKDICT_RU_ES,
     WIKDICT_RU_CA,
@@ -300,23 +313,38 @@ pub const OCR: &[Row] = &[
     },
 ];
 
+/// Pronunciation recordings are streamed from Commons.
+const RECORDINGS: &[Row] = &[Row {
+    index: "Wikimedia Commons",
+    upstream: "https://commons.wikimedia.org/",
+    license: "Each recording is available under the licence on its Commons file page.",
+    credit: "Wikimedia Commons contributors",
+    url: None,
+    author: "",
+    license_uri: "",
+    link: "",
+}];
+
 /// The sections of the credits, in `CREDITS` and in the application: their
 /// headings and their rows, the indexes first.
-pub const SECTIONS: [(&str, &[Row]); 2] = [("Dictionary indexes", ROWS), ("OCR", OCR)];
+pub const SECTIONS: [(&str, &[Row]); 3] = [
+    ("Dictionary indexes", ROWS),
+    ("OCR", OCR),
+    ("Recordings", RECORDINGS),
+];
 
 /// The command that writes `CREDITS` anew from the tables.
 pub const WRITE_CREDITS: &str = "ADDICT_WRITE_CREDITS=1 cargo test -p addict-dictionary credits";
 
 /// The text of `CREDITS`: a header naming addict and its license, then a
-/// block per row, the indexes in table order and then, under its own
-/// heading, OCR. Each block is the index, its credit line, its license and
-/// its upstream file.
+/// block per row in section order. Each block is the source name, its credit
+/// line, its license and its upstream file.
 pub fn credits() -> String {
     let mut text = String::new();
     text.push_str("Credits of addict\n");
     text.push_str("=================\n\n");
     text.push_str("addict is licensed under the MIT License (see LICENSES/MIT.txt).\n");
-    text.push_str("It uses the dictionary data and the OCR data and software below,\n");
+    text.push_str("It uses the dictionary data, OCR data and software, and recordings below,\n");
     text.push_str("each under its own license.\n\n");
     text.push_str("This file is generated from crates/addict-dictionary/src/sources.rs;\n");
     text.push_str(&format!(
@@ -348,6 +376,7 @@ pub fn row(source: Source) -> &'static Row {
         Source::DbnaryCa => &DBNARY_CA,
         Source::SinonimsCat => &SINONIMS_CAT,
         Source::KaikkiEnCatalan => &KAIKKI_EN_CATALAN,
+        Source::KaikkiRu => &KAIKKI_RU,
         Source::WikdictRuEn => &WIKDICT_RU_EN,
         Source::WikdictRuEs => &WIKDICT_RU_ES,
         Source::WikdictRuCa => &WIKDICT_RU_CA,
@@ -373,6 +402,7 @@ mod tests {
         "kaikki-es-Espanol",
         "kaikki-en-Spanish",
         "kaikki-en-Catalan",
+        "kaikki-ru-Russkiy",
         "wikdict-es-ru",
         "wikdict-ca-ru",
         "wikdict-ru-en",
@@ -404,6 +434,7 @@ mod tests {
         Source::DbnaryCa,
         Source::SinonimsCat,
         Source::KaikkiEnCatalan,
+        Source::KaikkiRu,
         Source::WikdictRuEn,
         Source::WikdictRuEs,
         Source::WikdictRuCa,
@@ -423,10 +454,10 @@ mod tests {
         assert_eq!(rows, documented);
     }
 
-    /// Every row, of the indexes and of OCR, has a license and a credit.
+    /// Every row has a license and a credit.
     #[test]
     fn sources_have_a_license_and_a_credit() {
-        for row in ROWS.iter().chain(OCR) {
+        for row in ROWS.iter().chain(OCR).chain(RECORDINGS) {
             assert!(!row.license.trim().is_empty(), "{}: no license", row.index);
             assert!(!row.credit.trim().is_empty(), "{}: no credit", row.index);
         }
@@ -518,13 +549,12 @@ mod tests {
         );
     }
 
-    /// Every row, of the indexes and then of OCR, is in the credits once
-    /// with its credit line, in table order.
+    /// Every row is in the credits once with its credit line, in table order.
     #[test]
     fn credits_list_every_row_once_in_order() {
         let text = credits();
         let mut from = 0;
-        for row in ROWS.iter().chain(OCR) {
+        for row in ROWS.iter().chain(OCR).chain(RECORDINGS) {
             let block = format!("\n{}\n  Credit:   {}\n", row.index, row.credit);
             assert_eq!(text.matches(&block).count(), 1, "{}", row.index);
             let at = text[from..].find(&block).expect("in table order") + from;
@@ -538,25 +568,37 @@ mod tests {
             .find(&format!("\n{}\n", ROWS[ROWS.len() - 1].index))
             .expect("index row");
         assert!(last_index < ocr && ocr < first_ocr);
+        let recordings = text.find("\nRecordings\n").expect("the recordings heading");
+        let commons = text.find("\nWikimedia Commons\n").expect("the Commons row");
+        assert!(first_ocr < recordings && recordings < commons);
+        assert!(
+            text.contains(
+                "Each recording is available under the licence on its Commons file page."
+            )
+        );
     }
 
-    /// The sections hold every row once, the indexes and then OCR, in
-    /// table order.
+    /// The sections hold every row once, in table order.
     #[test]
     fn sections_list_every_row_once_in_table_order() {
         let listed: Vec<&str> = SECTIONS
             .iter()
             .flat_map(|(_, rows)| rows.iter().map(|row| row.index))
             .collect();
-        let table: Vec<&str> = ROWS.iter().chain(OCR).map(|row| row.index).collect();
+        let table: Vec<&str> = ROWS
+            .iter()
+            .chain(OCR)
+            .chain(RECORDINGS)
+            .map(|row| row.index)
+            .collect();
         assert_eq!(listed, table);
-        assert_eq!(listed.len(), 21);
+        assert_eq!(listed.len(), 23);
     }
 
     /// Every index is downloaded by the builder from an `https://` URL that
     /// ends with the name of its pinned file in `KNOWN`, or, for a Kaikki
-    /// file, with a name `KAIKKI_NAMES` gives its source; OCR is never
-    /// downloaded.
+    /// file, with a name `KAIKKI_NAMES` gives its source. Non-index sources
+    /// have no index download.
     #[test]
     fn every_index_has_a_download_url_of_its_known_file() {
         for row in ROWS {
@@ -576,7 +618,43 @@ mod tests {
                 .any(|&(upstream, of)| of == source && upstream == name);
             assert!(pinned || kaikki, "{}: {url}", row.index);
         }
-        assert!(OCR.iter().all(|row| row.url.is_none()));
+        assert!(OCR.iter().chain(RECORDINGS).all(|row| row.url.is_none()));
+    }
+
+    /// The Russian article index is credited as the Spanish Wiktionary's
+    /// is, downloaded from the raw ruwiktionary extract, and placed before
+    /// the WikDict files of Russian headwords.
+    #[test]
+    fn the_russian_article_row_has_the_kaikki_terms() {
+        let row = row(Source::KaikkiRu);
+        assert_eq!(row.index, "kaikki-ru-Russkiy");
+        assert_eq!(row.upstream, "kaikki.org ruwiktionary extract");
+        assert_eq!(
+            row.url,
+            Some("https://kaikki.org/ruwiktionary/raw-wiktextract-data.jsonl.gz")
+        );
+        assert_eq!(
+            (
+                row.credit,
+                row.license,
+                row.author,
+                row.link,
+                row.license_uri
+            ),
+            (
+                KAIKKI_ES.credit,
+                KAIKKI_ES.license,
+                KAIKKI_ES.author,
+                KAIKKI_ES.link,
+                KAIKKI_ES.license_uri
+            )
+        );
+        let at = |index: &str| ROWS.iter().position(|row| row.index == index);
+        assert_eq!(
+            at("kaikki-ru-Russkiy").map(|at| at + 1),
+            at("wikdict-ru-en")
+        );
+        assert!(credits().contains("\nkaikki-ru-Russkiy\n  Credit:   "));
     }
 
     /// No index has two rows.

@@ -5,12 +5,15 @@
 //! drift apart.
 //!
 //! The indexes of the format [`format::VERSION`] are assets of the release
-//! tagged [`tag`], `indexes-v<VERSION>`: each index compressed with xz as
-//! [`asset_name`], `<name>.index.xz`. [`MANIFEST_2`] lists the current
-//! inventory, and [`MANIFEST`] lists the legacy inventory. Both use the
-//! [`Manifest`] schema for asset sizes and SHA-256 checksums. A release
-//! of an older format is never changed, so an application that reads only
-//! that format keeps finding its indexes.
+//! tagged [`tag`], `indexes-v<VERSION>`, in the data repository
+//! `doqhu/addict-indexes`: each index compressed with xz as [`asset_name`],
+//! `<name>.index.xz`. [`MANIFEST_3`] lists the current inventory,
+//! [`MANIFEST_2`] the frozen inventory of 0.4.1 and [`MANIFEST`] the legacy
+//! inventory of 0.2.0. All three use the [`Manifest`] schema for asset sizes
+//! and SHA-256 checksums. An application reads the newest manifest it knows
+//! and, when the release does not have it, the next older one. A release of
+//! an older format is never changed, so an application that reads only that
+//! format keeps finding its indexes.
 //!
 //! [`install`] unpacks a downloaded asset, whose size and hash the caller has
 //! checked against the manifest, into a temporary file beside the index,
@@ -40,8 +43,12 @@ use crate::{
 /// The name of the legacy manifest asset used by apps through 0.2.x.
 pub const MANIFEST: &str = "manifest.json";
 
-/// The name of the manifest asset listing the full inventory.
+/// The name of the manifest asset listing the inventory of 0.4.1, which
+/// apps through 0.4.x read.
 pub const MANIFEST_2: &str = "manifest-2.json";
+
+/// The name of the manifest asset listing the full inventory.
+pub const MANIFEST_3: &str = "manifest-3.json";
 
 /// The indexes eligible for the legacy manifest, in source row order.
 pub const LEGACY_PUBLISHED: [&str; 13] = [
@@ -58,6 +65,58 @@ pub const LEGACY_PUBLISHED: [&str; 13] = [
     "wikdict-ru-en",
     "wikdict-ru-es",
     "wikdict-ru-ca",
+];
+
+/// The indexes eligible for [`MANIFEST_2`], in source row order: the 19 of
+/// 0.4.1, frozen. The Russian article index, `kaikki-ru-Russkiy`, is not
+/// among them, so an app that reads only this manifest is never offered it.
+pub const MANIFEST_2_PUBLISHED: [&str; 19] = [
+    "oewn",
+    "freedict",
+    "wikdict-es-ru",
+    "kaikki-es-Espanol",
+    "omw-es",
+    "kaikki-en-Spanish",
+    "wikdict-ca-ru",
+    "dbnary-ca",
+    "sinonims-cat",
+    "kaikki-en-Catalan",
+    "wikdict-ru-en",
+    "wikdict-ru-es",
+    "wikdict-ru-ca",
+    "wikdict-es-ca",
+    "wikdict-en-es",
+    "wikdict-en-ca",
+    "wikdict-es-en",
+    "wikdict-ca-en",
+    "wikdict-ca-es",
+];
+
+/// The indexes eligible for the current manifest, [`MANIFEST_3`], in source
+/// row order: every row of [`sources::ROWS`], the 19 of [`MANIFEST_2`] plus
+/// `kaikki-ru-Russkiy`. A row outside it is neither built nor published,
+/// nor required for any language.
+pub const MANIFEST_3_PUBLISHED: [&str; 20] = [
+    "oewn",
+    "freedict",
+    "wikdict-es-ru",
+    "kaikki-es-Espanol",
+    "omw-es",
+    "kaikki-en-Spanish",
+    "wikdict-ca-ru",
+    "dbnary-ca",
+    "sinonims-cat",
+    "kaikki-en-Catalan",
+    "kaikki-ru-Russkiy",
+    "wikdict-ru-en",
+    "wikdict-ru-es",
+    "wikdict-ru-ca",
+    "wikdict-es-ca",
+    "wikdict-en-es",
+    "wikdict-en-ca",
+    "wikdict-es-en",
+    "wikdict-ca-en",
+    "wikdict-ca-es",
 ];
 
 /// The tag of the data release of the indexes of this format.
@@ -362,6 +421,7 @@ mod tests {
         assert_eq!(asset_name("oewn"), "oewn.index.xz");
         assert_eq!(MANIFEST, "manifest.json");
         assert_eq!(MANIFEST_2, "manifest-2.json");
+        assert_eq!(MANIFEST_3, "manifest-3.json");
     }
 
     /// The legacy manifest is limited to the 13 indexes of 0.2.0.
@@ -393,11 +453,46 @@ mod tests {
         assert_eq!(legacy, LEGACY_PUBLISHED);
     }
 
+    /// Manifest-2 is frozen at the 19 indexes of 0.4.1, in row order, the
+    /// legacy ones among them; the Russian article index is not in it.
+    #[test]
+    fn the_current_inventory_matches_version_0_4_1() {
+        let eligible: Vec<&str> = sources::ROWS
+            .iter()
+            .map(|row| row.index)
+            .filter(|name| MANIFEST_2_PUBLISHED.contains(name))
+            .collect();
+        assert_eq!(eligible, MANIFEST_2_PUBLISHED);
+        assert!(
+            LEGACY_PUBLISHED
+                .iter()
+                .all(|name| MANIFEST_2_PUBLISHED.contains(name))
+        );
+        assert!(!MANIFEST_2_PUBLISHED.contains(&"kaikki-ru-Russkiy"));
+        assert_eq!(sources::ROWS.len(), MANIFEST_2_PUBLISHED.len() + 1);
+    }
+
+    /// The newest manifest lists every row, in row order, and so holds both
+    /// older inventories.
+    #[test]
+    fn the_newest_inventory_is_every_row() {
+        let rows: Vec<&str> = sources::ROWS.iter().map(|row| row.index).collect();
+        assert_eq!(rows, MANIFEST_3_PUBLISHED);
+        assert!(
+            MANIFEST_2_PUBLISHED
+                .iter()
+                .chain(LEGACY_PUBLISHED.iter())
+                .all(|name| MANIFEST_3_PUBLISHED.contains(name))
+        );
+        assert!(MANIFEST_3_PUBLISHED.contains(&"kaikki-ru-Russkiy"));
+    }
+
     #[test]
     fn a_name_is_the_source_of_its_row() {
         assert_eq!(source_of("oewn"), Some(Source::Oewn));
         assert_eq!(source_of("freedict"), Some(Source::Freedict));
         assert_eq!(source_of("wikdict-ru-ca"), Some(Source::WikdictRuCa));
+        assert_eq!(source_of("kaikki-ru-Russkiy"), Some(Source::KaikkiRu));
         assert_eq!(source_of("oewn.index"), None);
         assert_eq!(source_of("tessdata"), None);
         assert_eq!(source_of(""), None);

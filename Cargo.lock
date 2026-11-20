@@ -72,6 +72,8 @@ dependencies = [
  "futures-util",
  "libc",
  "lzma-rs",
+ "percent-encoding",
+ "quick-xml",
  "reqwest",
  "rusqlite",
  "serde",

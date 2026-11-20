@@ -11,7 +11,7 @@ use std::{borrow::Cow, fmt, io::BufRead};
 use quick_xml::{
     Reader, XmlVersion,
     encoding::EncodingError,
-    escape::resolve_predefined_entity,
+    escape::resolve_xml_entity,
     events::{BytesRef, BytesStart, Event},
 };
 
@@ -50,7 +50,7 @@ pub(crate) fn read_event<'b>(
     })
 }
 
-/// The value of the attribute `name`, with its entities resolved.
+/// The value of the attribute `name`, with XML entities resolved.
 pub(crate) fn attribute(
     element: &BytesStart<'_>,
     name: &str,
@@ -66,7 +66,7 @@ pub(crate) fn attribute(
         let attribute = attribute.map_err(|error| bad(&error))?;
         if attribute.key.as_ref() == name.as_bytes() {
             return attribute
-                .normalized_value(XmlVersion::Implicit1_0)
+                .normalized_value_with(XmlVersion::Implicit1_0, 1, resolve_xml_entity)
                 .map(|value| Some(value.into_owned()))
                 .map_err(|error| bad(&error));
         }
@@ -102,7 +102,7 @@ pub(crate) fn push_reference(
         Some(character) => target.push(character),
         None => {
             let name = reference.decode().map_err(not_text(malformed))?;
-            target.push_str(resolve_predefined_entity(&name).ok_or_else(unknown)?);
+            target.push_str(resolve_xml_entity(&name).ok_or_else(unknown)?);
         }
     }
     Ok(())

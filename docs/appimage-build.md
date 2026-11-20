@@ -79,17 +79,17 @@ packaging/appimage/tests.sh
 ```
 
 The checker uses the runtime's extraction command, without FUSE. It checks
-ELF architecture, loader, GTK/libc, schemas, fonts, icons, modules, symlink
-containment and dictionary/OCR data contamination (including renamed indexes
-with the `ADDICTIX` header). Refusal tests use disposable layout files, not
+ELF architecture, loader, GTK/libc, schemas, fonts, icons, pronunciation
+plugins, symlink containment and dictionary/OCR data contamination (including
+renamed indexes with the `ADDICTIX` header). Refusal tests use disposable layout files, not
 published dictionary fixtures. These checks do not prove a visible window or
 translation on a desktop.
 
-Failures name their step and input/component. Pinned RPMs are fetched from the
-signed copies that Fedora's Koji keeps for each build, so a package update does
-not remove them. If one is still missing, restore that exact checked file or
-deliberately review a new lock; do not switch to a current package silently.
-Bad cached checksums fail; remove only the named cached input and retry. Set
+Failures name their step and input/component. Fedora RPMs come from Koji and
+the Fedora updates archive. If a signed Koji copy disappears, check the archive
+for the same file and confirm its locked SHA-256 before changing the URL. Review
+a new lock if the exact file is unavailable. For a bad cached checksum, remove
+only the named cached input and retry. Set
 `ADDICT_APPIMAGE_KEEP_WORK=1` to retain the temporary source/build workspace
 for diagnosis; each later build still starts with a fresh directory. Existing
 outputs are cleared before the first check of a build, so a failed rebuild
@@ -552,7 +552,7 @@ container after quick-sharun's deployment and before AppDir validation.
 Besides the hosts listed above, the build downloads from
 `kojipkgs.fedoraproject.org` (source RPMs), `raw.githubusercontent.com`,
 `deb.debian.org` (the dash tarball), `static.crates.io`,
-`static.rust-lang.org`, `ziglang.org`, `ftp.gnu.org`, `www.gnu.org` and
+`static.rust-lang.org`, `ziglang.org`, `gcc.gnu.org`, `www.gnu.org` and
 `musl.libc.org`. The first build fetches about 2.3 GB of source RPMs and
 0.3 GB of other sources into `target/appimage-inputs/`; each build copies
 them once more into its temporary workspace (`mktemp -d`, usually `/tmp`) and
@@ -575,7 +575,7 @@ list:
   | `shared/bin/` | `/usr/bin/`, `/usr/libexec/`, `/usr/libexec/gstreamer-1.0/` |
   | `bin/` | `/usr/bin/`, `/usr/libexec/` |
   | `lib/gstreamer-1.0/` | `/usr/libexec/gstreamer-1.0/` |
-  | `lib/` | `/usr/lib64/`, `/usr/lib/` |
+  | `lib/` | `/usr/lib64/`, `/usr/lib/`, `/usr/lib64/pulseaudio/` |
   | `share/` | `/usr/share/` |
   | `etc/` | `/etc/` |
 

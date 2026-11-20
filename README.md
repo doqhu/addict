@@ -35,9 +35,12 @@ a video, can be captured from the screen and read with Tesseract OCR.
   any other pair the window says that there is no offline dictionary for it
   yet.
 - Capture: choose an area of the screen, and its text replaces the field.
-- A Russian word is translated into your language. With Russian as your
-  language, it is looked up the other way: its translations into the reading
-  language.
+- With English, Spanish or Catalan as your language, look up Russian words
+  offline, including from inflected forms. The article uses Kaikki.org’s
+  extract of Russian Wiktionary and gives Russian definitions by sense,
+  synonyms and IPA transcriptions. Pronunciation recordings, when available,
+  play online from Wikimedia Commons. With Russian as your language, Russian
+  words are translated into the reading language.
 - An icon in the top bar with Show, Settings, About and Exit.
 
 ## Requirements
@@ -270,6 +273,7 @@ window says which ones are missing. The indexes are kept in
 | Catalan | definitions | [ca_dbnary_ontolex_2026-10-01.ttl.bz2][dbnary-ca] |
 | Catalan | synonyms | [th_ca_ES.dat][sinonims-cat] |
 | Catalan | English glosses | [kaikki.org-dictionary-Catalan.jsonl.gz][kaikki-en-catalan] |
+| Russian | definitions, synonyms, IPA and word forms from Kaikki.org’s Russian Wiktionary extract | [raw-wiktextract-data.jsonl.gz][kaikki-ru] |
 | Russian | English translations | [ru-en.sqlite3][ru-en] |
 | Russian | Spanish translations | [ru-es.sqlite3][ru-es] |
 | Russian | Catalan translations | [ru-ca.sqlite3][ru-ca] |
@@ -286,6 +290,7 @@ window says which ones are missing. The indexes are kept in
 [dbnary-ca]: https://kaiko.getalp.org/static/ontolex/ca/ca_dbnary_ontolex_2026-10-01.ttl.bz2
 [sinonims-cat]: https://github.com/Softcatala/sinonims-cat/releases/download/2.3.2/th_ca_ES.dat
 [kaikki-en-catalan]: https://kaikki.org/dictionary/Catalan/kaikki.org-dictionary-Catalan.jsonl.gz
+[kaikki-ru]: https://kaikki.org/ruwiktionary/raw-wiktextract-data.jsonl.gz
 [ru-en]: https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ru-en.sqlite3
 [ru-es]: https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ru-es.sqlite3
 [ru-ca]: https://download.wikdict.com/dictionaries/sqlite/2_2026-06/ru-ca.sqlite3

@@ -6,19 +6,26 @@
 //! into my language. A pair of a language with itself has no row.
 //!
 //! Article sources (definitions and synonyms: `oewn`, `kaikki-es-Espanol`,
-//! `omw-es`, `dbnary-ca`, `sinonims-cat`) are not here: they describe a word
-//! in its own language and stay keyed by the reading language alone.
+//! `omw-es`, `dbnary-ca`, `sinonims-cat`, `kaikki-ru-Russkiy`) describe a word
+//! in its own language and are keyed by the reading language alone.
 //!
 //! Row (Russian, X) does double duty today: with Russian chosen as my
 //! language, a Cyrillic word is translated into the pressed language X from
 //! `wikdict-ru-X`, the same source a Russian word read by someone whose
 //! language is X would use.
+//!
+//! [`required_sources`] gives only the indexes of the current manifest,
+//! [`release::MANIFEST_3_PUBLISHED`]: a source not published there is never
+//! required. A Russian article source, such as `kaikki-ru-Russkiy`, is
+//! required for every my language but Russian: it serves someone who reads
+//! Russian as a foreign language, while with Russian as my language a
+//! Cyrillic word is translated instead and never asks it.
 
 use addict_core::translation::Source as Language;
 
 use crate::{
-    import::{KNOWN, Kind, Source},
-    sources,
+    import::{Kind, Source},
+    release, sources,
 };
 
 /// The translation sources of one ordered pair of distinct languages.
@@ -107,16 +114,20 @@ pub fn translations(reading: Language, my: Language) -> &'static [Source] {
 }
 
 /// The article and English gloss sources, plus translations into and out of
-/// `my`, in source row order.
+/// `my`, in source row order; only those of the current manifest, and no
+/// Russian article source when `my` is Russian.
 pub fn required_sources(my: Language) -> impl Iterator<Item = Source> {
     sources::ROWS.iter().filter_map(move |row| {
-        let source = KNOWN
-            .iter()
-            .map(|known| known.source)
-            .find(|&source| sources::row(source).index == row.index)?;
+        if !release::MANIFEST_3_PUBLISHED.contains(&row.index) {
+            return None;
+        }
+        let source = release::source_of(row.index)?;
         match source.kind() {
-            Kind::Definitions | Kind::Synonyms | Kind::English => Some(source),
-            Kind::Translation(_) | Kind::FromRussian => PAIRS
+            Kind::Definitions => {
+                (my != Language::Ru || source.language() != Some(Language::Ru)).then_some(source)
+            }
+            Kind::Synonyms | Kind::English => Some(source),
+            Kind::Translation(_) => PAIRS
                 .iter()
                 .any(|pair| (pair.my == my || pair.reading == my) && pair.sources.contains(&source))
                 .then_some(source),
@@ -144,6 +155,7 @@ mod tests {
             "dbnary-ca",
             "sinonims-cat",
             "kaikki-en-Catalan",
+            "kaikki-ru-Russkiy",
             "wikdict-ru-en",
             "wikdict-en-es",
             "wikdict-en-ca",
@@ -159,6 +171,7 @@ mod tests {
             "dbnary-ca",
             "sinonims-cat",
             "kaikki-en-Catalan",
+            "kaikki-ru-Russkiy",
             "wikdict-ru-es",
             "wikdict-es-ca",
             "wikdict-en-es",
@@ -174,6 +187,7 @@ mod tests {
             "dbnary-ca",
             "sinonims-cat",
             "kaikki-en-Catalan",
+            "kaikki-ru-Russkiy",
             "wikdict-ru-ca",
             "wikdict-es-ca",
             "wikdict-en-ca",
@@ -196,10 +210,10 @@ mod tests {
             "wikdict-ru-ca",
         ];
         for (my, expected) in [
-            (Language::En, english),
-            (Language::Es, spanish),
-            (Language::Ca, catalan),
-            (Language::Ru, russian),
+            (Language::En, &english[..]),
+            (Language::Es, &spanish[..]),
+            (Language::Ca, &catalan[..]),
+            (Language::Ru, &russian[..]),
         ] {
             assert_eq!(
                 required_index_names(my).collect::<Vec<_>>(),
@@ -208,13 +222,21 @@ mod tests {
             );
         }
         assert_eq!(russian, crate::release::LEGACY_PUBLISHED);
+        // The Russian article index is in every set but Russian's.
+        for my in Language::ALL {
+            assert_eq!(
+                required_sources(my).any(|source| source == Source::KaikkiRu),
+                my != Language::Ru,
+                "{my:?}"
+            );
+        }
     }
 
     /// Whether the source translates its headwords rather than describing
     /// them in their own language. No wildcard arm.
     fn translates(source: Source) -> bool {
         match source.kind() {
-            Kind::Translation(_) | Kind::English | Kind::FromRussian => true,
+            Kind::Translation(_) | Kind::English => true,
             Kind::Definitions | Kind::Synonyms => false,
         }
     }
@@ -289,10 +311,9 @@ mod tests {
         assert_eq!(rows, expected);
         for pair in PAIRS {
             assert!(
-                pair.sources.iter().any(|source| matches!(
-                    source.kind(),
-                    Kind::Translation(_) | Kind::FromRussian
-                )),
+                pair.sources
+                    .iter()
+                    .any(|source| matches!(source.kind(), Kind::Translation(_))),
                 "{pair:?}"
             );
         }
@@ -319,28 +340,16 @@ mod tests {
         }
     }
 
-    /// The sources of a row read words in its reading language and give its
-    /// language: a source of Russian headwords translates into my language,
-    /// any other has headwords of the reading language, and its kind gives
-    /// the target, or English, as my language says.
+    /// The sources of a row have headwords of its reading language, and
+    /// their kind gives the target, or English, as my language says.
     #[test]
     fn rows_agree_with_the_sources() {
         for pair in PAIRS {
             for &source in pair.sources {
-                match source.russian_into() {
-                    Some(into) => {
-                        assert_eq!(pair.reading, Language::Ru, "{source:?}");
-                        assert_eq!(into, pair.my, "{source:?}");
-                        assert_eq!(source.language(), None, "{source:?}");
-                    }
-                    None => {
-                        assert_eq!(source.language(), Some(pair.reading), "{source:?}");
-                    }
-                }
+                assert_eq!(source.language(), Some(pair.reading), "{source:?}");
                 let my = match source.kind() {
                     Kind::Translation(target) => Some(target),
                     Kind::English => Some(Language::En),
-                    Kind::FromRussian => source.russian_into(),
                     Kind::Definitions | Kind::Synonyms => None,
                 };
                 assert_eq!(my, Some(pair.my), "{source:?}");

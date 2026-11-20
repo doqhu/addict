@@ -382,6 +382,7 @@ pub fn describe(name: &str) -> Option<(&'static str, &'static str)> {
         Source::DbnaryCa => ("Catalan", "Catalan Wiktionary, via DBnary"),
         Source::SinonimsCat => ("Catalan", "Softcatalà thesaurus"),
         Source::KaikkiEnCatalan => ("Catalan", "English Wiktionary, via Kaikki"),
+        Source::KaikkiRu => ("Russian", "Russian Wiktionary, via Kaikki"),
         Source::WikdictRuEn => ("Russian", "WikDict, Russian → English"),
         Source::WikdictRuEs => ("Russian", "WikDict, Russian → Spanish"),
         Source::WikdictRuCa => ("Russian", "WikDict, Russian → Catalan"),
@@ -1402,7 +1403,7 @@ mod tests {
 
         use crate::stub::{Route, Stub};
 
-        let manifest_path = format!("/{}/{}", release::tag(), release::MANIFEST_2);
+        let manifest_path = format!("/{}/{}", release::tag(), release::MANIFEST_3);
         let empty = Stub::start(HashMap::new()).expect("the stub");
         let downloader = Downloader::with_base_url(empty.base_url());
         let error = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader)
@@ -1462,38 +1463,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_run_and_recovery_prefer_the_numbered_manifest_with_legacy_fallback() {
+    async fn first_run_and_recovery_prefer_the_newest_manifest_with_older_fallbacks() {
         use std::collections::HashMap;
 
         use crate::stub::{Route, Stub};
 
         let tag = release::tag();
+        let newest_path = format!("/{tag}/{}", release::MANIFEST_3);
         let numbered_path = format!("/{tag}/{}", release::MANIFEST_2);
         let legacy_path = format!("/{tag}/{}", release::MANIFEST);
         let manifest = |name| Manifest {
             format: addict_dictionary::format::VERSION,
             indexes: vec![Published::of(name, b"xz")],
         };
+        let newest = manifest("kaikki-ru-Russkiy");
         let numbered = manifest("wikdict-es-ca");
         let legacy = manifest("oewn");
         let dir = TempDir::new("manifest-selection");
 
-        for has_numbered in [true, false] {
+        // How many of the manifests, newest first, the release has.
+        for published in [3, 2, 1] {
             let mut routes = HashMap::from([(
                 legacy_path.clone(),
                 Route::File(legacy.to_json().into_bytes()),
             )]);
-            let mut requests = vec![format!("GET {numbered_path} HTTP/1.1")];
-            let expected = if has_numbered {
+            if published >= 2 {
                 routes.insert(
                     numbered_path.clone(),
                     Route::File(numbered.to_json().into_bytes()),
                 );
-                &numbered
-            } else {
-                requests.push(format!("GET {legacy_path} HTTP/1.1"));
-                &legacy
+            }
+            if published == 3 {
+                routes.insert(
+                    newest_path.clone(),
+                    Route::File(newest.to_json().into_bytes()),
+                );
+            }
+            let (requests, expected): (Vec<_>, _) = match published {
+                3 => (vec![&newest_path], &newest),
+                2 => (vec![&newest_path, &numbered_path], &numbered),
+                _ => (vec![&newest_path, &numbered_path, &legacy_path], &legacy),
             };
+            let requests: Vec<String> = requests
+                .into_iter()
+                .map(|path| format!("GET {path} HTTP/1.1"))
+                .collect();
             let stub = Stub::start(routes).unwrap();
             let downloader = Downloader::with_base_url(stub.base_url());
             let offer = offered_manifest(Indexes::MISSING, Language::Ru, false, &downloader)
@@ -1542,7 +1556,7 @@ mod tests {
             indexes: indexes.clone(),
         };
         let mut routes = std::collections::HashMap::from([(
-            format!("/{tag}/{}", release::MANIFEST_2),
+            format!("/{tag}/{}", release::MANIFEST_3),
             Route::File(manifest.to_json().into_bytes()),
         )]);
         for published in indexes {
@@ -1726,11 +1740,12 @@ mod tests {
                 .into_bytes(),
             ),
         ] {
-            let requests_per_attempt = if body.is_some() { 1 } else { 2 };
+            // Without a manifest, all three are asked: 3, 2, then the legacy one.
+            let requests_per_attempt = if body.is_some() { 1 } else { 3 };
             let routes = body
                 .map(|body| {
                     (
-                        format!("/{}/{}", release::tag(), release::MANIFEST_2),
+                        format!("/{}/{}", release::tag(), release::MANIFEST_3),
                         Route::File(body),
                     )
                 })
@@ -1864,17 +1879,19 @@ mod tests {
         }
     }
 
-    /// The first run offers my language's set out of the 19 of
-    /// `manifest-2.json`, in manifest order; out of the legacy 13 it offers
-    /// what they have of it, and an index already present is not offered.
+    /// The first run offers my language's set out of the 20 of
+    /// `manifest-3.json`, in manifest order; out of the 19 of
+    /// `manifest-2.json` or the legacy 13 it offers what they have of it,
+    /// and an index already present is not offered.
     #[test]
     fn the_first_run_offers_the_set_of_my_language_only() {
         let all: Vec<Published> = sources::ROWS
             .iter()
+            .filter(|row| release::MANIFEST_3_PUBLISHED.contains(&row.index))
             .enumerate()
             .map(|(i, row)| entry(row.index, i as u64 + 1))
             .collect();
-        assert_eq!(all.len(), 19);
+        assert_eq!(all.len(), 20);
         let names = |offered: Vec<Published>| -> Vec<String> {
             offered
                 .into_iter()
@@ -1897,8 +1914,28 @@ mod tests {
         );
         let english = names(offered(&all, Language::En, |_| false));
         assert!(english.contains(&"wikdict-en-es".to_owned()));
+        assert!(english.contains(&"kaikki-ru-Russkiy".to_owned()));
         assert!(!english.contains(&"wikdict-es-ca".to_owned()));
         assert!(!english.contains(&"wikdict-ru-es".to_owned()));
+        assert!(
+            !names(offered(&all, Language::Ru, |_| false))
+                .contains(&"kaikki-ru-Russkiy".to_owned())
+        );
+
+        // Only manifest-2: English gets its set but the Russian article.
+        let numbered: Vec<Published> = all
+            .iter()
+            .filter(|published| release::MANIFEST_2_PUBLISHED.contains(&published.name.as_str()))
+            .cloned()
+            .collect();
+        assert_eq!(numbered.len(), 19);
+        let english_numbered = names(offered(&numbered, Language::En, |_| false));
+        let expected: Vec<String> = english
+            .iter()
+            .filter(|name| *name != "kaikki-ru-Russkiy")
+            .cloned()
+            .collect();
+        assert_eq!(english_numbered, expected);
 
         // Only the legacy manifest: English gets what it lists of its set.
         let legacy: Vec<Published> = all
@@ -1942,6 +1979,7 @@ mod tests {
         assert_eq!(
             missing(&indexes, Language::En),
             [
+                "kaikki-ru-Russkiy",
                 "wikdict-en-es",
                 "wikdict-en-ca",
                 "wikdict-es-en",
@@ -1997,6 +2035,10 @@ mod tests {
         assert_eq!(
             describe("wikdict-es-ca"),
             Some(("Spanish", "WikDict, Spanish → Catalan"))
+        );
+        assert_eq!(
+            describe("kaikki-ru-Russkiy"),
+            Some(("Russian", "Russian Wiktionary, via Kaikki"))
         );
         assert_eq!(describe("tessdata"), None);
         assert_eq!(eyebrow_text(false, 13), EYEBROW);
@@ -2273,7 +2315,7 @@ mod tests {
         let tag = release::tag();
         let stub = Stub::start(HashMap::from([
             (
-                format!("/{tag}/{}", release::MANIFEST_2),
+                format!("/{tag}/{}", release::MANIFEST_3),
                 Route::File(manifest.to_json().into_bytes()),
             ),
             (format!("/{tag}/omw-es.index.xz"), Route::File(good.clone())),
@@ -2334,7 +2376,7 @@ mod tests {
         let manifests = stub
             .seen()
             .iter()
-            .filter(|line| line.contains(release::MANIFEST_2))
+            .filter(|line| line.contains(release::MANIFEST_3))
             .count();
         assert_eq!(manifests, 1, "{:?}", stub.seen());
     }
