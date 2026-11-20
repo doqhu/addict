@@ -1196,8 +1196,8 @@ mod tests {
     /// The published release, over the network: the manifest the app reads,
     /// manifest-3, lists the indexes of `MANIFEST_3_PUBLISHED`; the frozen
     /// manifest-2 and legacy manifest list only what apps through 0.4.x and
-    /// 0.2.x know; and one WikDict index downloads, matches its entry and
-    /// opens. Run by hand
+    /// 0.2.x know; and the Russian article index, the largest, downloads,
+    /// matches its entry, opens and has the article of `собака`. Run by hand
     /// after the indexes workflow published:
     /// `cargo test -p addict-engine download::tests::live -- --ignored`.
     #[tokio::test]
@@ -1241,16 +1241,21 @@ mod tests {
         let names: Vec<&str> = legacy.indexes.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, release::LEGACY_PUBLISHED, "manifest.json is 0.2.0's");
 
-        let wikdict = current
+        let russian = current
             .indexes
             .iter()
-            .find(|p| p.name == "wikdict-es-ca")
-            .expect("wikdict-es-ca is published");
+            .find(|p| p.name == "kaikki-ru-Russkiy")
+            .expect("kaikki-ru-Russkiy is published");
         let dir = DataDir::new("live");
         let path = downloader
-            .install(wikdict, &dir.data(), |_| {})
+            .install(russian, &dir.data(), |_| {})
             .await
-            .expect("wikdict-es-ca installs");
-        Index::open(&path).expect("the installed index opens");
+            .expect("kaikki-ru-Russkiy installs");
+        let index = Index::open(&path).expect("the installed index opens");
+        let article = index
+            .find("собака")
+            .expect("find")
+            .expect("собака has an article");
+        assert!(!article.senses.is_empty(), "собака has senses");
     }
 }

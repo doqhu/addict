@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The disk and memory of the runner, recorded: 19 upstream files and
+      # The disk and memory of the runner, recorded: 20 upstream files and
       # their indexes must fit.
       - name: Show the runner's limits
         run: |

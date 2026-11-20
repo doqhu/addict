@@ -8,7 +8,7 @@
 #                                            idle sample, GPU record, an OCR cycle (a cancelled
 #                                            capture, then a recognized one), 60 s idle sample,
 #                                            online and OCR digests, summary
-# A session is of the product with all sixteen dictionary indexes imported and records them; it
+# A session is of the product with all seventeen dictionary indexes imported and records them; it
 # sends text to DeepL and does not start without the key file, nor without Tesseract's
 # English data. Calibration sends nothing. The certificate lives in the output directory,
 # so this directory needs its own calibration. The idle samples are of the process with
@@ -36,16 +36,17 @@ build_harness='cargo build --release -p addict-app --example harness'
 data=${XDG_DATA_HOME:-}
 [[ $data == /* ]] || data=$HOME/.local/share
 entry="$data/applications/io.github.doqhu.Addict.desktop"
-# Each index with the published file it is imported from: the sixteen EN/ES/CA indexes, in the order of import::KNOWN.
+# Each index with the published file it is imported from: the sixteen EN/ES/CA indexes and the
+# Russian article (not the wikdict-ru-* translations), in the order of import::KNOWN.
 indexes=(oewn freedict wikdict-es-ru kaikki-es-Espanol omw-es kaikki-en-Spanish
-  wikdict-ca-ru dbnary-ca sinonims-cat kaikki-en-Catalan
+  wikdict-ca-ru dbnary-ca sinonims-cat kaikki-en-Catalan kaikki-ru-Russkiy
   wikdict-es-ca wikdict-en-es wikdict-en-ca wikdict-es-en wikdict-ca-en wikdict-ca-es)
 indexes=("${indexes[@]/#/"$data/addict/"}")
 indexes=("${indexes[@]/%/.index}")
 published=(english-wordnet-2025.xml.gz freedict-eng-rus-2025.11.23.src.tar.xz
   es-ru.sqlite3 kaikki.org-dictionary-Español.jsonl.gz omw-es-2.0.tar.xz
   kaikki.org-dictionary-Spanish.jsonl.gz ca-ru.sqlite3 ca_dbnary_ontolex_2026-10-01.ttl.bz2
-  th_ca_ES.dat kaikki.org-dictionary-Catalan.jsonl.gz
+  th_ca_ES.dat kaikki.org-dictionary-Catalan.jsonl.gz raw-wiktextract-data.jsonl.gz
   es-ca.sqlite3 en-es.sqlite3 en-ca.sqlite3 es-en.sqlite3 ca-en.sqlite3 ca-es.sqlite3)
 lookups=30
 # The key file as the application finds it: a relative XDG_CONFIG_HOME is ignored.

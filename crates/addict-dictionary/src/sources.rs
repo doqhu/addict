@@ -398,8 +398,6 @@ mod tests {
 
     /// The indexes named in the notes on the dictionary sources, typed in
     /// here because those notes are not in the repository.
-    /// `kaikki-ru-Russkiy` is listed ahead of its row in the notes, which
-    /// entry 7 of epic-russian-article adds.
     const DOCUMENTED: &[&str] = &[
         "kaikki-es-Espanol",
         "kaikki-en-Spanish",
