@@ -26,7 +26,7 @@ PREFIXES = [
     ('shared/bin/', ['/usr/bin/', '/usr/libexec/', '/usr/libexec/gstreamer-1.0/']),
     ('bin/', ['/usr/bin/', '/usr/libexec/']),
     ('lib/gstreamer-1.0/', ['/usr/libexec/gstreamer-1.0/']),
-    ('lib/', ['/usr/lib64/', '/usr/lib/']),
+    ('lib/', ['/usr/lib64/', '/usr/lib/', '/usr/lib64/pulseaudio/']),
     ('share/', ['/usr/share/']),
     ('etc/', ['/etc/']),
 ]

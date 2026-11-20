@@ -61,6 +61,8 @@ for pattern in ['AppRun', 'AppRun.sh', 'sharun', 'dash', 'bin/addict', 'shared/b
                 'share/licenses/ocr/tessdata-LICENSE', 'share/licenses/ocr/tesseract/*',
                 'share/licenses/ocr/leptonica/*',
                 'lib/libgtk-4.so*', 'lib/libGLESv2.so*', 'lib/libvulkan_lvp.so*',
+                'lib/gstreamer-1.0/libgstautodetect.so', 'lib/gstreamer-1.0/libgstpulseaudio.so',
+                'lib/gstreamer-1.0/libgstogg.so', 'lib/gstreamer-1.0/libgstvorbis.so',
                 'share/vulkan/icd.d/lvp_icd*.json', 'lib/libc.so.6', 'lib/ld-linux-x86-64.so.2',
                 'share/glib-2.0/schemas/gschemas.compiled', 'etc/fonts/fonts.conf',
                 'share/fonts/**/*.ttf', 'share/icons/hicolor/*/apps/io.github.doqhu.Addict.png',

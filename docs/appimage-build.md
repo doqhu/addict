@@ -79,9 +79,9 @@ packaging/appimage/tests.sh
 ```
 
 The checker uses the runtime's extraction command, without FUSE. It checks
-ELF architecture, loader, GTK/libc, schemas, fonts, icons, modules, symlink
-containment and dictionary/OCR data contamination (including renamed indexes
-with the `ADDICTIX` header). Refusal tests use disposable layout files, not
+ELF architecture, loader, GTK/libc, schemas, fonts, icons, pronunciation
+plugins, symlink containment and dictionary/OCR data contamination (including
+renamed indexes with the `ADDICTIX` header). Refusal tests use disposable layout files, not
 published dictionary fixtures. These checks do not prove a visible window or
 translation on a desktop.
 
@@ -552,7 +552,7 @@ container after quick-sharun's deployment and before AppDir validation.
 Besides the hosts listed above, the build downloads from
 `kojipkgs.fedoraproject.org` (source RPMs), `raw.githubusercontent.com`,
 `deb.debian.org` (the dash tarball), `static.crates.io`,
-`static.rust-lang.org`, `ziglang.org`, `ftp.gnu.org`, `www.gnu.org` and
+`static.rust-lang.org`, `ziglang.org`, `gcc.gnu.org`, `www.gnu.org` and
 `musl.libc.org`. The first build fetches about 2.3 GB of source RPMs and
 0.3 GB of other sources into `target/appimage-inputs/`; each build copies
 them once more into its temporary workspace (`mktemp -d`, usually `/tmp`) and
@@ -575,7 +575,7 @@ list:
   | `shared/bin/` | `/usr/bin/`, `/usr/libexec/`, `/usr/libexec/gstreamer-1.0/` |
   | `bin/` | `/usr/bin/`, `/usr/libexec/` |
   | `lib/gstreamer-1.0/` | `/usr/libexec/gstreamer-1.0/` |
-  | `lib/` | `/usr/lib64/`, `/usr/lib/` |
+  | `lib/` | `/usr/lib64/`, `/usr/lib/`, `/usr/lib64/pulseaudio/` |
   | `share/` | `/usr/share/` |
   | `etc/` | `/etc/` |
 
