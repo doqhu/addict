@@ -15,8 +15,11 @@
 //! language is X would use.
 //!
 //! [`required_sources`] gives only the indexes of the current manifest,
-//! [`release::MANIFEST_2_PUBLISHED`]: a source not published there, such as
-//! `kaikki-ru-Russkiy`, is never required.
+//! [`release::MANIFEST_3_PUBLISHED`]: a source not published there is never
+//! required. A Russian article source, such as `kaikki-ru-Russkiy`, is
+//! required for every my language but Russian: it serves someone who reads
+//! Russian as a foreign language, while with Russian as my language a
+//! Cyrillic word is translated instead and never asks it.
 
 use addict_core::translation::Source as Language;
 
@@ -111,10 +114,11 @@ pub fn translations(reading: Language, my: Language) -> &'static [Source] {
 }
 
 /// The article and English gloss sources, plus translations into and out of
-/// `my`, in source row order; only those of the current manifest.
+/// `my`, in source row order; only those of the current manifest, and no
+/// Russian article source when `my` is Russian.
 pub fn required_sources(my: Language) -> impl Iterator<Item = Source> {
     sources::ROWS.iter().filter_map(move |row| {
-        if !release::MANIFEST_2_PUBLISHED.contains(&row.index) {
+        if !release::MANIFEST_3_PUBLISHED.contains(&row.index) {
             return None;
         }
         let source = KNOWN
@@ -122,7 +126,10 @@ pub fn required_sources(my: Language) -> impl Iterator<Item = Source> {
             .map(|known| known.source)
             .find(|&source| sources::row(source).index == row.index)?;
         match source.kind() {
-            Kind::Definitions | Kind::Synonyms | Kind::English => Some(source),
+            Kind::Definitions => {
+                (my != Language::Ru || source.language() != Some(Language::Ru)).then_some(source)
+            }
+            Kind::Synonyms | Kind::English => Some(source),
             Kind::Translation(_) => PAIRS
                 .iter()
                 .any(|pair| (pair.my == my || pair.reading == my) && pair.sources.contains(&source))
@@ -151,6 +158,7 @@ mod tests {
             "dbnary-ca",
             "sinonims-cat",
             "kaikki-en-Catalan",
+            "kaikki-ru-Russkiy",
             "wikdict-ru-en",
             "wikdict-en-es",
             "wikdict-en-ca",
@@ -166,6 +174,7 @@ mod tests {
             "dbnary-ca",
             "sinonims-cat",
             "kaikki-en-Catalan",
+            "kaikki-ru-Russkiy",
             "wikdict-ru-es",
             "wikdict-es-ca",
             "wikdict-en-es",
@@ -181,6 +190,7 @@ mod tests {
             "dbnary-ca",
             "sinonims-cat",
             "kaikki-en-Catalan",
+            "kaikki-ru-Russkiy",
             "wikdict-ru-ca",
             "wikdict-es-ca",
             "wikdict-en-ca",
@@ -203,10 +213,10 @@ mod tests {
             "wikdict-ru-ca",
         ];
         for (my, expected) in [
-            (Language::En, english),
-            (Language::Es, spanish),
-            (Language::Ca, catalan),
-            (Language::Ru, russian),
+            (Language::En, &english[..]),
+            (Language::Es, &spanish[..]),
+            (Language::Ca, &catalan[..]),
+            (Language::Ru, &russian[..]),
         ] {
             assert_eq!(
                 required_index_names(my).collect::<Vec<_>>(),
@@ -215,10 +225,11 @@ mod tests {
             );
         }
         assert_eq!(russian, crate::release::LEGACY_PUBLISHED);
-        // The Russian article index is in no set until it is published.
+        // The Russian article index is in every set but Russian's.
         for my in Language::ALL {
-            assert!(
-                required_sources(my).all(|source| source != Source::KaikkiRu),
+            assert_eq!(
+                required_sources(my).any(|source| source == Source::KaikkiRu),
+                my != Language::Ru,
                 "{my:?}"
             );
         }

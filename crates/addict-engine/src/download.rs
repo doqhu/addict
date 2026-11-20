@@ -132,19 +132,21 @@ impl Downloader {
         format!("{}/{}/{asset}", self.base_url, release::tag())
     }
 
-    /// Prefers the current manifest and tries the legacy one on HTTP 404.
+    /// Prefers the current manifest, [`release::MANIFEST_3`], and on HTTP
+    /// 404 tries the next older one, [`release::MANIFEST_2`], then the
+    /// legacy [`release::MANIFEST`]. Any other error, or a manifest that
+    /// cannot be parsed, stops there.
     pub async fn manifest(&self) -> Result<Manifest, DownloadError> {
-        let body = match self
-            .fetch(MANIFEST_WHAT, release::MANIFEST_2, MANIFEST_MAX, |_| {})
-            .await
-        {
-            Err(DownloadError::Status { status: 404, .. }) => {
-                self.fetch(MANIFEST_WHAT, release::MANIFEST, MANIFEST_MAX, |_| {})
-                    .await?
+        let mut body = self
+            .fetch(MANIFEST_WHAT, release::MANIFEST_3, MANIFEST_MAX, |_| {})
+            .await;
+        for older in [release::MANIFEST_2, release::MANIFEST] {
+            if !matches!(body, Err(DownloadError::Status { status: 404, .. })) {
+                break;
             }
-            result => result?,
-        };
-        Manifest::parse(&body).map_err(|cause| DownloadError::Manifest { cause })
+            body = self.fetch(MANIFEST_WHAT, older, MANIFEST_MAX, |_| {}).await;
+        }
+        Manifest::parse(&body?).map_err(|cause| DownloadError::Manifest { cause })
     }
 
     /// Downloads the index `published` lists, checks it against the entry
@@ -758,7 +760,7 @@ mod tests {
     fn release(manifest: Vec<u8>, asset: Option<Vec<u8>>) -> Stub {
         let tag = release::tag();
         let mut routes = HashMap::from([(
-            format!("/{tag}/{}", release::MANIFEST_2),
+            format!("/{tag}/{}", release::MANIFEST_3),
             Route::File(manifest),
         )]);
         if let Some(asset) = asset {
@@ -793,7 +795,7 @@ mod tests {
         assert_eq!(
             stub.seen(),
             [
-                format!("GET /{tag}/{} HTTP/1.1", release::MANIFEST_2),
+                format!("GET /{tag}/{} HTTP/1.1", release::MANIFEST_3),
                 format!("GET /{tag}/oewn.index.xz HTTP/1.1"),
                 "GET /objects/oewn HTTP/1.1".to_owned(),
             ]
@@ -825,10 +827,10 @@ mod tests {
         assert_eq!(
             stub.seen(),
             [
-                format!("GET /{tag}/{} HTTP/1.1", release::MANIFEST_2),
+                format!("GET /{tag}/{} HTTP/1.1", release::MANIFEST_3),
                 format!("GET /{tag}/oewn.index.xz HTTP/1.1"),
                 "GET /objects/oewn HTTP/1.1".to_owned(),
-                format!("GET /{tag}/{} HTTP/1.1", release::MANIFEST_2),
+                format!("GET /{tag}/{} HTTP/1.1", release::MANIFEST_3),
             ]
         );
     }
@@ -855,7 +857,7 @@ mod tests {
         let manifests = stub
             .seen()
             .iter()
-            .filter(|line| line.contains(release::MANIFEST_2))
+            .filter(|line| line.contains(release::MANIFEST_3))
             .count();
         assert_eq!(manifests, 2, "{:?}", stub.seen());
         assert_eq!(stub.seen().len(), 6, "{:?}", stub.seen());
@@ -1028,28 +1030,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_a_404_falls_back_to_the_legacy_manifest() {
+    async fn only_a_404_falls_back_to_the_next_older_manifest() {
         let tag = release::tag();
+        let newest = format!("/{tag}/{}", release::MANIFEST_3);
         let current = format!("/{tag}/{}", release::MANIFEST_2);
         let legacy = format!("/{tag}/{}", release::MANIFEST);
-        let entry = Published::of("oewn", b"legacy");
-        let legacy_route = Route::File(manifest_of(vec![entry.clone()]));
-        let current_request = format!("GET {current} HTTP/1.1");
+        let current_entry = Published::of("oewn", b"current");
+        let current_route = Route::File(manifest_of(vec![current_entry.clone()]));
+        let legacy_entry = Published::of("oewn", b"legacy");
+        let legacy_route = Route::File(manifest_of(vec![legacy_entry.clone()]));
+        let request = |path: &str| format!("GET {path} HTTP/1.1");
+
+        // 3 → 2: manifest-2 is used, and the legacy one never asked.
+        let stub = Stub::start(HashMap::from([
+            (current.clone(), current_route.clone()),
+            (legacy.clone(), legacy_route.clone()),
+        ]))
+        .unwrap();
+        let downloader = Downloader::with_base_url(stub.base_url());
+        assert_eq!(
+            downloader.manifest().await.unwrap().indexes,
+            [current_entry]
+        );
+        assert_eq!(stub.seen(), [request(&newest), request(&current)]);
+
+        // 3 → 2 → 1.
         let stub = Stub::start(HashMap::from([(legacy.clone(), legacy_route.clone())])).unwrap();
         let downloader = Downloader::with_base_url(stub.base_url());
-        assert_eq!(downloader.manifest().await.unwrap().indexes, [entry]);
+        assert_eq!(downloader.manifest().await.unwrap().indexes, [legacy_entry]);
         assert_eq!(
             stub.seen(),
-            [current_request.clone(), format!("GET {legacy} HTTP/1.1")]
+            [request(&newest), request(&current), request(&legacy)]
         );
 
+        // A bad manifest-3 stops there, after one request.
         for (route, expected_status) in [
             (Route::File(b"invalid JSON".to_vec()), None),
             (Route::File(br#"{"format":2,"indexes":[]}"#.to_vec()), None),
             (Route::Status("500 Internal Server Error"), Some(500)),
         ] {
             let stub = Stub::start(HashMap::from([
-                (current.clone(), route),
+                (newest.clone(), route),
+                (current.clone(), current_route.clone()),
                 (legacy.clone(), legacy_route.clone()),
             ]))
             .unwrap();
@@ -1062,7 +1084,7 @@ mod tests {
                 ),
                 None => assert!(matches!(error, DownloadError::Manifest { .. }), "{error:?}"),
             }
-            assert_eq!(stub.seen(), std::slice::from_ref(&current_request));
+            assert_eq!(stub.seen(), [request(&newest)]);
         }
     }
 
@@ -1154,6 +1176,10 @@ mod tests {
         let downloader = Downloader::new();
         let tag = release::tag();
         assert_eq!(
+            downloader.url(release::MANIFEST_3),
+            format!("https://github.com/doqhu/addict/releases/download/{tag}/manifest-3.json")
+        );
+        assert_eq!(
             downloader.url(release::MANIFEST_2),
             format!("https://github.com/doqhu/addict/releases/download/{tag}/manifest-2.json")
         );
@@ -1167,21 +1193,23 @@ mod tests {
         );
     }
 
-    /// The published release, over the network: the current manifest lists
-    /// the indexes of `MANIFEST_2_PUBLISHED`, the legacy one only what apps through 0.2.x know, and
-    /// one WikDict index downloads, matches its entry and opens. Run by hand
+    /// The published release, over the network: the manifest the app reads,
+    /// manifest-3, lists the indexes of `MANIFEST_3_PUBLISHED`; the frozen
+    /// manifest-2 and legacy manifest list only what apps through 0.4.x and
+    /// 0.2.x know; and one WikDict index downloads, matches its entry and
+    /// opens. Run by hand
     /// after the indexes workflow published:
     /// `cargo test -p addict-engine download::tests::live -- --ignored`.
     #[tokio::test]
     #[ignore = "needs the network and the published indexes release"]
     async fn live_release_lists_and_installs_the_published_indexes() {
         let downloader = Downloader::new();
-        let current = downloader.manifest().await.expect("manifest-2.json");
+        let current = downloader.manifest().await.expect("manifest-3.json");
         let names: Vec<&str> = current.indexes.iter().map(|p| p.name.as_str()).collect();
-        let expected = addict_dictionary::release::MANIFEST_2_PUBLISHED;
         assert_eq!(
-            names, expected,
-            "manifest-2.json lists its frozen inventory"
+            names,
+            release::MANIFEST_3_PUBLISHED,
+            "manifest-3.json lists the full inventory"
         );
         for published in &current.indexes {
             assert!(published.size > 0, "{} has a size", published.name);
@@ -1192,6 +1220,18 @@ mod tests {
                 published.name
             );
         }
+
+        let body = downloader
+            .fetch("manifest-2", release::MANIFEST_2, 1 << 20, |_| {})
+            .await
+            .expect("manifest-2.json");
+        let frozen = Manifest::parse(&body).expect("a readable manifest-2.json");
+        let names: Vec<&str> = frozen.indexes.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            release::MANIFEST_2_PUBLISHED,
+            "manifest-2.json is 0.4.1's"
+        );
 
         let body = downloader
             .fetch("the legacy manifest", release::MANIFEST, 1 << 20, |_| {})

@@ -4453,7 +4453,7 @@ mod tests {
         session.window.destroy();
     }
 
-    /// On a fresh install the first-run offer, fed `manifest-2.json` by the
+    /// On a fresh install the first-run offer, fed `manifest-3.json` by the
     /// download stub, queues Russian's set when no choice is made, and
     /// exactly English's when English is chosen in the dialog, which makes
     /// it my language and shows it in Settings. Nothing is installed: the
@@ -4507,13 +4507,13 @@ mod tests {
             format: addict_dictionary::format::VERSION,
             indexes: sources::ROWS
                 .iter()
-                .filter(|row| addict_dictionary::release::MANIFEST_2_PUBLISHED.contains(&row.index))
+                .filter(|row| addict_dictionary::release::MANIFEST_3_PUBLISHED.contains(&row.index))
                 .map(|row| Published::of(row.index, row.index.as_bytes()))
                 .collect(),
         };
-        assert_eq!(manifest.indexes.len(), 19);
+        assert_eq!(manifest.indexes.len(), 20);
         let stub = Stub::start(HashMap::from([(
-            format!("/{}/{}", release::tag(), release::MANIFEST_2),
+            format!("/{}/{}", release::tag(), release::MANIFEST_3),
             Route::File(manifest.to_json().into_bytes()),
         )]))
         .unwrap();
@@ -4638,7 +4638,8 @@ mod tests {
 
     /// With Russian's set installed, a change of my language in Settings to
     /// English opens the Settings offer for missing indexes listing exactly
-    /// the four indexes English lacks, and Download queues them; a waiting
+    /// the five indexes English lacks (four pairs and the Russian article),
+    /// and Download queues them; a waiting
     /// offer follows a later change; back to Russian nothing is offered and
     /// nothing is asked of the network. A change while the first-run offer
     /// owns the decision starts nothing. No file is removed.
@@ -4722,13 +4723,13 @@ mod tests {
             format: addict_dictionary::format::VERSION,
             indexes: sources::ROWS
                 .iter()
-                .filter(|row| addict_dictionary::release::MANIFEST_2_PUBLISHED.contains(&row.index))
+                .filter(|row| addict_dictionary::release::MANIFEST_3_PUBLISHED.contains(&row.index))
                 .map(|row| Published::of(row.index, row.index.as_bytes()))
                 .collect(),
         };
-        assert_eq!(manifest.indexes.len(), 19);
+        assert_eq!(manifest.indexes.len(), 20);
         let stub = Stub::start(HashMap::from([(
-            format!("/{}/{}", release::tag(), release::MANIFEST_2),
+            format!("/{}/{}", release::tag(), release::MANIFEST_3),
             Route::File(manifest.to_json().into_bytes()),
         )]))
         .unwrap();
@@ -4796,10 +4797,12 @@ mod tests {
             first_run::nothing_text(Language::Ru)
         );
 
-        // Russian → English: exactly the four English lacks.
+        // Russian → English: exactly the four pairs English lacks, and the
+        // Russian article.
         assert_eq!(
             lacks(Language::En),
             [
+                "kaikki-ru-Russkiy",
                 "wikdict-en-es",
                 "wikdict-en-ca",
                 "wikdict-es-en",

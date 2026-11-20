@@ -1,15 +1,16 @@
 //! Builds the assets of the data release of the indexes, which the
 //! application downloads on its first run: for each of the sources in
 //! `addict_dictionary::sources::ROWS` that the current manifest publishes
-//! (`release::MANIFEST_2_PUBLISHED`) the upstream file is downloaded
-//! from the URL of its row and imported, as `addict import` does, and the index is
-//! compressed with `xz`. Any other row is neither downloaded nor built. Then `manifest.json`, `manifest-2.json`, `WNDB_License.txt` and
-//! `release-body.md` are written beside them. Nothing is uploaded: the
+//! (`release::MANIFEST_3_PUBLISHED`) the upstream file is downloaded once
+//! from the URL of its row and imported, as `addict import` does, and the
+//! index is compressed with `xz`. Any other row is neither downloaded nor
+//! built. Then `manifest.json`, `manifest-2.json`, `manifest-3.json`,
+//! `WNDB_License.txt` and `release-body.md` are written beside them. Nothing is uploaded: the
 //! monthly release job (`.github/workflows/indexes.yml`) or the maintainer
 //! does that, as `docs/index-release.md` says.
 //!
 //! ```text
-//! cargo run -p addict-dictionary --example build-indexes -- [--out <DIR>] [--previous <FILE>] [--previous-2 <FILE>]
+//! cargo run -p addict-dictionary --example build-indexes -- [--out <DIR>] [--previous <FILE>] [--previous-2 <FILE>] [--previous-3 <FILE>]
 //! cargo run -p addict-dictionary --example build-indexes -- --print-tag
 //! ```
 //!
@@ -20,10 +21,13 @@
 //! written even when every source failed. The paths of the assets go to
 //! stdout, and one line per failed source, naming its index, to stderr.
 //!
-//! `--previous` and `--previous-2` name the published `manifest.json` and
-//! `manifest-2.json`. Each output manifest can keep entries for failed
-//! sources from its own previous manifest, with their notices included on
-//! the release page. The legacy inventory remains limited to 0.2.0 indexes.
+//! `--previous`, `--previous-2` and `--previous-3` name the published
+//! `manifest.json`, `manifest-2.json` and `manifest-3.json`. Each output
+//! manifest lists the built indexes of its own inventory and can keep
+//! entries for failed sources from its own previous manifest only, with
+//! their notices included on the release page. The legacy inventory remains
+//! limited to the 13 indexes of 0.2.0 and `manifest-2.json` to the 19 of
+//! 0.4.1.
 //! A previous manifest that cannot be read or parsed stops the run before
 //! anything is built.
 //!
@@ -47,7 +51,8 @@ use addict_dictionary::{
     format,
     import::{self, Day, KNOWN, Origin},
     release::{
-        self, LEGACY_PUBLISHED, MANIFEST, MANIFEST_2, MANIFEST_2_PUBLISHED, Manifest, Published,
+        self, LEGACY_PUBLISHED, MANIFEST, MANIFEST_2, MANIFEST_2_PUBLISHED, MANIFEST_3,
+        MANIFEST_3_PUBLISHED, Manifest, Published,
     },
     sources::{self, Row},
 };
@@ -69,8 +74,8 @@ const DOWNLOADS: &str = ".downloads";
 const DOWNLOAD_LIMIT: Duration = Duration::from_secs(30 * 60);
 
 /// The usage line printed with a usage error.
-const USAGE: &str =
-    "usage: build-indexes [--out <DIR>] [--previous <FILE>] [--previous-2 <FILE>] | --print-tag";
+const USAGE: &str = "usage: build-indexes [--out <DIR>] [--previous <FILE>] [--previous-2 <FILE>] \
+                     [--previous-3 <FILE>] | --print-tag";
 
 fn main() -> ExitCode {
     ExitCode::from(run(
@@ -103,12 +108,18 @@ fn run(args: impl Iterator<Item = String>, stdout: &mut dyn Write, stderr: &mut 
             .as_deref()
             .map(read_previous)
             .transpose()?;
+        let previous_3 = options
+            .previous_3
+            .as_deref()
+            .map(read_previous)
+            .transpose()?;
         let http = client()?;
         build(
             out,
             sources::ROWS,
             previous.as_ref(),
             previous_2.as_ref(),
+            previous_3.as_ref(),
             |row, out| build_one(&http, row, out),
         )
     })();
@@ -128,7 +139,7 @@ fn print_report(report: &Report, out: &Path, stdout: &mut dyn Write, stderr: &mu
     for &name in &report.rebuilt {
         let _ = writeln!(stdout, "{}", out.join(release::asset_name(name)).display());
     }
-    for name in [MANIFEST, MANIFEST_2, WNDB_LICENSE, RELEASE_BODY] {
+    for name in [MANIFEST, MANIFEST_2, MANIFEST_3, WNDB_LICENSE, RELEASE_BODY] {
         let _ = writeln!(stdout, "{}", out.join(name).display());
     }
     if report.failed.is_empty() {
@@ -173,20 +184,23 @@ struct Options {
     /// The manifest of the published release, whose entries of failed
     /// sources are kept.
     previous: Option<PathBuf>,
-    /// The previous manifest of the full inventory.
+    /// The previous manifest of the 0.4.1 inventory.
     previous_2: Option<PathBuf>,
+    /// The previous manifest of the full inventory.
+    previous_3: Option<PathBuf>,
     /// Print the tag of the release and build nothing.
     print_tag: bool,
 }
 
 impl Options {
-    /// The options of `args`: `--out <DIR>`, `--previous <FILE>`, `--previous-2 <FILE>`, or
-    /// `--print-tag` alone.
+    /// The options of `args`: `--out <DIR>`, `--previous <FILE>`,
+    /// `--previous-2 <FILE>`, `--previous-3 <FILE>`, or `--print-tag` alone.
     fn parse(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut options = Self {
             out: PathBuf::from(DEFAULT_OUT),
             previous: None,
             previous_2: None,
+            previous_3: None,
             print_tag: false,
         };
         let mut count = 0;
@@ -200,6 +214,10 @@ impl Options {
                 "--previous-2" => {
                     options.previous_2 =
                         Some(args.next().ok_or("--previous-2 needs a file")?.into());
+                }
+                "--previous-3" => {
+                    options.previous_3 =
+                        Some(args.next().ok_or("--previous-3 needs a file")?.into());
                 }
                 "--print-tag" => options.print_tag = true,
                 _ => return Err(format!("unknown argument {arg}")),
@@ -238,11 +256,12 @@ fn client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|error| format!("cannot start the HTTP client: {error}"))
 }
 
-/// Builds the index of every row of `rows` that [`MANIFEST_2_PUBLISHED`]
-/// lists into `out`, skipping the others unbuilt, going on after a
-/// source that fails, then writes both manifests, the Princeton license and
-/// the release page. Each manifest keeps eligible entries for failed sources
-/// from its own previous copy, and the release page includes their notices.
+/// Builds the index of every row of `rows` that [`MANIFEST_3_PUBLISHED`]
+/// lists into `out`, once, skipping the others unbuilt, going on after a
+/// source that fails, then writes the three manifests, the Princeton
+/// license and the release page. Each manifest lists the indexes of its own
+/// inventory and keeps entries for failed sources from its own previous
+/// copy only; the release page includes their notices.
 /// Returns an error if the output directory or a file beside the indexes
 /// cannot be written.
 fn build(
@@ -250,38 +269,46 @@ fn build(
     rows: &[Row],
     previous: Option<&Manifest>,
     previous_2: Option<&Manifest>,
+    previous_3: Option<&Manifest>,
     mut build_one: impl FnMut(&Row, &Path) -> Result<(Published, String), String>,
 ) -> Result<Report, String> {
     fs::create_dir_all(out).map_err(|error| format!("cannot make {}: {error}", out.display()))?;
-    let mut legacy = Vec::new();
-    let mut current = Vec::new();
+    let mut manifests = [
+        Output::new(MANIFEST, &LEGACY_PUBLISHED, previous),
+        Output::new(MANIFEST_2, &MANIFEST_2_PUBLISHED, previous_2),
+        Output::new(MANIFEST_3, &MANIFEST_3_PUBLISHED, previous_3),
+    ];
     let mut listed: Vec<(&Row, Upstream)> = Vec::new();
     let mut rebuilt = Vec::new();
     let mut failed = Vec::new();
     let mut kept = Vec::new();
     for row in rows {
-        if !MANIFEST_2_PUBLISHED.contains(&row.index) {
+        if !MANIFEST_3_PUBLISHED.contains(&row.index) {
             continue;
         }
-        let in_legacy = LEGACY_PUBLISHED.contains(&row.index);
+        let eligible = manifests
+            .iter_mut()
+            .filter(|manifest| manifest.inventory.contains(&row.index));
         match build_one(row, out) {
             Ok((published, edition)) => {
-                if in_legacy {
-                    legacy.push(published.clone());
+                for manifest in eligible {
+                    manifest.indexes.push(published.clone());
                 }
-                current.push(published);
                 listed.push((row, Upstream::Built(edition)));
                 rebuilt.push(row.index);
             }
             Err(error) => {
                 failed.push((row.index, error));
-                let legacy_entry = previous
-                    .filter(|_| in_legacy)
-                    .and_then(|manifest| previous_entry(manifest, row));
-                let current_entry = previous_2.and_then(|manifest| previous_entry(manifest, row));
-                legacy.extend(legacy_entry.cloned());
-                current.extend(current_entry.cloned());
-                if legacy_entry.is_some() || current_entry.is_some() {
+                let mut any_kept = false;
+                for manifest in eligible {
+                    let previous = manifest.previous;
+                    if let Some(entry) = previous.and_then(|previous| previous_entry(previous, row))
+                    {
+                        manifest.indexes.push(entry.clone());
+                        any_kept = true;
+                    }
+                }
+                if any_kept {
                     listed.push((row, Upstream::Kept));
                     kept.push(row.index);
                 }
@@ -294,18 +321,45 @@ fn build(
         include_bytes!("WNDB_License.txt").as_slice(),
     )?;
     write(&out.join(RELEASE_BODY), release_body(&listed).as_bytes())?;
-    for (name, indexes) in [(MANIFEST, legacy), (MANIFEST_2, current)] {
+    for output in manifests {
         let manifest = Manifest {
             format: format::VERSION,
-            indexes,
+            indexes: output.indexes,
         };
-        write(&out.join(name), manifest.to_json().as_bytes())?;
+        write(&out.join(output.name), manifest.to_json().as_bytes())?;
     }
     Ok(Report {
         rebuilt,
         failed,
         kept,
     })
+}
+
+/// One manifest the run writes.
+struct Output<'a> {
+    /// The name of its asset.
+    name: &'static str,
+    /// The indexes it may list.
+    inventory: &'static [&'static str],
+    /// Its published copy, whose entries of failed sources it keeps.
+    previous: Option<&'a Manifest>,
+    /// What it lists, in row order.
+    indexes: Vec<Published>,
+}
+
+impl<'a> Output<'a> {
+    fn new(
+        name: &'static str,
+        inventory: &'static [&'static str],
+        previous: Option<&'a Manifest>,
+    ) -> Self {
+        Self {
+            name,
+            inventory,
+            previous,
+            indexes: Vec::new(),
+        }
+    }
 }
 
 fn previous_entry<'a>(manifest: &'a Manifest, row: &Row) -> Option<&'a Published> {
@@ -442,8 +496,9 @@ fn release_body(rows: &[(&Row, Upstream)]) -> String {
     ));
     body.push_str(
         "Each `.index.xz` is an xz-compressed index. The manifests give asset sizes and SHA-256 \
-         checksums for the current inventory (`manifest-2.json`) and the legacy 0.2.x inventory \
-         (`manifest.json`). Each index also carries the license notice below in its file.\n",
+         checksums for the current inventory (`manifest-3.json`), the 0.4.x inventory \
+         (`manifest-2.json`) and the legacy 0.2.x inventory (`manifest.json`). Each index also \
+         carries the license notice below in its file.\n",
     );
     for (row, upstream) in rows {
         body.push_str(&format!("\n## {}\n\n", release::asset_name(row.index)));
@@ -618,7 +673,7 @@ mod tests {
         fs::write(out.join("freedict.index.xz"), b"stale").expect("a stale asset");
         let http = client().expect("the HTTP client");
 
-        let report = build(&out, &rows, None, None, |row, out| {
+        let report = build(&out, &rows, None, None, None, |row, out| {
             build_one(&http, row, out)
         })
         .expect("the run");
@@ -682,11 +737,11 @@ mod tests {
     }
 
     #[test]
-    fn all_sources_are_built_once_and_publish_the_two_inventories_in_order() {
+    fn all_sources_are_built_once_and_publish_the_three_inventories_in_order() {
         let dir = TempDir::new();
         let out = dir.0.join("indexes");
         let mut attempts = Vec::new();
-        let report = build(&out, sources::ROWS, None, None, |row, out| {
+        let report = build(&out, sources::ROWS, None, None, None, |row, out| {
             attempts.push(row.index);
             fs::write(out.join(release::asset_name(row.index)), row.index).unwrap();
             Ok((
@@ -696,24 +751,26 @@ mod tests {
         })
         .expect("the run");
 
-        let expected: Vec<_> = sources::ROWS
-            .iter()
-            .map(|row| row.index)
-            .filter(|index| *index != "kaikki-ru-Russkiy")
-            .collect();
-        assert_eq!(expected.len(), 19);
-        assert_eq!(expected, MANIFEST_2_PUBLISHED);
-        // The Russian article index is neither downloaded nor built.
+        let expected: Vec<_> = sources::ROWS.iter().map(|row| row.index).collect();
+        assert_eq!(expected.len(), 20);
+        assert_eq!(expected, MANIFEST_3_PUBLISHED);
+        // Each index is downloaded and built once, though up to three
+        // manifests list it.
         assert_eq!(attempts, expected);
         assert_eq!(report.rebuilt, expected);
         assert!(report.failed.is_empty());
         let legacy = read_previous(&out.join(MANIFEST)).unwrap();
         let numbered = read_previous(&out.join(MANIFEST_2)).unwrap();
+        let newest = read_previous(&out.join(MANIFEST_3)).unwrap();
         assert_eq!(names(&legacy), LEGACY_PUBLISHED);
         assert_eq!(names(&numbered), MANIFEST_2_PUBLISHED);
-        assert!(!out.join("kaikki-ru-Russkiy.index.xz").exists());
+        assert_eq!(names(&newest), MANIFEST_3_PUBLISHED);
+        assert!(out.join("kaikki-ru-Russkiy.index.xz").exists());
         for entry in legacy.indexes {
             assert!(numbered.indexes.contains(&entry), "{entry:?}");
+        }
+        for entry in numbered.indexes {
+            assert!(newest.indexes.contains(&entry), "{entry:?}");
         }
 
         let mut stdout = Vec::new();
@@ -729,6 +786,60 @@ mod tests {
             .map(|name| out.join(release::asset_name(name)).display().to_string())
             .collect();
         assert_eq!(reported_assets, assets);
+        let manifests: Vec<_> = output
+            .lines()
+            .filter(|line| line.ends_with(".json"))
+            .collect();
+        let expected_manifests: Vec<_> = [MANIFEST, MANIFEST_2, MANIFEST_3]
+            .iter()
+            .map(|name| out.join(name).display().to_string())
+            .collect();
+        assert_eq!(manifests, expected_manifests);
+    }
+
+    /// A failed `kaikki-ru-Russkiy` that every previous manifest lists is
+    /// kept in manifest-3 alone: the two older inventories never hold it.
+    #[test]
+    fn a_failed_russian_article_is_kept_in_the_newest_manifest_alone() {
+        let entry = published("kaikki-ru-Russkiy");
+        let previous = Manifest {
+            format: format::VERSION,
+            indexes: vec![entry.clone()],
+        };
+        let rows = [*sources::row(Source::KaikkiRu)];
+        let out = TempDir::new();
+        let report = build(
+            &out.0,
+            &rows,
+            Some(&previous),
+            Some(&previous),
+            Some(&previous),
+            |_, _| Err("upstream failed".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(report.kept, ["kaikki-ru-Russkiy"]);
+        assert!(
+            read_previous(&out.0.join(MANIFEST))
+                .unwrap()
+                .indexes
+                .is_empty()
+        );
+        assert!(
+            read_previous(&out.0.join(MANIFEST_2))
+                .unwrap()
+                .indexes
+                .is_empty()
+        );
+        assert_eq!(
+            read_previous(&out.0.join(MANIFEST_3)).unwrap().indexes,
+            [entry]
+        );
+        let body = fs::read_to_string(out.0.join(RELEASE_BODY)).expect("the release page");
+        assert!(body.contains("## kaikki-ru-Russkiy.index.xz"), "{body}");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(print_report(&report, &out.0, &mut stdout, &mut stderr), 1);
     }
 
     /// When every source fails, the manifest is still written, empty.
@@ -743,7 +854,7 @@ mod tests {
         let out = dir.0.join("indexes");
 
         let http = client().expect("the HTTP client");
-        let report = build(&out, &rows, None, None, |row, out| {
+        let report = build(&out, &rows, None, None, None, |row, out| {
             build_one(&http, row, out)
         })
         .expect("the run");
@@ -806,7 +917,7 @@ mod tests {
         let out = dir.0.join("indexes");
 
         let http = client().expect("the HTTP client");
-        let report = build(&out, &rows, Some(&previous), None, |row, out| {
+        let report = build(&out, &rows, Some(&previous), None, None, |row, out| {
             build_one(&http, row, out)
         })
         .expect("the run");
@@ -818,6 +929,8 @@ mod tests {
         let manifest = Manifest::parse(&json).expect("a valid manifest");
         let numbered = read_previous(&out.join(MANIFEST_2)).unwrap();
         assert_eq!(names(&numbered), ["kaikki-en-Catalan"]);
+        let newest = read_previous(&out.join(MANIFEST_3)).unwrap();
+        assert_eq!(names(&newest), ["kaikki-en-Catalan"]);
         assert_eq!(names(&manifest), ["freedict", "kaikki-en-Catalan"]);
         assert_eq!(manifest.indexes[0], published("freedict"));
         let catalan = fs::read(out.join("kaikki-en-Catalan.index.xz")).expect("the asset");
@@ -867,6 +980,7 @@ mod tests {
             "kaikki-en-Catalan.index.xz",
             MANIFEST,
             MANIFEST_2,
+            MANIFEST_3,
             WNDB_LICENSE,
             RELEASE_BODY,
         ]
@@ -926,7 +1040,7 @@ mod tests {
         let out = dir.0.join("indexes");
 
         let http = client().expect("the HTTP client");
-        let report = build(&out, &rows, Some(&previous), None, |row, out| {
+        let report = build(&out, &rows, Some(&previous), None, None, |row, out| {
             build_one(&http, row, out)
         })
         .expect("the run");
@@ -937,6 +1051,10 @@ mod tests {
         let json = fs::read(out.join(MANIFEST)).expect("the manifest");
         let manifest = Manifest::parse(&json).expect("a valid manifest");
         assert_eq!(names(&manifest), ["kaikki-en-Catalan"]);
+        for name in [MANIFEST_2, MANIFEST_3] {
+            let other = read_previous(&out.join(name)).unwrap();
+            assert_eq!(names(&other), ["kaikki-en-Catalan"], "{name}");
+        }
         let body = fs::read_to_string(out.join(RELEASE_BODY)).expect("the release page");
         assert!(!body.contains("## freedict.index.xz"), "{body}");
         assert!(!body.contains("## oewn.index.xz"), "{body}");
@@ -957,6 +1075,11 @@ mod tests {
             format: format::VERSION,
             indexes: vec![new_entry.clone(), numbered_entry.clone()],
         };
+        let newest_entry = Published::of("oewn", b"the newest release asset");
+        let newest = Manifest {
+            format: format::VERSION,
+            indexes: vec![newest_entry.clone()],
+        };
         let rows = [
             *sources::row(Source::Oewn),
             *sources::row(Source::Freedict),
@@ -965,13 +1088,20 @@ mod tests {
         ];
         let out = TempDir::new();
         let rebuilt = Published::of("kaikki-en-Catalan", b"rebuilt");
-        let report = build(&out.0, &rows, Some(&legacy), Some(&numbered), |row, _| {
-            if row.index == rebuilt.name {
-                Ok((rebuilt.clone(), "test".to_owned()))
-            } else {
-                Err("upstream failed".to_owned())
-            }
-        })
+        let report = build(
+            &out.0,
+            &rows,
+            Some(&legacy),
+            Some(&numbered),
+            Some(&newest),
+            |row, _| {
+                if row.index == rebuilt.name {
+                    Ok((rebuilt.clone(), "test".to_owned()))
+                } else {
+                    Err("upstream failed".to_owned())
+                }
+            },
+        )
         .unwrap();
 
         assert_eq!(
@@ -980,7 +1110,11 @@ mod tests {
         );
         assert_eq!(
             read_previous(&out.0.join(MANIFEST_2)).unwrap().indexes,
-            [numbered_entry, new_entry, rebuilt]
+            [numbered_entry, new_entry, rebuilt.clone()]
+        );
+        assert_eq!(
+            read_previous(&out.0.join(MANIFEST_3)).unwrap().indexes,
+            [newest_entry, rebuilt]
         );
         assert_eq!(report.kept, ["oewn", "wikdict-es-ca"]);
         let mut stdout = Vec::new();
@@ -1027,7 +1161,7 @@ mod tests {
         let older = dir.0.join("older.json");
         fs::write(&older, br#"{"format":2,"indexes":[]}"#).expect("the older manifest");
         let missing = dir.0.join("missing.json");
-        for (option, previous) in ["--previous", "--previous-2"]
+        for (option, previous) in ["--previous", "--previous-2", "--previous-3"]
             .into_iter()
             .flat_map(|option| {
                 [&missing, &garbled, &older]
@@ -1065,6 +1199,7 @@ mod tests {
             &["--out", "x", "--print-tag"],
             &["--print-tag", "--previous", "manifest.json"],
             &["--print-tag", "--previous-2", "manifest-2.json"],
+            &["--print-tag", "--previous-3", "manifest-3.json"],
             &["--print-tag", "--print-tag"],
         ] {
             let (code, stdout, stderr) = run_with(args);
@@ -1072,5 +1207,45 @@ mod tests {
             assert!(stdout.is_empty(), "{stdout}");
             assert!(stderr.contains("usage:"), "{stderr}");
         }
+    }
+
+    /// Each `--previous…` option takes a file; the options can come in any
+    /// order.
+    #[test]
+    fn the_options_are_parsed() {
+        let parse = |args: &[&str]| Options::parse(args.iter().map(|arg| (*arg).to_owned()));
+        assert_eq!(
+            parse(&[
+                "--previous-3",
+                "c.json",
+                "--out",
+                "o",
+                "--previous",
+                "a.json",
+                "--previous-2",
+                "b.json",
+            ]),
+            Ok(Options {
+                out: PathBuf::from("o"),
+                previous: Some(PathBuf::from("a.json")),
+                previous_2: Some(PathBuf::from("b.json")),
+                previous_3: Some(PathBuf::from("c.json")),
+                print_tag: false,
+            })
+        );
+        assert_eq!(
+            parse(&[]),
+            Ok(Options {
+                out: PathBuf::from(DEFAULT_OUT),
+                previous: None,
+                previous_2: None,
+                previous_3: None,
+                print_tag: false,
+            })
+        );
+        for option in ["--out", "--previous", "--previous-2", "--previous-3"] {
+            assert!(parse(&[option]).is_err(), "{option}");
+        }
+        assert!(parse(&["--previous-4", "d.json"]).is_err());
     }
 }
