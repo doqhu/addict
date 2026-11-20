@@ -3,7 +3,7 @@
   "architecture": "x86_64",
   "base": "registry.fedoraproject.org/fedora@sha256:1965dd267a1be0f695534e132de7719e50b142389528226d49288a8866dbe5ad",
   "resolved": "2026-11-10",
-  "rpm_resolution": "Fedora 43; dnf download --resolve --alldeps; install_weak_deps=False; exclude=*.i686; complete closure including base packages; Mesa Vulkan driver closure included for GTK runtime; libglvnd-gles for dynamically loaded libGLESv2; URLs are the build's signed copies on Fedora Koji (kojipkgs), which keep superseded builds, except openh264 from Cisco's codec host",
+  "rpm_resolution": "Fedora 43; dnf download --resolve --alldeps; install_weak_deps=False; exclude=*.i686; complete closure including base packages; Mesa Vulkan driver closure included for GTK runtime; libglvnd-gles for dynamically loaded libGLESv2; signed RPM URLs use Fedora Koji or the Fedora updates archive, with openh264 from Cisco's codec host",
   "rust": "1.99.1-2.fc43",
   "quick_sharun_revision": "ce344325ab1db718a7ad4ce9868a92a38d4af12a",
   "embedded_runtime": "uruntime 0.8.1 / DwarFS; patch URUNTIME_EXTRACT=3 to =2",
@@ -367,17 +367,17 @@
     },
     {
       "file": "git-2.56.0-1.fc43.x86_64.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/git/2.56.0/1.fc43/data/signed/31645531/x86_64/git-2.56.0-1.fc43.x86_64.rpm",
+      "url": "https://fedoraproject-updates-archive.fedoraproject.org/fedora/43/x86_64/git-2.56.0-1.fc43.x86_64.rpm",
       "sha256": "8df5fdeb2e19e958e265ebe6fd1a48c1ea832d72741e01d38221c1214fde73f2"
     },
     {
       "file": "git-core-2.56.0-1.fc43.x86_64.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/git/2.56.0/1.fc43/data/signed/31645531/x86_64/git-core-2.56.0-1.fc43.x86_64.rpm",
+      "url": "https://fedoraproject-updates-archive.fedoraproject.org/fedora/43/x86_64/git-core-2.56.0-1.fc43.x86_64.rpm",
       "sha256": "6aa10d035b4cd3e431983fe2ee2d6438346e98751c08537571f6fa42fbc8b318"
     },
     {
       "file": "git-core-doc-2.56.0-1.fc43.noarch.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/git/2.56.0/1.fc43/data/signed/31645531/noarch/git-core-doc-2.56.0-1.fc43.noarch.rpm",
+      "url": "https://fedoraproject-updates-archive.fedoraproject.org/fedora/43/x86_64/git-core-doc-2.56.0-1.fc43.noarch.rpm",
       "sha256": "9e0ed1144f5e2957ecccca983bba5b52ea7b452d885388b471e4c54156561348"
     },
     {
@@ -572,7 +572,7 @@
     },
     {
       "file": "hwdata-0.412-1.fc43.noarch.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/hwdata/0.412/1.fc43/data/signed/31645531/noarch/hwdata-0.412-1.fc43.noarch.rpm",
+      "url": "https://fedoraproject-updates-archive.fedoraproject.org/fedora/43/x86_64/hwdata-0.412-1.fc43.noarch.rpm",
       "sha256": "d8ded886442f004592f687942cd3eaeaf92e1b81ad8a779259fe7429330d8cab"
     },
     {
@@ -1527,7 +1527,7 @@
     },
     {
       "file": "perl-Git-2.56.0-1.fc43.noarch.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/git/2.56.0/1.fc43/data/signed/31645531/noarch/perl-Git-2.56.0-1.fc43.noarch.rpm",
+      "url": "https://fedoraproject-updates-archive.fedoraproject.org/fedora/43/x86_64/perl-Git-2.56.0-1.fc43.noarch.rpm",
       "sha256": "bcaecfd36df81c3d549059d837846260c1411268a95c5388165b1c32e6331f82"
     },
     {

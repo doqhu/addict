@@ -85,11 +85,11 @@ with the `ADDICTIX` header). Refusal tests use disposable layout files, not
 published dictionary fixtures. These checks do not prove a visible window or
 translation on a desktop.
 
-Failures name their step and input/component. Pinned RPMs are fetched from the
-signed copies that Fedora's Koji keeps for each build, so a package update does
-not remove them. If one is still missing, restore that exact checked file or
-deliberately review a new lock; do not switch to a current package silently.
-Bad cached checksums fail; remove only the named cached input and retry. Set
+Failures name their step and input/component. Fedora RPMs come from Koji and
+the Fedora updates archive. If a signed Koji copy disappears, check the archive
+for the same file and confirm its locked SHA-256 before changing the URL. Review
+a new lock if the exact file is unavailable. For a bad cached checksum, remove
+only the named cached input and retry. Set
 `ADDICT_APPIMAGE_KEEP_WORK=1` to retain the temporary source/build workspace
 for diagnosis; each later build still starts with a fresh directory. Existing
 outputs are cleared before the first check of a build, so a failed rebuild
