@@ -12,31 +12,43 @@ file import remains available beside it.
 
 On its first run, with no index installed, addict offers to download every
 dictionary the manifest of the data release lists. The app downloads prebuilt
-indexes from a GitHub data release of this repository, one after another. Each
-index has its own row in the dialog, with its progress and a Cancel button; an
-index that fails (a missing asset, a network error, a wrong size or checksum,
-an unknown name or format, a file the app cannot open) says why on its row,
-and the other indexes still install. A network failure is shown in plain
-words, such as `cannot download oewn: cannot reach the server`, `no answer in
-time` (when the server does not answer in time, or an answer goes 60 seconds
-without a byte) or `the connection was interrupted`, and the full error of the
-HTTP library is written to standard error as
-`addict: cannot download <index or the index manifest>: <error>`. A manifest that lists no index
-offers nothing. This page is the contract
-between that release and the app, and the steps the maintainer follows to
-publish it. The schema lives in `crates/addict-dictionary/src/release.rs`,
-which both the builder and the app read.
+indexes from a GitHub data release of the separate data repository
+[`doqhu/addict-indexes`](https://github.com/doqhu/addict-indexes), one after
+another. Each index has its own row in the dialog, with its progress and a
+Cancel button; an index that fails (a missing asset, a network error, a wrong
+size or checksum, an unknown name or format, a file the app cannot open) says
+why on its row, and the other indexes still install. A network failure is
+shown in plain words, such as `cannot download oewn: cannot reach the server`,
+`no answer in time` (when the server does not answer in time, or an answer
+goes 60 seconds without a byte) or `the connection was interrupted`, and the
+full error of the HTTP library is written to standard error as
+`addict: cannot download <index or the index manifest>: <error>`. A manifest
+that lists no index offers nothing. This page is the contract between that
+release and the app, and the steps the maintainer follows to publish it. The
+schema lives in `crates/addict-dictionary/src/release.rs`, which both the
+builder and the app read.
 
 ## The release
 
 - **Tag:** `indexes-v<VERSION>`, where `<VERSION>` is
   `addict_dictionary::format::VERSION` (now `3`, so the tag is `indexes-v3`).
-  The data release is separate from the app's `vX.Y.Z` releases. An
+  The data release lives in `doqhu/addict-indexes`, apart from the app's
+  `vX.Y.Z` releases in `doqhu/addict`. An
   `indexes-v2` release existed only as a test before any app read it, and
   was deleted; no released app downloads indexes of format 2.
 - **URLs:** the app fetches only
-  `https://github.com/doqhu/addict/releases/download/indexes-v<VERSION>/<asset>`.
+  `https://github.com/doqhu/addict-indexes/releases/download/indexes-v<VERSION>/<asset>`
+  (`BASE_URL` in `crates/addict-engine/src/download.rs`).
   It never calls the GitHub REST API and never uses `releases/latest`.
+- **Why a separate repository:** `doqhu/addict` has immutable releases on, so
+  that a published app release can never change. A data release must be
+  refreshed every month, so it lives in `doqhu/addict-indexes`, where
+  immutable releases are off.
+- **The frozen release of `doqhu/addict`:** apps 0.2.x and 0.4.x read the
+  `indexes-v3` release of `doqhu/addict` itself. That `indexes-v3` release,
+  with `manifest.json`, `manifest-2.json` and their indexes, stays as it is:
+  it is immutable, is never refreshed, and is never edited or deleted. The
+  app releases of `doqhu/addict` stay immutable too.
 - **Assets:**
   - `<name>.index.xz`: the index `<name>.index`, compressed with xz. The
     name is the index name of `addict_dictionary::sources`, such as `oewn`.
@@ -159,8 +171,9 @@ Use the refresh commands below with the previous manifest files, or fix the
 failed sources and rebuild before uploading.
 
 After a successful build for a new format, create the release with the
-indexes, then upload the manifests. `--latest=false` keeps the app's own
-release marked as the latest one:
+indexes, then upload the manifests. `--latest=false` keeps the indexes
+release from being marked as the latest one; the app never uses
+`releases/latest` anyway:
 
 ```bash
 if grep -Fxq target/indexes/manifest.json target/indexes-assets.txt &&
@@ -169,13 +182,13 @@ if grep -Fxq target/indexes/manifest.json target/indexes-assets.txt &&
   mapfile -t rebuilt < <(grep '\.index\.xz$' target/indexes-assets.txt)
   (( ${#rebuilt[@]} > 0 )) &&
   xz -t "${rebuilt[@]}" &&
-  gh release create indexes-v3 --repo doqhu/addict --target main --latest=false \
+  gh release create indexes-v3 --repo doqhu/addict-indexes --target main --latest=false \
     --title "Dictionary indexes, format 3" \
     --notes-file target/indexes/release-body.md \
     "${rebuilt[@]}" target/indexes/WNDB_License.txt &&
-  gh release upload indexes-v3 --repo doqhu/addict target/indexes/manifest.json &&
-  gh release upload indexes-v3 --repo doqhu/addict target/indexes/manifest-2.json &&
-  gh release upload indexes-v3 --repo doqhu/addict target/indexes/manifest-3.json
+  gh release upload indexes-v3 --repo doqhu/addict-indexes target/indexes/manifest.json &&
+  gh release upload indexes-v3 --repo doqhu/addict-indexes target/indexes/manifest-2.json &&
+  gh release upload indexes-v3 --repo doqhu/addict-indexes target/indexes/manifest-3.json
 fi
 ```
 
@@ -186,7 +199,7 @@ download and the option of a manifest the release does not have yet, such as
 
 ```bash
 previous=$(mktemp -d)
-gh release download indexes-v3 --repo doqhu/addict \
+gh release download indexes-v3 --repo doqhu/addict-indexes \
   --pattern manifest.json --pattern manifest-2.json --pattern manifest-3.json \
   --dir "$previous"
 mkdir -p target
@@ -206,12 +219,12 @@ if grep -Fxq target/indexes/manifest.json target/indexes-assets.txt &&
    grep -Fxq target/indexes/manifest-2.json target/indexes-assets.txt &&
    grep -Fxq target/indexes/manifest-3.json target/indexes-assets.txt; then
   mapfile -t rebuilt < <(grep '\.index\.xz$' target/indexes-assets.txt)
-  gh release upload indexes-v3 --repo doqhu/addict --clobber \
+  gh release upload indexes-v3 --repo doqhu/addict-indexes --clobber \
     "${rebuilt[@]}" target/indexes/WNDB_License.txt &&
-  gh release upload indexes-v3 --repo doqhu/addict --clobber target/indexes/manifest.json &&
-  gh release upload indexes-v3 --repo doqhu/addict --clobber target/indexes/manifest-2.json &&
-  gh release upload indexes-v3 --repo doqhu/addict --clobber target/indexes/manifest-3.json &&
-  gh release edit indexes-v3 --repo doqhu/addict --notes-file target/indexes/release-body.md
+  gh release upload indexes-v3 --repo doqhu/addict-indexes --clobber target/indexes/manifest.json &&
+  gh release upload indexes-v3 --repo doqhu/addict-indexes --clobber target/indexes/manifest-2.json &&
+  gh release upload indexes-v3 --repo doqhu/addict-indexes --clobber target/indexes/manifest-3.json &&
+  gh release edit indexes-v3 --repo doqhu/addict-indexes --notes-file target/indexes/release-body.md
 fi
 ```
 
@@ -228,31 +241,48 @@ update. The choice file and the data directory are:
 
 ## The monthly release job
 
-`.github/workflows/indexes.yml` builds and uploads the indexes once a month,
-on the 2nd at 03:17 UTC. To start it by hand, open Actions → Dictionary
-indexes → Run workflow, or run:
+The workflow lives only in `doqhu/addict-indexes`, as
+`.github/workflows/indexes.yml`; `doqhu/addict` has no indexes workflow. It
+builds and uploads the indexes once a month, on the 2nd at 03:17 UTC, from
+`main` of `doqhu/addict`. To start it by hand, open Actions → Dictionary
+indexes → Run workflow in `doqhu/addict-indexes`, or run:
 
 ```sh
-gh workflow run indexes.yml --repo doqhu/addict
+gh workflow run indexes.yml --repo doqhu/addict-indexes
 ```
+
+The input `ref` (default `main`) is the branch, tag or commit of
+`doqhu/addict` the builder is built from, for example
+`gh workflow run indexes.yml --repo doqhu/addict-indexes -f ref=feat/russian-article-tracer`.
+The monthly run always builds `main`.
 
 The job:
 
-1. Asks the builder for the tag (`build-indexes --print-tag`), so it writes
+1. Checks out `doqhu/addict` at `ref` (a public repository, read with no
+   secret) and builds the builder from it.
+2. Asks the builder for the tag (`build-indexes --print-tag`), so it writes
    only the release of the current index format. A release of an older
    format is never read or written.
-2. Downloads `manifest.json`, `manifest-2.json` and `manifest-3.json` when
+3. Downloads `manifest.json`, `manifest-2.json` and `manifest-3.json` when
    present. Failure to download a listed manifest stops publication; a
    release without `manifest-3.json` builds without `--previous-3`.
-3. Passes available manifests to the builder through `--previous`,
+4. Passes available manifests to the builder through `--previous`,
    `--previous-2` and `--previous-3`, respectively.
-4. Requires the current build to report the three manifest paths. Creates
-   the release if needed with `--latest=false`, uploads the rebuilt indexes
-   and `WNDB_License.txt`, uploads the manifests one at a time, oldest first
-   and `manifest-3.json` last, then replaces the release notes with
-   `release-body.md`.
-5. Lists the indexes built, kept and failed, with each failure's error, in
+5. Requires the current build to report the three manifest paths. Creates
+   the release if needed with `--latest=false` and `--target main` (the
+   `main` of `doqhu/addict-indexes`, which holds only the workflow and a
+   README), uploads the rebuilt indexes and `WNDB_License.txt`, uploads the
+   manifests one at a time, oldest first and `manifest-3.json` last, then
+   replaces the release notes with `release-body.md`. It writes with the
+   job's own `GITHUB_TOKEN`; there is no long-lived token.
+6. Lists the indexes built, kept and failed, with each failure's error, in
    the run's summary.
+7. Re-enables its own workflow, whatever happened before
+   (`gh api -X PUT repos/doqhu/addict-indexes/actions/workflows/indexes.yml/enable`,
+   with `actions: write`). GitHub disables a scheduled workflow of a public
+   repository after 60 days without repository activity; this step is meant
+   to keep the monthly run going, but it is not proven to reset that timer.
+   If the workflow shows as disabled in Actions, enable it there by hand.
 
 **Kept indexes.** When a source fails, each manifest can keep an eligible
 entry from its own published copy at the source's position in
@@ -265,3 +295,24 @@ builds of its inventory.
 failed, kept or not, after the other indexes were published. Read the
 summary, fix the source (a new pin in `import::KNOWN` and a new URL in
 `sources.rs`, for example), and start the job again.
+
+## Setting up the data repository
+
+The maintainer does this once; the app and this repository do not depend on
+anything else:
+
+1. Create the public repository `doqhu/addict-indexes` with a `main` branch.
+2. In its Settings → General → Releases, leave immutable releases off.
+3. Optionally, in its Settings → Actions → General → Workflow permissions,
+   choose "Read and write permissions". This is a precaution, not a
+   requirement: the job itself requests `contents: write` and
+   `actions: write`.
+4. Push the workflow `.github/workflows/indexes.yml` and a short `README.md`
+   to its `main`.
+5. Dispatch the first run against the branch that carries manifest-3, for
+   example `-f ref=feat/russian-article-tracer`, while that branch is not yet
+   merged; once it is, the default `main` is right. The first run creates
+   `indexes-v3` there with the 20 indexes, `WNDB_License.txt` and the three
+   manifests. A second run must refresh it with `--clobber` and no error.
+6. Run the ignored live test:
+   `cargo test -p addict-engine download::tests::live -- --ignored`.

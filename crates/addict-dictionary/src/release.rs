@@ -5,15 +5,15 @@
 //! drift apart.
 //!
 //! The indexes of the format [`format::VERSION`] are assets of the release
-//! tagged [`tag`], `indexes-v<VERSION>`: each index compressed with xz as
-//! [`asset_name`], `<name>.index.xz`. [`MANIFEST_3`] lists the current
-//! inventory, [`MANIFEST_2`] the frozen inventory of 0.4.1 and [`MANIFEST`]
-//! the legacy inventory of 0.2.0. All three use the [`Manifest`] schema for
-//! asset sizes and SHA-256 checksums. An application reads the newest
-//! manifest it knows and, when the release does not have it, the next older
-//! one. A release
-//! of an older format is never changed, so an application that reads only
-//! that format keeps finding its indexes.
+//! tagged [`tag`], `indexes-v<VERSION>`, in the data repository
+//! `doqhu/addict-indexes`: each index compressed with xz as [`asset_name`],
+//! `<name>.index.xz`. [`MANIFEST_3`] lists the current inventory,
+//! [`MANIFEST_2`] the frozen inventory of 0.4.1 and [`MANIFEST`] the legacy
+//! inventory of 0.2.0. All three use the [`Manifest`] schema for asset sizes
+//! and SHA-256 checksums. An application reads the newest manifest it knows
+//! and, when the release does not have it, the next older one. A release of
+//! an older format is never changed, so an application that reads only that
+//! format keeps finding its indexes.
 //!
 //! [`install`] unpacks a downloaded asset, whose size and hash the caller has
 //! checked against the manifest, into a temporary file beside the index,

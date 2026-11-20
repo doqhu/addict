@@ -10,7 +10,7 @@
 //!
 //! On the first start with no index at all, the window offers to download
 //! every dictionary published as an asset of the release `indexes-v<format>`
-//! of the repository: Download fetches them one after another, checks the
+//! of the data repository `doqhu/addict-indexes`: Download fetches them one after another, checks the
 //! size and SHA-256 of each against the release's manifest and installs it,
 //! such as `oewn.index`; one that fails says why on its row and the others go
 //! on. Not now is remembered and the offer is not made again. When the

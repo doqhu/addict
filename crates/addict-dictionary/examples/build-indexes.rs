@@ -6,8 +6,9 @@
 //! index is compressed with `xz`. Any other row is neither downloaded nor
 //! built. Then `manifest.json`, `manifest-2.json`, `manifest-3.json`,
 //! `WNDB_License.txt` and `release-body.md` are written beside them. Nothing is uploaded: the
-//! monthly release job (`.github/workflows/indexes.yml`) or the maintainer
-//! does that, as `docs/index-release.md` says.
+//! monthly release job (`.github/workflows/indexes.yml` of the data
+//! repository `doqhu/addict-indexes`) or the maintainer does that, as
+//! `docs/index-release.md` says.
 //!
 //! ```text
 //! cargo run -p addict-dictionary --example build-indexes -- [--out <DIR>] [--previous <FILE>] [--previous-2 <FILE>] [--previous-3 <FILE>]

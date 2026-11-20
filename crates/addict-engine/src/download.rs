@@ -1,6 +1,7 @@
 //! The download of the published indexes: the manifest of the data release
 //! of this index format and the assets it lists, from fixed release-asset
-//! URLs, `<base>/indexes-v<VERSION>/<asset>`. The GitHub REST API and
+//! URLs of the data repository `doqhu/addict-indexes`,
+//! `<base>/indexes-v<VERSION>/<asset>`. The GitHub REST API and
 //! `releases/latest` are never asked; GitHub answers an asset URL with a
 //! redirect, which is followed.
 //!
@@ -40,8 +41,11 @@ use addict_dictionary::{
 };
 use futures_channel::oneshot;
 
-/// Where the releases of the repository keep their assets.
-pub const BASE_URL: &str = "https://github.com/doqhu/addict/releases/download";
+/// Where the data releases keep their assets: the repository
+/// `doqhu/addict-indexes`, whose releases stay mutable so the monthly job can
+/// replace them. The frozen `indexes-v3` of `doqhu/addict` serves only
+/// 0.2.x and 0.4.x.
+pub const BASE_URL: &str = "https://github.com/doqhu/addict-indexes/releases/download";
 
 /// How long the fetch of the manifest may take on the runner.
 pub const MANIFEST_LIMIT: Duration = Duration::from_secs(60);
@@ -87,14 +91,14 @@ pub struct Downloader {
 }
 
 impl Downloader {
-    /// The downloader of the product: the releases of the repository.
-    /// Nothing is connected here.
+    /// The downloader of the product: the data releases of
+    /// `doqhu/addict-indexes` ([`BASE_URL`]). Nothing is connected here.
     pub fn new() -> Self {
         Self::with_base_url(BASE_URL)
     }
 
-    /// A downloader that asks `base_url` instead of the repository's
-    /// releases, for the tests.
+    /// A downloader that asks `base_url` instead of the data releases of
+    /// `doqhu/addict-indexes` ([`BASE_URL`]), for the tests.
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
@@ -1177,28 +1181,37 @@ mod tests {
         let tag = release::tag();
         assert_eq!(
             downloader.url(release::MANIFEST_3),
-            format!("https://github.com/doqhu/addict/releases/download/{tag}/manifest-3.json")
+            format!(
+                "https://github.com/doqhu/addict-indexes/releases/download/{tag}/manifest-3.json"
+            )
         );
         assert_eq!(
             downloader.url(release::MANIFEST_2),
-            format!("https://github.com/doqhu/addict/releases/download/{tag}/manifest-2.json")
+            format!(
+                "https://github.com/doqhu/addict-indexes/releases/download/{tag}/manifest-2.json"
+            )
         );
         assert_eq!(
             downloader.url(release::MANIFEST),
-            format!("https://github.com/doqhu/addict/releases/download/{tag}/manifest.json")
+            format!(
+                "https://github.com/doqhu/addict-indexes/releases/download/{tag}/manifest.json"
+            )
         );
         assert_eq!(
             downloader.url("oewn.index.xz"),
-            format!("https://github.com/doqhu/addict/releases/download/{tag}/oewn.index.xz")
+            format!(
+                "https://github.com/doqhu/addict-indexes/releases/download/{tag}/oewn.index.xz"
+            )
         );
     }
 
-    /// The published release, over the network: the manifest the app reads,
-    /// manifest-3, lists the indexes of `MANIFEST_3_PUBLISHED`; the frozen
-    /// manifest-2 and legacy manifest list only what apps through 0.4.x and
-    /// 0.2.x know; and the Russian article index, the largest, downloads,
-    /// matches its entry, opens and has the article of `собака`. Run by hand
-    /// after the indexes workflow published:
+    /// The published release of `doqhu/addict-indexes`, over the network:
+    /// the manifest the app reads, manifest-3, lists the indexes of
+    /// `MANIFEST_3_PUBLISHED`; the frozen manifest-2 and legacy manifest
+    /// beside it list only what apps through 0.4.x and 0.2.x know; and the
+    /// Russian article index, the largest, downloads, matches its entry,
+    /// opens and has the article of `собака`. Run by hand after the indexes
+    /// workflow of `doqhu/addict-indexes` published:
     /// `cargo test -p addict-engine download::tests::live -- --ignored`.
     #[tokio::test]
     #[ignore = "needs the network and the published indexes release"]

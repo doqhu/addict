@@ -9,8 +9,10 @@ create tags, so explicit tag creation is needed to start the workflow
 them to the draft, then publishes it. With immutable releases enabled,
 publication locks the assets; every upload must finish first. This page says
 what that run does and what the maintainer does when it fails. The dictionary
-indexes have their own data release, `indexes-v<N>`, which [index-release.md](index-release.md)
-describes; this workflow never touches it.
+indexes have their own data release, `indexes-v<N>`, in the separate
+repository `doqhu/addict-indexes`, which [index-release.md](index-release.md)
+describes; this workflow never touches it. The frozen `indexes-v3` release of
+this repository, which apps 0.2.x and 0.4.x read, is never touched either.
 
 ## A tag run
 
