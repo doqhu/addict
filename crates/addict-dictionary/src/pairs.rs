@@ -6,8 +6,8 @@
 //! into my language. A pair of a language with itself has no row.
 //!
 //! Article sources (definitions and synonyms: `oewn`, `kaikki-es-Espanol`,
-//! `omw-es`, `dbnary-ca`, `sinonims-cat`) are not here: they describe a word
-//! in its own language and stay keyed by the reading language alone.
+//! `omw-es`, `dbnary-ca`, `sinonims-cat`, `kaikki-ru-Russkiy`) describe a word
+//! in its own language and are keyed by the reading language alone.
 //!
 //! Row (Russian, X) does double duty today: with Russian chosen as my
 //! language, a Cyrillic word is translated into the pressed language X from
@@ -24,7 +24,7 @@
 use addict_core::translation::Source as Language;
 
 use crate::{
-    import::{KNOWN, Kind, Source},
+    import::{Kind, Source},
     release, sources,
 };
 
@@ -121,10 +121,7 @@ pub fn required_sources(my: Language) -> impl Iterator<Item = Source> {
         if !release::MANIFEST_3_PUBLISHED.contains(&row.index) {
             return None;
         }
-        let source = KNOWN
-            .iter()
-            .map(|known| known.source)
-            .find(|&source| sources::row(source).index == row.index)?;
+        let source = release::source_of(row.index)?;
         match source.kind() {
             Kind::Definitions => {
                 (my != Language::Ru || source.language() != Some(Language::Ru)).then_some(source)

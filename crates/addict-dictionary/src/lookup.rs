@@ -22,9 +22,9 @@
 //! tables are used whole, as imported: EXP-9 measured the same coverage
 //! with the full tables as with their irregular-only part.
 //!
-//! [`article`] answers from one index of an ES or CA source with the
-//! headwords of its language, and [`grouped`] answers from every index of
-//! one language at once, what each gives under its [`Kind`].
+//! [`article`] answers from one index with the headwords of its language,
+//! and [`grouped`] answers from every index of one language at once, what
+//! each gives under its [`Kind`].
 //!
 //! [`grouped`] also gives the analyses of the word as a verb form, from the
 //! analysis tables of the indexes it asks ([`analyses_of`]).
@@ -49,7 +49,7 @@ use addict_core::{
 
 use crate::{
     analysis::{Analyses, Shape},
-    combined::{Found, merged},
+    combined::{Found, append_unique, merged},
     import::Kind,
     index::{Error, Index, SynonymGroup},
     wikdict,
@@ -156,7 +156,7 @@ pub fn lemmas_of<'a>(
 /// candidates. An error of the index is the error of the lookup.
 pub fn article(index: &Index, language: Language, word: &str) -> Result<Option<Article>, Error> {
     let headwords = if language == Language::Ru {
-        russian_readings([index], word)?.headwords
+        russian_readings([index], word)?.headwords()
     } else {
         headwords(language, word, &lemmas_of([index], language, word)?)
     };
@@ -365,7 +365,12 @@ pub fn grouped(
             .iter()
             .filter_map(|(kind, index)| (*kind == Kind::Definitions).then_some(*index));
         let readings = russian_readings(definitions, word)?;
-        (readings.headwords, readings.translations)
+        let headwords = readings.headwords();
+        let mut spellings = readings.spellings;
+        if spellings.is_empty() {
+            spellings.push(russian_spellings(word));
+        }
+        (headwords, spellings)
     } else {
         let lemmas = lemmas_of(indexes.iter().map(|(_, index)| *index), language, word)?;
         (headwords(language, word, &lemmas), Vec::new())
@@ -382,7 +387,8 @@ pub fn grouped(
     let written = reduction::stripped(word);
     let itself = [written.to_owned(), reduction::lowercase(written)];
     for (kind, index) in indexes {
-        let found = if language == Language::Ru && matches!(kind, Kind::Translation(_)) {
+        let russian_translation = language == Language::Ru && matches!(kind, Kind::Translation(_));
+        let found = if russian_translation {
             let mut translated = Vec::new();
             for spellings in &russian_translations {
                 translated.extend(found(index, spellings, true)?);
@@ -393,14 +399,14 @@ pub fn grouped(
         };
         // Of an index of Russian translations only the translations are
         // kept: the article's entries are those of its definitions.
-        if !(language == Language::Ru && matches!(kind, Kind::Translation(_))) {
-            crate::combined::append_unique(
+        if !russian_translation {
+            append_unique(
                 &mut grouped.entries,
                 found
                     .iter()
                     .flat_map(|found| found.article.entries.iter().cloned()),
             );
-            crate::combined::append_unique(
+            append_unique(
                 &mut grouped.sense_metadata,
                 found
                     .iter()
@@ -423,7 +429,7 @@ pub fn grouped(
                 found_any |= !found.is_empty();
                 let into = grouped.translations_mut(*target);
                 let translations = found.iter().flat_map(|found| &found.article.translations);
-                push_new(into, translations.cloned());
+                append_unique(into, translations.cloned());
             }
             Kind::Synonyms => {
                 if analyses.is_none() {
@@ -467,7 +473,7 @@ pub fn grouped(
                     .iter()
                     .flat_map(|found| &found.article.senses)
                     .filter(|sense| !sense.definition.trim().is_empty());
-                push_new(english, glosses.map(|sense| sense.definition.clone()));
+                append_unique(english, glosses.map(|sense| sense.definition.clone()));
             }
         }
     }
@@ -493,24 +499,29 @@ pub fn grouped(
 
 #[derive(Default)]
 struct RussianReadings {
-    headwords: Vec<String>,
-    translations: Vec<Vec<String>>,
+    /// One nonempty spelling list per reading, with the validated headword first.
+    spellings: Vec<Vec<String>>,
 }
 
 impl RussianReadings {
+    fn headwords(&self) -> Vec<String> {
+        self.spellings
+            .iter()
+            .map(|spellings| spellings[0].clone())
+            .collect()
+    }
+
     fn add(&mut self, spellings: Vec<String>) {
         if let Some(headword) = spellings.first()
-            && !self.headwords.contains(headword)
+            && !self.spellings.iter().any(|reading| &reading[0] == headword)
         {
-            self.headwords.push(headword.clone());
-            self.translations.push(spellings);
+            self.spellings.push(spellings);
         }
     }
 }
 
 /// Keep one Russian headword per definition-backed reading, with lemmas
-/// first. A translation index can use any spelling of each reading. If
-/// there are no definition readings, it can still look up the picked word.
+/// first. A translation index can use any spelling of each reading.
 fn russian_readings<'a>(
     definitions: impl IntoIterator<Item = &'a Index> + Clone,
     word: &str,
@@ -523,7 +534,7 @@ fn russian_readings<'a>(
             readings.add(spellings);
         }
     }
-    if readings.headwords.is_empty()
+    if readings.spellings.is_empty()
         && let Some(infinitive) = russian_past_infinitive(word)
     {
         readings.add(validated_russian_spellings(
@@ -533,9 +544,6 @@ fn russian_readings<'a>(
         )?);
     }
     readings.add(validated_russian_spellings(definitions, word, false)?);
-    if readings.headwords.is_empty() {
-        readings.translations.push(russian_spellings(word));
-    }
     Ok(readings)
 }
 
@@ -639,20 +647,11 @@ pub fn russian(index: &Index, word: &str) -> Result<Option<Vec<String>>, Error> 
     for spelling in russian_spellings(word) {
         if let Some(article) = index.find(&spelling)? {
             let mut translations = Vec::new();
-            push_new(&mut translations, article.translations);
+            append_unique(&mut translations, article.translations);
             return Ok((!translations.is_empty()).then_some(translations));
         }
     }
     Ok(None)
-}
-
-/// Appends each of `items` that `list` does not have yet.
-fn push_new(list: &mut Vec<String>, items: impl IntoIterator<Item = String>) {
-    for item in items {
-        if !list.contains(&item) {
-            list.push(item);
-        }
-    }
 }
 
 #[cfg(test)]
