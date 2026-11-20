@@ -68,6 +68,6 @@
   </screenshots>
 
   <releases>
-    <release version="0.4.1" date="2026-11-19"/> <!-- x-release-please-version-date -->
+    <release version="0.5.0" date="2026-11-20"/> <!-- x-release-please-version-date -->
   </releases>
 </component>

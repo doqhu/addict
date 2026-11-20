@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/doqhu/addict/compare/v0.4.1...v0.5.0) (2026-11-20)
+
+
+### Features
+
+* add offline Russian dictionary articles ([#32](https://github.com/doqhu/addict/issues/32)) ([e47dbc6](https://github.com/doqhu/addict/commit/e47dbc669f05150d97801ca6c7c9dd441f872669))
+
 ## [0.4.1](https://github.com/doqhu/addict/compare/v0.4.0...v0.4.1) (2026-11-19)
 
 
