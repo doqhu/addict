@@ -1016,14 +1016,14 @@
       "sha256": "cfcd48adc62fab0575792b9b3e974dbe04f1896d9584e016d8730ee7d4816365"
     },
     {
-      "file": "libpng-1.6.58-1.fc43.x86_64.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/libpng/1.6.58/1.fc43/data/signed/31645531/x86_64/libpng-1.6.58-1.fc43.x86_64.rpm",
-      "sha256": "043d4bee72435bcca077c0fee7ac5974b31bc11ab10ef92ffe8bef713381dd77"
+      "file": "libpng-1.6.59-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libpng/1.6.59/1.fc43/data/signed/31645531/x86_64/libpng-1.6.59-1.fc43.x86_64.rpm",
+      "sha256": "1d4b558308b2b8e30220c98cee15ed4a91c3291574f1b2084aad407bf986c888"
     },
     {
-      "file": "libpng-devel-1.6.58-1.fc43.x86_64.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/libpng/1.6.58/1.fc43/data/signed/31645531/x86_64/libpng-devel-1.6.58-1.fc43.x86_64.rpm",
-      "sha256": "ff01a39b132bb5b06d9f4db61f938f32e8d428b59bba67f13fd9415396fe81aa"
+      "file": "libpng-devel-1.6.59-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libpng/1.6.59/1.fc43/data/signed/31645531/x86_64/libpng-devel-1.6.59-1.fc43.x86_64.rpm",
+      "sha256": "bfe049b3a8c524f9c127ca9bf858d8a454e221165b8c57b5fd98efa03e586dc6"
     },
     {
       "file": "libpsl-0.21.5-6.fc43.x86_64.rpm",
@@ -1081,9 +1081,9 @@
       "sha256": "841b094f56d067d5f49aa312724086b6a817e41e02cc0dbe49d4ec1c203a1bb5"
     },
     {
-      "file": "libsoup3-3.6.6-5.fc43.x86_64.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/libsoup3/3.6.6/5.fc43/data/signed/31645531/x86_64/libsoup3-3.6.6-5.fc43.x86_64.rpm",
-      "sha256": "80e28270dafd44738839dc31e582b6ed239fb6e983aa664ced1aebfed8f2a003"
+      "file": "libsoup3-3.6.6-6.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libsoup3/3.6.6/6.fc43/data/signed/31645531/x86_64/libsoup3-3.6.6-6.fc43.x86_64.rpm",
+      "sha256": "9defb3e044ff33ea01bf12979bb92bff1d34374bda296ef2ab17da934cfb252f"
     },
     {
       "file": "libssh-0.11.5-1.fc43.x86_64.rpm",
@@ -1401,9 +1401,9 @@
       "sha256": "bfd108d97f316c3e6f1ab63de275af560fb3ed5883973afdaee35f80eecb2b71"
     },
     {
-      "file": "openldap-2.6.15-1.fc43.x86_64.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/openldap/2.6.15/1.fc43/data/signed/31645531/x86_64/openldap-2.6.15-1.fc43.x86_64.rpm",
-      "sha256": "56820f4a507ee2b1968e55ea1f28e135c02667304bb57660d73e9ab69889483e"
+      "file": "openldap-2.6.16-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/openldap/2.6.16/1.fc43/data/signed/31645531/x86_64/openldap-2.6.16-1.fc43.x86_64.rpm",
+      "sha256": "a072a6b640c4133d88cab03fa9d5c143e6ef3ce5198c8bf58f20248e629fd117"
     },
     {
       "file": "openssh-10.0p1-14.fc43.x86_64.rpm",
@@ -1936,14 +1936,14 @@
       "sha256": "d4e530842729c64e37b270bb2098d8277606e6875605164a79f16265a7c8b544"
     },
     {
-      "file": "tesseract-5.5.3-2.fc43.x86_64.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/data/signed/31645531/x86_64/tesseract-5.5.3-2.fc43.x86_64.rpm",
-      "sha256": "f6b887ffcab34360cf59ba2ff36dd61fb156eece723a36ba57e0ff2f55bc65b6"
+      "file": "tesseract-5.5.4-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.4/1.fc43/data/signed/31645531/x86_64/tesseract-5.5.4-1.fc43.x86_64.rpm",
+      "sha256": "15147197a995c41f348fa50ad635021bdbda0cf6485a4df1c7f25d04986f727f"
     },
     {
-      "file": "tesseract-common-5.5.3-2.fc43.noarch.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/data/signed/31645531/noarch/tesseract-common-5.5.3-2.fc43.noarch.rpm",
-      "sha256": "380287bba39bff59161696ae96e522703869cedc29621f4ae4cc270d3beb18b8"
+      "file": "tesseract-common-5.5.4-1.fc43.noarch.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.4/1.fc43/data/signed/31645531/noarch/tesseract-common-5.5.4-1.fc43.noarch.rpm",
+      "sha256": "d64d5106a2e8a789a84e67cc59a6bf1d7f96c87634142c848ae81aa10f0e8403"
     },
     {
       "file": "tesseract-langpack-eng-4.1.0-11.fc43.noarch.rpm",
@@ -1951,9 +1951,9 @@
       "sha256": "14288995c1db9699960da0b0cb6e36df500270d77a24c86b10605aaef57d2c6e"
     },
     {
-      "file": "tesseract-libs-5.5.3-2.fc43.x86_64.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/data/signed/31645531/x86_64/tesseract-libs-5.5.3-2.fc43.x86_64.rpm",
-      "sha256": "3f05bcc2ec5666c8c1c65ba330e7cb439f3669f01f8fce54b85e4247c6b8dce1"
+      "file": "tesseract-libs-5.5.4-1.fc43.x86_64.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.4/1.fc43/data/signed/31645531/x86_64/tesseract-libs-5.5.4-1.fc43.x86_64.rpm",
+      "sha256": "35d7ece23633d9eb9dfd5ef0cca293ebfeb1b6f160c49d4d5a251d2940cdce64"
     },
     {
       "file": "tesseract-tessdata-doc-4.1.0-11.fc43.noarch.rpm",
@@ -2599,9 +2599,9 @@
       "sha256": "b799df903e702232b51e9f60602445719d550f37d41a96a7f5239df7c6749fd7"
     },
     {
-      "file": "libpng-1.6.58-1.fc43.src.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/libpng/1.6.58/1.fc43/src/libpng-1.6.58-1.fc43.src.rpm",
-      "sha256": "92a44491ca23445788af4eb2a3e71a4aed8296920462e53456641c9546ec781a"
+      "file": "libpng-1.6.59-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/libpng/1.6.59/1.fc43/src/libpng-1.6.59-1.fc43.src.rpm",
+      "sha256": "4ac1cb8effff135872aeb98b50abd61105d2e27d8e73ea49e7faf2bd5c74ba5f"
     },
     {
       "file": "libpsl-0.21.5-6.fc43.src.rpm",
@@ -2764,9 +2764,9 @@
       "sha256": "da46ab098e342185adb37988030c6ab5ca9e62f18b69c3dcca97b4d6d5088a15"
     },
     {
-      "file": "openldap-2.6.15-1.fc43.src.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/openldap/2.6.15/1.fc43/src/openldap-2.6.15-1.fc43.src.rpm",
-      "sha256": "d0d5f9a51b52eb4c67d90c8b427b2dceb40374038ce75442c3a8b9ca3fb16a92"
+      "file": "openldap-2.6.16-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/openldap/2.6.16/1.fc43/src/openldap-2.6.16-1.fc43.src.rpm",
+      "sha256": "296fb524bba8be5e03d134958a1636e4ba2d34737becb2ebc3e2b93dc9139d27"
     },
     {
       "file": "openssl-3.5.9-1.fc43.src.rpm",
@@ -2839,9 +2839,9 @@
       "sha256": "8541af0fdf7085dadfcf9e123371ed15cc5b57646ea2013e219e2ff6a73db0b7"
     },
     {
-      "file": "tesseract-5.5.3-2.fc43.src.rpm",
-      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.3/2.fc43/src/tesseract-5.5.3-2.fc43.src.rpm",
-      "sha256": "a8424b3a7a6bc622cc06d4b67a75ae189da886fcaa66d8f6331bee894ab9840b"
+      "file": "tesseract-5.5.4-1.fc43.src.rpm",
+      "url": "https://kojipkgs.fedoraproject.org/packages/tesseract/5.5.4/1.fc43/src/tesseract-5.5.4-1.fc43.src.rpm",
+      "sha256": "ae02e3d90279a97b00bed6b2c5adab2e902d777316ca38886fe4ea62536ee260"
     },
     {
       "file": "tesseract-tessdata-4.1.0-11.fc43.src.rpm",

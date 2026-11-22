@@ -387,7 +387,7 @@ Desktop acceptance, recorded 2026-11-10:
 
 ## Bundled OCR and repeatable capture verification (5.3)
 
-The pinned Fedora 43 input set adds Tesseract 5.5.3-2.fc43, Leptonica
+The pinned Fedora 43 input set adds Tesseract 5.5.4-1.fc43, Leptonica
 1.87.0-1.fc43 and their resolved RPM dependencies (391 RPMs total). The four
 models (`rus` joined `eng`, `spa` and `cat` for Russian Capture) and the Apache
 license use the same tessdata_fast 4.1.0 URLs and SHA-256 pins as the Flatpak
