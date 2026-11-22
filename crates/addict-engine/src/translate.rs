@@ -125,6 +125,27 @@ pub fn request(
     }
 }
 
+/// The online request about the whole `sentence` of the field, asked for
+/// with no word chosen ([`Kept::ask_whole`](crate::online::Kept::ask_whole)):
+/// the sentence, without context, read in `source`; `None` when it is not
+/// sent at all, which is when it is Russian and so is the `target`, as
+/// [`is_sent`] says for a word of it. An English `target` is spelled as
+/// `english` says.
+pub fn whole_request(
+    sentence: &str,
+    source: Source,
+    target: Source,
+    english: English,
+) -> Option<Request> {
+    (!(target == Source::Ru && is_russian(sentence))).then(|| Request {
+        text: sentence.to_owned(),
+        context: None,
+        source,
+        target,
+        english,
+    })
+}
+
 /// Starts the online `request` on `work`, with a deadline; every online
 /// request starts here. `on_outcome` runs once on the worker thread. Without
 /// a request or without a runner nothing starts and the state to show is
@@ -225,6 +246,7 @@ pub(crate) mod tests {
     use super::{
         SENTENCE_LIMIT, TRANSLATE_LIMIT, Translated, is_sent, request, source_of, translate,
         translate_within, translation_ended, translation_result, translation_unstarted,
+        whole_request,
     };
     use crate::{
         dictionaries::{Looked, tests::Sampled},
@@ -674,6 +696,40 @@ pub(crate) mod tests {
             target: Language::Ru,
             english: English::Us,
         }
+    }
+
+    #[test]
+    fn a_whole_sentence_is_sent_alone_unless_russian_into_russian() {
+        let request = whole_request(
+            "I sat on the bank of the river.",
+            Language::En,
+            Language::Ru,
+            English::Us,
+        )
+        .expect("sent");
+        assert_eq!(request.text, "I sat on the bank of the river.");
+        assert_eq!(request.context, None);
+        assert_eq!(
+            (request.source, request.target),
+            (Language::En, Language::Ru)
+        );
+        assert_eq!(
+            whole_request(
+                "Я сидел на берегу.",
+                Language::Ru,
+                Language::Ru,
+                English::Us
+            ),
+            None
+        );
+        let russian = whole_request(
+            "Я сидел на берегу.",
+            Language::Ru,
+            Language::En,
+            English::Gb,
+        )
+        .expect("sent");
+        assert_eq!(russian.english, English::Gb);
     }
 
     #[test]

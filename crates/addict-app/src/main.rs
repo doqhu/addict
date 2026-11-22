@@ -169,8 +169,13 @@
 //! "selection or clipboard", is being read; once the window is active, the
 //! primary selection is read, then the clipboard when the selection gave no
 //! line, both within a limit from the press. The line replaces the field, a
-//! lone word is looked up, and nothing is sent online until a word is
-//! clicked. A read that gives nothing leaves the field empty and says that
+//! lone word is looked up. A text of more words is sent online at once as
+//! the whole sentence, without context, while the Translate sentence at once
+//! switch of Settings is on, as it is by default: it is shown with no word
+//! chosen, and a click on a word then sends the word only. With the switch
+//! off nothing is sent online until a word is clicked. The switch is kept in
+//! the file `translate-sentence`, `on` or `off`, next to the DeepL key. A
+//! read that gives nothing leaves the field empty and says that
 //! nothing is selected or copied. A new press, an edit of the field or a
 //! capture gives up a read that runs.
 //!
@@ -257,8 +262,8 @@ mod wrap;
 mod stub;
 
 use addict_engine::{
-    cache, capture, dictionaries, download, english, entries, evidence, history, language, manual,
-    my_language, online, translate, view,
+    at_once, cache, capture, dictionaries, download, english, entries, evidence, history, language,
+    manual, my_language, online, translate, view,
 };
 
 use std::{

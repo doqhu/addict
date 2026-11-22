@@ -29,6 +29,9 @@ a video, can be captured from the screen and read with Tesseract OCR.
   four languages: the clicked word in the context of its sentence, the
   sentence, or a chosen definition. Answers are cached on disk for up to 90
   days after their last use.
+- A sentence read by the shortcut is translated online at once, before any
+  click. Settings → Translate sentence at once turns this off, and then the
+  sentence is translated with the first click on one of its words.
 - Offline translations from the dictionaries for the pairs that have one
   today: English, Spanish and Catalan into Russian, Russian into English,
   Spanish and Catalan, and English glosses of Spanish and Catalan words. For
