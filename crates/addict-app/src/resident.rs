@@ -179,6 +179,7 @@ use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     about::About,
+    at_once,
     cache::{self, Cached},
     capture::{self, Capture, Captured, Failure, Timing},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
@@ -298,6 +299,11 @@ enum Event {
     EnglishRead(English),
     /// The user chose this spelling in the English spelling row of Settings.
     EnglishChosen(English),
+    /// The file of Translate sentence at once, read on the runner after the
+    /// start, holds this state.
+    AtOnceRead(bool),
+    /// The user moved the Translate sentence at once switch to this state.
+    AtOnceChosen(bool),
     /// The check at the start says where the dictionary indexes stand.
     Indexes {
         generation: u64,
@@ -605,6 +611,17 @@ struct Session {
     english_chosen: bool,
     /// The read or the write of the English-spelling file on the runner.
     english_job: Option<Job>,
+    /// Whether a sentence read at a press of the clipboard shortcut is
+    /// translated online at once, before a click on a word.
+    at_once: bool,
+    /// Where that choice is kept across restarts; `None` when the
+    /// environment names no configuration directory.
+    at_once_file: Option<std::path::PathBuf>,
+    /// Whether the user moved the switch in this session: the read of the
+    /// file, should it come later, changes nothing then.
+    at_once_chosen: bool,
+    /// The read or the write of that file on the runner.
+    at_once_job: Option<Job>,
     /// Where the first-run offer to download a dictionary stands.
     first_run: FirstRun,
     download_run: u64,
@@ -901,6 +918,16 @@ impl Session {
                 }
             }
             Event::EnglishChosen(english) => self.english_chosen(english),
+            Event::AtOnceRead(at_once) => {
+                // After a choice the job is its write, which must not be
+                // dropped (and so cancelled) by the read.
+                if !self.at_once_chosen {
+                    self.at_once_job = None;
+                    self.at_once = at_once;
+                    self.settings.render_at_once(at_once);
+                }
+            }
+            Event::AtOnceChosen(at_once) => self.at_once_chosen(at_once),
             Event::Indexes {
                 generation,
                 indexes,
@@ -1715,8 +1742,9 @@ impl Session {
 
     /// The read of the primary selection and the clipboard with `number`
     /// ended; one that was given up shows nothing. A `line` replaces the
-    /// field as a new text with the source clipboard; nothing is asked
-    /// online. Without one, the reason is logged, the waiting ends and the
+    /// field as a new text with the source clipboard; with Translate
+    /// sentence at once on, a text of more words is asked for online as a
+    /// whole sentence, and nothing else is asked. Without one, the reason is logged, the waiting ends and the
     /// source line says that a text was too long, when one was, or else that
     /// nothing is selected or copied.
     fn copied(&mut self, number: u64, line: Result<String, Missed>) {
@@ -1730,6 +1758,9 @@ impl Session {
             Ok(line) => {
                 let edit = self.manual.copied(&line);
                 self.replace_field(edit);
+                if self.at_once {
+                    self.ask_whole();
+                }
             }
             Err(missed) => {
                 eprintln!(
@@ -1903,6 +1934,20 @@ impl Session {
         self.render_online();
     }
 
+    /// The whole text of the field, a sentence of more words, is asked for
+    /// online itself, with no word chosen, unless it is already pending,
+    /// answered or too long. A lone word or an empty field sends nothing.
+    fn ask_whole(&mut self) {
+        if self.field_is_newer() {
+            return;
+        }
+        let long = online::is_long(self.manual.sentence());
+        if let Some(subject) = self.online.ask_whole(long) {
+            self.start_translation(subject);
+        }
+        self.render_online();
+    }
+
     /// The text of the field was submitted, by Enter or by a paste: a lone
     /// word is asked for online, unless it was already. Nothing else
     /// changes, and an empty field or a sentence sends nothing.
@@ -2064,10 +2109,12 @@ impl Session {
             }
             return;
         }
-        let russian = self
-            .manual
-            .input()
-            .is_some_and(|input| is_russian(input.word()));
+        // The whole sentence, asked for with no word chosen, is Russian when
+        // it has a Cyrillic letter.
+        let russian = match self.manual.input() {
+            Some(input) => is_russian(input.word()),
+            None => is_russian(self.manual.sentence()),
+        };
         let source =
             translate::source_of(subject, self.language, self.looking_up.answered, russian);
         let request = self.online_request(subject, source);
@@ -2430,10 +2477,20 @@ impl Session {
 
     /// The online request about `subject` of the current input, read in
     /// `source`, into my language in the spelling of English chosen.
+    /// With no word chosen, only the whole sentence has one.
     fn online_request(&self, subject: Subject, source: Language) -> Option<Request> {
-        self.manual.input().and_then(|input| {
-            translate::request(input, subject, source, self.my_language, self.english)
-        })
+        match (self.manual.input(), subject) {
+            (Some(input), _) => {
+                translate::request(input, subject, source, self.my_language, self.english)
+            }
+            (None, Subject::Sentence(_)) => translate::whole_request(
+                self.manual.sentence(),
+                source,
+                self.my_language,
+                self.english,
+            ),
+            (None, Subject::Word(_) | Subject::Lone) => None,
+        }
     }
 
     /// Redoes the offline result of the shown word and forgets and asks again
@@ -2450,7 +2507,14 @@ impl Session {
         self.translating_word = None;
         self.looking_up.deferred.clear();
         self.translating_sentence = None;
+        let whole = self.online.asks_whole();
         let submitted = self.online.forget();
+        if whole {
+            let long = online::is_long(self.manual.sentence());
+            if let Some(subject) = self.online.ask_whole(long) {
+                self.start_translation(subject);
+            }
+        }
         if let Some(run) = self.manual.again() {
             self.start_lookup(run);
             let chosen = self.manual.chosen().and_then(|index| {
@@ -2548,6 +2612,34 @@ impl Session {
         });
         if self.english_job.is_none() {
             eprintln!("addict: the English spelling was not kept: no runner");
+        }
+    }
+
+    /// The user moved Translate sentence at once to `at_once`: from the next
+    /// press on, kept in its file by a write on the runner. The text the
+    /// field holds is not asked for again.
+    fn at_once_chosen(&mut self, at_once: bool) {
+        self.at_once_chosen = true;
+        self.at_once = at_once;
+        let path = self.at_once_file.clone();
+        self.at_once_job = self.work.upgrade().map(|work| {
+            work.run(
+                language::FILE_LIMIT,
+                async move { at_once::write(path.as_deref(), at_once) },
+                |outcome| match outcome {
+                    // Replaced by a newer choice, which is written instead.
+                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
+                    Outcome::Finished(Err(e)) => {
+                        eprintln!("addict: Translate sentence at once was not kept: {e}");
+                    }
+                    Outcome::TimedOut | Outcome::Panicked => {
+                        eprintln!("addict: Translate sentence at once was not kept");
+                    }
+                },
+            )
+        });
+        if self.at_once_job.is_none() {
+            eprintln!("addict: Translate sentence at once was not kept: no runner");
         }
     }
 
@@ -3129,6 +3221,7 @@ fn start_settings(
     let imported = sender.clone();
     let my_language = sender.clone();
     let english = sender.clone();
+    let at_once = sender.clone();
     let download = sender.clone();
     Settings::new(
         window,
@@ -3151,6 +3244,9 @@ fn start_settings(
         },
         move |chosen| {
             let _ = english.unbounded_send(Event::EnglishChosen(chosen));
+        },
+        move |chosen| {
+            let _ = at_once.unbounded_send(Event::AtOnceChosen(chosen));
         },
         move || refresh_import(articles.clone(), imported.clone()),
         move || {
@@ -3355,6 +3451,28 @@ fn start_my_language(
     Some(job)
 }
 
+/// Starts the one read of the file of Translate sentence at once at `path`
+/// on `work`; the state it holds comes to `sender` as an event. Without a
+/// runner nothing is read, and the default stays.
+fn start_at_once(
+    work: Option<&Work>,
+    path: Option<std::path::PathBuf>,
+    sender: &UnboundedSender<Event>,
+) -> Option<Job> {
+    let read = sender.clone();
+    let job = work?.run(
+        language::FILE_LIMIT,
+        async move { at_once::read(path.as_deref()) },
+        move |outcome| {
+            if let Outcome::Finished(at_once) = outcome {
+                // On the worker: the UI thread wakes for the event.
+                let _ = read.unbounded_send(Event::AtOnceRead(at_once));
+            }
+        },
+    );
+    Some(job)
+}
+
 /// Starts the one read of the English-spelling file at `path` on `work`;
 /// the spelling it holds, US for anything else, comes to `sender` as an
 /// event. Without a runner nothing is read, and US stays.
@@ -3524,6 +3642,8 @@ fn start(
     let my_language_job = start_my_language(work.as_deref(), my_language_file.clone(), &sender);
     let english_file = english::path();
     let english_job = start_english(work.as_deref(), english_file.clone(), &sender);
+    let at_once_file = at_once::path();
+    let at_once_job = start_at_once(work.as_deref(), at_once_file.clone(), &sender);
     let (translator, key_file, cache) = online_translator();
     let settings = start_settings(
         &window,
@@ -3581,6 +3701,10 @@ fn start(
         english_file,
         english_chosen: false,
         english_job,
+        at_once: at_once::DEFAULT,
+        at_once_file,
+        at_once_chosen: false,
+        at_once_job,
         first_run: FirstRun::Unasked,
         download_run: 0,
         release: download::BASE_URL.to_owned(),
@@ -4194,12 +4318,87 @@ mod tests {
             english_file: None,
             english_chosen: false,
             english_job: None,
+            at_once: at_once::DEFAULT,
+            at_once_file: None,
+            at_once_chosen: false,
+            at_once_job: None,
             first_run: FirstRun::Done,
             download_run: 0,
             release: download::BASE_URL.to_owned(),
             first_run_choice: None,
         };
         (session, events, work)
+    }
+
+    /// With Translate sentence at once on, a sentence read at a press is
+    /// sent at once, alone, and shown with no word chosen; a click on a word
+    /// then sends the word only. With it off nothing is sent until a click,
+    /// and a later read of the file does not undo the user's choice. Run
+    /// alone: GTK starts once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_copied_sentence_is_translated_at_once_only_while_the_switch_is_on() {
+        use std::sync::Arc;
+
+        use addict_core::translation::Canned;
+        use futures_util::StreamExt;
+        use gtk::glib;
+
+        use crate::view::{Online, Whole};
+        gtk::init().expect("a display");
+        let (mut session, mut events, _work) = test_session("io.github.doqhu.Addict.AtOnceTest");
+        let canned = Arc::new(Canned::new(Ok("Я сидел на берегу реки.")));
+        session.translator = canned.clone();
+        session.language = Language::En;
+        let context = glib::MainContext::default();
+        let line = "I sat on the bank of the river.";
+
+        assert!(session.at_once);
+        let number = session.copying.begin();
+        session.handle(Event::Clipboard(number, Ok(line.to_owned())));
+        assert_eq!(session.manual.chosen(), None);
+        while session.translating_sentence.is_some() {
+            let event = context.block_on(events.next()).expect("an event");
+            session.handle(event);
+        }
+        let asked = canned.asked();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].text, line);
+        assert_eq!(asked[0].context, None);
+        assert_eq!(
+            (asked[0].source, asked[0].target),
+            (Language::En, Language::Ru)
+        );
+        assert_eq!(
+            session.online.shown(None).sentence,
+            Some(&Whole::Asked(Online::Translated(
+                "Я сидел на берегу реки.".into()
+            )))
+        );
+        // A click on `bank` sends the word alone.
+        session.word_chosen(4);
+        while session.translating_word.is_some() || session.looking_up.job.is_some() {
+            let event = context.block_on(events.next()).expect("an event");
+            session.handle(event);
+        }
+        let asked = canned.asked();
+        assert_eq!(asked.len(), 2);
+        assert_eq!(asked[1].text, "bank");
+        assert_eq!(asked[1].context.as_deref(), Some(line));
+
+        // Off: a new press sends nothing, and the read of the file comes
+        // too late to change it.
+        session.handle(Event::AtOnceChosen(false));
+        session.handle(Event::AtOnceRead(true));
+        assert!(!session.at_once);
+        let number = session.copying.begin();
+        session.handle(Event::Clipboard(
+            number,
+            Ok("The bank was closed.".to_owned()),
+        ));
+        assert!(session.translating_sentence.is_none());
+        assert_eq!(session.online.shown(None), Default::default());
+        assert_eq!(canned.asked().len(), 2);
     }
 
     /// A saved Russian with English mine ends pressed whichever file is

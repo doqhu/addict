@@ -10,7 +10,10 @@
 //! click on another word does for the word. What is answered or still
 //! pending is not asked for again; what was refused or given up is. A
 //! sentence longer than [`SENTENCE_LIMIT`] characters is never asked for as
-//! a text. An outcome is kept only when it carries the number of this text
+//! a text. A sentence read at a press of the clipboard shortcut may also be
+//! asked for at once, before any click ([`Kept::ask_whole`]): it is then
+//! shown while no word is chosen, and a later click on a word asks for the
+//! word only. An outcome is kept only when it carries the number of this text
 //! and its request is still awaited here.
 //!
 //! Sending the requests is [`translate`](crate::translate)'s and
@@ -93,6 +96,9 @@ pub struct Kept {
     sentence_of: BTreeMap<usize, usize>,
     /// `None` until the lone word is submitted.
     lone: Option<Online>,
+    /// Whether the first sentence was asked for itself, with no click: it is
+    /// shown while no word is chosen.
+    whole: bool,
 }
 
 /// Whether a request in this state is to be sent now: one that was never
@@ -160,6 +166,36 @@ impl Kept {
             self.begin(*subject);
         }
         click
+    }
+
+    /// The first sentence, numbered 0, is asked for itself, with no word
+    /// clicked; `long` says whether it is too long to be sent. Only in a text
+    /// of more words. From now on it is shown while no word is chosen. Gives
+    /// the request to send: none when the sentence is pending, answered or
+    /// too long.
+    pub fn ask_whole(&mut self, long: bool) -> Option<Subject> {
+        let Kind::Sentence = self.kind else {
+            return None;
+        };
+        self.whole = true;
+        match self.sentences.get(&0) {
+            Some(Whole::TooLong | Whole::Asked(Online::Pending | Online::Translated(_))) => None,
+            Some(Whole::Asked(Online::Refused(_))) | None if long => {
+                self.sentences.insert(0, Whole::TooLong);
+                None
+            }
+            Some(Whole::Asked(Online::Refused(_))) | None => {
+                self.sentences.insert(0, Whole::Asked(Online::Pending));
+                self.begin(Subject::Sentence(0));
+                Some(Subject::Sentence(0))
+            }
+        }
+    }
+
+    /// Whether the first sentence was asked for itself, by
+    /// [`Kept::ask_whole`].
+    pub fn asks_whole(&self) -> bool {
+        self.whole
     }
 
     /// The text was submitted, by Enter or by a paste. Says whether the
@@ -251,13 +287,16 @@ impl Kept {
     }
 
     /// What the window shows while the word with the index `chosen` is the
-    /// chosen one: its own texts and those of its sentence.
+    /// chosen one: its own texts and those of its sentence. With no word
+    /// chosen, the first sentence when it was asked for itself.
     pub fn shown(&self, chosen: Option<usize>) -> OnlineTexts<'_> {
+        let sentence = match chosen {
+            Some(index) => self.sentence_of.get(&index).copied(),
+            None => self.whole.then_some(0),
+        };
         OnlineTexts {
             word: chosen.and_then(|index| self.words.get(&index)),
-            sentence: chosen
-                .and_then(|index| self.sentence_of.get(&index))
-                .and_then(|number| self.sentences.get(number)),
+            sentence: sentence.and_then(|number| self.sentences.get(&number)),
             lone: self.lone.as_ref(),
         }
     }
@@ -285,6 +324,47 @@ mod tests {
 
     fn sentence() -> Kept {
         Kept::of(TEXT, Kind::Sentence)
+    }
+
+    #[test]
+    fn a_whole_sentence_is_asked_once_and_a_click_then_asks_the_word_only() {
+        let mut kept = sentence();
+        assert_eq!(kept.shown(None), OnlineTexts::default());
+        assert_eq!(kept.ask_whole(false), Some(Subject::Sentence(0)));
+        assert!(kept.asks_whole());
+        let pending = Whole::Asked(PENDING);
+        assert_eq!(kept.shown(None).sentence, Some(&pending));
+        // Asked again while pending: nothing more.
+        assert_eq!(kept.ask_whole(false), None);
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), translated("Я сидел.")));
+        let answered = Whole::Asked(translated("Я сидел."));
+        assert_eq!(kept.shown(None).sentence, Some(&answered));
+        // A click asks for its word, and the sentence is not asked again.
+        assert_eq!(kept.click(BANK, 0, false).ask, [Subject::Word(BANK)]);
+        assert_eq!(kept.shown(Some(BANK)).sentence, Some(&answered));
+    }
+
+    #[test]
+    fn a_whole_sentence_refused_is_asked_again_and_a_long_one_never() {
+        let mut kept = sentence();
+        assert_eq!(kept.ask_whole(false), Some(Subject::Sentence(0)));
+        assert!(kept.answer_current(TEXT, Subject::Sentence(0), REFUSED));
+        assert_eq!(kept.ask_whole(false), Some(Subject::Sentence(0)));
+
+        let mut long = sentence();
+        assert_eq!(long.ask_whole(true), None);
+        assert_eq!(long.shown(None).sentence, Some(&Whole::TooLong));
+        assert_eq!(long.request_number(Subject::Sentence(0)), None);
+    }
+
+    #[test]
+    fn only_a_text_of_more_words_asks_for_its_whole_sentence() {
+        for kind in [Kind::Empty, Kind::Lone] {
+            let mut kept = Kept::of(TEXT, kind);
+            assert_eq!(kept.ask_whole(false), None, "{kind:?}");
+            assert!(!kept.asks_whole());
+            assert_eq!(kept.shown(None), OnlineTexts::default());
+        }
     }
 
     #[test]

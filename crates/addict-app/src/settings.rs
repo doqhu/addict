@@ -612,6 +612,10 @@ pub struct Settings {
     rebinding: Cell<bool>,
     /// The line of the startup state.
     startup_status: gtk::Label,
+    /// The Translate sentence at once switch.
+    at_once: gtk::Switch,
+    /// Set while the code, not the user, moves the switch.
+    at_once_rendering: Rc<Cell<bool>>,
     /// The My language choice.
     my_language: gtk::DropDown,
     /// Set while the code, not the user, moves the choice.
@@ -650,6 +654,13 @@ pub fn english_name(english: English) -> &'static str {
         English::Gb => "British",
     }
 }
+
+/// The name of the switch that translates a copied sentence at once.
+const AT_ONCE_NAME: &str = "Translate sentence at once";
+
+/// The line under it: what the switch does.
+const AT_ONCE_HINT: &str = "A sentence read by the shortcut is translated online without a \
+     click on a word.";
 
 /// The names of the English spelling row, in the order of its choices.
 pub fn english_names() -> Vec<&'static str> {
@@ -730,7 +741,9 @@ impl Settings {
     /// pressed; `on_clear` runs when Clear cache is pressed; `on_startup` runs
     /// with the state asked for when the user moves the Start at login switch;
     /// `on_my_language` runs with the language the user chooses in My language;
-    /// `on_english` with the spelling the user chooses in English spelling.
+    /// `on_english` with the spelling the user chooses in English spelling;
+    /// `on_at_once` with the state the user moves Translate sentence at once
+    /// to.
     /// `on_imported` refreshes resident dictionary states before success is shown.
     #[allow(clippy::too_many_arguments)]
     pub fn new<F: Future<Output = Result<(), String>> + 'static>(
@@ -743,6 +756,7 @@ impl Settings {
         on_startup: impl Fn(bool) + 'static,
         on_my_language: impl Fn(Source) + 'static,
         on_english: impl Fn(English) + 'static,
+        on_at_once: impl Fn(bool) + 'static,
         on_imported: impl Fn() -> F + 'static,
         on_download: impl Fn() + 'static,
     ) -> Self {
@@ -896,6 +910,30 @@ impl Settings {
         let startup_status = label("", &["hint"]);
         startup_status.set_visible(false);
 
+        // Before the handler is connected: the start is not a choice.
+        let at_once = gtk::Switch::builder()
+            .valign(gtk::Align::Center)
+            .active(addict_engine::at_once::DEFAULT)
+            .build();
+        at_once.update_property(&[gtk::accessible::Property::Label(AT_ONCE_NAME)]);
+        let at_once_rendering = Rc::new(Cell::new(false));
+        let rendering = at_once_rendering.clone();
+        at_once.connect_active_notify(move |switch| {
+            if !rendering.get() {
+                on_at_once(switch.is_active());
+            }
+        });
+        let at_once_name = label(AT_ONCE_NAME, &[]);
+        at_once_name.set_hexpand(true);
+        at_once_name.set_valign(gtk::Align::Center);
+        let at_once_line = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        at_once_line.append(&at_once_name);
+        at_once_line.append(&at_once);
+        let at_once_hint = label(AT_ONCE_HINT, &["hint"]);
+
         let my_language = gtk::DropDown::from_strings(&my_language_names());
         my_language.set_valign(gtk::Align::Center);
         my_language.update_property(&[gtk::accessible::Property::Label("My language")]);
@@ -1007,6 +1045,7 @@ impl Settings {
             &[
                 &row(&[cache_row.upcast_ref(), cache_status.upcast_ref()]),
                 &row(&[startup_row.upcast_ref(), startup_status.upcast_ref()]),
+                &row(&[at_once_line.upcast_ref(), at_once_hint.upcast_ref()]),
                 &row(&[my_language_row.upcast_ref()]),
                 &english_row,
             ],
@@ -1063,6 +1102,8 @@ impl Settings {
             bound: Cell::new(false),
             rebinding: Cell::new(false),
             startup_status,
+            at_once,
+            at_once_rendering,
             my_language,
             my_language_rendering,
             english_row,
@@ -1203,6 +1244,14 @@ impl Settings {
         self.english_rendering.set(false);
     }
 
+    /// Shows `at_once` in the Translate sentence at once switch without
+    /// asking anything.
+    pub fn render_at_once(&self, at_once: bool) {
+        self.at_once_rendering.set(true);
+        self.at_once.set_active(at_once);
+        self.at_once_rendering.set(false);
+    }
+
     /// Shows the English spelling row, or hides it: it is shown only while
     /// English is my language.
     pub fn show_english(&self, shown: bool) {
@@ -1294,6 +1343,7 @@ mod tests {
             |_| {},
             |_| {},
             |_| {},
+            |_| {},
             || async { Ok(()) },
             move || pressed.set(pressed.get() + 1),
         );
@@ -1360,6 +1410,7 @@ mod tests {
             |_| {},
             move |chosen| told.borrow_mut().push(chosen),
             |_| {},
+            |_| {},
             || async { Ok(()) },
             || {},
         );
@@ -1395,6 +1446,7 @@ mod tests {
             |_| {},
             |_| {},
             move |chosen| told.borrow_mut().push(chosen),
+            |_| {},
             || async { Ok(()) },
             || {},
         );
@@ -1438,6 +1490,7 @@ mod tests {
             move |wanted| told.borrow_mut().push(wanted),
             |_| {},
             |_| {},
+            |_| {},
             || async { Ok(()) },
             || {},
         );
@@ -1476,6 +1529,7 @@ mod tests {
             || {},
             |_| {},
             || {},
+            |_| {},
             |_| {},
             |_| {},
             |_| {},

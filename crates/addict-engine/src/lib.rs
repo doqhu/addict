@@ -1,5 +1,6 @@
 //! Addict engine: the GTK-free logic of the application (texts of the window, lookups, online requests, downloads, cache, history, evidence).
 
+pub mod at_once;
 pub mod cache;
 pub mod capture;
 pub mod dictionaries;
