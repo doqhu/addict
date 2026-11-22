@@ -1,50 +1,51 @@
 # addict
 
 addict is a hotkey translator for Linux readers of English, Spanish, Catalan
-and Russian. You choose your own language, the language of translation, in
-Settings; the other three are the languages you read. Select or copy a word or
-a sentence anywhere, press the shortcut, and a small window shows the
-dictionary article of the word: its senses, synonyms, transcriptions with
-recordings, and its translations into your language. Click a word of a
-sentence and DeepL translates the word in that sentence, and the sentence
-itself, into your language. Text that cannot be selected, such as an image or
-a video, can be captured from the screen and read with Tesseract OCR.
+and Russian. In Settings you choose your own language, the one addict
+translates into; the other three are the languages you read.
+
+Select or copy a word anywhere and press the shortcut: a small window shows
+the word's dictionary article, with its senses, synonyms, transcriptions,
+recordings and translations into your language. Select a whole sentence
+instead, and DeepL translates it at once; click any of its words to see how
+that word is translated in the sentence. Text that cannot be selected, such
+as text in an image or a video, can be captured from the screen and read with
+Tesseract OCR.
 
 ![The addict window with the article of a Catalan word](docs/screenshot.png)
 
 ## Features
 
-- A clipboard shortcut reads the selected text, or the clipboard when nothing
-  is selected, the same way in every application. A separate screenshot
-  shortcut opens the interactive region picker for OCR.
-- Settings → My language chooses the language of translation: English,
-  Spanish, Catalan or Russian, which is the default. The window's three
-  language buttons are the other three. While English is your language,
-  Settings → English spelling chooses US, the default, or British spelling
-  for the online translations.
-- Offline dictionary lookup in English, Spanish and Catalan, by the word as
-  written and by its dictionary forms. When the reading language has
-  dictionaries but none of them has the word, the other two are asked.
-- Translations into your language online, from DeepL, between any two of the
-  four languages: the clicked word in the context of its sentence, the
-  sentence, or a chosen definition. Answers are cached on disk for up to 90
-  days after their last use.
-- A sentence read by the shortcut is translated online at once, before any
-  click. Settings → Translate sentence at once turns this off, and then the
-  sentence is translated with the first click on one of its words.
-- Offline translations from the dictionaries for the pairs that have one
-  today: English, Spanish and Catalan into Russian, Russian into English,
-  Spanish and Catalan, and English glosses of Spanish and Catalan words. For
-  any other pair the window says that there is no offline dictionary for it
-  yet.
-- Capture: choose an area of the screen, and its text replaces the field.
-- With English, Spanish or Catalan as your language, look up Russian words
-  offline, including from inflected forms. The article uses Kaikki.org’s
-  extract of Russian Wiktionary and gives Russian definitions by sense,
-  synonyms and IPA transcriptions. Pronunciation recordings, when available,
-  play online from Wikimedia Commons. With Russian as your language, Russian
-  words are translated into the reading language.
-- An icon in the top bar with Show, Settings, About and Exit.
+- **Two shortcuts.** One reads the selected text, or the clipboard when
+  nothing is selected, the same way in every application. The other lets you
+  choose an area of the screen; its text, read by OCR, goes into the window.
+- **Your language.** Settings → My language chooses the language addict
+  translates into: English, Spanish, Catalan or Russian (the default). The
+  window's three language buttons choose among the other three. When English
+  is your language, Settings → English spelling chooses US (the default) or
+  British spelling for the online translations.
+- **Offline dictionaries.** Words are looked up in English, Spanish and
+  Catalan, as written and by their dictionary forms. When the dictionaries of
+  the reading language don't have the word, the other two languages are
+  tried.
+- **Russian words.** When your language is English, Spanish or Catalan,
+  Russian words are looked up offline too, inflected forms included. The
+  article comes from Kaikki.org's extract of Russian Wiktionary: Russian
+  definitions by sense, synonyms and IPA transcriptions. Recordings, when
+  there are any, play online from Wikimedia Commons. When Russian is your
+  language, Russian words are translated into the reading language.
+- **Offline translations** for the pairs that have a dictionary today:
+  English, Spanish and Catalan into Russian; Russian into English, Spanish
+  and Catalan; and English glosses of Spanish and Catalan words. For any other
+  pair, the window says that there is no offline dictionary for it yet.
+- **Online translations** from DeepL, between any two of the four languages:
+  a clicked word in the context of its sentence, the sentence itself, or a
+  chosen definition. Answers are cached on disk for up to 90 days after their
+  last use.
+- **Sentences at once.** A sentence read by the shortcut is translated as
+  soon as it appears. To translate it only after you click one of its words,
+  turn off Settings → Translate sentence at once.
+- **Top-bar icon** with Show, Settings, About and Exit.
 
 ## Requirements
 
@@ -66,7 +67,7 @@ a video, can be captured from the screen and read with Tesseract OCR.
 
 Each [release](https://github.com/doqhu/addict/releases) carries an AppImage
 and a Flatpak bundle for x86_64, each with a `.sha256` file; `<version>` below
-stands for the release's version, such as `0.2.0`. addict is not on Flathub
+stands for the release's version, such as `0.5.0`. addict is not on Flathub
 yet. To build it yourself, see Build from source.
 
 ### AppImage
@@ -120,11 +121,10 @@ flatpak run io.github.doqhu.Addict
 ```
 
 The bundle needs the GNOME runtime, which Flatpak installs from a remote
-such as Flathub, so set that remote up first if you have not. A bundle does not update itself: install the next
-release's bundle the same way. Before you switch from a source build or an
-AppImage launcher, run `addict uninstall` (for an AppImage,
-`./Addict-<version>-x86_64.AppImage uninstall`) and quit the running addict;
-the note below says why.
+such as Flathub, so set that remote up first if you have not. A bundle does
+not update itself: install the next release's bundle the same way. Before you
+switch from a source build or an AppImage, see
+[Switching to the Flatpak](#switching-to-the-flatpak).
 
 ## Build from source
 
@@ -158,68 +158,7 @@ target/release/addict
 directory, so addict appears among your applications. The entry names the
 program by its full path, so run `install` again if you move the program.
 `addict uninstall` removes what `install` wrote, and turns off login startup
-first (see below).
-
-To start addict at login, turn on Settings → Start at login. addict asks the
-desktop's Background portal to do it, in the Flatpak and in a source build, and
-then starts silently at each login. `install` does not set it up, but a source
-build needs it first: the portal knows addict by the entry it writes. The switch
-shows what the portal last confirmed, as the portal cannot be asked what is
-set. If the two have drifted apart, for instance after you move the program or
-delete the entry by hand, turn the switch off and on again to repair it.
-
-An older build wrote its own login entry, which keeps starting addict and may
-open the window at each login. A source build then shows the switch on, with a
-line saying so; turning it off and on replaces that entry with the portal's.
-
-`addict uninstall` asks the portal to remove a login entry of ours before it
-removes anything else. If the portal is unavailable or refuses, it removes
-nothing and names the file. A file of that name that addict did not write, or a
-symlink, is refused and left alone, and the portal is not asked.
-
-Before you switch to a Flatpak of addict (from Flathub, or built from
-`packaging/flatpak`), run `addict uninstall` and quit the running addict:
-choose Exit in its top-bar menu, or run `pkill -x addict` when there is no
-icon. The entry `install` wrote hides the Flatpak's, and a running addict
-built from source answers in place of the Flatpak.
-
-Normal launches show the main window, including the first launch and launches
-while addict is already running. Open Settings from the window's main
-menu or the top-bar menu; tray support is optional. Closing the window or
-pressing Esc keeps addict running for its shortcuts.
-
-On the first start, the desktop portal asks you to confirm the shortcuts.
-The clipboard action suggests Super+Q and keeps any existing assignment.
-The screenshot action has no suggested key: open Settings → Configure
-shortcuts… and assign a free key to Screen region (OCR). The portal owns both
-assignments, and Settings shows changes immediately. Its dialog configures
-both actions independently. Portals of GlobalShortcuts version 1, as on stock
-GNOME, have no such dialog to reopen, and neither do portals that offer version
-2 over a desktop backend without it (xdg-desktop-portal before 1.22 with
-GNOME's backend). There addict binds both actions again under new IDs, which
-makes the desktop show its dialog with the current keys filled in; cancelling
-it leaves the keys as they were. addict remembers which IDs are current in
-`shortcut-generation`, in its configuration directory. Ubuntu's dock holds
-Super+Q, so choose another key there.
-
-With the window closed, the screenshot key opens the region picker. Choose
-an area to put editable OCR text in the window, using its reading language;
-cancelling starts no OCR or translation. The clipboard key continues to read
-selected or copied text independently.
-
-A capture that ends without a snapshot opens the window, with a line saying
-what happened and Capture focused: press Enter to open the picker again. If
-the shortcut is not bound, Retry has the focus instead, and Capture is one click
-away. The window also opens after Esc, because GNOME reports Esc and a real
-failure the same way, so addict cannot tell them apart. No permission is
-involved on GNOME: an interactive screenshot asks for none, and there is nothing
-to grant.
-
-Use `addict --background` (or `flatpak run io.github.doqhu.Addict --background`)
-for a silent login launch. This mode stays silent even if shortcut setup fails,
-including when forwarded to a running instance. Launch normally to see its
-status and Retry in the main window. This flag does not set up autostart; the
-Start at login switch in Settings does.
+first (see [Start at login](#start-at-login)).
 
 ### Where addict finds Tesseract
 
@@ -233,6 +172,75 @@ resolved from the directory of the `addict` program (for `/app/bin/addict`,
 nonblank line; a relative path, or a file that cannot be read, is ignored. A
 build from source with the system Tesseract needs neither file.
 
+## Use
+
+A normal launch shows the main window, also when addict is already running.
+Closing the window or pressing Esc keeps addict running for its shortcuts.
+Open Settings from the window's main menu or from the top-bar menu; the
+top-bar icon is optional.
+
+### Shortcuts
+
+On the first start, the desktop asks you to confirm the shortcuts. The
+clipboard shortcut suggests Super+Q and keeps a key you have already
+assigned. The screenshot shortcut has no suggested key: open Settings →
+Configure shortcuts… and give Screen region (OCR) a free key. Ubuntu's dock
+uses Super+Q, so choose another key there. The desktop portal owns both
+keys, and Settings shows any change at once.
+
+Some desktop portals, stock GNOME among them, have no dialog to reopen later.
+There, Configure shortcuts… registers both shortcuts again under new IDs, so
+the desktop shows its dialog again with the current keys filled in;
+cancelling it leaves the keys as they were. addict keeps the current IDs in
+`shortcut-generation` in its configuration directory.
+
+The screenshot shortcut opens the area picker even while the window is
+closed. Choose an area and its text appears in the window, read in the
+reading language, ready to edit. Cancelling starts no OCR and no
+translation.
+
+If a capture ends without a picture, the window opens with a line that says
+what happened, and Capture has the focus: press Enter to try again. If the
+shortcut is not bound, Retry has the focus instead. The window opens after
+Esc as well, because GNOME reports Esc and a real failure the same way. GNOME
+asks for no permission for an interactive screenshot, so there is nothing to
+grant.
+
+### Start at login
+
+Turn on Settings → Start at login. addict asks the desktop's Background
+portal to start it silently at each login, both in the Flatpak and in a
+source build. A source build must run `addict install` first: the portal
+knows addict by the desktop entry it writes. The portal cannot be asked what
+is set, so the switch shows what the portal last confirmed. If the two drift
+apart, for instance after you move the program or delete the entry by hand,
+turn the switch off and on again.
+
+An older version of addict wrote its own login entry, which keeps starting
+addict and may open the window at each login. A source build then shows the
+switch on, with a line saying so; turning it off and on replaces that entry
+with the portal's.
+
+`addict --background` (or `flatpak run io.github.doqhu.Addict --background`)
+is the silent launch used at login. It stays silent even if the shortcuts
+cannot be set up; launch addict normally to see the problem and Retry. The
+flag does not set up login startup; the switch in Settings does.
+
+`addict uninstall` asks the portal to remove addict's login entry before it
+removes anything else. If the portal is unavailable or refuses, it removes
+nothing and names the file. A file of that name that addict did not write,
+or a symlink, is left alone, and the portal is not asked.
+
+### Switching to the Flatpak
+
+Before you switch from a source build or an AppImage to a Flatpak of addict
+(a release bundle, Flathub, or a build from `packaging/flatpak`), run
+`addict uninstall` (for an AppImage, `./Addict-<version>-x86_64.AppImage
+uninstall`) and quit the running addict: choose Exit in its top-bar menu, or
+run `pkill -x addict` when there is no icon. Otherwise the entry `install`
+wrote hides the Flatpak's, and the running addict answers in place of the
+Flatpak.
+
 ## Dictionaries
 
 addict looks words up in dictionary indexes. The first start offers to download
@@ -240,11 +248,10 @@ the published indexes. Settings → Dictionaries → Download dictionaries check
 all published indexes and offers only missing or unreadable files. You can use
 it after choosing Not now, or to restore a deleted or damaged index; healthy
 files, including manually imported editions, are kept. To import an upstream
-file yourself, download a file
-below, open Settings → Dictionaries → Import file…, and choose it. The app
-builds its index in the background and shows completion or a failure beside
-the action. A newly added dictionary is available on the next lookup. If that
-dictionary was already in use, restart Addict to use its new edition.
+file yourself, download one from the table below, open Settings →
+Dictionaries → Import file…, and choose it. addict builds its index in the
+background and shows the result beside the button. A new dictionary is used
+from the next lookup; a new edition of one already in use, after a restart.
 
 Use this in-app route for Flatpak: its file chooser grants access to the
 selected download through the desktop portal, with no additional filesystem
@@ -259,8 +266,8 @@ SHA-256 before it writes anything. The Kaikki files are the exception: Kaikki
 replaces them about every week, so addict accepts any edition of them by its
 content (it must read as a Kaikki file and hold at least 10,000 headwords),
 but only under its upstream name, as linked below; the older name
-`kaikki.org-dictionary-Español.jsonl.gz` is accepted too. Such an index is dated by the
-file's modification time. One index is enough to start, and the
+`kaikki.org-dictionary-Español.jsonl.gz` is accepted too. Such an index is
+dated by the file's modification time. One index is enough to start, and the
 window says which ones are missing. The indexes are kept in
 `~/.local/share/addict`.
 
@@ -301,7 +308,9 @@ window says which ones are missing. The indexes are kept in
 ## Configuration
 
 addict keeps its settings as small files in `~/.config/addict`
-(`$XDG_CONFIG_HOME/addict` when that is set):
+(`$XDG_CONFIG_HOME/addict` when that is set; for the Flatpak,
+`~/.var/app/io.github.doqhu.Addict/config/addict`). Settings writes most of
+them, so you rarely need to edit one:
 
 - `deepl.key` -- the DeepL API key. Enter it in Settings, which writes the
   file with mode `0600`; a file with any permission beyond `0600` is
@@ -318,9 +327,16 @@ addict keeps its settings as small files in `~/.config/addict`
   Russian.
 - `english` -- the spelling of English for online translations, `us` or `gb`,
   written when you choose it in Settings. Without the file it is US.
+- `translate-sentence` -- whether a sentence read by the shortcut is
+  translated at once, `on` or `off`, written when you move the switch in
+  Settings. Without the file it is `on`.
+- `login-startup`, `shortcut-generation`, `first-run-download` -- what the
+  portal last confirmed for Start at login, the current shortcut IDs, and
+  whether the first-run download was declined. addict writes these itself.
 
-DeepL answers are cached in `~/.cache/addict`; Settings shows the cache size
-and clears it.
+DeepL answers are cached in `~/.cache/addict` (for the Flatpak,
+`~/.var/app/io.github.doqhu.Addict/cache/addict`); Settings shows the cache
+size and clears it.
 
 ### Hyprland
 
