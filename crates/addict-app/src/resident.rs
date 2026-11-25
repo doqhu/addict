@@ -49,7 +49,7 @@
 //! snapshot, and shows nothing. Each capture job has a number, so what a
 //! given-up job had already sent is ignored. Every capture end that is
 //! shown, also one that could not start, is recorded with `--evidence` as it
-//! is shown; a given-up one is not. The job is [`capture`](crate::capture)'s.
+//! is shown; a given-up one is not. The job is [`capture`]'s.
 //!
 //! The clipboard action reads the text selected or copied, the same for every
 //! application. The press gives up a running capture and the read of the
@@ -151,6 +151,7 @@ use std::{
 
 use addict_core::{
     APP_ID,
+    failure::recognize::OcrFailure,
     input::{Source, window_state},
     sentence,
     translation::{
@@ -162,13 +163,15 @@ use addict_dictionary::{
     import,
     release::{Manifest, Published},
 };
-use addict_engine::recording::{AUDIO_LIMIT, AudioFailure, CREDIT_LIMIT, fetch_audio};
+use addict_engine::{
+    capture::{Captured, Failure, Timing},
+    recording::{AUDIO_LIMIT, AudioFailure, CREDIT_LIMIT, fetch_audio},
+    work::{Job, Outcome, Work},
+};
 use addict_platform::{
-    ocr::OcrFailure,
     shortcut::{self, Action, Bindings, KeyOwner, ShortcutEvent, ShortcutHandle},
     startup,
     tray::{self, TrayEvent, TrayHandle},
-    work::{Job, Outcome, Work},
 };
 use futures_channel::{
     mpsc::{UnboundedReceiver, UnboundedSender},
@@ -181,7 +184,7 @@ use crate::{
     about::About,
     at_once,
     cache::{self, Cached},
-    capture::{self, Capture, Captured, Failure, Timing},
+    capture::{self, Capture},
     dictionaries::{Articles, Dictionaries, Indexes, Looked},
     download::{self, Downloader},
     english, entries, evidence,
@@ -216,6 +219,14 @@ const BIND_LIMITS: shortcut::Limits = shortcut::Limits {
 /// How long the read of the selection and the clipboard may take from the
 /// press, the wait for the window to be active included.
 const CLIPBOARD_LIMIT: Duration = Duration::from_secs(1);
+
+/// How long the lookup of one word may take.
+const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
+
+/// How long one online request may take. A network answer is slower than a
+/// file read, and this deadline is the only thing that ends a request
+/// without an answer.
+const TRANSLATE_LIMIT: Duration = Duration::from_secs(10);
 
 /// What lives as long as the resident application.
 struct Resident {
@@ -1989,6 +2000,7 @@ impl Session {
         let generation = self.indexes.generation;
         let started = manual::offline(
             self.work.upgrade().as_deref(),
+            LOOKUP_LIMIT,
             self.articles.clone(),
             word,
             language,
@@ -2157,6 +2169,7 @@ impl Session {
             .map_or(self.language, |request| request.source);
         let started = translate::translate(
             self.work.upgrade().as_deref(),
+            TRANSLATE_LIMIT,
             self.translator.clone(),
             request,
             move |outcome| {
@@ -3396,7 +3409,7 @@ fn start_check(
     generation: u64,
 ) -> Option<Job> {
     let checked = sender.clone();
-    manual::check_indexes(work, articles, move |indexes| {
+    manual::check_indexes(work, LOOKUP_LIMIT, articles, move |indexes| {
         // On the worker: the UI thread wakes for the event.
         let _ = checked.unbounded_send(Event::Indexes {
             generation,
@@ -3959,14 +3972,27 @@ mod tests {
 
     use super::{
         CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, CapturePress, Capturing, Copying, Event,
-        FailedEndFocus, LaunchMode, WindowActions, WindowEvent, connect_launches,
-        connect_menu_actions, connect_settings_action, dispatch_window, failed_end_focus,
-        is_offered_command, missed_line,
+        FailedEndFocus, LOOKUP_LIMIT, LaunchMode, TRANSLATE_LIMIT, WindowActions, WindowEvent,
+        connect_launches, connect_menu_actions, connect_settings_action, dispatch_window,
+        failed_end_focus, is_offered_command, missed_line,
     };
     use crate::view::{
         Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
     };
     use addict_core::translation::Source as Language;
+
+    #[test]
+    fn the_lookup_limit_is_finite_and_short() {
+        assert!(!LOOKUP_LIMIT.is_zero());
+        assert!(LOOKUP_LIMIT.as_secs() <= 10);
+    }
+
+    #[test]
+    fn the_translate_limit_is_finite_and_its_own() {
+        assert!(!TRANSLATE_LIMIT.is_zero());
+        assert_eq!(TRANSLATE_LIMIT.as_secs(), 10);
+        assert!(TRANSLATE_LIMIT > LOOKUP_LIMIT);
+    }
 
     #[test]
     fn buffered_recording_can_be_reopened_from_the_beginning() {
@@ -3988,7 +4014,7 @@ mod tests {
             format::{self, Contents, Headword},
             import::{self, Source},
         };
-        use addict_platform::work::{Outcome, Work};
+        use addict_engine::work::{Outcome, Work};
         use futures_util::{StreamExt, pin_mut, poll};
         use std::{path::PathBuf, sync::Arc};
 
@@ -4020,6 +4046,7 @@ mod tests {
             assert!(
                 manual::offline(
                     Some(&work),
+                    LOOKUP_LIMIT,
                     articles.clone(),
                     word.to_owned(),
                     language,
@@ -4077,6 +4104,7 @@ mod tests {
             let (send, receive) = futures_channel::oneshot::channel();
             let _job = manual::offline(
                 Some(&work),
+                LOOKUP_LIMIT,
                 articles.clone(),
                 word.to_owned(),
                 language,
@@ -4117,7 +4145,7 @@ mod tests {
             import::{self, Source},
             release::Published,
         };
-        use addict_platform::work::{Outcome, Work};
+        use addict_engine::work::{Outcome, Work};
         use futures_util::StreamExt;
         use std::{collections::HashMap, path::PathBuf, sync::Arc};
         struct Temp(PathBuf);
@@ -4212,6 +4240,7 @@ mod tests {
             let (send, receive) = futures_channel::oneshot::channel();
             let _lookup = manual::offline(
                 Some(&work),
+                LOOKUP_LIMIT,
                 articles.clone(),
                 word.to_owned(),
                 language,
@@ -4247,7 +4276,7 @@ mod tests {
     ) -> (
         super::Session,
         futures_channel::mpsc::UnboundedReceiver<Event>,
-        std::rc::Rc<addict_platform::work::Work>,
+        std::rc::Rc<addict_engine::work::Work>,
     ) {
         use super::*;
         let app = gtk::Application::builder()
@@ -5368,13 +5397,13 @@ mod tests {
     }
 
     /// A job that stands for the one of a capture.
-    fn capture_job(work: &addict_platform::work::Work) -> addict_platform::work::Job {
+    fn capture_job(work: &addict_engine::work::Work) -> addict_engine::work::Job {
         work.run(std::time::Duration::from_secs(5), async {}, |_| {})
     }
 
     #[test]
     fn a_press_while_a_picker_waits_starts_nothing() {
-        let work = addict_platform::work::Work::start().expect("runner");
+        let work = addict_engine::work::Work::start().expect("runner");
         let mut capturing = Capturing::default();
         assert_eq!(capturing.press(false), CapturePress::Start);
         capturing.hiding = true;
@@ -5387,7 +5416,7 @@ mod tests {
 
     #[test]
     fn a_retry_has_a_new_number_and_an_old_job_is_ignored() {
-        let work = addict_platform::work::Work::start().expect("runner");
+        let work = addict_engine::work::Work::start().expect("runner");
         let mut capturing = Capturing::default();
         let old = capturing.next_number();
         capturing.job = Some(capture_job(&work));
@@ -5608,6 +5637,8 @@ mod tests {
 
     #[test]
     fn forwarded_launches_retain_each_invocations_mode() {
+        // Its children would be counted by the capture's test of them.
+        let _children = crate::capture::tests::children();
         use std::{
             cell::RefCell,
             process::Command,
@@ -5799,7 +5830,8 @@ mod tests {
         };
 
         use addict_core::APP_ID;
-        use addict_platform::{desktop, startup::StartupFailure};
+        use addict_core::failure::login_item::StartupFailure;
+        use addict_platform::desktop;
         use zbus::{
             Connection,
             message::Header,
@@ -5985,6 +6017,8 @@ mod tests {
 
         #[test]
         fn the_switch_changes_startup_only_through_the_portal() {
+            // Its children would be counted by the capture's test of them.
+            let _children = crate::capture::tests::children();
             if std::env::var_os(CHILD).is_none() {
                 let root = std::env::temp_dir()
                     .join(format!("addict-resident-startup-{}", std::process::id()));

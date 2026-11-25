@@ -6,7 +6,7 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use addict_platform::work::{Outcome, Work};
+use addict_engine::work::{Outcome, Work};
 use tokio::sync::oneshot;
 
 /// Limit for each wait of the test thread.

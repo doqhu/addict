@@ -2451,11 +2451,12 @@ pub mod tests {
         my: Language,
         word: &str,
     ) -> (Language, Option<crate::view::Lookup>) {
-        let work = addict_platform::work::Work::start().expect("runner");
+        let work = crate::work::Work::start().expect("runner");
         let (sender, receiver) = std::sync::mpsc::channel();
         let known = dictionaries.indexes();
         let job = crate::manual::offline(
             Some(&work),
+            crate::manual::tests::LOOKUP_LIMIT,
             std::sync::Arc::new(dictionaries),
             word.to_owned(),
             pressed,
@@ -2739,12 +2740,9 @@ pub mod tests {
             dir.dictionaries()
                 .look_up_first(Language::Es, Language::En, "banco");
         assert_eq!(language, Language::Es);
-        let lookup = crate::manual::result_in(
-            addict_platform::work::Outcome::Finished(looked),
-            "banco",
-            language,
-        )
-        .expect("a result");
+        let lookup =
+            crate::manual::result_in(crate::work::Outcome::Finished(looked), "banco", language)
+                .expect("a result");
         let texts = choice_texts(
             &lookup,
             None,
@@ -2945,12 +2943,9 @@ pub mod tests {
         ] {
             let (language, looked) = dictionaries.look_up_first(pressed, my, word);
             assert_eq!(language, reading, "{word}");
-            let lookup = crate::manual::result_in(
-                addict_platform::work::Outcome::Finished(looked),
-                word,
-                language,
-            )
-            .expect("an offline result");
+            let lookup =
+                crate::manual::result_in(crate::work::Outcome::Finished(looked), word, language)
+                    .expect("an offline result");
             let texts = choice_texts(
                 &lookup,
                 None,
@@ -2992,9 +2987,7 @@ pub mod tests {
         let dictionaries = dir.dictionaries();
         let lookup = |dictionaries: &Dictionaries, target, word| {
             crate::manual::result_in(
-                addict_platform::work::Outcome::Finished(
-                    dictionaries.look_up_for(En, target, word),
-                ),
+                crate::work::Outcome::Finished(dictionaries.look_up_for(En, target, word)),
                 word,
                 En,
             )
@@ -3110,7 +3103,7 @@ pub mod tests {
         let dictionaries = dir.dictionaries();
         let lookup = |target| {
             let looked = dictionaries.look_up_for(En, target, "bank");
-            crate::manual::result_in(addict_platform::work::Outcome::Finished(looked), "bank", En)
+            crate::manual::result_in(crate::work::Outcome::Finished(looked), "bank", En)
                 .expect("an offline result")
         };
         let mut shown = Shown::default();
@@ -3282,12 +3275,12 @@ pub mod tests {
     }
     #[test]
     fn english_source_sense_associations_survive_answer_lookup_and_shown() {
+        use crate::work::Outcome;
         use crate::{
             manual::result_in,
             view::{Lookup, Shown},
         };
         use addict_core::dictionary::Pos;
-        use addict_platform::work::Outcome;
 
         let freedict = addict_dictionary::freedict::parse(
             br#"<TEI><entry>
@@ -3379,12 +3372,12 @@ pub mod tests {
 
     #[test]
     fn grammar_pronunciation_and_audio_survive_application_answers_and_lookup_transport() {
+        use crate::work::Outcome;
         use crate::{
             manual::result_in,
             view::{Lookup, Shown},
         };
         use addict_core::dictionary::Pos;
-        use addict_platform::work::Outcome;
         for (source, language, code, word) in [
             (Source::Oewn, Language::En, "en", "bank"),
             (Source::KaikkiEs, Language::Es, "es", "banco"),

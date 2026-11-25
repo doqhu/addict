@@ -26,11 +26,10 @@ use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 
 use addict_core::{
     dictionary::{Article, LexicalEntry, PartOfSpeech, Pos, Pronunciation, Sense},
+    failure::{capture::CaptureFailure, login_item::StartupFailure, recognize::OcrFailure},
     input::{Source, WindowState},
     translation::{English, Refusal, Request, Source as Language, reading_languages},
 };
-
-use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
 
 use addict_dictionary::{
     analysis::{Analyses, Number, Person, Shape, TenseMood},
@@ -2755,6 +2754,16 @@ impl Shown {
     }
 }
 
+/// Why the portal did not change startup, as a clause.
+pub fn failure_reason(failure: &StartupFailure) -> String {
+    match failure {
+        StartupFailure::Refused => "the Background portal refused".to_owned(),
+        StartupFailure::Unavailable => "the Background portal is not available".to_owned(),
+        StartupFailure::NoAnswer => "the Background portal did not answer in time".to_owned(),
+        StartupFailure::Failed(text) => text.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use addict_core::{
@@ -2772,7 +2781,7 @@ mod tests {
         PENDING, ResultTexts, SYNONYMS_LABEL, Shown, SynonymTexts, Translating, UNFINISHED, Whole,
         binding_texts, indexes_text, online_rows, result_texts, sentence_markup, texts,
     };
-    use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure};
+    use addict_core::failure::{capture::CaptureFailure, recognize::OcrFailure};
 
     use super::{
         Held, NOTHING_SELECTED_TEXT, command_in, failure_text, install_language, install_tesseract,

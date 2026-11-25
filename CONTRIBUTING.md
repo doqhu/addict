@@ -77,8 +77,10 @@ scripts/check.sh
 ```
 
 It runs `cargo fmt --check`, `cargo clippy` with warnings as errors, a build
-of the product without the test features, all the tests, and a guard that
-keeps GTK out of every crate but `addict-app`. Some tests run Tesseract, so
+of the product without the test features, all the tests, a guard that
+keeps GTK out of every crate but `addict-app` and `addict-platform`, `ashpd`,
+`zbus` and `ksni` out of `addict-engine`, and a check of `addict-engine` on its
+own. Some tests run Tesseract, so
 install it with its English and Russian data. The portal and forwarded-launch tests also
 need `dbus-run-session` and `dbus-daemon` (`sudo dnf install dbus-daemon` on
 Fedora). They create isolated session buses and do not use your desktop portal.
@@ -86,8 +88,9 @@ Fedora). They create isolated session buses and do not use your desktop portal.
 CI on GitHub runs the format and lint checks, the tests, `reuse lint`, a
 secret scan of the whole history, the tests of the release trigger and upload
 script (`scripts/release-tests.sh`), and builds the Flatpak and checks it with
-`flatpak-builder-lint`, but not the build without the test features or the
-GTK guard, so run `scripts/check.sh` yourself. CI runs once for each commit
+`flatpak-builder-lint`. It also runs `scripts/check.sh guard`: the dependency
+guard and the check of `addict-engine` on its own. It does not run the build
+without the test features, so run `scripts/check.sh` yourself. CI runs once for each commit
 of a pull request and for each commit on `main`; a push to another branch
 without a pull request starts no run, but "Run workflow" on the CI workflow's
 Actions page tests any branch.
@@ -128,9 +131,10 @@ that an artifact works on a target distribution.
 - `crates/addict-deepl` -- the DeepL client and its key file.
 - `crates/addict-engine` -- the logic of the program without its widgets:
   the texts of the window, the manual path, lookups, online requests,
-  downloads, the cache, the history and the evidence. It must not depend on
-  GTK, GDK, gio or glib; `scripts/check.sh` guards it, so a second frontend
-  can reuse it.
+  downloads, the cache, the history, the evidence and the job runner. It
+  must not depend on GTK, GDK, gio or glib, nor on `addict-platform`, `ashpd`,
+  `zbus` or `ksni`; `scripts/check.sh` guards it, so a second frontend can
+  reuse it.
 - `crates/addict-app` -- the `addict` program: the resident process, the
   window and the commands.
 

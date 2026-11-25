@@ -15,9 +15,10 @@ use std::{
 
 use addict_core::APP_ID;
 use addict_deepl::key;
+use addict_engine::view::failure_reason;
 use addict_platform::{
     desktop::{self, LoginEntry, Target},
-    startup::{self, StartupFailure},
+    startup,
 };
 
 /// The file of the last startup state the portal confirmed, in the
@@ -62,24 +63,14 @@ pub fn check_launcher_installed() -> Result<(), String> {
     }
 }
 
-/// Why the portal did not change startup, as a clause.
-pub fn failure_reason(failure: &StartupFailure) -> String {
-    match failure {
-        StartupFailure::Refused => "the Background portal refused".to_owned(),
-        StartupFailure::Unavailable => "the Background portal is not available".to_owned(),
-        StartupFailure::NoAnswer => "the Background portal did not answer in time".to_owned(),
-        StartupFailure::Failed(text) => text.clone(),
-    }
-}
-
 /// The app icon by size in pixels, from
 /// `crates/addict-app/icons/make-icons.py`. The binary carries them so that
 /// the install works from wherever it is run.
 const ICONS: [(u32, &[u8]); 4] = [
-    (64, include_bytes!("../../addict-app/icons/64.png")),
-    (128, include_bytes!("../../addict-app/icons/128.png")),
-    (256, include_bytes!("../../addict-app/icons/256.png")),
-    (512, include_bytes!("../../addict-app/icons/512.png")),
+    (64, include_bytes!("../icons/64.png")),
+    (128, include_bytes!("../icons/128.png")),
+    (256, include_bytes!("../icons/256.png")),
+    (512, include_bytes!("../icons/512.png")),
 ];
 
 fn applications_dir() -> Result<PathBuf, String> {

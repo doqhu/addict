@@ -18,17 +18,17 @@
 use std::{cell::Cell, future::Future, path::Path, rc::Rc, time::Duration};
 
 use addict_core::APP_ID;
+use addict_core::failure::login_item::StartupFailure;
 use addict_core::translation::{English, Source};
 use addict_deepl::key::{self, KeyError};
+use addict_engine::{view::failure_reason, work::Outcome};
 use addict_platform::{
     desktop::LoginEntry,
     shortcut::{Bindings, KeyOwner, SCREENSHOT_ID, SHORTCUT_ID},
-    startup::StartupFailure,
-    work::Outcome,
 };
 use gtk::{glib, prelude::*};
 
-use crate::{cache::Footprint, entries, file_import, view::Binding};
+use crate::{cache::Footprint, file_import, view::Binding};
 
 /// How long reading the state of the key file may take.
 pub const KEY_CHECK_LIMIT: Duration = Duration::from_secs(2);
@@ -129,10 +129,7 @@ where
 
 /// The line for a failure of the portal.
 fn startup_failure_text(failure: &StartupFailure) -> String {
-    format!(
-        "Startup was not changed: {}.",
-        entries::failure_reason(failure)
-    )
+    format!("Startup was not changed: {}.", failure_reason(failure))
 }
 
 /// What the switch shows, and the line under it, after a change that started
@@ -151,7 +148,7 @@ pub fn startup_end_text(end: &StartupEnd, last: bool) -> (bool, String) {
             format!(
                 "Startup could not be saved ({save}) and could not be turned back off ({}): \
                  addict may still start at login. Turn this on and off again to repair it.",
-                entries::failure_reason(revoke)
+                failure_reason(revoke)
             ),
         ),
         StartupEnd::DisabledUnsaved { save } => (
@@ -1278,8 +1275,10 @@ impl Settings {
 mod tests {
     use std::{cell::RefCell, future::ready};
 
+    use addict_core::failure::login_item::StartupFailure;
     use addict_deepl::key::KeyError;
-    use addict_platform::{desktop::LoginEntry, startup::StartupFailure, work::Outcome};
+    use addict_engine::work::Outcome;
+    use addict_platform::desktop::LoginEntry;
 
     use super::{
         CacheState, KeyState, NO_KEY_PLACE, REBINDING, StartupEnd, StartupShown, badge, cache_text,
