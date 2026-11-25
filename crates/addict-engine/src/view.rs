@@ -3765,14 +3765,11 @@ mod tests {
         let article = Sample.lookup("bank").expect("bank");
         let count = article.senses.len();
         let lookup = Lookup::Article(article.clone());
-        for chosen in 0..count {
+        for (chosen, sense) in article.senses.iter().enumerate() {
             let rows = rows(&lookup, Some(chosen));
             assert_eq!(rows.len(), count);
             let picked: Vec<_> = rows.iter().filter(|(_, _, picked)| *picked).collect();
-            assert_eq!(
-                picked,
-                [&(chosen + 1, article.senses[chosen].definition.clone(), true)]
-            );
+            assert_eq!(picked, [&(chosen + 1, sense.definition.clone(), true)]);
         }
     }
 
