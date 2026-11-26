@@ -15,8 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use addict_core::failure::capture::CaptureFailure;
 use addict_platform::{
-    screenshot::{self, CaptureFailure},
+    screenshot,
     shortcut::{self, Action, Bindings, Limits, ShortcutEvent},
 };
 use zbus::{

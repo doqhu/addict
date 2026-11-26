@@ -24,18 +24,13 @@ use addict_core::{
     input::Input,
     translation::{English, Refusal, Request, Source, Translator, is_russian},
 };
-use addict_platform::work::{Job, Outcome, Work};
 
 use crate::{
     evidence::{self, Elapsed, Probe, Record, Requested},
     online::Subject,
     view::Online,
+    work::{Job, Outcome, Work},
 };
-
-/// How long one online request may take. A network answer is slower than a
-/// file read, and this deadline is the only thing that ends a request
-/// without an answer.
-const TRANSLATE_LIMIT: Duration = Duration::from_secs(10);
 
 /// The most characters, not bytes, the text of the field may have for its
 /// sentence to be sent for translation. A longer text is still the context
@@ -146,23 +141,13 @@ pub fn whole_request(
     })
 }
 
-/// Starts the online `request` on `work`, with a deadline; every online
+/// Starts the online `request` on `work`, with `deadline`; every online
 /// request starts here. `on_outcome` runs once on the worker thread. Without
 /// a request or without a runner nothing starts and the state to show is
 /// given back.
 pub fn translate(
     work: Option<&Work>,
-    translator: Arc<dyn Translator>,
-    request: Option<Request>,
-    on_outcome: impl FnOnce(Outcome<Translated>) + Send + 'static,
-) -> Result<Job, Online> {
-    translate_within(TRANSLATE_LIMIT, work, translator, request, on_outcome)
-}
-
-/// [`translate`] with the deadline `limit`.
-fn translate_within(
-    limit: Duration,
-    work: Option<&Work>,
+    deadline: Duration,
     translator: Arc<dyn Translator>,
     request: Option<Request>,
     on_outcome: impl FnOnce(Outcome<Translated>) + Send + 'static,
@@ -171,7 +156,7 @@ fn translate_within(
         return Err(Online::Refused(Refusal::Other));
     };
     Ok(work.run(
-        limit,
+        deadline,
         async move { translator.translate(request).await },
         on_outcome,
     ))
@@ -241,23 +226,25 @@ pub(crate) mod tests {
         DeepL,
         stub::{Reply, Stub, translation_body},
     };
-    use addict_platform::work::{Outcome, Work};
 
     use super::{
-        SENTENCE_LIMIT, TRANSLATE_LIMIT, Translated, is_sent, request, source_of, translate,
-        translate_within, translation_ended, translation_result, translation_unstarted,
-        whole_request,
+        SENTENCE_LIMIT, Translated, is_sent, request, source_of, translate, translation_ended,
+        translation_result, translation_unstarted, whole_request,
     };
     use crate::{
         dictionaries::{Looked, tests::Sampled},
         evidence::{Elapsed, Probe, Requested},
         manual::{
-            Edit, LOOKUP_LIMIT, Manual, look_up, lookup_result,
-            tests::{WAIT, is_shown, lone, with_sentence},
+            Edit, Manual, look_up, lookup_result,
+            tests::{LOOKUP_LIMIT, WAIT, is_shown, lone, with_sentence},
         },
         online::{Kept, Subject, is_long},
         view::{Lookup, Online, OnlineTexts, Whole},
+        work::{Outcome, Work},
     };
+
+    /// The deadline of the online requests of the tests: the product's own.
+    const TRANSLATE_LIMIT: Duration = Duration::from_secs(10);
 
     #[test]
     fn definition_worker_sends_only_explicit_actions_and_allows_guarded_recovery() {
@@ -276,11 +263,17 @@ pub(crate) mod tests {
         let run = |request, translator: Arc<dyn Translator>| {
             let (sender, receiver) = mpsc::channel();
             let caller = thread::current().id();
-            let job = translate(Some(&work), translator, Some(request), move |outcome| {
-                sender
-                    .send((outcome, caller != thread::current().id()))
-                    .expect("receiver");
-            })
+            let job = translate(
+                Some(&work),
+                TRANSLATE_LIMIT,
+                translator,
+                Some(request),
+                move |outcome| {
+                    sender
+                        .send((outcome, caller != thread::current().id()))
+                        .expect("receiver");
+                },
+            )
             .expect("job");
             let (outcome, elsewhere) = receiver.recv_timeout(WAIT).expect("outcome");
             assert!(elsewhere);
@@ -353,9 +346,15 @@ pub(crate) mod tests {
         shown.choose(0);
         let (old, request) = shown.request_definition().expect("action");
         let (sender, receiver) = mpsc::channel();
-        let job = translate(Some(&work), Arc::new(Mute), Some(request), move |outcome| {
-            sender.send(outcome).expect("receiver");
-        })
+        let job = translate(
+            Some(&work),
+            TRANSLATE_LIMIT,
+            Arc::new(Mute),
+            Some(request),
+            move |outcome| {
+                sender.send(outcome).expect("receiver");
+            },
+        )
         .expect("job");
         assert!(shown.choose(1));
         drop(job);
@@ -414,9 +413,9 @@ pub(crate) mod tests {
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
         let caller = thread::current().id();
-        let job = translate_within(
-            limit,
+        let job = translate(
             Some(&work),
+            limit,
             translator,
             Some(word_request(manual)),
             move |outcome| {
@@ -449,9 +448,15 @@ pub(crate) mod tests {
         give_up: bool,
     ) -> (Outcome<Translated>, Option<Elapsed>) {
         let (sender, receiver) = mpsc::channel();
-        let job = translate(Some(work), translator, Some(request), move |outcome| {
-            let _ = sender.send((outcome, probe.ended()));
-        })
+        let job = translate(
+            Some(work),
+            TRANSLATE_LIMIT,
+            translator,
+            Some(request),
+            move |outcome| {
+                let _ = sender.send((outcome, probe.ended()));
+            },
+        )
         .expect("job");
         if give_up {
             drop(job);
@@ -477,12 +482,12 @@ pub(crate) mod tests {
         // No runner, and then no request.
         let unstarted = [
             (
-                translate(None, canned.clone(), Some(bank()), |_| {}),
+                translate(None, TRANSLATE_LIMIT, canned.clone(), Some(bank()), |_| {}),
                 Requested::Word,
                 "word",
             ),
             (
-                translate(Some(&work), canned.clone(), None, |_| {}),
+                translate(Some(&work), TRANSLATE_LIMIT, canned.clone(), None, |_| {}),
                 Requested::Definition,
                 "definition",
             ),
@@ -639,7 +644,8 @@ pub(crate) mod tests {
             translation_ended(outcome, Requested::Sentence, Language::En, elapsed),
             Some((Online::Refused(Refusal::Quota), None))
         );
-        let online = translate(None, refusing, Some(bank()), |_| {}).expect_err("nothing started");
+        let online = translate(None, TRANSLATE_LIMIT, refusing, Some(bank()), |_| {})
+            .expect_err("nothing started");
         assert_eq!(probe.not_started(), None);
         assert_eq!(
             translation_unstarted(&online, Requested::Word, Language::En, probe),
@@ -950,6 +956,7 @@ pub(crate) mod tests {
             });
             let started = translate(
                 Some(&self.work),
+                TRANSLATE_LIMIT,
                 self.translator.clone(),
                 asked,
                 move |outcome| {
@@ -1311,8 +1318,8 @@ pub(crate) mod tests {
             let (_, record) =
                 translation_ended(outcome, Requested::Word, language, elapsed).expect("ended");
             assert_eq!(record.expect("a record").details()["source"], code);
-            let online =
-                translate(None, Arc::new(Mute), Some(bank()), |_| {}).expect_err("unstarted");
+            let online = translate(None, TRANSLATE_LIMIT, Arc::new(Mute), Some(bank()), |_| {})
+                .expect_err("unstarted");
             let record =
                 translation_unstarted(&online, Requested::Sentence, language, Probe::start(true))
                     .expect("a record");
@@ -1616,15 +1623,20 @@ pub(crate) mod tests {
         let manual = bank_of_the_river();
         let started = translate(
             None,
+            TRANSLATE_LIMIT,
             translator.clone(),
             Some(word_request(&manual)),
             |_| panic!("reported without a runner"),
         );
         assert_eq!(started.err(), Some(Online::Refused(Refusal::Other)));
         let work = Work::start().expect("runner");
-        let started = translate(Some(&work), translator.clone(), None, |_| {
-            panic!("reported without a request")
-        });
+        let started = translate(
+            Some(&work),
+            TRANSLATE_LIMIT,
+            translator.clone(),
+            None,
+            |_| panic!("reported without a request"),
+        );
         assert_eq!(started.err(), Some(Online::Refused(Refusal::Other)));
         // Dropping the runner waits for its jobs to be gone.
         drop(work);
@@ -1685,6 +1697,7 @@ pub(crate) mod tests {
         let manual = bank_of_the_river();
         let job = translate(
             Some(&work),
+            TRANSLATE_LIMIT,
             Arc::new(Mute),
             Some(word_request(&manual)),
             move |outcome| {
@@ -1711,13 +1724,6 @@ pub(crate) mod tests {
             let shown = is_shown(&outcome);
             assert_eq!(translation_result(outcome).is_some(), shown);
         }
-    }
-
-    #[test]
-    fn the_translate_limit_is_finite_and_its_own() {
-        assert!(!TRANSLATE_LIMIT.is_zero());
-        assert_eq!(TRANSLATE_LIMIT.as_secs(), 10);
-        assert!(TRANSLATE_LIMIT > LOOKUP_LIMIT);
     }
 
     /// A key file of one test with this mode, removed when the test ends.
@@ -1768,6 +1774,7 @@ pub(crate) mod tests {
         let lookup_sender = sender.clone();
         let lookup = look_up(
             Some(&work),
+            LOOKUP_LIMIT,
             Arc::new(Sampled),
             input.word().to_owned(),
             move |outcome| {
@@ -1784,6 +1791,7 @@ pub(crate) mod tests {
                 let online = sender.clone();
                 translate(
                     Some(&work),
+                    TRANSLATE_LIMIT,
                     translator.clone(),
                     request(input, subject, Language::En, Language::Ru, English::Us),
                     move |outcome| {
@@ -1858,6 +1866,7 @@ pub(crate) mod tests {
             let (sender, receiver) = mpsc::channel();
             let _job = translate(
                 Some(&work),
+                TRANSLATE_LIMIT,
                 translator.clone(),
                 request(input, subject, language, Language::Ru, English::Us),
                 move |outcome| {
@@ -1948,6 +1957,7 @@ pub(crate) mod tests {
             let probe = Probe::start(true);
             let _job = translate(
                 Some(&work),
+                TRANSLATE_LIMIT,
                 translator.clone(),
                 request(input, subject, source, Language::Ru, English::Us),
                 move |outcome| {
@@ -2001,6 +2011,7 @@ pub(crate) mod tests {
         let (sender, receiver) = mpsc::channel();
         let _job = translate(
             Some(&work),
+            TRANSLATE_LIMIT,
             translator,
             request(
                 spanish.input().expect("input"),
@@ -2088,6 +2099,7 @@ pub(crate) mod tests {
             let (sender, receiver) = mpsc::channel();
             let job = look_up(
                 Some(&desk.work),
+                LOOKUP_LIMIT,
                 Arc::new(Sampled),
                 "bank".to_owned(),
                 move |outcome| {

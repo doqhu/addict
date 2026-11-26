@@ -71,6 +71,11 @@ jobs:
       - name: Test the workspace
         run: runuser -u tester -- cargo test --locked --workspace
 
+      # The engine stays free of GTK and of the Linux adapters (AD-17), and
+      # builds on its own.
+      - name: Guard the dependencies
+        run: runuser -u tester -- scripts/check.sh guard
+
   # The release trigger: the guard and the tag filters of the workflows.
   workflows:
     runs-on: ubuntu-24.04

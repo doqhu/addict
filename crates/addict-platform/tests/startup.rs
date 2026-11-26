@@ -11,7 +11,8 @@ use std::{
     time::Duration,
 };
 
-use addict_platform::startup::{self, StartupFailure};
+use addict_core::failure::login_item::StartupFailure;
+use addict_platform::startup;
 use zbus::{
     Connection,
     message::Header,

@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 
+use addict_core::failure::login_item::StartupFailure;
 use ashpd::desktop::background::{BackgroundProxy, BackgroundRequestOptions};
 
 use crate::portal::{self, PortalFailure};
@@ -26,20 +27,6 @@ const BACKGROUND_FLAG: &str = "--background";
 
 /// The name of the program on `PATH` inside the sandbox.
 const SANDBOX_PROGRAM: &str = "addict";
-
-/// Why the portal did not do what it was asked.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StartupFailure {
-    /// The portal answered with code 1 or 2, or answered success with the
-    /// other state than the one asked for.
-    Refused,
-    /// The bus, the portal or its Background interface is not there.
-    Unavailable,
-    /// The limit passed with no answer.
-    NoAnswer,
-    /// A step failed; the text names it with the portal's own error.
-    Failed(String),
-}
 
 impl From<PortalFailure> for StartupFailure {
     fn from(failure: PortalFailure) -> Self {

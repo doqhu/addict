@@ -1379,9 +1379,9 @@ pub(crate) mod tests {
         assert_eq!(words(&file), words(&plain));
         let mut expected = MAX_HEADER_LEN as u64;
         let header = header(&file);
-        for id in 0..NOTICED_SECTIONS {
-            assert_eq!(header.sections[id].offset, expected, "section {id}");
-            expected += header.sections[id].len;
+        for (id, section) in header.sections.iter().enumerate().take(NOTICED_SECTIONS) {
+            assert_eq!(section.offset, expected, "section {id}");
+            expected += section.len;
         }
         assert_eq!(expected, file.len() as u64);
     }
@@ -1642,9 +1642,9 @@ pub(crate) mod tests {
         let file = encode(&sample()).expect("encode");
         let header = header(&file);
         let mut expected = MAX_HEADER_LEN as u64;
-        for id in 0..NOTICED_SECTIONS {
-            assert_eq!(header.sections[id].offset, expected, "section {id}");
-            expected += header.sections[id].len;
+        for (id, section) in header.sections.iter().enumerate().take(NOTICED_SECTIONS) {
+            assert_eq!(section.offset, expected, "section {id}");
+            expected += section.len;
         }
         assert_eq!(expected, file.len() as u64);
     }

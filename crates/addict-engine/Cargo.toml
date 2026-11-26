@@ -14,7 +14,6 @@ path = "src/lib.rs"
 addict-core = { path = "../addict-core" }
 addict-deepl = { path = "../addict-deepl" }
 addict-dictionary = { path = "../addict-dictionary" }
-addict-platform = { path = "../addict-platform" }
 clap = { version = "=4.6.7", features = ["derive"] }
 futures-channel = "=0.3.34"
 libc = "=0.2.190"
@@ -27,8 +26,8 @@ rusqlite = { version = "=0.41.0", features = ["bundled"] }
 serde_json = "=1.0.151"
 sha2 = "=0.10.9"
 # `rt` for `spawn_blocking`: the checks and the install of a downloaded
-# index leave the runner's thread.
-tokio = { version = "=1.53.2", features = ["rt", "sync", "time"] }
+# index leave the runner's thread. `macros` for the runner's `select!`.
+tokio = { version = "=1.53.2", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
 # The sample dictionary and translator are for tests only: the product cannot

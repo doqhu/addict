@@ -20,8 +20,10 @@ use std::{
     time::{Instant, SystemTime},
 };
 
-use addict_core::translation::{Refusal, Source as Language};
-use addict_platform::{ocr::OcrFailure, screenshot::CaptureFailure, work::Outcome};
+use addict_core::{
+    failure::{capture::CaptureFailure, recognize::OcrFailure},
+    translation::{Refusal, Source as Language},
+};
 use serde_json::{Value, json};
 
 use crate::{
@@ -29,6 +31,7 @@ use crate::{
     dictionaries::{Answer, Looked},
     online::Subject,
     view::Online,
+    work::Outcome,
 };
 
 // The harness's format and rules, from the example's own files: the tests read
@@ -81,14 +84,17 @@ pub struct Record {
     details: Value,
 }
 
+impl Record {
+    /// The fields of the record's `details`.
+    pub fn details(&self) -> &Value {
+        &self.details
+    }
+}
+
 #[cfg(test)]
 impl Record {
     pub fn event(&self) -> &str {
         self.event
-    }
-
-    pub fn details(&self) -> &Value {
-        &self.details
     }
 }
 
@@ -484,7 +490,7 @@ impl Read {
 
 /// How many child processes this process has now: the pids of
 /// `/proc/self/task/*/children`. `None` when none of those files can be read.
-fn child_processes() -> Option<u64> {
+pub fn child_processes() -> Option<u64> {
     let tasks = std::fs::read_dir("/proc/self/task").ok()?;
     let mut count = None;
     for task in tasks.flatten() {
@@ -1105,66 +1111,6 @@ mod tests {
         }
         assert_eq!(rows[2].details["recognition_ms"], Value::Null);
         assert_eq!(rows[4].details["capture_ms"], Value::Null);
-    }
-
-    #[test]
-    fn no_child_process_is_left_after_a_recognition() {
-        use addict_platform::{
-            ocr::{self, Params},
-            work::Work,
-        };
-
-        use crate::{
-            capture::{
-                OCR_LIMIT, tesseract,
-                tests::{FIXTURE, children},
-            },
-            manual::tests::WAIT,
-        };
-
-        let _children = children();
-        // The count sees a child while it runs.
-        let mut sleeper = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn sleep");
-        assert!(child_processes().is_some_and(|count| count >= 1));
-        sleeper.kill().expect("kill sleep");
-        sleeper.wait().expect("reap sleep");
-
-        let work = Work::start().expect("runner");
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let _job = work.run(
-            OCR_LIMIT * 2,
-            async {
-                ocr::recognize(
-                    &tesseract(),
-                    Path::new(FIXTURE),
-                    &Params::ENGLISH,
-                    OCR_LIMIT,
-                )
-                .await
-            },
-            move |outcome| {
-                let _ = sender.send(outcome);
-            },
-        );
-        let Outcome::Finished(recognition) = receiver.recv_timeout(WAIT).expect("outcome") else {
-            panic!("the recognition finished");
-        };
-        assert!(recognition.result.is_ok());
-        let timing = Timing {
-            capture_ms: None,
-            recognition_ms: Some(1),
-            child_peak_rss_bytes: recognition.peak_rss_bytes,
-        };
-        let record = ocr_record(Read::Recognized, &timing);
-        assert_eq!(record.details["child_processes"], 0);
-        assert!(
-            record.details["pss_bytes"]
-                .as_u64()
-                .is_some_and(|bytes| bytes > 0)
-        );
     }
 
     #[test]

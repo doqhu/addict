@@ -41,7 +41,7 @@ use addict_core::{
     translation::{Source as Language, reading_languages},
 };
 use addict_engine::recording::{AudioFailure, CommonsFile, Credit};
-use addict_platform::work::Job;
+use addict_engine::work::Job;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{

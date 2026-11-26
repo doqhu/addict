@@ -40,17 +40,14 @@ use addict_core::{
     sentence,
     translation::{Source as Language, is_russian},
 };
-use addict_platform::work::{Job, Outcome, Work};
 
 use crate::{
     dictionaries::{Answer, Articles, Indexes, Looked, State},
     online::Kind,
     translate::SENTENCE_LIMIT,
     view::Lookup,
+    work::{Job, Outcome, Work},
 };
-
-/// How long the lookup of one word may take.
-pub(crate) const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
 
 /// The most characters a selected or copied text may have, as one line, to
 /// become the field's text: the most whose sentence is still sent for
@@ -303,16 +300,13 @@ impl Manual {
 #[cfg(test)]
 pub fn look_up(
     work: Option<&Work>,
+    deadline: Duration,
     articles: Arc<dyn Articles>,
     word: String,
     on_outcome: impl FnOnce(Outcome<Looked>) + Send + 'static,
 ) -> Result<Job, Box<Lookup>> {
     let work = work.ok_or_else(|| Box::new(Lookup::Unfinished))?;
-    Ok(work.run(
-        LOOKUP_LIMIT,
-        async move { articles.look_up(&word) },
-        on_outcome,
-    ))
+    Ok(work.run(deadline, async move { articles.look_up(&word) }, on_outcome))
 }
 
 /// Starts the lookup of `word` read first in `chosen` by someone whose own
@@ -323,6 +317,7 @@ pub fn look_up(
 /// nothing starts and the result to show is given back.
 fn look_up_first(
     work: Option<&Work>,
+    deadline: Duration,
     articles: Arc<dyn Articles>,
     word: String,
     chosen: Language,
@@ -331,7 +326,7 @@ fn look_up_first(
 ) -> Result<Job, Box<Lookup>> {
     let work = work.ok_or_else(|| Box::new(Lookup::Unfinished))?;
     Ok(work.run(
-        LOOKUP_LIMIT,
+        deadline,
         async move { articles.look_up_first(chosen, my, &word) },
         move |outcome| {
             let (language, outcome) = answering(chosen, outcome);
@@ -347,6 +342,7 @@ fn look_up_first(
 /// runner nothing starts and the result to show is given back.
 fn look_up_russian(
     work: Option<&Work>,
+    deadline: Duration,
     articles: Arc<dyn Articles>,
     word: String,
     into: Language,
@@ -354,7 +350,7 @@ fn look_up_russian(
 ) -> Result<Job, Box<Lookup>> {
     let work = work.ok_or_else(|| Box::new(Lookup::Unfinished))?;
     Ok(work.run(
-        LOOKUP_LIMIT,
+        deadline,
         async move { articles.look_up_russian(into, &word) },
         move |outcome| on_outcome(into, outcome),
     ))
@@ -370,6 +366,7 @@ fn look_up_russian(
 /// show is given back.
 fn look_up_russian_article(
     work: Option<&Work>,
+    deadline: Duration,
     articles: Arc<dyn Articles>,
     word: String,
     my: Language,
@@ -377,7 +374,7 @@ fn look_up_russian_article(
 ) -> Result<Job, Box<Lookup>> {
     let work = work.ok_or_else(|| Box::new(Lookup::Unfinished))?;
     Ok(work.run(
-        LOOKUP_LIMIT,
+        deadline,
         async move { articles.look_up_for(Language::Ru, my, &word) },
         move |outcome| {
             let language = match &outcome {
@@ -430,8 +427,11 @@ fn answering(
 /// language it is translated into ([`russian_into`]), which `on_outcome`
 /// is given. No wildcard arm: a new language does not
 /// compile until it is given its offline result.
+// The deadline is the controller's to give, beside what the lookup needs.
+#[allow(clippy::too_many_arguments)]
 pub fn offline(
     work: Option<&Work>,
+    deadline: Duration,
     articles: Arc<dyn Articles>,
     word: String,
     chosen: Language,
@@ -441,18 +441,20 @@ pub fn offline(
 ) -> Result<Job, Box<Lookup>> {
     if is_russian(&word) {
         if my != Language::Ru {
-            return look_up_russian_article(work, articles, word, my, on_outcome);
+            return look_up_russian_article(work, deadline, articles, word, my, on_outcome);
         }
         let into = russian_into(chosen, my);
-        return look_up_russian(work, articles, word, into, on_outcome);
+        return look_up_russian(work, deadline, articles, word, into, on_outcome);
     }
     match chosen {
-        Language::En => look_up_first(work, articles, word, chosen, my, on_outcome),
-        Language::Ru if my != chosen => look_up_first(work, articles, word, chosen, my, on_outcome),
+        Language::En => look_up_first(work, deadline, articles, word, chosen, my, on_outcome),
+        Language::Ru if my != chosen => {
+            look_up_first(work, deadline, articles, word, chosen, my, on_outcome)
+        }
         Language::Es | Language::Ca | Language::Ru => {
             match known.and_then(|indexes| indexes.of_language(chosen)) {
                 Some(State::Open | State::Unreadable) => {
-                    look_up_first(work, articles, word, chosen, my, on_outcome)
+                    look_up_first(work, deadline, articles, word, chosen, my, on_outcome)
                 }
                 Some(State::Missing) | None => Err(Box::new(Lookup::NoDictionary(chosen))),
             }
@@ -477,16 +479,17 @@ pub fn checks_again(lookup: &Lookup, language: Language) -> bool {
     matches!(lookup, Lookup::NoDictionary(_)) && Indexes::OPEN.of_language(language).is_some()
 }
 
-/// Asks `articles` on `work`, with the deadline of a lookup, where the
-/// indexes stand. `on_indexes` runs on the worker thread when the answer
+/// Asks `articles` on `work`, with `deadline`, where the indexes stand.
+/// `on_indexes` runs on the worker thread when the answer
 /// came, and not at all otherwise. Without a runner nothing starts.
 pub fn check_indexes(
     work: Option<&Work>,
+    deadline: Duration,
     articles: Arc<dyn Articles>,
     on_indexes: impl FnOnce(Indexes) + Send + 'static,
 ) -> Option<Job> {
     let job = work?.run(
-        LOOKUP_LIMIT,
+        deadline,
         async move { articles.indexes() },
         move |outcome| {
             if let Outcome::Finished(indexes) = outcome {
@@ -569,11 +572,10 @@ pub(crate) mod tests {
         input::{Source, WindowState},
         translation::{Source as Language, reading_languages},
     };
-    use addict_platform::work::{Outcome, Work};
 
     use super::{
-        CLIPBOARD_MAX_CHARS, Edit, LOOKUP_LIMIT, Manual, NoLine, check_indexes, checks_again,
-        clipboard_line, look_up, lookup_result, offline, result_in,
+        CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine, check_indexes, checks_again, clipboard_line,
+        look_up, lookup_result, offline, result_in,
     };
     use crate::{
         dictionaries::{
@@ -586,12 +588,16 @@ pub(crate) mod tests {
             tests::{BANK, RIVER, RIVER_WORD, text_at_the_limit},
         },
         view::Lookup,
+        work::{Outcome, Work},
     };
 
     const SENTENCE: &str = "I sat on the bank.";
 
     /// How long a test waits for an outcome that must come.
     pub(crate) const WAIT: Duration = Duration::from_secs(10);
+
+    /// The deadline of the lookups of the tests: the product's own.
+    pub(crate) const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
 
     pub(crate) fn with_sentence(sentence: &str) -> Manual {
         let mut manual = Manual::default();
@@ -623,6 +629,7 @@ pub(crate) mod tests {
         let caller = thread::current().id();
         let job = look_up(
             Some(&work),
+            LOOKUP_LIMIT,
             std::sync::Arc::new(articles),
             word.to_owned(),
             move |outcome| {
@@ -678,6 +685,7 @@ pub(crate) mod tests {
                 for word in ["real", "once", "fin", "banco"] {
                     let started = offline(
                         Some(&work),
+                        LOOKUP_LIMIT,
                         std::sync::Arc::new(Unasked),
                         word.to_owned(),
                         language,
@@ -700,6 +708,7 @@ pub(crate) mod tests {
             ] {
                 let started = offline(
                     Some(&work),
+                    LOOKUP_LIMIT,
                     std::sync::Arc::new(Unasked),
                     "real".to_owned(),
                     language,
@@ -716,6 +725,7 @@ pub(crate) mod tests {
         // Also without a runner: nothing was to run.
         let started = offline(
             None,
+            LOOKUP_LIMIT,
             std::sync::Arc::new(Unasked),
             "real".to_owned(),
             Language::Es,
@@ -735,6 +745,7 @@ pub(crate) mod tests {
         for known in [None, Some(Indexes::OPEN)] {
             let started = offline(
                 None,
+                LOOKUP_LIMIT,
                 std::sync::Arc::new(Unasked),
                 "bank".to_owned(),
                 Language::Ru,
@@ -815,6 +826,7 @@ pub(crate) mod tests {
         let language = articles.0;
         let job = offline(
             Some(&work),
+            LOOKUP_LIMIT,
             std::sync::Arc::new(articles),
             word.to_owned(),
             language,
@@ -874,6 +886,7 @@ pub(crate) mod tests {
         let (sender, receiver) = mpsc::channel();
         let job = offline(
             Some(&work),
+            LOOKUP_LIMIT,
             std::sync::Arc::new(articles),
             word.to_owned(),
             chosen,
@@ -1005,6 +1018,7 @@ pub(crate) mod tests {
         // Without a runner nothing is asked.
         let started = offline(
             None,
+            LOOKUP_LIMIT,
             std::sync::Arc::new(Unasked),
             "собака".to_owned(),
             Language::Es,
@@ -1044,6 +1058,7 @@ pub(crate) mod tests {
         let (sender, receiver) = mpsc::channel();
         let job = offline(
             Some(&work),
+            LOOKUP_LIMIT,
             std::sync::Arc::new(articles),
             word.to_owned(),
             pressed,
@@ -1210,6 +1225,7 @@ pub(crate) mod tests {
         // Without a runner nothing is asked.
         let started = offline(
             None,
+            LOOKUP_LIMIT,
             std::sync::Arc::new(Unasked),
             "собака".to_owned(),
             Language::Es,
@@ -1418,6 +1434,7 @@ pub(crate) mod tests {
         let (sender, receiver) = mpsc::channel();
         let job = offline(
             Some(&work),
+            LOOKUP_LIMIT,
             std::sync::Arc::new(Sampled),
             "bank".to_owned(),
             Language::En,
@@ -1437,6 +1454,7 @@ pub(crate) mod tests {
         );
         let started = offline(
             None,
+            LOOKUP_LIMIT,
             std::sync::Arc::new(Sampled),
             "bank".to_owned(),
             Language::En,
@@ -1858,9 +1876,14 @@ pub(crate) mod tests {
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
         let caller = thread::current().id();
-        let job = check_indexes(Some(&work), std::sync::Arc::new(articles), move |indexes| {
-            let _ = sender.send((indexes, thread::current().id() != caller));
-        })
+        let job = check_indexes(
+            Some(&work),
+            LOOKUP_LIMIT,
+            std::sync::Arc::new(articles),
+            move |indexes| {
+                let _ = sender.send((indexes, thread::current().id() != caller));
+            },
+        )
         .expect("job");
         // The sender is dropped with the callback when nothing is reported.
         let reported = receiver.recv_timeout(WAIT).ok();
@@ -1884,7 +1907,7 @@ pub(crate) mod tests {
 
     #[test]
     fn without_a_runner_no_check_starts() {
-        let started = check_indexes(None, std::sync::Arc::new(Sampled), |_| {
+        let started = check_indexes(None, LOOKUP_LIMIT, std::sync::Arc::new(Sampled), |_| {
             panic!("reported without a runner");
         });
         assert!(started.is_none());
@@ -1902,6 +1925,7 @@ pub(crate) mod tests {
         let (sender, receiver) = mpsc::channel();
         let started = look_up(
             None,
+            LOOKUP_LIMIT,
             std::sync::Arc::new(Sampled),
             "bank".to_owned(),
             move |outcome| {
@@ -2288,11 +2312,5 @@ pub(crate) mod tests {
             clipboard_line(&format!("{at_the_limit}я")),
             Err(NoLine::TooLong(501))
         );
-    }
-
-    #[test]
-    fn the_lookup_limit_is_finite_and_short() {
-        assert!(!LOOKUP_LIMIT.is_zero());
-        assert!(LOOKUP_LIMIT.as_secs() <= 10);
     }
 }
