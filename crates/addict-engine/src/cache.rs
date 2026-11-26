@@ -1,6 +1,5 @@
 //! The on-disk cache of the online answers: one SQLite table in
-//! `$XDG_CACHE_HOME/addict/translations.sqlite3`, or
-//! `$HOME/.cache/addict/translations.sqlite3`.
+//! `translations.sqlite3` in the supplied cache directory.
 //!
 //! [`Cached`] wraps a [`Translator`] and answers a request it has answered
 //! before, even in an earlier process, without asking the inner one. The key
@@ -69,7 +68,7 @@ const FILE_MODE: u32 = 0o600;
 /// except as a line of text.
 #[derive(Debug)]
 pub enum Error {
-    /// The environment names no cache directory.
+    /// No cache directory was supplied.
     NoDirectory,
     Io(io::Error),
     Sqlite(rusqlite::Error),
@@ -98,25 +97,6 @@ impl From<rusqlite::Error> for Error {
     fn from(error: rusqlite::Error) -> Self {
         Error::Sqlite(error)
     }
-}
-
-/// The cache directory of the product: `$XDG_CACHE_HOME/addict` when the
-/// variable is an absolute path, else `$HOME/.cache/addict`; `None` when
-/// neither names one. Nothing is read or created here.
-pub fn cache_dir() -> Option<PathBuf> {
-    cache_dir_from(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
-}
-
-fn cache_dir_from(
-    cache_home: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
-) -> Option<PathBuf> {
-    let cache = match cache_home.map(PathBuf::from) {
-        Some(cache) if cache.is_absolute() => cache,
-        // The base directory specification says to ignore a relative value.
-        _ => PathBuf::from(home.filter(|home| !home.is_empty())?).join(".cache"),
-    };
-    Some(cache.join("addict"))
 }
 
 /// The key of `request`: SHA-256 of the schema version, then `source_lang`,
@@ -607,7 +587,7 @@ pub(crate) mod tests {
 
     use super::{
         AGE_LIMIT, Cache, Cached, DAY, FILE, Footprint, SIZE_LIMIT, Store, TAG_FILE, TAG_SIGNATURE,
-        cache_dir_from, key_of,
+        key_of,
     };
 
     /// A directory of one test, removed when the test ends.
@@ -1124,24 +1104,5 @@ pub(crate) mod tests {
         drop(Cache::open_at(&dir).expect("open"));
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&dir.join(FILE)), 0o600);
-    }
-
-    #[test]
-    fn the_cache_directory_follows_the_base_directory_specification() {
-        let some = |s: &str| Some(std::ffi::OsString::from(s));
-        assert_eq!(
-            cache_dir_from(some("/x/cache"), some("/home/u")),
-            Some(PathBuf::from("/x/cache/addict"))
-        );
-        assert_eq!(
-            cache_dir_from(some("relative"), some("/home/u")),
-            Some(PathBuf::from("/home/u/.cache/addict"))
-        );
-        assert_eq!(
-            cache_dir_from(None, some("/home/u")),
-            Some(PathBuf::from("/home/u/.cache/addict"))
-        );
-        assert_eq!(cache_dir_from(None, some("")), None);
-        assert_eq!(cache_dir_from(None, None), None);
     }
 }

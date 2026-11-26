@@ -1,8 +1,7 @@
 //! Whether a sentence read at a press of the clipboard shortcut is
 //! translated online at once, kept across restarts: one line, `on` or `off`,
 //! in the file `translate-sentence` of the product's configuration
-//! directory, [`addict_deepl::key::config_dir`], the directory of the DeepL
-//! key.
+//! directory.
 //!
 //! The file is read once, on the runner, after the start, and written on the
 //! runner each time the Translate sentence at once switch of Settings moves;
@@ -32,10 +31,10 @@ const OFF: &str = "off";
 /// The default: a copied sentence is translated at once.
 pub const DEFAULT: bool = true;
 
-/// The file of the product, or `None` when the environment names no
-/// configuration directory. Nothing is read here.
-pub fn path() -> Option<PathBuf> {
-    Some(addict_deepl::key::config_dir()?.join(AT_ONCE_FILE))
+/// The file of the product, or `None` when no configuration directory
+/// was supplied. Nothing is read here.
+pub fn path(config: Option<&Path>) -> Option<PathBuf> {
+    Some(config?.join(AT_ONCE_FILE))
 }
 
 /// Whether the file at `path` says to translate at once; [`DEFAULT`] for no

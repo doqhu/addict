@@ -2,7 +2,7 @@
 //!
 //! The offer is due when all indexes required for my language are missing
 //! and the user has not declined it. The choice file, `first-run-download` in the
-//! product's configuration directory ([`addict_deepl::key::config_dir`]),
+//! product's configuration directory,
 //! holds `declined` once Not now was pressed. Download writes no choice: an
 //! required index that is open or unreadable suppresses the next offer.
 //!
@@ -145,10 +145,10 @@ pub fn late_text(limit: Duration) -> String {
     format!("it did not finish within {} minutes", limit.as_secs() / 60)
 }
 
-/// The choice file of the product, or `None` when the environment names no
-/// configuration directory. Nothing is read here.
-pub fn path() -> Option<PathBuf> {
-    Some(addict_deepl::key::config_dir()?.join(CHOICE_FILE))
+/// The choice file of the product, or `None` when no configuration directory
+/// was supplied. Nothing is read here.
+pub fn path(config: Option<&Path>) -> Option<PathBuf> {
+    Some(config?.join(CHOICE_FILE))
 }
 
 /// Whether the file at `path` says that the offer was declined. No path, a

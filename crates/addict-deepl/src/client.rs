@@ -156,7 +156,7 @@ struct Translation {
 /// The client. It holds the path of the key file and never the key.
 #[derive(Debug)]
 pub struct DeepL {
-    /// `None` when the environment names no configuration directory.
+    /// `None` when no key path was supplied.
     key_file: Option<PathBuf>,
     /// The base URL of every request; `None` chooses the host by the key.
     base_url: Option<String>,
@@ -165,11 +165,11 @@ pub struct DeepL {
 }
 
 impl DeepL {
-    /// The client of the product: the key file of [`key::key_path`] and the
-    /// host of the key. Nothing is read or opened here.
-    pub fn new() -> Self {
+    /// Uses the supplied key file and the host of its key. Nothing is read
+    /// or opened here.
+    pub fn new(key_file: Option<PathBuf>) -> Self {
         Self {
-            key_file: key::key_path(),
+            key_file,
             base_url: None,
             http: OnceLock::new(),
         }
@@ -257,12 +257,6 @@ impl DeepL {
             .build()
             .map_err(|_| Refusal::Other)?;
         Ok(self.http.get_or_init(|| built))
-    }
-}
-
-impl Default for DeepL {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

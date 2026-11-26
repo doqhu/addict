@@ -549,21 +549,6 @@ impl fmt::Display for Day {
     }
 }
 
-/// The data directory of the product: `$XDG_DATA_HOME/addict` when the
-/// variable is an absolute path, else `$HOME/.local/share/addict`.
-pub fn data_dir() -> Option<PathBuf> {
-    data_dir_from(std::env::var_os("XDG_DATA_HOME"), std::env::var_os("HOME"))
-}
-
-fn data_dir_from(data_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    let data = match data_home.map(PathBuf::from) {
-        Some(data) if data.is_absolute() => data,
-        // The base directory specification says to ignore a relative value.
-        _ => PathBuf::from(home.filter(|home| !home.is_empty())?).join(".local/share"),
-    };
-    Some(data.join("addict"))
-}
-
 /// Where the index of `source` lives inside the data directory `dir`.
 pub fn index_path(dir: &Path, source: Source) -> PathBuf {
     dir.join(source.index_name())
@@ -1096,10 +1081,6 @@ mod tests {
     };
     use addict_core::translation::reading_languages;
 
-    fn os(text: &str) -> Option<OsString> {
-        Some(OsString::from(text))
-    }
-
     /// A manual import against `known`, with the real minimum of headwords.
     fn import_known(
         file: &Path,
@@ -1465,32 +1446,6 @@ mod tests {
         )
         .expect("import");
         assert_eq!(imported.edition, "fixture-1");
-    }
-
-    #[test]
-    fn the_data_directory_follows_the_base_directory_rules() {
-        assert_eq!(
-            data_dir_from(os("/data"), os("/home/u")),
-            Some(PathBuf::from("/data/addict"))
-        );
-        assert_eq!(
-            data_dir_from(None, os("/home/u")),
-            Some(PathBuf::from("/home/u/.local/share/addict"))
-        );
-        // A relative or an empty value is ignored.
-        for ignored in ["relative/data", ""] {
-            assert_eq!(
-                data_dir_from(os(ignored), os("/home/u")),
-                Some(PathBuf::from("/home/u/.local/share/addict"))
-            );
-        }
-        assert_eq!(data_dir_from(None, None), None);
-        assert_eq!(data_dir_from(None, os("")), None);
-        assert_eq!(data_dir_from(os("relative"), None), None);
-        assert_eq!(
-            data_dir_from(os("/data"), None),
-            Some(PathBuf::from("/data/addict"))
-        );
     }
 
     #[test]

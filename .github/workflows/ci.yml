@@ -39,7 +39,7 @@ jobs:
           dnf -y install --setopt=install_weak_deps=False
           gcc pkgconf-pkg-config gtk4-devel rust cargo clippy rustfmt git
           tesseract tesseract-langpack-eng tesseract-langpack-rus util-linux
-          dbus-daemon xz
+          dbus-daemon python3 xz
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -71,9 +71,9 @@ jobs:
       - name: Test the workspace
         run: runuser -u tester -- cargo test --locked --workspace
 
-      # The engine stays free of GTK and of the Linux adapters (AD-17), and
-      # builds on its own.
-      - name: Guard the dependencies
+      # Keep Linux dependencies out of the engine and directory environment
+      # reads out of the shared crates. Check the engine on its own.
+      - name: Guard dependencies and directory reads
         run: runuser -u tester -- scripts/check.sh guard
 
   # The release trigger: the guard and the tag filters of the workflows.

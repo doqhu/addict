@@ -1,13 +1,9 @@
-//! The key file: where it is, who may read it and what it holds.
+//! Reading and writing the DeepL key file.
 //!
-//! The key is the first and only thing of the file,
-//! `$XDG_CONFIG_HOME/addict/deepl.key`, or `$HOME/.config/addict/deepl.key`
-//! when the variable is unset or relative. That directory, [`config_dir`],
-//! is the product's one configuration directory: the other files of the
-//! product are found by the same rule. A file that anyone but its owner
-//! can use, or that its owner can execute, is refused before its content is
-//! read. [`write`] replaces the file with one of mode `0600` that holds a
-//! key, and nothing else of the product writes it.
+//! The key is the first and only thing in the supplied file. A file that
+//! anyone but its owner can use, or that its owner can execute, is refused
+//! before its content is read. [`write`] replaces the file with one of mode
+//! `0600` that holds a key.
 
 use std::{
     ffi::OsString,
@@ -34,34 +30,9 @@ const KEY_LIMIT: u64 = 1024;
 /// What a key of the Free plan ends with.
 const FREE_SUFFIX: &str = ":fx";
 
-/// The key file of the product: `$XDG_CONFIG_HOME/addict/deepl.key` when the
-/// variable is an absolute path, else `$HOME/.config/addict/deepl.key`.
-pub fn key_path() -> Option<PathBuf> {
-    Some(config_dir()?.join(KEY_FILE))
-}
-
-/// The configuration directory of the product: `$XDG_CONFIG_HOME/addict`
-/// when the variable is an absolute path, else `$HOME/.config/addict`;
-/// `None` when neither names one. Nothing is read or created here.
-pub fn config_dir() -> Option<PathBuf> {
-    config_dir_from(
-        std::env::var_os("XDG_CONFIG_HOME"),
-        std::env::var_os("HOME"),
-    )
-}
-
-fn config_dir_from(config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    let config = match config_home.map(PathBuf::from) {
-        Some(config) if config.is_absolute() => config,
-        // The base directory specification says to ignore a relative value.
-        _ => PathBuf::from(home.filter(|home| !home.is_empty())?).join(".config"),
-    };
-    Some(config.join("addict"))
-}
-
-#[cfg(test)]
-fn key_path_from(config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
-    Some(config_dir_from(config_home, home)?.join(KEY_FILE))
+/// The key file in the supplied configuration directory.
+pub fn key_path(config: Option<&Path>) -> Option<PathBuf> {
+    Some(config?.join(KEY_FILE))
 }
 
 /// A DeepL key. Its `Debug` output does not hold it.
@@ -223,57 +194,7 @@ pub fn write(path: &Path, key: &str) -> Result<(), WriteError> {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, path::PathBuf};
-
-    use super::{Key, config_dir_from, key_path_from};
-
-    fn os(text: &str) -> Option<OsString> {
-        Some(OsString::from(text))
-    }
-
-    #[test]
-    fn an_absolute_config_home_holds_the_key_file() {
-        assert_eq!(
-            key_path_from(os("/x/config"), os("/home/u")),
-            Some(PathBuf::from("/x/config/addict/deepl.key"))
-        );
-    }
-
-    #[test]
-    fn an_unset_empty_or_relative_config_home_falls_back_to_home() {
-        for config_home in [None, os(""), os("config"), os("./config")] {
-            assert_eq!(
-                key_path_from(config_home.clone(), os("/home/u")),
-                Some(PathBuf::from("/home/u/.config/addict/deepl.key")),
-                "{config_home:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn without_a_config_home_and_a_home_there_is_no_key_file() {
-        for home in [None, os("")] {
-            assert_eq!(key_path_from(None, home.clone()), None, "{home:?}");
-            assert_eq!(key_path_from(os("relative"), home.clone()), None);
-        }
-    }
-
-    #[test]
-    fn the_key_file_lies_in_the_configuration_directory() {
-        for (config_home, home) in [
-            (os("/x/config"), os("/home/u")),
-            (None, os("/home/u")),
-            (os("relative"), os("/home/u")),
-        ] {
-            let dir = config_dir_from(config_home.clone(), home.clone()).expect("a directory");
-            assert!(dir.ends_with("addict"), "{dir:?}");
-            assert_eq!(
-                key_path_from(config_home, home),
-                Some(dir.join("deepl.key"))
-            );
-        }
-        assert_eq!(config_dir_from(None, None), None);
-    }
+    use super::Key;
 
     #[test]
     fn a_free_key_is_known_by_its_suffix() {

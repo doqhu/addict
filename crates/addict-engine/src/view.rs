@@ -1779,6 +1779,13 @@ pub enum Choice {
     Gloss(usize),
 }
 
+/// Where the shell keeps the DeepL key, or its guidance when no file is configured.
+#[derive(Debug, Clone, Copy)]
+pub enum KeyLocation<'a> {
+    File(&'a Path),
+    Hint(&'a str),
+}
+
 /// The parts of `lookup` with the sense `chosen` in it, as
 /// [`choice_texts`] gives them; for the tests.
 #[cfg(test)]
@@ -1792,7 +1799,7 @@ pub fn result_texts<'a>(
         lookup,
         chosen.map(Choice::Sense),
         definition,
-        key_file,
+        key_file.map_or(tests::NO_KEY_LOCATION, KeyLocation::File),
         None,
         Translating::default(),
     )
@@ -1801,7 +1808,7 @@ pub fn result_texts<'a>(
 /// The parts of `lookup` with `choice` in it; a choice the result does not
 /// have is no choice. The online translation of the definition,
 /// `definition`, stands under the chosen sense or gloss when its text is not
-/// blank. A refusal about the key names `key_file`, as in
+/// blank. A refusal about the key uses `key_location`, as in
 /// [`online_rows`]. An article that the language `elsewhere.1` gave for a
 /// word the chosen language `elsewhere.0` had no entry for has the line
 /// that names both. The translations row of an article is for the target
@@ -1813,14 +1820,14 @@ pub fn choice_texts<'a>(
     lookup: &'a Lookup,
     choice: Option<Choice>,
     definition: Option<&'a Online>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     elsewhere: Option<(Language, Language)>,
     translating: Translating,
 ) -> ResultTexts<'a> {
     let elsewhere = elsewhere
         .filter(|(chosen, found)| chosen != found)
         .map(|(chosen, found)| elsewhere_text(chosen, found));
-    let texts = lookup_texts(lookup, choice, definition, key_file, translating);
+    let texts = lookup_texts(lookup, choice, definition, key_location, translating);
     match lookup {
         // Without the Russian article only its translations show, and the
         // hint says the article is not downloaded: no line names it.
@@ -1847,7 +1854,7 @@ fn lookup_texts<'a>(
     lookup: &'a Lookup,
     choice: Option<Choice>,
     definition: Option<&'a Online>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     translating: Translating,
 ) -> ResultTexts<'a> {
     let chosen = match choice {
@@ -1873,7 +1880,7 @@ fn lookup_texts<'a>(
             article,
             chosen,
             definition,
-            key_file,
+            key_location,
             translating.target(Language::En),
             translating.my,
         ),
@@ -1882,7 +1889,7 @@ fn lookup_texts<'a>(
             grouped,
             choice,
             definition,
-            key_file,
+            key_location,
             translating.target(*language),
             translating.my,
         ),
@@ -1929,7 +1936,7 @@ fn article_texts<'a>(
     article: &'a Article,
     chosen: Option<usize>,
     definition: Option<&'a Online>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     target: Language,
     my: Language,
 ) -> ResultTexts<'a> {
@@ -1939,7 +1946,7 @@ fn article_texts<'a>(
         &[],
         chosen,
         definition,
-        key_file,
+        key_location,
         my,
     );
     ResultTexts {
@@ -1980,7 +1987,7 @@ fn grouped_texts<'a>(
     grouped: &'a Grouped,
     choice: Option<Choice>,
     definition: Option<&'a Online>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     target: Language,
     my: Language,
 ) -> ResultTexts<'a> {
@@ -2001,7 +2008,7 @@ fn grouped_texts<'a>(
         groups,
         chosen,
         definition,
-        key_file,
+        key_location,
         my,
     );
     let hint = match &grouped.definitions {
@@ -2073,7 +2080,7 @@ fn grouped_texts<'a>(
                         .filter(|_| !text.trim().is_empty() && !no_key)
                         .map(|online| Block {
                             label: definition_label(my),
-                            line: online_line(online, key_file, my),
+                            line: online_line(online, key_location, my),
                         }),
                     no_key,
                 }
@@ -2101,7 +2108,7 @@ fn sense_texts<'a>(
     groups: &'a [addict_dictionary::index::SynonymGroup],
     chosen: Option<usize>,
     definition: Option<&'a Online>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     my: Language,
 ) -> (Option<&'static str>, Vec<SenseText<'a>>) {
     let chosen = chosen.filter(|index| *index < senses.len());
@@ -2131,7 +2138,7 @@ fn sense_texts<'a>(
                         .filter(|_| !sense.definition.trim().is_empty())
                         .map(|online| Block {
                             label: definition_label(my),
-                            line: online_line(online, key_file, my),
+                            line: online_line(online, key_location, my),
                         }),
                     synonyms: Listed::of_cow(SYNONYMS_LABEL, synonyms, NO_SYNONYMS),
                 }),
@@ -2373,12 +2380,12 @@ pub fn answer_texts<'a>(
 /// sentence and the sentence, in this order; empty when there is none. A
 /// row's line is the pending line, the translation as it came, the line of
 /// a refusal or the line of a text that is too long. A refusal about the
-/// key names `key_file`, or says how to make it known when there is none;
+/// key uses `key_location` for the file path or the shell's hint;
 /// one about the language names `my` language, which the texts are sent
 /// into.
 pub fn online_rows<'a>(
     texts: &OnlineTexts<'a>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     my: Language,
 ) -> Vec<OnlineRow<'a>> {
     let mut rows = Vec::new();
@@ -2386,7 +2393,7 @@ pub fn online_rows<'a>(
         rows.push(online_row(
             ONLINE_WORD_LABEL,
             online,
-            key_file,
+            key_location,
             my,
             OnlineKind::Word,
         ));
@@ -2395,7 +2402,7 @@ pub fn online_rows<'a>(
         rows.push(online_row(
             ONLINE_LONE_LABEL,
             online,
-            key_file,
+            key_location,
             my,
             OnlineKind::Lone,
         ));
@@ -2405,7 +2412,7 @@ pub fn online_rows<'a>(
             Whole::Asked(online) => online_row(
                 ONLINE_SENTENCE_LABEL,
                 online,
-                key_file,
+                key_location,
                 my,
                 OnlineKind::Sentence,
             ),
@@ -2426,7 +2433,7 @@ pub fn online_rows<'a>(
 fn online_row<'a>(
     label: &'static str,
     online: &'a Online,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     my: Language,
     kind: OnlineKind,
 ) -> OnlineRow<'a> {
@@ -2437,7 +2444,7 @@ fn online_row<'a>(
     };
     OnlineRow {
         label,
-        line: online_line(online, key_file, my),
+        line: online_line(online, key_location, my),
         state,
         word: kind != OnlineKind::Sentence,
         kind,
@@ -2448,19 +2455,23 @@ fn online_row<'a>(
 /// The line of one online request: the pending line, the translation as it
 /// came or the line of a refusal, for a text sent into `my` language. No
 /// wildcard arm: a new state does not compile until it is given its line.
-fn online_line<'a>(online: &'a Online, key_file: Option<&Path>, my: Language) -> Cow<'a, str> {
+fn online_line<'a>(
+    online: &'a Online,
+    key_location: KeyLocation<'_>,
+    my: Language,
+) -> Cow<'a, str> {
     match online {
         Online::Pending => Cow::Borrowed(ONLINE_PENDING),
         Online::Translated(text) => Cow::Borrowed(text),
-        Online::Refused(refusal) => Cow::Owned(refusal_text(*refusal, key_file, my)),
+        Online::Refused(refusal) => Cow::Owned(refusal_text(*refusal, key_location, my)),
     }
 }
 
 /// The line of `refusal`, which says what failed. A refusal about the key
-/// names `key_file`, or says how to make it known when there is none; one
+/// uses `key_location` for the file path or the shell's hint; one
 /// about the language names `my` language, which the text was sent into. No
 /// wildcard arm: a new refusal does not compile until it is given its line.
-fn refusal_text(refusal: Refusal, key_file: Option<&Path>, my: Language) -> String {
+fn refusal_text(refusal: Refusal, key_location: KeyLocation<'_>, my: Language) -> String {
     let unsupported;
     let line = match refusal {
         Refusal::Key => "A DeepL key is required.",
@@ -2483,11 +2494,9 @@ fn refusal_text(refusal: Refusal, key_file: Option<&Path>, my: Language) -> Stri
         refusal,
         Refusal::Key | Refusal::UnreadableKey | Refusal::UnsafeKey | Refusal::RejectedKey
     ) {
-        match key_file {
-            Some(path) => format!("{line} Key file: {}", path.display()),
-            None => format!(
-                "{line} Set an absolute XDG_CONFIG_HOME or HOME to locate addict/deepl.key."
-            ),
+        match key_location {
+            KeyLocation::File(path) => format!("{line} Key file: {}", path.display()),
+            KeyLocation::Hint(hint) => format!("{line} {hint}"),
         }
     } else {
         line.to_owned()
@@ -2766,6 +2775,7 @@ pub fn failure_reason(failure: &StartupFailure) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::KeyLocation;
     use addict_core::{
         dictionary::{Article, Dictionary, Sample, Sense},
         input::{Source, WindowState},
@@ -2919,7 +2929,7 @@ mod tests {
                     EXPLANATION_MARK.to_owned(),
                     "  land <near> & water  ".to_owned(),
                     super::definition_label(Language::Ru).to_owned(),
-                    super::online_line(&online, Some(path), Language::Ru).into_owned(),
+                    super::online_line(&online, KeyLocation::File(path), Language::Ru).into_owned(),
                     format!("{SYNONYMS_LABEL} shore"),
                     String::new(),
                     format!("{RUSSIAN_LABEL} берег"),
@@ -2939,6 +2949,8 @@ mod tests {
         assert!(!read(&texts).contains(&super::definition_label(Language::Ru).to_owned()));
     }
 
+    pub(super) const NO_KEY_LOCATION: KeyLocation<'_> = KeyLocation::Hint("Locate the key.");
+
     const SENTENCE: &str = "I sat on the bank.";
 
     fn translated(text: &str) -> Online {
@@ -2947,7 +2959,7 @@ mod tests {
 
     /// The labels and lines of the rows of `texts`, with no key file.
     fn online(texts: &OnlineTexts<'_>) -> Vec<(&'static str, String, OnlineState, bool)> {
-        online_rows(texts, None, Language::Ru)
+        online_rows(texts, NO_KEY_LOCATION, Language::Ru)
             .into_iter()
             .map(|row| (row.label, row.line.into_owned(), row.state, row.word))
             .collect()
@@ -2955,7 +2967,7 @@ mod tests {
 
     #[test]
     fn without_an_online_text_there_is_no_row() {
-        assert!(online_rows(&OnlineTexts::default(), None, Language::Ru).is_empty());
+        assert!(online_rows(&OnlineTexts::default(), NO_KEY_LOCATION, Language::Ru).is_empty());
     }
 
     #[test]
@@ -3046,7 +3058,7 @@ mod tests {
                 sentence: Some(&whole),
                 lone: None,
             },
-            None,
+            NO_KEY_LOCATION,
             Language::Ru,
         ) {
             assert_eq!(row.line, "<b>берег</b> & банк");
@@ -3108,7 +3120,7 @@ mod tests {
             Refusal::TimedOut,
             Refusal::Other,
         ] {
-            let line = super::refusal_text(refusal, None, Language::Ru);
+            let line = super::refusal_text(refusal, NO_KEY_LOCATION, Language::Ru);
             let refused = Online::Refused(refusal);
             let whole = Whole::Asked(refused.clone());
             assert_eq!(
@@ -3970,7 +3982,7 @@ mod tests {
 
     #[test]
     fn the_unsupported_language_line_names_no_pair() {
-        let line = super::refusal_text(Refusal::UnsupportedLanguage, None, Language::Ru);
+        let line = super::refusal_text(Refusal::UnsupportedLanguage, NO_KEY_LOCATION, Language::Ru);
         assert!(!line.contains("EN"), "{line}");
         assert!(line.contains("DeepL"), "{line}");
     }
@@ -4497,7 +4509,7 @@ mod tests {
             shown.lookup().expect("a result"),
             shown.choice(),
             shown.definition(),
-            None,
+            NO_KEY_LOCATION,
             shown.elsewhere(),
             Translating::default(),
         )
@@ -4662,7 +4674,7 @@ mod tests {
                 lookup,
                 chosen.map(super::Choice::Sense),
                 None,
-                None,
+                NO_KEY_LOCATION,
                 None,
                 english,
             )
@@ -4734,7 +4746,7 @@ mod tests {
             &lookup,
             None,
             None,
-            None,
+            NO_KEY_LOCATION,
             Some((Language::Es, Language::Ru)),
             spanish,
         );
@@ -4752,7 +4764,7 @@ mod tests {
             &translations_only,
             None,
             None,
-            None,
+            NO_KEY_LOCATION,
             Some((Language::Es, Language::Ru)),
             spanish,
         );
@@ -5511,7 +5523,7 @@ mod tests {
             lookup,
             shown.choice(),
             Some(&Online::Pending),
-            None,
+            NO_KEY_LOCATION,
             None,
             Translating::default(),
         );
@@ -5568,7 +5580,7 @@ mod tests {
                 shown.lookup().expect("article"),
                 shown.choice(),
                 shown.definition(),
-                None,
+                NO_KEY_LOCATION,
                 None,
                 Translating::default(),
             );
@@ -5886,36 +5898,52 @@ mod tests {
             Refusal::TimedOut,
             Refusal::Other,
         ];
+        let hint = "Open Settings to configure the key.";
+        let path = std::path::Path::new("/config/<key>&/deepl.key");
+        let mut shown = definition_shown();
+        shown.choose(0);
         let mut lines = std::collections::BTreeSet::new();
         for refusal in refusals {
-            let line = super::refusal_text(refusal, None, Language::Ru);
-            assert!(lines.insert(line.clone()), "{line}");
             let online = Online::Refused(refusal);
-            let line_shown = super::online_rows(
-                &OnlineTexts {
-                    lone: Some(&online),
-                    ..OnlineTexts::default()
-                },
-                Some(std::path::Path::new("/config/<key>&/deepl.key")),
-                Language::Ru,
-            )
-            .remove(0)
-            .line;
+            let texts = OnlineTexts {
+                lone: Some(&online),
+                ..OnlineTexts::default()
+            };
+            let line = |location| {
+                let rows = super::online_rows(&texts, location, Language::Ru);
+                let choice = super::choice_texts(
+                    shown.lookup().expect("article"),
+                    shown.choice(),
+                    Some(&online),
+                    location,
+                    None,
+                    shown.translating(),
+                );
+                let definition = choice.senses[0]
+                    .explained
+                    .as_ref()
+                    .and_then(|explanation| explanation.definition.as_ref())
+                    .expect("online definition");
+                assert_eq!(definition.line, rows[0].line);
+                rows.into_iter()
+                    .next()
+                    .expect("online row")
+                    .line
+                    .into_owned()
+            };
+            let without_path = line(KeyLocation::Hint(hint));
+            let with_path = line(KeyLocation::File(path));
             if matches!(
                 refusal,
                 Refusal::Key | Refusal::UnreadableKey | Refusal::UnsafeKey | Refusal::RejectedKey
             ) {
-                assert!(
-                    line_shown.contains("/config/<key>&/deepl.key"),
-                    "{line_shown}"
-                );
-                assert!(
-                    line.contains("XDG_CONFIG_HOME") && line.contains("HOME"),
-                    "{line}"
-                );
+                let prefix = without_path.strip_suffix(hint).expect("caller hint");
+                assert_eq!(with_path, format!("{prefix}Key file: {}", path.display()));
             } else {
-                assert!(!line_shown.contains("deepl.key"), "{line_shown}");
+                assert_eq!(without_path, with_path);
+                assert!(!without_path.contains(hint));
             }
+            assert!(lines.insert(without_path.clone()), "{without_path}");
         }
     }
 
@@ -6406,7 +6434,14 @@ mod tests {
     /// The texts of `lookup` for `my` language mine and `pressed` pressed,
     /// with nothing chosen.
     fn for_pair(lookup: &Lookup, my: Language, pressed: Language) -> ResultTexts<'_> {
-        super::choice_texts(lookup, None, None, None, None, Translating { my, pressed })
+        super::choice_texts(
+            lookup,
+            None,
+            None,
+            NO_KEY_LOCATION,
+            None,
+            Translating { my, pressed },
+        )
     }
 
     /// Whether `text` has a Cyrillic letter.
@@ -6785,7 +6820,14 @@ mod tests {
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(article())));
         let lookup = shown.lookup().expect("article").clone();
-        let before = super::choice_texts(&lookup, None, None, None, None, shown.translating());
+        let before = super::choice_texts(
+            &lookup,
+            None,
+            None,
+            NO_KEY_LOCATION,
+            None,
+            shown.translating(),
+        );
         assert!(cyrillic(&translations_and_glosses(&before)));
         shown.set_my_language(Language::En);
         shown.set_pressed(Language::Es);
@@ -6796,7 +6838,14 @@ mod tests {
                 pressed: Language::Es,
             }
         );
-        let after = super::choice_texts(&lookup, None, None, None, None, shown.translating());
+        let after = super::choice_texts(
+            &lookup,
+            None,
+            None,
+            NO_KEY_LOCATION,
+            None,
+            shown.translating(),
+        );
         let said = translations_and_glosses(&after);
         assert!(!cyrillic(&said), "{said}");
         assert_eq!(
@@ -6848,7 +6897,7 @@ mod tests {
                     lookup,
                     Some(super::Choice::Sense(0)),
                     Some(&translation),
-                    None,
+                    NO_KEY_LOCATION,
                     None,
                     translating,
                 );
@@ -6863,7 +6912,7 @@ mod tests {
                 &catalan,
                 Some(super::Choice::Gloss(1)),
                 Some(&translation),
-                None,
+                NO_KEY_LOCATION,
                 None,
                 translating,
             );
@@ -6881,7 +6930,8 @@ mod tests {
             };
             let lookup = grouped_in(read);
             let Some(super::GlossTexts::Glosses(glosses)) =
-                super::choice_texts(&lookup, None, None, None, None, translating).glosses
+                super::choice_texts(&lookup, None, None, NO_KEY_LOCATION, None, translating)
+                    .glosses
             else {
                 panic!("glosses");
             };
@@ -6899,7 +6949,7 @@ mod tests {
                     lone: Some(&lone),
                     ..OnlineTexts::default()
                 },
-                None,
+                NO_KEY_LOCATION,
                 my,
             );
             let language = translating.answer_language(Some(&english));
@@ -6916,7 +6966,7 @@ mod tests {
                     sentence: Some(&whole),
                     lone: Some(&unsupported),
                 },
-                None,
+                NO_KEY_LOCATION,
                 my,
             ) {
                 assert_eq!(row.line, refused);
@@ -6925,7 +6975,7 @@ mod tests {
                 &english,
                 Some(super::Choice::Sense(0)),
                 Some(&unsupported),
-                None,
+                NO_KEY_LOCATION,
                 None,
                 translating,
             );
@@ -6999,7 +7049,8 @@ mod tests {
                 let translating = Translating { my, pressed };
                 for lookup in &lookups {
                     let language = translating.answer_language(Some(lookup));
-                    let plain = super::choice_texts(lookup, None, None, None, None, translating);
+                    let plain =
+                        super::choice_texts(lookup, None, None, NO_KEY_LOCATION, None, translating);
                     for online in &states {
                         for choice in [
                             None,
@@ -7010,7 +7061,7 @@ mod tests {
                                 lookup,
                                 choice,
                                 Some(online),
-                                None,
+                                NO_KEY_LOCATION,
                                 Some((Language::En, Language::Es)),
                                 translating,
                             );
@@ -7034,7 +7085,7 @@ mod tests {
                                 },
                                 OnlineTexts::default(),
                             ] {
-                                let rows = online_rows(&texts, None, my);
+                                let rows = online_rows(&texts, NO_KEY_LOCATION, my);
                                 said.push(format!("{rows:?}"));
                                 let answer = super::answer_texts(
                                     plain.translations.as_ref(),

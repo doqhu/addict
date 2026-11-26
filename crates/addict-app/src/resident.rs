@@ -143,6 +143,7 @@ use std::{
     future::Future,
     io::{self, Write},
     os::fd::FromRawFd,
+    path::{Path, PathBuf},
     process::ExitCode,
     rc::{Rc, Weak},
     sync::Arc,
@@ -151,6 +152,7 @@ use std::{
 
 use addict_core::{
     APP_ID,
+    dirs::Dirs,
     failure::recognize::OcrFailure,
     input::{Source, window_state},
     sentence,
@@ -159,10 +161,7 @@ use addict_core::{
     },
 };
 use addict_deepl::{DeepL, key};
-use addict_dictionary::{
-    import,
-    release::{Manifest, Published},
-};
+use addict_dictionary::release::{Manifest, Published};
 use addict_engine::{
     capture::{Captured, Failure, Timing},
     recording::{AUDIO_LIMIT, AudioFailure, CREDIT_LIMIT, fetch_audio},
@@ -386,9 +385,13 @@ enum Event {
 
 /// Starts one attempt to bind the shortcuts; its events go to `sender`. With
 /// `timed`, an activation carries the time the worker thread received it.
-fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandle {
+fn start_shortcut(
+    sender: &UnboundedSender<Event>,
+    timed: bool,
+    config: Option<&Path>,
+) -> ShortcutHandle {
     let sender = sender.clone();
-    let file = entries::shortcut_file();
+    let file = entries::shortcut_file(config);
     shortcut::start(
         APP_ID,
         KeyOwner::detect(),
@@ -513,6 +516,7 @@ fn failed_end_focus(binding: &Binding) -> FailedEndFocus {
 
 /// The state the event loop keeps between events, on the UI thread.
 struct Session {
+    dirs: Dirs,
     binding: Binding,
     view: View,
     window: gtk::ApplicationWindow,
@@ -1018,6 +1022,7 @@ impl Session {
                             _job: start_first_run(
                                 &work,
                                 Downloader::with_base_url(self.release.clone()),
+                                first_run::path(self.dirs.config.as_deref()),
                                 indexes,
                                 my,
                                 &self.sender,
@@ -1204,7 +1209,7 @@ impl Session {
             }
             _ => {}
         }
-        let (Some(work), Some(dir)) = (self.work.upgrade(), import::data_dir()) else {
+        let (Some(work), Some(dir)) = (self.work.upgrade(), self.dirs.data.clone()) else {
             self.settings
                 .render_download(false, &first_run::recovery_failed_text(first_run::NO_PLACE));
             return;
@@ -1275,7 +1280,7 @@ impl Session {
             self.first_run_indexes(&manifest)
         };
         let mut queue = first_run::Queue::new(indexes);
-        let (Some(_), Some(dir)) = (self.work.upgrade(), import::data_dir()) else {
+        let (Some(_), Some(dir)) = (self.work.upgrade(), self.dirs.data.clone()) else {
             let why = first_run::NO_PLACE;
             eprintln!("addict: the dictionary download failed: {why}");
             queue.cancel_all();
@@ -1476,7 +1481,7 @@ impl Session {
             self.settings.render_download(false, "");
             return;
         }
-        let path = first_run::path();
+        let path = first_run::path(self.dirs.config.as_deref());
         let job = self.work.upgrade().map(|work| {
             work.run(
                 first_run::FILE_LIMIT,
@@ -1553,6 +1558,7 @@ impl Session {
         let ended = self.sender.clone();
         let started = capture::start(
             self.work.upgrade().as_deref(),
+            self.dirs.config.clone(),
             self.capturing.language,
             move || {
                 // On the worker: the UI thread wakes for the event.
@@ -2763,12 +2769,11 @@ impl Session {
             return;
         };
         let sender = self.sender.clone();
+        let state = entries::startup_file(self.dirs.config.as_deref());
         self.startup_read_job = Some(work.run(
             settings::STARTUP_READ_LIMIT,
             async move {
-                let saved = entries::startup_file()
-                    .as_deref()
-                    .and_then(startup::read_saved);
+                let saved = state.as_deref().and_then(startup::read_saved);
                 // The sandbox cannot see the entry; a foreign one is no state.
                 let entry = (!startup::is_sandboxed())
                     .then(entries::login_entry)
@@ -2824,7 +2829,7 @@ impl Session {
         let sender = self.sender.clone();
         self.startup_job = Some(work.run(
             entries::STARTUP_LIMIT,
-            request_startup_change(enable),
+            request_startup_change(enable, entries::startup_file(self.dirs.config.as_deref())),
             move |outcome| {
                 let _ = sender.unbounded_send(Event::StartupChanged(outcome));
             },
@@ -3013,7 +3018,11 @@ impl Session {
         // after its session was closed: joining it does not
         // wait.
         current.borrow_mut().take();
-        *current.borrow_mut() = Some(start_shortcut(&self.sender, self.timed));
+        *current.borrow_mut() = Some(start_shortcut(
+            &self.sender,
+            self.timed,
+            self.dirs.config.as_deref(),
+        ));
     }
 }
 
@@ -3170,8 +3179,7 @@ fn build_ui(
 
 /// One change of the switch: the checks before the portal, then the flow of
 /// [`settings::change_startup`] with the real portal and the state file.
-async fn request_startup_change(enable: bool) -> StartupEnd {
-    let state = entries::startup_file();
+async fn request_startup_change(enable: bool, state: Option<PathBuf>) -> StartupEnd {
     // Only an enable needs it: a disable must work with this binary's path gone.
     let command = if enable {
         startup::relaunch_command()
@@ -3222,7 +3230,8 @@ async fn request_startup_change(enable: bool) -> StartupEnd {
 /// shortcut, Save key and the Start at login switch go to `sender` as events.
 fn start_settings(
     window: &gtk::ApplicationWindow,
-    key_file: Option<&std::path::Path>,
+    key_file: Option<&Path>,
+    data_dir: Option<PathBuf>,
     owner: KeyOwner,
     articles: Arc<dyn Articles>,
     sender: &UnboundedSender<Event>,
@@ -3239,6 +3248,7 @@ fn start_settings(
     Settings::new(
         window,
         key_file,
+        data_dir,
         owner,
         move || {
             let _ = change.unbounded_send(Event::ChangeShortcut);
@@ -3516,12 +3526,12 @@ fn start_english(
 fn start_first_run(
     work: &Work,
     downloader: Downloader,
+    path: Option<PathBuf>,
     indexes: Indexes,
     my: Language,
     sender: &UnboundedSender<Event>,
     run: u64,
 ) -> Job {
-    let path = first_run::path();
     let offered = sender.clone();
     work.run(
         download::MANIFEST_LIMIT,
@@ -3553,14 +3563,10 @@ fn start_first_run(
 /// Nothing is read, opened or connected here: the key file, the cache and the
 /// network are the runner's, at the first click on a word of a sentence or
 /// the first submit of a lone word.
-fn online_translator() -> (
-    Arc<dyn Translator>,
-    Option<std::path::PathBuf>,
-    Arc<cache::Store>,
-) {
-    let deepl = DeepL::new();
-    let key_file = deepl.key_file().map(std::path::Path::to_owned);
-    let translator = Cached::new(deepl, cache::cache_dir());
+fn online_translator(dirs: &Dirs) -> (Arc<dyn Translator>, Option<PathBuf>, Arc<cache::Store>) {
+    let key_file = key::key_path(dirs.config.as_deref());
+    let deepl = DeepL::new(key_file.clone());
+    let translator = Cached::new(deepl, dirs.cache.clone());
     let store = translator.store();
     (Arc::new(translator), key_file, store)
 }
@@ -3580,6 +3586,7 @@ fn serve(mut session: Session, mut receiver: UnboundedReceiver<Event>) {
 fn start(
     application: &gtk::Application,
     evidence: Option<Rc<RefCell<evidence::Writer>>>,
+    dirs: &Dirs,
 ) -> Resident {
     // The worker threads push; the main context wakes only for an event.
     let (sender, receiver) = futures_channel::mpsc::unbounded();
@@ -3595,7 +3602,8 @@ fn start(
     // session.
     let recording = evidence.map(|writer| Recording::start(writer, &window));
     let timed = recording.is_some();
-    let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed))));
+    let config = dirs.config.as_deref();
+    let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed, config))));
     let events = sender.clone();
     let work = start_work();
     if let Some(work) = &work {
@@ -3645,28 +3653,30 @@ fn start(
     }
     // Nothing is opened here: the indexes are files, and files are the
     // runner's.
-    let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());
+    let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(dirs.data.clone()));
     let check = start_check(work.as_deref(), articles.clone(), &sender, 0);
     // After the check: the runner takes its jobs in this order. Only the
     // path is made here; the file is the runner's.
-    let language_file = language::path();
+    let language_file = language::path(config);
     let language_job = start_language(work.as_deref(), language_file.clone(), &sender);
-    let my_language_file = my_language::path();
+    let my_language_file = my_language::path(config);
     let my_language_job = start_my_language(work.as_deref(), my_language_file.clone(), &sender);
-    let english_file = english::path();
+    let english_file = english::path(config);
     let english_job = start_english(work.as_deref(), english_file.clone(), &sender);
-    let at_once_file = at_once::path();
+    let at_once_file = at_once::path(config);
     let at_once_job = start_at_once(work.as_deref(), at_once_file.clone(), &sender);
-    let (translator, key_file, cache) = online_translator();
+    let (translator, key_file, cache) = online_translator(dirs);
     let settings = start_settings(
         &window,
         key_file.as_deref(),
+        dirs.data.clone(),
         KeyOwner::detect(),
         articles.clone(),
         &sender,
     );
     let about = About::new(&window);
     let session = Session {
+        dirs: dirs.clone(),
         binding,
         view,
         window,
@@ -3914,7 +3924,11 @@ fn primary(application: gtk::Application) -> Result<gtk::Application, ExitCode> 
 
 /// Runs the resident application until it quits. With `evidence`, each
 /// activation is recorded to it.
-pub fn run(mode: LaunchMode, evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
+pub fn run(
+    mode: LaunchMode,
+    evidence: Option<Rc<RefCell<evidence::Writer>>>,
+    dirs: Dirs,
+) -> ExitCode {
     // Without a display there is nothing to be resident for: leave before the
     // application or the portal worker exist.
     if let Err(e) = gtk::init() {
@@ -3930,7 +3944,7 @@ pub fn run(mode: LaunchMode, evidence: Option<Rc<RefCell<evidence::Writer>>>) ->
 
     let slot = resident.clone();
     application.connect_startup(move |application| {
-        let resident = start(application, evidence.clone());
+        let resident = start(application, evidence.clone(), &dirs);
         *slot.borrow_mut() = Some(resident);
     });
     let launches = resident.clone();
@@ -3979,7 +3993,7 @@ mod tests {
     use crate::view::{
         Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
     };
-    use addict_core::translation::Source as Language;
+    use addict_core::{dirs::Dirs, translation::Source as Language};
 
     #[test]
     fn the_lookup_limit_is_finite_and_short() {
@@ -4269,10 +4283,11 @@ mod tests {
     }
 
     /// A full session of the window for a test, its application registered
-    /// under `id`, no file of its own; given back with its events and the
-    /// runner it uses. Needs a display.
+    /// under `id`, with the supplied directories. Returns its events and
+    /// runner. Needs a display.
     fn test_session(
         id: &str,
+        dirs: Dirs,
     ) -> (
         super::Session,
         futures_channel::mpsc::UnboundedReceiver<Event>,
@@ -4288,18 +4303,20 @@ mod tests {
         let binding = Binding::Attempting;
         let (view, window) = build_ui(&app, &binding, &sender);
         let work = Rc::new(Work::start().unwrap());
-        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(None));
-        let (translator, key_file, cache) = online_translator();
+        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(dirs.data.clone()));
+        let (translator, key_file, cache) = online_translator(&dirs);
         // Not the desktop the tests run on: the portal's dialog, as on GNOME.
         let settings = start_settings(
             &window,
             key_file.as_deref(),
+            dirs.data.clone(),
             KeyOwner::Portal,
             articles.clone(),
             &sender,
         );
         let about = About::new(&window);
         let session = Session {
+            dirs,
             binding,
             view,
             window,
@@ -4375,7 +4392,8 @@ mod tests {
 
         use crate::view::{Online, Whole};
         gtk::init().expect("a display");
-        let (mut session, mut events, _work) = test_session("io.github.doqhu.Addict.AtOnceTest");
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.AtOnceTest", Dirs::default());
         let canned = Arc::new(Canned::new(Ok("Я сидел на берегу реки.")));
         session.translator = canned.clone();
         session.language = Language::En;
@@ -4442,7 +4460,8 @@ mod tests {
     fn the_reading_language_holds_in_either_read_order_and_on_a_gloss_click() {
         use addict_core::translation::reading_languages;
         gtk::init().expect("a display");
-        let (mut session, _events, _work) = test_session("io.github.doqhu.Addict.LanguageTest");
+        let (mut session, _events, _work) =
+            test_session("io.github.doqhu.Addict.LanguageTest", Dirs::default());
         session.handle(Event::LanguageRead(Language::Ru));
         assert_eq!(session.language, Language::En);
         session.handle(Event::MyLanguageRead(Language::En));
@@ -4488,7 +4507,8 @@ mod tests {
         use addict_deepl::client::sent;
         use addict_engine::online::Subject;
         gtk::init().expect("a display");
-        let (mut session, _events, _work) = test_session("io.github.doqhu.Addict.EnglishTest");
+        let (mut session, _events, _work) =
+            test_session("io.github.doqhu.Addict.EnglishTest", Dirs::default());
         // A chosen word in the manual only: the field stays empty, so it is
         // newer, and a change of language or spelling sends nothing.
         let _ = session.manual.edit("Me gusta el color rojo.".to_owned());
@@ -4572,7 +4592,8 @@ mod tests {
     fn the_indexes_line_and_the_definition_button_follow_my_language() {
         use addict_engine::dictionaries::{Indexes, State};
         gtk::init().expect("a display");
-        let (mut session, _events, _work) = test_session("io.github.doqhu.Addict.MyTextsTest");
+        let (mut session, _events, _work) =
+            test_session("io.github.doqhu.Addict.MyTextsTest", Dirs::default());
         let indexes = Indexes {
             definitions: State::Open,
             spanish: State::Open,
@@ -4623,7 +4644,8 @@ mod tests {
         use addict_dictionary::{import::Source, release::Published};
 
         gtk::init().expect("a display");
-        let (mut session, _events, work) = test_session("io.github.doqhu.Addict.FirstRunTest");
+        let (mut session, _events, work) =
+            test_session("io.github.doqhu.Addict.FirstRunTest", Dirs::default());
         // Observe request IDs without contacting the release server.
         session.work = Weak::new();
         let pending = || work.run(language::FILE_LIMIT, std::future::pending::<()>(), |_| {});
@@ -4744,31 +4766,11 @@ mod tests {
             std::env::temp_dir().join(format!("addict-first-run-language-{}", std::process::id())),
         );
         std::fs::create_dir(&temp.0).unwrap();
-        // Put back when the test ends, before `temp` is removed.
-        struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
-        impl Drop for Env {
-            fn drop(&mut self) {
-                for (key, value) in &self.0 {
-                    // SAFETY: as when they were set below.
-                    unsafe {
-                        match value {
-                            Some(value) => std::env::set_var(key, value),
-                            None => std::env::remove_var(key),
-                        }
-                    }
-                }
-            }
-        }
-        let _env = Env(["XDG_DATA_HOME", "XDG_CONFIG_HOME"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect());
-        // SAFETY: the display tests run one per process ("run alone"); no
-        // other thread of this test reads the environment meanwhile.
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", temp.0.join("data"));
-            std::env::set_var("XDG_CONFIG_HOME", temp.0.join("config"));
-        }
+        let dirs = Dirs {
+            config: Some(temp.0.join("config/addict")),
+            data: Some(temp.0.join("data/addict")),
+            cache: None,
+        };
 
         let manifest = Manifest {
             format: addict_dictionary::format::VERSION,
@@ -4787,7 +4789,7 @@ mod tests {
 
         gtk::init().expect("a display");
         let (mut session, mut events, _work) =
-            test_session("io.github.doqhu.Addict.FirstRunLanguageTest");
+            test_session("io.github.doqhu.Addict.FirstRunLanguageTest", dirs);
         session.release = stub.base_url();
         let context = glib::MainContext::default();
         // Handles the events of the runner until `done` holds.
@@ -4929,34 +4931,14 @@ mod tests {
             std::env::temp_dir().join(format!("addict-language-change-{}", std::process::id())),
         );
         std::fs::create_dir(&temp.0).unwrap();
-        // Put back when the test ends, before `temp` is removed.
-        struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
-        impl Drop for Env {
-            fn drop(&mut self) {
-                for (key, value) in &self.0 {
-                    // SAFETY: as when they were set below.
-                    unsafe {
-                        match value {
-                            Some(value) => std::env::set_var(key, value),
-                            None => std::env::remove_var(key),
-                        }
-                    }
-                }
-            }
-        }
-        let _env = Env(["XDG_DATA_HOME", "XDG_CONFIG_HOME"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect());
-        // SAFETY: the display tests run one per process ("run alone"); no
-        // other thread of this test reads the environment meanwhile.
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", temp.0.join("data"));
-            std::env::set_var("XDG_CONFIG_HOME", temp.0.join("config"));
-        }
+        let dirs = Dirs {
+            config: Some(temp.0.join("config/addict")),
+            data: Some(temp.0.join("data/addict")),
+            cache: None,
+        };
 
         // Russian's set, readable on disk and present in the snapshot.
-        let dir = import::data_dir().unwrap();
+        let dir = dirs.data.clone().unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let index = addict_dictionary::format::encode(&addict_dictionary::format::Contents {
             source: "installed".to_owned(),
@@ -5003,7 +4985,7 @@ mod tests {
 
         gtk::init().expect("a display");
         let (mut session, mut events, _work) =
-            test_session("io.github.doqhu.Addict.LanguageChangeTest");
+            test_session("io.github.doqhu.Addict.LanguageChangeTest", dirs);
         session.release = stub.base_url();
         session.my_language = Language::Ru;
         session.first_run = FirstRun::Done;
@@ -5179,7 +5161,8 @@ mod tests {
         use super::*;
         use addict_dictionary::release::Published;
         gtk::init().expect("a display");
-        let (mut session, mut events, work) = test_session("io.github.doqhu.Addict.RecoveryTest");
+        let (mut session, mut events, work) =
+            test_session("io.github.doqhu.Addict.RecoveryTest", Dirs::default());
 
         fn button(widget: &gtk::Widget, text: &str) -> Option<gtk::Button> {
             if let Some(button) = widget.downcast_ref::<gtk::Button>()
@@ -5961,12 +5944,12 @@ mod tests {
             started.recv().expect("the mock portal started");
         }
 
-        fn change(enable: bool) -> StartupEnd {
+        fn change(enable: bool, state_file: PathBuf) -> StartupEnd {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(request_startup_change(enable))
+                .block_on(request_startup_change(enable, Some(state_file)))
         }
 
         /// Runs this test again on a private bus with no service directory, so
@@ -6042,6 +6025,7 @@ mod tests {
             });
             start_mock(mock.clone());
             let asked = || mock.asked.lock().unwrap().clone();
+            let change = |enable| change(enable, state_file.clone());
 
             // No launcher: the portal would not register a host app.
             let StartupEnd::NotAsked(reason) = change(true) else {

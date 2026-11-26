@@ -244,6 +244,7 @@
 
 mod about;
 mod capture;
+mod dirs;
 mod entries;
 mod file_import;
 mod first_run;
@@ -317,16 +318,18 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let dirs = dirs::from_env();
     match cli.command {
         Some(Command::Install) => report(entries::install_entries()),
-        Some(Command::Uninstall) => report(entries::uninstall_entries()),
-        Some(Command::Import { file }) => import_file(&file),
+        Some(Command::Uninstall) => report(entries::uninstall_entries(dirs.config.as_deref())),
+        Some(Command::Import { file }) => import_file(&file, dirs.data.as_deref()),
         None => {
-            gpu::select_vulkan_drivers();
+            gpu::select_vulkan_drivers(dirs.config.as_deref());
             match open_evidence(cli.evidence.zip(cli.origin)) {
                 Ok(writer) => resident::run(
                     resident::LaunchMode::from_background(cli.background),
                     writer,
+                    dirs,
                 ),
                 Err(message) => fail(&message),
             }
@@ -342,13 +345,13 @@ fn fail(message: &str) -> ExitCode {
 
 /// Imports the dictionary file and prints the path of its index and what the
 /// index holds.
-fn import_file(file: &Path) -> ExitCode {
-    let Some(dir) = import::data_dir() else {
+fn import_file(file: &Path, data: Option<&Path>) -> ExitCode {
+    let Some(dir) = data else {
         return fail(
             "cannot find the data directory: XDG_DATA_HOME is not set to an absolute path and HOME is unset or empty",
         );
     };
-    match import::import(file, &dir, import::Origin::Manual) {
+    match import::import(file, dir, import::Origin::Manual) {
         Ok(imported) => {
             println!("{}", imported.path.display());
             println!("edition: {}", imported.edition);

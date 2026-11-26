@@ -14,8 +14,7 @@
 //!
 //! Which Tesseract runs is decided in the job, before each recognition, by
 //! [`tesseract`]: the files `tesseract`, a program path, and `tessdata`, a
-//! data directory, of the configuration directory,
-//! [`addict_deepl::key::config_dir`], and the directory of the running
+//! data directory, of the configuration directory, and the directory of the running
 //! executable go to [`Tesseract::locate`]. Each file is its first nonblank
 //! line, trimmed; a file that is missing, cannot be read, is not a regular
 //! file, holds no nonblank line or a relative path is unset, and nothing is
@@ -82,16 +81,21 @@ const SETTING_LIMIT: u64 = 4096;
 /// The Tesseract of the one rule, from the two setting files and the
 /// directory of the running executable. This reads files, so it runs on the
 /// runner.
-pub fn tesseract() -> Tesseract {
-    let config = addict_deepl::key::config_dir();
-    let setting = |name| config.as_ref().and_then(|dir| setting(&dir.join(name)));
+fn tesseract(config: Option<&Path>) -> Tesseract {
+    let (program, tessdata) = tesseract_paths(config);
+    let program = program.as_deref().and_then(setting);
+    let tessdata = tessdata.as_deref().and_then(setting);
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_owned));
-    Tesseract::locate(
-        setting(PROGRAM_FILE).as_deref(),
-        setting(TESSDATA_FILE).as_deref(),
-        exe_dir.as_deref(),
+    Tesseract::locate(program.as_deref(), tessdata.as_deref(), exe_dir.as_deref())
+}
+
+/// The two configuration files used to locate Tesseract.
+pub(super) fn tesseract_paths(config: Option<&Path>) -> (Option<PathBuf>, Option<PathBuf>) {
+    (
+        config.map(|dir| dir.join(PROGRAM_FILE)),
+        config.map(|dir| dir.join(TESSDATA_FILE)),
     )
 }
 
@@ -142,6 +146,7 @@ pub fn ocr_language(language: Language) -> &'static str {
 /// back, with nothing measured.
 pub fn start(
     work: Option<&Work>,
+    config: Option<PathBuf>,
     language: Language,
     on_captured: impl FnOnce() + Send + 'static,
     on_outcome: impl FnOnce(Outcome<Capture>) + Send + 'static,
@@ -151,7 +156,14 @@ pub fn start(
         let started = Instant::now();
         let answer = portal_answer(CAPTURE_LIMIT, screenshot::capture(APP_ID)).await;
         let capture_ms = Some(millis(started.elapsed()));
-        after_answer(answer, capture_ms, language, tesseract, on_captured).await
+        after_answer(
+            answer,
+            capture_ms,
+            language,
+            || tesseract(config.as_deref()),
+            on_captured,
+        )
+        .await
     };
     Ok(work.run(JOB_LIMIT, job, on_outcome))
 }
@@ -333,16 +345,15 @@ pub(crate) mod tests {
             move || told.store(true, Ordering::SeqCst)
         };
         let shot = path.clone();
-        let _job =
-            work.run(
-                JOB_LIMIT,
-                async move {
-                    recognize_snapshot(&tesseract(), shot, &Params::ENGLISH, on_captured).await
-                },
-                move |outcome| {
-                    let _ = sender.send(outcome);
-                },
-            );
+        let _job = work.run(
+            JOB_LIMIT,
+            async move {
+                recognize_snapshot(&tesseract(None), shot, &Params::ENGLISH, on_captured).await
+            },
+            move |outcome| {
+                let _ = sender.send(outcome);
+            },
+        );
         let outcome = receiver.recv_timeout(WAIT).expect("outcome");
         let (captured, timing) = captured_result(outcome).expect("shown");
         assert_eq!(
@@ -372,7 +383,7 @@ pub(crate) mod tests {
         let job = work.run(
             JOB_LIMIT,
             async move {
-                recognize_snapshot(&tesseract(), shot, &Params::ENGLISH, move || {
+                recognize_snapshot(&tesseract(None), shot, &Params::ENGLISH, move || {
                     let _ = captured.send(());
                 })
                 .await
@@ -442,7 +453,7 @@ pub(crate) mod tests {
             Ok(path.clone()),
             Some(1200),
             Language::En,
-            tesseract,
+            || tesseract(None),
             move || announced.store(true, Ordering::SeqCst),
         ));
         let (captured, timing) = captured_result(outcome).expect("shown");
@@ -487,7 +498,7 @@ pub(crate) mod tests {
         let (sender, receiver) = mpsc::channel();
         let _job = work.run(
             JOB_LIMIT,
-            async move { recognize_snapshot(&tesseract(), path, &Params::ENGLISH, || {}).await },
+            async move { recognize_snapshot(&tesseract(None), path, &Params::ENGLISH, || {}).await },
             move |outcome| {
                 let _ = sender.send(outcome);
             },
@@ -544,7 +555,7 @@ pub(crate) mod tests {
         let shot = path.clone();
         let _job = work.run(
             JOB_LIMIT,
-            async move { recognize_snapshot(&tesseract(), shot, &params, || {}).await },
+            async move { recognize_snapshot(&tesseract(None), shot, &params, || {}).await },
             move |outcome| {
                 let _ = sender.send(outcome);
             },
@@ -558,7 +569,7 @@ pub(crate) mod tests {
     /// Whether the Tesseract of the rule lists the data `language` as
     /// installed.
     fn installed(language: &str) -> bool {
-        let tesseract = tesseract();
+        let tesseract = tesseract(None);
         let mut command = std::process::Command::new(tesseract.program());
         if let Some(tessdata) = tesseract.tessdata() {
             command.arg("--tessdata-dir").arg(tessdata);
@@ -583,7 +594,7 @@ pub(crate) mod tests {
         let params = Params::in_language(ocr_language(Language::Ca));
         let _job = work.run(
             JOB_LIMIT,
-            async move { recognize_snapshot(&tesseract(), path, &params, || {}).await },
+            async move { recognize_snapshot(&tesseract(None), path, &params, || {}).await },
             move |outcome| {
                 let _ = sender.send(outcome);
             },
@@ -599,6 +610,7 @@ pub(crate) mod tests {
     #[test]
     fn without_a_runner_nothing_starts() {
         let started = start(
+            None,
             None,
             Language::Ca,
             || panic!("captured"),
@@ -662,7 +674,7 @@ pub(crate) mod tests {
             OCR_LIMIT * 2,
             async {
                 ocr::recognize(
-                    &tesseract(),
+                    &tesseract(None),
                     Path::new(FIXTURE),
                     &Params::ENGLISH,
                     OCR_LIMIT,

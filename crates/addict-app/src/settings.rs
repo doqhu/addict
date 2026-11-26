@@ -15,7 +15,13 @@
 //! showing the window calls no portal. The texts are plain functions of the
 //! state, so that they can be tested without a display.
 
-use std::{cell::Cell, future::Future, path::Path, rc::Rc, time::Duration};
+use std::{
+    cell::Cell,
+    future::Future,
+    path::{Path, PathBuf},
+    rc::Rc,
+    time::Duration,
+};
 
 use addict_core::APP_ID;
 use addict_core::failure::login_item::StartupFailure;
@@ -746,6 +752,7 @@ impl Settings {
     pub fn new<F: Future<Output = Result<(), String>> + 'static>(
         parent: &impl IsA<gtk::Window>,
         key_file: Option<&Path>,
+        data_dir: Option<PathBuf>,
         owner: KeyOwner,
         on_change: impl Fn() + 'static,
         on_save: impl Fn(String) + 'static,
@@ -1066,7 +1073,7 @@ impl Settings {
             .child(&scroll)
             .css_classes(["addict", "settings"])
             .build();
-        import_file.connect(&window, on_imported);
+        import_file.connect(&window, data_dir, on_imported);
         let escape = gtk::EventControllerKey::new();
         let esc = window.downgrade();
         escape.connect_key_pressed(move |_, key, _, _| {
@@ -1335,6 +1342,7 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
+            None,
             super::KeyOwner::Portal,
             || {},
             |_| {},
@@ -1402,6 +1410,7 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
+            None,
             super::KeyOwner::Portal,
             || {},
             |_| {},
@@ -1437,6 +1446,7 @@ mod tests {
         let told = asked.clone();
         let settings = super::Settings::new(
             &parent,
+            None,
             None,
             super::KeyOwner::Portal,
             || {},
@@ -1482,6 +1492,7 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
+            None,
             super::KeyOwner::Portal,
             || {},
             |_| {},
@@ -1523,6 +1534,7 @@ mod tests {
         let parent = gtk::Window::new();
         let settings = super::Settings::new(
             &parent,
+            None,
             None,
             super::KeyOwner::Portal,
             || {},

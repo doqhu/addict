@@ -3,7 +3,7 @@
 
 use std::{cell::RefCell, future::Future, path::PathBuf, rc::Rc};
 
-use addict_dictionary::import::{self, Imported};
+use addict_dictionary::import::Imported;
 use gtk::{gio, prelude::*};
 
 use crate::{download, settings::label};
@@ -162,6 +162,7 @@ impl Row {
     pub fn connect<F: Future<Output = Result<(), String>> + 'static>(
         &self,
         parent: &gtk::Window,
+        data_dir: Option<PathBuf>,
         on_imported: impl Fn() -> F + 'static,
     ) {
         let button = self.button.downgrade();
@@ -184,9 +185,10 @@ impl Row {
             };
             let action = action.clone();
             let on_imported = on_imported.clone();
+            let data_dir = data_dir.clone();
             gtk::glib::spawn_future_local(async move {
                 action
-                    .run(choose(&parent), import::data_dir(), || on_imported())
+                    .run(choose(&parent), data_dir, || on_imported())
                     .await;
             });
         });

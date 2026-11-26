@@ -50,9 +50,9 @@ use crate::{
         ADD_KEY_LABEL, ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, AnalysisGroup, Answer,
         AnswerLine, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COMMONS_FILE_LABEL, COPIED_LABEL,
         COPY_LABEL, ChosenGloss, Explained, FIELD_PLACEHOLDER, FORM_TAG, FORWARD_TOOLTIP, FormRow,
-        GLOSS_NO_KEY, GlossRow, GlossTexts, LANGUAGE_TOOLTIP, LONE_WORD_TIP, LOOK_UP_ENGLISH,
-        Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE, OnlineRow,
-        OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
+        GLOSS_NO_KEY, GlossRow, GlossTexts, KeyLocation, LANGUAGE_TOOLTIP, LONE_WORD_TIP,
+        LOOK_UP_ENGLISH, Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE,
+        OnlineRow, OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
         PronunciationText, RECORDING_NEEDS_NETWORK, RETRY_LABEL, ResultTexts, SENSES_LABEL,
         SHOW_LESS, SYNONYM_PREVIEW, SenseText, Shown, SynonymTexts, WHOLE_WORD_LABEL, answer_texts,
         binding_texts, choice_texts, command_in, definition_action_label, indexes_text,
@@ -61,6 +61,13 @@ use crate::{
     },
     wrap::Wrap,
 };
+
+const KEY_LOCATION_HINT: &str =
+    "Set an absolute XDG_CONFIG_HOME or HOME to locate addict/deepl.key.";
+
+fn key_location(path: Option<&std::path::Path>) -> KeyLocation<'_> {
+    path.map_or(KeyLocation::Hint(KEY_LOCATION_HINT), KeyLocation::File)
+}
 
 /// How wide the wrapping texts ask to be, in characters.
 const TEXT_WIDTH_CHARS: i32 = 56;
@@ -2278,7 +2285,7 @@ impl View {
             lookup,
             shown.choice(),
             shown.definition(),
-            key_file,
+            key_location(key_file),
             shown.elsewhere(),
             shown.translating(),
         );
@@ -2393,7 +2400,7 @@ impl View {
     pub fn render_online(&self, online: &OnlineTexts<'_>, key_file: Option<&std::path::Path>) {
         self.release_focus();
         self.online.replace(
-            online_rows(online, key_file, self.my_language.get())
+            online_rows(online, key_location(key_file), self.my_language.get())
                 .into_iter()
                 .map(OnlineRow::into_owned)
                 .collect(),
