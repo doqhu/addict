@@ -47,13 +47,6 @@ use futures_channel::oneshot;
 /// 0.2.x and 0.4.x.
 pub const BASE_URL: &str = "https://github.com/doqhu/addict-indexes/releases/download";
 
-/// How long the fetch of the manifest may take on the runner.
-pub const MANIFEST_LIMIT: Duration = Duration::from_secs(60);
-
-/// How long the download and the install of one index may take on the
-/// runner.
-pub const DOWNLOAD_LIMIT: Duration = Duration::from_secs(30 * 60);
-
 /// How long a connection may take to open.
 const CONNECT_LIMIT: Duration = Duration::from_secs(30);
 
@@ -524,10 +517,11 @@ pub async fn blocking<T: Send + 'static>(
 pub async fn recovery_manifest(
     downloader: &Downloader,
     dir: PathBuf,
+    manifest_limit: Duration,
 ) -> Result<Manifest, DownloadError> {
     // The manifest keeps its own deadline; the health scan of every
     // installed index that follows can take longer on a slow disk.
-    let manifest = tokio::time::timeout(MANIFEST_LIMIT, downloader.manifest())
+    let manifest = tokio::time::timeout(manifest_limit, downloader.manifest())
         .await
         .map_err(|_| DownloadError::Manifest {
             cause: "it did not come in time".to_owned(),
@@ -656,7 +650,7 @@ mod tests {
         let stub = release(manifest_of(vec![Published::of("oewn", &xz)]), None);
         let downloader = Downloader::with_base_url(stub.base_url()).recovering();
         let dir = DataDir::new("manual-after-selection");
-        let manifest = super::recovery_manifest(&downloader, dir.data())
+        let manifest = super::recovery_manifest(&downloader, dir.data(), Duration::from_secs(60))
             .await
             .unwrap();
         assert_eq!(manifest.indexes.len(), 1);

@@ -142,6 +142,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     fs::File,
     future::Future,
     io::{self, Write},
@@ -149,10 +150,19 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
     rc::{Rc, Weak},
-    sync::Arc,
+    sync::{Arc, Mutex, Weak as WorkRef},
     time::Duration,
 };
 
+use addict_controller::{
+    self as controller, Controller, Dispatcher, LookupState, Platform, StartFacts, TypedWord,
+    ViewState,
+    deadlines::{
+        AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CACHE_LIMIT, CLIPBOARD_LIMIT,
+        CREDIT_LIMIT, DOWNLOAD_LIMIT, FIRST_RUN_FILE_LIMIT, KEY_SAVE_LIMIT, LANGUAGE_FILE_LIMIT,
+        LOOKUP_LIMIT, MANIFEST_LIMIT, STARTUP_LIMIT, STARTUP_READ_LIMIT, TRANSLATE_LIMIT,
+    },
+};
 use addict_core::{
     APP_ID,
     dirs::Dirs,
@@ -170,7 +180,7 @@ use addict_deepl::{
 use addict_dictionary::release::{Manifest, Published};
 use addict_engine::{
     capture::{Captured, Failure, Timing},
-    recording::{AUDIO_LIMIT, AudioFailure, CREDIT_LIMIT, fetch_audio},
+    recording::{AudioFailure, fetch_audio},
     work::{Job, Outcome, Work},
 };
 use addict_platform::{
@@ -207,7 +217,7 @@ use crate::{
         Binding, Choice, Held, Lookup, NOTHING_SELECTED_TEXT, Online, Shown, command_in,
         failure_text, too_long_text,
     },
-    widgets::{PlaybackMedia, View},
+    widgets::{FieldEdit, PlaybackMedia, View},
 };
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
@@ -217,21 +227,9 @@ const TRIGGER: &str = "LOGO+q";
 /// bind is asked for, and ten minutes for its answer, which on GNOME is a
 /// person's in a dialog that the window may cover on a first launch.
 const BIND_LIMITS: shortcut::Limits = shortcut::Limits {
-    start: Duration::from_secs(60),
-    answer: Duration::from_secs(600),
+    start: BIND_START_LIMIT,
+    answer: BIND_ANSWER_LIMIT,
 };
-
-/// How long the read of the selection and the clipboard may take from the
-/// press, the wait for the window to be active included.
-const CLIPBOARD_LIMIT: Duration = Duration::from_secs(1);
-
-/// How long the lookup of one word may take.
-const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
-
-/// How long one online request may take. A network answer is slower than a
-/// file read, and this deadline is the only thing that ends a request
-/// without an answer.
-const TRANSLATE_LIMIT: Duration = Duration::from_secs(10);
 
 /// What lives as long as the resident application.
 struct Resident {
@@ -240,10 +238,8 @@ struct Resident {
     _shortcut: Rc<RefCell<Option<ShortcutHandle>>>,
     /// Where a repeated launch reports itself.
     events: UnboundedSender<Event>,
-    /// The runner of the lookups; `None` when it could not be started.
-    _work: Option<Rc<Work>>,
-    /// What the lookups ask.
-    _articles: Arc<dyn Articles>,
+    /// Owns the lookup loop and the shared runner.
+    _controller: Option<Controller>,
     /// The icon in the top bar and its menu.
     _tray: TrayHandle,
 }
@@ -255,7 +251,7 @@ enum Event {
     /// Retry was pressed.
     Retry,
     /// The text of the field changed; this is the new text.
-    Sentence(String),
+    Sentence(String, FieldEdit),
     /// The word with this index in the shown sentence was clicked.
     Word(usize),
     /// The sense with this index in the shown list was clicked.
@@ -290,6 +286,8 @@ enum Event {
         language: Language,
         outcome: Outcome<Looked>,
     },
+    /// The shared controller's complete typed lookup snapshot.
+    Controller(ViewState),
     /// The online request about `subject`, sent from `source` for the text
     /// with the number `text`, ended. `elapsed` is as for a definition.
     Translated {
@@ -543,7 +541,8 @@ struct Session {
     shown: Shown,
     /// Weak: the runner must go when the resident state is dropped. Never
     /// upgrades when the runner could not be started.
-    work: Weak<Work>,
+    work: WorkRef<Work>,
+    controller: Option<Dispatcher>,
     articles: Arc<dyn Articles>,
     /// What a word or a sentence is translated by online.
     translator: Arc<dyn Translator>,
@@ -796,6 +795,8 @@ impl Capturing {
 struct LookingUp {
     /// The lookup whose outcome is awaited; dropping it cancels the lookup.
     job: Option<Job>,
+    typed: Option<TypedRun>,
+    revision: u64,
     /// The language that gave the result of the last started lookup, once
     /// it ended with one; `None` before. The word's online requests are
     /// sent from it.
@@ -804,6 +805,17 @@ struct LookingUp {
     /// while its lookup runs: they are sent once it ends, from the language
     /// that answered.
     deferred: Vec<Subject>,
+}
+
+struct TypedRun {
+    run: u64,
+    pending: bool,
+}
+
+impl LookingUp {
+    fn pending(&self) -> bool {
+        self.job.is_some() || self.typed.as_ref().is_some_and(|typed| typed.pending)
+    }
 }
 
 /// Where the read of the clipboard of a [`Session`] stands; at first none
@@ -878,7 +890,7 @@ impl Session {
             Event::ToggleStartup(enable) => self.toggle_startup(enable),
             Event::StartupChanged(outcome) => self.startup_changed(outcome),
             Event::Retry => self.retry(),
-            Event::Sentence(text) => self.sentence_changed(text),
+            Event::Sentence(text, origin) => self.sentence_changed(text, origin),
             Event::Word(index) => self.word_chosen(index),
             Event::Sense(index) => self.sense_chosen(index),
             Event::Gloss(index) => self.gloss_chosen(index),
@@ -899,6 +911,7 @@ impl Session {
                 language,
                 outcome,
             } => self.looked_up(run, generation, language, outcome),
+            Event::Controller(state) => self.render_controller(state),
             Event::Translated {
                 text,
                 subject,
@@ -1225,9 +1238,9 @@ impl Session {
         // The manifest has its own deadline inside; the health scan of
         // every installed index needs the longer one.
         let job = work.run(
-            download::DOWNLOAD_LIMIT,
+            DOWNLOAD_LIMIT,
             async move {
-                download::recovery_manifest(&downloader, dir)
+                download::recovery_manifest(&downloader, dir, MANIFEST_LIMIT)
                     .await
                     .map_err(|error| error.to_string())
             },
@@ -1264,7 +1277,7 @@ impl Session {
 
     /// Download was pressed: the indexes of the manifest are downloaded and
     /// installed on the runner, one after another, each within
-    /// [`download::DOWNLOAD_LIMIT`].
+    /// [`DOWNLOAD_LIMIT`].
     fn first_run_download(&mut self) {
         if !matches!(self.first_run, FirstRun::Shown { .. }) {
             return;
@@ -1343,7 +1356,7 @@ impl Session {
             let refresh = self.sender.clone();
             let downloader = Downloader::with_base_url(self.release.clone());
             let job = work.run(
-                download::DOWNLOAD_LIMIT,
+                DOWNLOAD_LIMIT,
                 async move {
                     install_download(
                         downloader,
@@ -1461,7 +1474,7 @@ impl Session {
         let result = match outcome {
             Outcome::Finished(Ok(_)) => Ok(()),
             Outcome::Finished(Err(error)) => Err(error),
-            Outcome::TimedOut => Err(first_run::late_text(download::DOWNLOAD_LIMIT)),
+            Outcome::TimedOut => Err(first_run::late_text(DOWNLOAD_LIMIT)),
             Outcome::Cancelled | Outcome::Panicked => Err(first_run::STOPPED.to_owned()),
         };
         if let Err(error) = &result {
@@ -1488,7 +1501,7 @@ impl Session {
         let path = first_run::path(self.dirs.config.as_deref());
         let job = self.work.upgrade().map(|work| {
             work.run(
-                first_run::FILE_LIMIT,
+                FIRST_RUN_FILE_LIMIT,
                 async move { first_run::write(path.as_deref()) },
                 |outcome| match outcome {
                     Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
@@ -1687,7 +1700,7 @@ impl Session {
         let edit = self.manual.edit(String::new());
         self.view.set_field_text("");
         self.render_history();
-        self.text_replaced(edit);
+        self.text_replaced(edit, FieldEdit::Replaced);
     }
 
     /// Starts the read of the primary selection and the clipboard as the
@@ -1826,7 +1839,7 @@ impl Session {
     /// The source line goes. A snapshot being recognized and a read of the
     /// selection and the clipboard are given up: the user's text wins, and the state no
     /// longer says that a source is read.
-    fn sentence_changed(&mut self, text: String) {
+    fn sentence_changed(&mut self, text: String, origin: FieldEdit) {
         self.view.clear_source_failure();
         let gave_up_capture =
             self.capturing.job.is_some() && self.manual.reading() == Some(Source::Ocr);
@@ -1835,7 +1848,7 @@ impl Session {
         }
         let gave_up_read = self.give_up_read();
         let edit = self.manual.edit(text);
-        self.text_replaced(edit);
+        self.text_replaced(edit, origin);
         // A typed text is not recorded, but Back can go from it.
         self.render_history();
         if gave_up_capture || gave_up_read {
@@ -1854,7 +1867,7 @@ impl Session {
             self.history.record(self.manual.sentence());
         }
         self.render_history();
-        self.text_replaced(edit);
+        self.text_replaced(edit, FieldEdit::Replaced);
     }
 
     /// Back or Alt+Left: the text before in the history is put into the
@@ -1895,7 +1908,7 @@ impl Session {
     /// What follows a new text in the field, typed, pasted or recognized:
     /// the online texts of the old one are given up, and a lone word is
     /// looked up at once.
-    fn text_replaced(&mut self, edit: Edit) {
+    fn text_replaced(&mut self, edit: Edit, origin: FieldEdit) {
         if edit == Edit::Same {
             return;
         }
@@ -1911,11 +1924,11 @@ impl Session {
             Edit::Cleared => {
                 // Cancels the lookup; whatever it still reports has an old
                 // number.
-                self.looking_up.job = None;
+                self.retire_lookup();
                 self.render_manual();
                 self.show_result(None);
             }
-            Edit::Lone(run) => self.start_lookup(run),
+            Edit::Lone(run) => self.start_lookup_from(run, origin),
         }
     }
 
@@ -1996,8 +2009,21 @@ impl Session {
     /// dictionary no lookup starts, and the line that says so is shown. The
     /// online texts are not touched.
     fn start_lookup(&mut self, run: u64) {
-        // The lookup of another word, if it runs, is replaced.
+        self.start_lookup_from(run, FieldEdit::Replaced);
+    }
+
+    fn retire_lookup(&mut self) {
         self.looking_up.job = None;
+        if let Some(typed) = self.looking_up.typed.take()
+            && let Some(controller) = &self.controller
+        {
+            controller.dispatch(controller::Event::TypedLookupRetired { run: typed.run });
+        }
+    }
+
+    fn start_lookup_from(&mut self, run: u64, origin: FieldEdit) {
+        // The lookup of another word, if it runs, is replaced.
+        self.retire_lookup();
         self.looking_up.answered = None;
         self.render_manual();
         let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
@@ -2007,6 +2033,25 @@ impl Session {
         let sender = self.sender.clone();
         let language = self.language;
         let generation = self.indexes.generation;
+        if matches!(origin, FieldEdit::Typed)
+            && let Some(controller) = &self.controller
+        {
+            if controller.dispatch(controller::Event::WordTyped(TypedWord {
+                run,
+                word,
+                reading: language,
+                target: self.my_language,
+                known_indexes: self.indexes.known,
+                index_generation: generation,
+            })) {
+                self.looking_up.typed = Some(TypedRun { run, pending: true });
+                self.show_result(Some(Lookup::Pending));
+            } else {
+                self.show_result(Some(Lookup::Unfinished));
+                self.send_deferred();
+            }
+            return;
+        }
         let started = manual::offline(
             self.work.upgrade().as_deref(),
             LOOKUP_LIMIT,
@@ -2036,14 +2081,66 @@ impl Session {
                 // No lookup event comes: what waited for one goes now.
                 self.send_deferred();
                 if checks {
-                    self.check = start_check(
-                        self.work.upgrade().as_deref(),
-                        self.articles.clone(),
-                        &self.sender,
-                        self.indexes.generation,
-                    );
+                    self.check_lookup_indexes();
                 }
             }
+        }
+    }
+
+    fn check_lookup_indexes(&mut self) {
+        self.check = start_check(
+            self.work.upgrade().as_deref(),
+            self.articles.clone(),
+            &self.sender,
+            self.indexes.generation,
+        );
+    }
+
+    fn render_controller(&mut self, state: ViewState) {
+        if state.revision <= self.looking_up.revision {
+            return;
+        }
+        self.looking_up.revision = state.revision;
+        let Some(lookup) = state.typed_lookup else {
+            return;
+        };
+        let LookupState::Resolved(result) = lookup.state else {
+            return;
+        };
+        self.record_lookup(result.evidence);
+        if result.check_indexes && lookup.index_generation == self.indexes.generation {
+            self.check_lookup_indexes();
+        }
+        if !self.manual.awaits(lookup.run) || self.field_is_newer() {
+            return;
+        }
+        let Some(typed) = &mut self.looking_up.typed else {
+            return;
+        };
+        if typed.run != lookup.run || !typed.pending {
+            return;
+        }
+        typed.pending = false;
+        if let Some(indexes) = result.indexes {
+            self.observe_lookup_indexes(lookup.index_generation, indexes);
+        }
+        self.looking_up.answered = result.answered;
+        self.show_answered(
+            Some(result.lookup),
+            result.answered.unwrap_or(self.language),
+        );
+        self.send_deferred();
+    }
+
+    fn record_lookup(&self, answered: Option<evidence::Answered>) {
+        if let (Some(recording), Some(answered)) = (&self.recording, answered) {
+            recording.looked_up(answered);
+        }
+    }
+
+    fn observe_lookup_indexes(&mut self, generation: u64, indexes: Indexes) {
+        if self.indexes.update(generation, indexes) {
+            self.view.render_indexes(indexes, self.my_language);
         }
     }
 
@@ -2060,15 +2157,9 @@ impl Session {
         language: Language,
         outcome: Outcome<Looked>,
     ) {
-        if let Some(recording) = &self.recording
-            && let Some(answered) = evidence::answered(&outcome)
-        {
-            recording.looked_up(answered);
-        }
-        if let Outcome::Finished(looked) = &outcome
-            && self.indexes.update(generation, looked.indexes)
-        {
-            self.view.render_indexes(looked.indexes, self.my_language);
+        self.record_lookup(evidence::answered(&outcome));
+        if let Outcome::Finished(looked) = &outcome {
+            self.observe_lookup_indexes(generation, looked.indexes);
         }
         if !self.manual.awaits(run) {
             return;
@@ -2124,7 +2215,7 @@ impl Session {
             return;
         }
         let word = matches!(subject, Subject::Word(_) | Subject::Lone);
-        if word && self.looking_up.job.is_some() {
+        if word && self.looking_up.pending() {
             if !self.looking_up.deferred.contains(&subject) {
                 self.looking_up.deferred.push(subject);
             }
@@ -2564,7 +2655,7 @@ impl Session {
         let language = self.saved_language;
         self.language_job = self.work.upgrade().map(|work| {
             work.run(
-                language::FILE_LIMIT,
+                LANGUAGE_FILE_LIMIT,
                 async move { language::write(path.as_deref(), language) },
                 |outcome| match outcome {
                     // Replaced by a newer choice, which is written instead.
@@ -2591,7 +2682,7 @@ impl Session {
         let language = self.my_language;
         self.my_language_job = self.work.upgrade().map(|work| {
             work.run(
-                language::FILE_LIMIT,
+                LANGUAGE_FILE_LIMIT,
                 async move { my_language::write(path.as_deref(), language) },
                 |outcome| match outcome {
                     // Replaced by a newer choice, which is written instead.
@@ -2618,7 +2709,7 @@ impl Session {
         let chosen = self.english;
         self.english_job = self.work.upgrade().map(|work| {
             work.run(
-                language::FILE_LIMIT,
+                LANGUAGE_FILE_LIMIT,
                 async move { english::write(path.as_deref(), chosen) },
                 |outcome| match outcome {
                     // Replaced by a newer choice, which is written instead.
@@ -2646,7 +2737,7 @@ impl Session {
         let path = self.at_once_file.clone();
         self.at_once_job = self.work.upgrade().map(|work| {
             work.run(
-                language::FILE_LIMIT,
+                LANGUAGE_FILE_LIMIT,
                 async move { at_once::write(path.as_deref(), at_once) },
                 |outcome| match outcome {
                     // Replaced by a newer choice, which is written instead.
@@ -2774,7 +2865,7 @@ impl Session {
         let sender = self.sender.clone();
         let state = entries::startup_file(self.dirs.config.as_deref());
         self.startup_read_job = Some(work.run(
-            settings::STARTUP_READ_LIMIT,
+            STARTUP_READ_LIMIT,
             async move {
                 let saved = state.as_deref().and_then(startup::read_saved);
                 // The sandbox cannot see the entry; a foreign one is no state.
@@ -2831,7 +2922,7 @@ impl Session {
         self.settings.say_startup("Asking the desktop…");
         let sender = self.sender.clone();
         self.startup_job = Some(work.run(
-            entries::STARTUP_LIMIT,
+            STARTUP_LIMIT,
             request_startup_change(enable, entries::startup_file(self.dirs.config.as_deref())),
             move |outcome| {
                 let _ = sender.unbounded_send(Event::StartupChanged(outcome));
@@ -2859,7 +2950,7 @@ impl Session {
         let cache = self.cache.clone();
         self.cache_job = self.work.upgrade().map(|work| {
             work.run(
-                settings::CACHE_LIMIT,
+                CACHE_LIMIT,
                 async move { cache.footprint() },
                 move |outcome| {
                     let state = match outcome {
@@ -2889,13 +2980,12 @@ impl Session {
         self.settings.render_cache(CacheState::Checking);
         let sender = self.sender.clone();
         let cache = self.cache.clone();
-        self.clear_job = Some(work.run(
-            settings::CACHE_LIMIT,
-            async move { cache.clear() },
-            move |outcome| {
-                let _ = sender.unbounded_send(Event::CacheCleared(outcome));
-            },
-        ));
+        self.clear_job =
+            Some(
+                work.run(CACHE_LIMIT, async move { cache.clear() }, move |outcome| {
+                    let _ = sender.unbounded_send(Event::CacheCleared(outcome));
+                }),
+            );
     }
 
     /// The clear of the cache ended: the line says why when it failed, and
@@ -2934,7 +3024,7 @@ impl Session {
         let generation = self.save_generation;
         self.save_job.take();
         self.save_job = Some(work.run(
-            settings::KEY_SAVE_LIMIT,
+            KEY_SAVE_LIMIT,
             persist_key(source, path, key),
             move |outcome| {
                 let _ = sender.unbounded_send(Event::KeySaved(generation, outcome));
@@ -3084,8 +3174,8 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
         let _ = retry.unbounded_send(Event::Retry);
     });
     let changed = sender.clone();
-    view.connect_sentence_changed(move |text| {
-        let _ = changed.unbounded_send(Event::Sentence(text.to_owned()));
+    view.connect_sentence_changed(move |text, origin| {
+        let _ = changed.unbounded_send(Event::Sentence(text.to_owned(), origin));
     });
     let submitted = sender.clone();
     view.connect_submitted(move || {
@@ -3335,16 +3425,48 @@ fn start_tray(sender: &UnboundedSender<Event>) -> TrayHandle {
     })
 }
 
-/// Starts the runner of the lookups. Without it the window still works; a
-/// click says that the lookup did not finish.
-fn start_work() -> Option<Rc<Work>> {
-    match Work::start() {
-        Ok(work) => Some(Rc::new(work)),
-        Err(e) => {
-            eprintln!("addict: lookups cannot run: {e}");
-            None
-        }
-    }
+/// Starts the shared lookup loop and hands its renders to the resident in
+/// FIFO order on the GTK main context.
+fn start_controller(
+    dirs: &Dirs,
+    key_source: &KeySource,
+    sender: &UnboundedSender<Event>,
+) -> io::Result<Controller> {
+    let queue = Arc::new(Mutex::new(VecDeque::new()));
+    let context = glib::MainContext::default();
+    let sender = sender.clone();
+    controller::start(
+        dirs.clone(),
+        Platform {
+            name: "Linux".to_owned(),
+        },
+        StartFacts {
+            key_source: key_source.clone(),
+        },
+        move |state, _effects| {
+            let first = {
+                let mut pending = queue.lock().expect("controller render queue");
+                let first = pending.is_empty();
+                pending.push_back(state);
+                first
+            };
+            if first {
+                let queue = queue.clone();
+                let sender = sender.clone();
+                // GLib may invoke immediately when the context is unowned.
+                // Only the channel is touched here. `serve` owns the widgets.
+                context.invoke(move || {
+                    // The context forwards this batch before another invoke
+                    // can deliver the next one. Enqueueing can continue now.
+                    let pending =
+                        std::mem::take(&mut *queue.lock().expect("controller render queue"));
+                    for state in pending {
+                        let _ = sender.unbounded_send(Event::Controller(state));
+                    }
+                });
+            }
+        },
+    )
 }
 
 /// GTK 4.20's GStreamer backend needs a file URI even for buffered audio.
@@ -3418,7 +3540,7 @@ fn start_language(
 ) -> Option<Job> {
     let read = sender.clone();
     let job = work?.run(
-        language::FILE_LIMIT,
+        LANGUAGE_FILE_LIMIT,
         async move { language::read(path.as_deref()) },
         move |outcome| {
             if let Outcome::Finished(language) = outcome {
@@ -3440,7 +3562,7 @@ fn start_my_language(
 ) -> Option<Job> {
     let read = sender.clone();
     let job = work?.run(
-        language::FILE_LIMIT,
+        LANGUAGE_FILE_LIMIT,
         async move { my_language::read(path.as_deref()) },
         move |outcome| {
             let language = match outcome {
@@ -3464,7 +3586,7 @@ fn start_at_once(
 ) -> Option<Job> {
     let read = sender.clone();
     let job = work?.run(
-        language::FILE_LIMIT,
+        LANGUAGE_FILE_LIMIT,
         async move { at_once::read(path.as_deref()) },
         move |outcome| {
             if let Outcome::Finished(at_once) = outcome {
@@ -3486,7 +3608,7 @@ fn start_english(
 ) -> Option<Job> {
     let read = sender.clone();
     let job = work?.run(
-        language::FILE_LIMIT,
+        LANGUAGE_FILE_LIMIT,
         async move { english::read(path.as_deref()) },
         move |outcome| {
             if let Outcome::Finished(english) = outcome {
@@ -3514,7 +3636,7 @@ fn start_first_run(
 ) -> Job {
     let offered = sender.clone();
     work.run(
-        download::MANIFEST_LIMIT,
+        MANIFEST_LIMIT,
         async move {
             let chosen = first_run::read(path.as_deref());
             first_run::offered_manifest(indexes, my, chosen, &downloader).await
@@ -3617,9 +3739,17 @@ fn start(
     let config = dirs.config.as_deref();
     let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed, config))));
     let events = sender.clone();
-    let work = start_work();
-    if let Some(work) = &work {
-        let work = Rc::downgrade(work);
+    let controller = match start_controller(dirs, &key_source, &sender) {
+        Ok(controller) => Some(controller),
+        Err(e) => {
+            eprintln!("addict: lookups cannot run: {e}");
+            None
+        }
+    };
+    let work = controller
+        .as_ref()
+        .map_or_else(WorkRef::new, Controller::work);
+    if controller.is_some() {
         view.connect_recording_audio({
             let work = work.clone();
             move |url, ready| {
@@ -3649,6 +3779,7 @@ fn start(
                 ))
             }
         });
+        let work = work.clone();
         view.connect_recording_credit(move |file, ready| {
             let work = work.upgrade()?;
             Some(start_recording_job(
@@ -3665,18 +3796,22 @@ fn start(
     }
     // Nothing is opened here: the indexes are files, and files are the
     // runner's.
-    let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(dirs.data.clone()));
-    let check = start_check(work.as_deref(), articles.clone(), &sender, 0);
+    let articles: Arc<dyn Articles> = controller.as_ref().map_or_else(
+        || Arc::new(Dictionaries::new(dirs.data.clone())),
+        Controller::dictionaries,
+    );
+    let runner = work.upgrade();
+    let check = start_check(runner.as_deref(), articles.clone(), &sender, 0);
     // After the check: the runner takes its jobs in this order. Only the
     // path is made here; the file is the runner's.
     let language_file = language::path(config);
-    let language_job = start_language(work.as_deref(), language_file.clone(), &sender);
+    let language_job = start_language(runner.as_deref(), language_file.clone(), &sender);
     let my_language_file = my_language::path(config);
-    let my_language_job = start_my_language(work.as_deref(), my_language_file.clone(), &sender);
+    let my_language_job = start_my_language(runner.as_deref(), my_language_file.clone(), &sender);
     let english_file = english::path(config);
-    let english_job = start_english(work.as_deref(), english_file.clone(), &sender);
+    let english_job = start_english(runner.as_deref(), english_file.clone(), &sender);
     let at_once_file = at_once::path(config);
-    let at_once_job = start_at_once(work.as_deref(), at_once_file.clone(), &sender);
+    let at_once_job = start_at_once(runner.as_deref(), at_once_file.clone(), &sender);
     let (translator, cache) = online_translator(dirs, DeepL::new(key_source.clone()));
     let settings = start_settings(
         &window,
@@ -3700,8 +3835,9 @@ fn start(
         history: History::default(),
         looking_up: LookingUp::default(),
         shown: Shown::default(),
-        work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),
-        articles: articles.clone(),
+        work,
+        controller: controller.as_ref().map(Controller::dispatcher),
+        articles,
         translator,
         key_file,
         key_source,
@@ -3752,8 +3888,7 @@ fn start(
         _hold: application.hold(),
         _shortcut: handle,
         events,
-        _work: work,
-        _articles: articles,
+        _controller: controller,
         _tray: tray,
     }
 }
@@ -4228,7 +4363,7 @@ mod tests {
             let dictionaries = articles.clone();
             let (finished, ended) = futures_channel::oneshot::channel();
             let job = work.run(
-                crate::download::DOWNLOAD_LIMIT,
+                addict_controller::deadlines::DOWNLOAD_LIMIT,
                 super::install_download(
                     Downloader::with_base_url(stub.base_url()),
                     published,
@@ -4304,7 +4439,7 @@ mod tests {
     ) -> (
         super::Session,
         futures_channel::mpsc::UnboundedReceiver<Event>,
-        std::rc::Rc<addict_engine::work::Work>,
+        std::sync::Arc<addict_engine::work::Work>,
     ) {
         use addict_deepl::key::{self, KeyError, KeySource};
 
@@ -4322,7 +4457,7 @@ mod tests {
     ) -> (
         super::Session,
         futures_channel::mpsc::UnboundedReceiver<Event>,
-        std::rc::Rc<addict_engine::work::Work>,
+        std::sync::Arc<addict_engine::work::Work>,
     ) {
         use super::*;
         let app = gtk::Application::builder()
@@ -4333,7 +4468,7 @@ mod tests {
         let (sender, events) = futures_channel::mpsc::unbounded();
         let binding = Binding::Attempting;
         let (view, window) = build_ui(&app, &binding, &sender);
-        let work = Rc::new(Work::start().unwrap());
+        let work = Arc::new(Work::start().unwrap());
         let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(dirs.data.clone()));
         let key_file = key::key_path(dirs.config.as_deref());
         let (translator, cache) = online_translator(&dirs, DeepL::new(key_source.clone()));
@@ -4360,7 +4495,8 @@ mod tests {
             history: History::default(),
             looking_up: LookingUp::default(),
             shown: Shown::default(),
-            work: Rc::downgrade(&work),
+            work: Arc::downgrade(&work),
+            controller: None,
             articles: articles.clone(),
             translator,
             key_file,
@@ -4430,6 +4566,213 @@ mod tests {
         }
     }
 
+    fn find<T: IsA<gtk::Widget>>(root: &gtk::Widget, accept: &impl Fn(&T) -> bool) -> Option<T> {
+        if let Some(widget) = root.downcast_ref::<T>().filter(|widget| accept(widget)) {
+            return Some(widget.clone());
+        }
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            if let Some(found) = find(&widget, accept) {
+                return Some(found);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_gtk_edit_renders_the_controller_article_and_enter_waits_for_its_language() {
+        use super::*;
+        use addict_core::translation::Canned;
+        use addict_dictionary::{
+            format::{Contents, Headword, SenseRecord, encode},
+            import::{self, Source as IndexSource},
+        };
+        use futures_util::future::{Either, select};
+
+        const DEFINITION: &str = "the ground alongside a river";
+        let data = KeyTestDir::new("addict-typed-lookup");
+        let index = encode(&Contents {
+            source: "oewn".to_owned(),
+            senses: vec![SenseRecord {
+                definition: DEFINITION.to_owned(),
+                members: vec!["bank".to_owned()],
+                ..Default::default()
+            }],
+            headwords: vec![Headword {
+                word: "bank".to_owned(),
+                senses: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(import::index_path(&data.0, IndexSource::Oewn), index).unwrap();
+        // A Spanish index with no entry for bank lets the lookup fall back to English.
+        let spanish = encode(&Contents {
+            source: "kaikki-es".to_owned(),
+            headwords: vec![Headword {
+                word: "otro".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(import::index_path(&data.0, IndexSource::KaikkiEs), spanish).unwrap();
+
+        gtk::init().expect("a display");
+        let (mut session, mut events, work) = test_session(
+            "io.github.doqhu.Addict.TypedLookupTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
+            },
+        );
+        drop(work);
+        let controller =
+            start_controller(&session.dirs, &session.key_source, &session.sender).unwrap();
+        session.work = controller.work();
+        session.controller = Some(controller.dispatcher());
+        session.articles = controller.dictionaries();
+        let canned = Arc::new(Canned::new(Ok("берег")));
+        session.translator = canned.clone();
+        session.history.record("earlier");
+        session.window.present();
+        let entry =
+            find::<gtk::Entry>(session.view.root().upcast_ref(), &|_| true).expect("lookup entry");
+        let context = glib::MainContext::default();
+        let mut handle_next = |session: &mut Session| {
+            let event = context.block_on(async {
+                match select(events.next(), glib::timeout_future(Duration::from_secs(5))).await {
+                    Either::Left((Some(event), _)) => event,
+                    _ => panic!("no resident event"),
+                }
+            });
+            session.handle(event);
+        };
+
+        entry.insert_text("bank", &mut 0);
+        while session.looking_up.answered != Some(Language::En) {
+            handle_next(&mut session);
+        }
+        assert!(
+            find::<gtk::Label>(session.view.root().upcast_ref(), &|label| {
+                label.text() == DEFINITION && label.is_visible()
+            })
+            .is_some()
+        );
+        assert!(
+            !session.history.can_back("earlier"),
+            "typing keeps no history"
+        );
+        assert!(canned.asked().is_empty(), "typing sends no online request");
+
+        entry.delete_text(0, -1);
+        while !session.manual.sentence().is_empty() {
+            handle_next(&mut session);
+        }
+        session.handle(Event::LanguageChosen(Language::Es));
+        assert_eq!(session.language, Language::Es);
+        entry.insert_text("bank", &mut 0);
+        entry.emit_activate();
+        while session.looking_up.deferred.is_empty() {
+            handle_next(&mut session);
+        }
+        assert!(session.looking_up.pending());
+        assert!(session.history.can_back("bank"), "Enter records the word");
+        assert!(canned.asked().is_empty(), "Enter waits for the lookup");
+        while session.looking_up.pending() || session.translating_word.is_some() {
+            handle_next(&mut session);
+        }
+        let requests = canned.asked();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].text, "bank");
+        assert_eq!(requests[0].source, Language::En);
+        assert_eq!(requests[0].target, Language::Ru);
+        session.window.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_delayed_typed_snapshot_refreshes_a_refusal_without_overwriting_newer_indexes() {
+        use super::*;
+        use crate::dictionaries::Answer;
+        use futures_util::future::{Either, select};
+
+        gtk::init().expect("a display");
+        let (mut session, mut events, work) =
+            test_session("io.github.doqhu.Addict.TypedSnapshotTest", Dirs::default());
+        drop(work);
+        let controller =
+            start_controller(&session.dirs, &session.key_source, &session.sender).unwrap();
+        session.work = controller.work();
+        session.controller = Some(controller.dispatcher());
+        session.articles = controller.dictionaries();
+        let context = glib::MainContext::default();
+        let mut completed = |session: &mut Session, word: &str, language: Language| {
+            session.language = language;
+            session.view.set_field_text(word);
+            session.sentence_changed(word.to_owned(), FieldEdit::Typed);
+            context.block_on(async {
+                let wait = async {
+                    while let Some(event) = events.next().await {
+                        if let Event::Controller(snapshot) = event
+                            && snapshot.typed_lookup.as_ref().is_some_and(|lookup| {
+                                session.manual.awaits(lookup.run)
+                                    && matches!(lookup.state, LookupState::Resolved(_))
+                            })
+                        {
+                            return snapshot;
+                        }
+                    }
+                    panic!("resident event channel closed");
+                };
+                match select(Box::pin(wait), glib::timeout_future(Duration::from_secs(5))).await {
+                    Either::Left((snapshot, _)) => snapshot,
+                    Either::Right(_) => panic!("no completed typed lookup"),
+                }
+            })
+        };
+
+        let refused = completed(&mut session, "banco", Language::Es);
+        session.view.set_field_text("new text");
+        session.sentence_changed("new text".to_owned(), FieldEdit::Replaced);
+        session.render_controller(refused);
+        assert!(
+            session.check.take().is_some(),
+            "a stale refusal still refreshes"
+        );
+
+        let refused = completed(&mut session, "otro", Language::Es);
+        let generation = session.indexes.begin_import();
+        session.render_controller(refused);
+        assert!(
+            session.check.is_none(),
+            "the import already owns the refresh"
+        );
+
+        let observed = completed(&mut session, "bank", Language::En);
+        session.view.set_field_text("river");
+        let edit = session.manual.edit("river".to_owned());
+        let Edit::Lone(run) = edit else {
+            panic!("a legacy lookup");
+        };
+        session.text_replaced(edit, FieldEdit::Replaced);
+        session.looked_up(
+            run,
+            generation,
+            Language::En,
+            Outcome::Finished(Looked {
+                answer: Answer::NoEntry,
+                indexes: Indexes::OPEN,
+            }),
+        );
+        session.render_controller(observed);
+        assert_eq!(session.indexes.current(), Some(Indexes::OPEN));
+        session.window.destroy();
+    }
+
     #[test]
     fn a_committed_key_save_stays_active_when_the_runner_reports_a_timeout() {
         use std::{future, sync::mpsc, time::Duration};
@@ -4481,23 +4824,6 @@ mod tests {
         use futures_util::{FutureExt, StreamExt};
         use gtk::glib;
         use std::fs;
-
-        fn find<T: IsA<gtk::Widget>>(
-            root: &gtk::Widget,
-            accept: &impl Fn(&T) -> bool,
-        ) -> Option<T> {
-            if let Some(widget) = root.downcast_ref::<T>().filter(|widget| accept(widget)) {
-                return Some(widget.clone());
-            }
-            let mut child = root.first_child();
-            while let Some(widget) = child {
-                if let Some(found) = find(&widget, accept) {
-                    return Some(found);
-                }
-                child = widget.next_sibling();
-            }
-            None
-        }
 
         const INITIAL: &str = "synthetic-startup-deepl:fx";
         const SAVED: &str = "synthetic-settings-deepl";
@@ -4962,8 +5288,8 @@ mod tests {
         let (mut session, _events, work) =
             test_session("io.github.doqhu.Addict.FirstRunTest", Dirs::default());
         // Observe request IDs without contacting the release server.
-        session.work = Weak::new();
-        let pending = || work.run(language::FILE_LIMIT, std::future::pending::<()>(), |_| {});
+        session.work = WorkRef::new();
+        let pending = || work.run(LANGUAGE_FILE_LIMIT, std::future::pending::<()>(), |_| {});
         let indexes = Indexes {
             presence: Indexes::MISSING.presence.with(Source::WikdictRuEs),
             ..Indexes::MISSING
@@ -5510,13 +5836,7 @@ mod tests {
             }
             false
         }
-        let pending = || {
-            work.run(
-                download::MANIFEST_LIMIT,
-                std::future::pending::<()>(),
-                |_| {},
-            )
-        };
+        let pending = || work.run(MANIFEST_LIMIT, std::future::pending::<()>(), |_| {});
         session.download_run = 1;
         session.first_run = FirstRun::Preparing { _job: pending() };
         let action = button(

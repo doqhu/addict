@@ -10,9 +10,9 @@
 use std::{
     io,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
+use addict_controller::deadlines::STARTUP_LIMIT;
 use addict_core::APP_ID;
 use addict_engine::view::failure_reason;
 use addict_platform::{
@@ -27,10 +27,6 @@ const STARTUP_FILE: &str = "login-startup";
 /// The file of the current generation of the shortcut IDs, in the configuration
 /// directory.
 const SHORTCUT_FILE: &str = "shortcut-generation";
-
-/// How long the portal may take over one request. It can be waiting for the
-/// user to answer its dialog.
-pub const STARTUP_LIMIT: Duration = Duration::from_secs(60);
 
 /// Where the last confirmed startup state is kept, or `None` when no
 /// configuration directory was supplied.

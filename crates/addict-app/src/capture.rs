@@ -27,6 +27,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use addict_controller::deadlines::{CAPTURE_JOB_LIMIT, CAPTURE_LIMIT, OCR_LIMIT};
 use addict_core::{
     APP_ID,
     failure::{capture::CaptureFailure, recognize::OcrFailure},
@@ -40,17 +41,6 @@ use addict_platform::{
     ocr::{self, Params, Tesseract},
     screenshot,
 };
-
-/// How long the user may take to choose the area, or to cancel.
-pub const CAPTURE_LIMIT: Duration = Duration::from_secs(300);
-
-/// How long the recognition of one snapshot may take.
-pub const OCR_LIMIT: Duration = Duration::from_secs(15);
-
-/// The deadline of the whole job: both limits and a margin for the rest.
-pub const JOB_LIMIT: Duration = CAPTURE_LIMIT
-    .saturating_add(OCR_LIMIT)
-    .saturating_add(Duration::from_secs(5));
 
 /// What a capture job ended with, and what it took.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,7 +155,7 @@ pub fn start(
         )
         .await
     };
-    Ok(work.run(JOB_LIMIT, job, on_outcome))
+    Ok(work.run(CAPTURE_JOB_LIMIT, job, on_outcome))
 }
 
 /// What the portal's `shot` answered within `limit`.
@@ -278,6 +268,7 @@ pub(crate) mod tests {
         time::Duration,
     };
 
+    use addict_controller::deadlines::{CAPTURE_JOB_LIMIT as JOB_LIMIT, CAPTURE_LIMIT, OCR_LIMIT};
     use addict_core::{
         failure::{capture::CaptureFailure, recognize::OcrFailure},
         translation::Source as Language,
@@ -290,8 +281,8 @@ pub(crate) mod tests {
     use addict_platform::ocr::{self, Params};
 
     use super::{
-        CAPTURE_LIMIT, Capture, JOB_LIMIT, OCR_LIMIT, after_answer, captured_result, ocr_language,
-        portal_answer, recognize_snapshot, setting, start, tesseract,
+        Capture, after_answer, captured_result, ocr_language, portal_answer, recognize_snapshot,
+        setting, start, tesseract,
     };
 
     /// Limit for each wait of the test thread.

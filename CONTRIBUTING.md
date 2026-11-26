@@ -77,12 +77,12 @@ scripts/check.sh
 ```
 
 It runs `cargo fmt --check`, `cargo clippy` with warnings as errors, a build
-of the product without the test features, all the tests, and a check of
-`addict-engine` on its own. The dependency guard keeps GTK out of the
-shared crates and the Linux adapters out of `addict-engine`. The directory
-guard uses Python 3 to flag explicit `HOME` and `XDG_*` reads in production
-Rust in `addict-core`, `addict-dictionary`, `addict-deepl` and
-`addict-engine`. Some tests run Tesseract, so
+of the product without the test features, all the tests, and separate checks
+of `addict-engine` and `addict-controller`. The dependency guard keeps GTK
+out of the shared crates and Linux adapters out of the engine and controller.
+The source guards use Python 3.11 or later. They flag explicit `HOME` and
+`XDG_*` reads in production Rust below the shell and `target_os` predicates
+in the controller. Some tests run Tesseract, so
 install it with its English and Russian data. The portal and forwarded-launch tests also
 need `dbus-run-session` and `dbus-daemon` (`sudo dnf install dbus-daemon` on
 Fedora). They create isolated session buses and do not use your desktop portal.
@@ -90,8 +90,8 @@ Fedora). They create isolated session buses and do not use your desktop portal.
 CI on GitHub runs the format and lint checks, the tests, `reuse lint`, a
 secret scan of the whole history, the tests of the release trigger and upload
 script (`scripts/release-tests.sh`), and builds the Flatpak and checks it with
-`flatpak-builder-lint`. It also runs both guards and the check of
-`addict-engine` on its own via `scripts/check.sh guard`. Run `scripts/check.sh`
+`flatpak-builder-lint`. It also runs the guards and standalone checks via
+`scripts/check.sh guard`. Run `scripts/check.sh`
 locally for a product build without test features. CI runs once for each commit
 of a pull request and for each commit on `main`; a push to another branch
 without a pull request starts no run, but "Run workflow" on the CI workflow's
@@ -137,6 +137,9 @@ that an artifact works on a target distribution.
   must not depend on GTK, GDK, gio or glib, nor on `addict-platform`, `ashpd`,
   `zbus` or `ksni`; `scripts/check.sh` guards it, so a second frontend can
   reuse it.
+- `crates/addict-controller` -- the platform-independent event loop, view
+  snapshots, product deadlines and shared runner. It handles offline lookups
+  of typed words.
 - `crates/addict-app` -- the `addict` program: the resident process, the
   window and the commands.
 

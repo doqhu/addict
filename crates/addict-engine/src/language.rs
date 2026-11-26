@@ -17,7 +17,6 @@ use std::{
     fs::{self, File},
     io::{self, Read},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use addict_core::translation::{Source, reading_languages};
@@ -27,9 +26,6 @@ const LANGUAGE_FILE: &str = "language";
 
 /// How many bytes of the file are read. A code and its line break are three.
 const LANGUAGE_LIMIT: u64 = 64;
-
-/// How long a read or a write of the file may take on the runner.
-pub const FILE_LIMIT: Duration = Duration::from_secs(2);
 
 /// The language file of the product, or `None` when no configuration directory
 /// was supplied. Nothing is read here.

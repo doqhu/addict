@@ -89,7 +89,7 @@ const RESULT_MIN_HEIGHT: i32 = 72;
 /// the field stays editable, and a read that ends after the field was edited
 /// is dropped. A clipboard that is empty, blank, not text or cannot be read
 /// changes nothing and says nothing.
-fn replace_on_paste(field: &gtk::Entry) {
+fn replace_on_paste(field: &Field) {
     let Some(text) = field
         .delegate()
         .and_then(|delegate| delegate.downcast::<gtk::Text>().ok())
@@ -131,14 +131,68 @@ fn replace_on_paste(field: &gtk::Entry) {
 
 /// Puts `text` into `field` as a paste does: it replaces the text, and the
 /// field is submitted, so a lone word is also asked for online.
-fn put_into_field(field: &gtk::Entry, text: &str) {
+fn put_into_field(field: &Field, text: &str) {
     // Fires `changed` twice, for the removal of the old text and for the new
     // one, also when the two are the same text.
+    let was_replacing = field.replacing.replace(true);
     field.set_text(text);
     field.set_position(-1);
+    field.replacing.set(was_replacing);
     // After the text is in the field: whoever hears of the submit has heard
     // of the new text first.
     field.emit_activate();
+}
+
+/// How a change reached the editable field.
+#[derive(Clone, Copy)]
+pub enum FieldEdit {
+    Typed,
+    Replaced,
+}
+
+/// The entry and the origin of its synchronous `changed` signal.
+struct Field {
+    entry: gtk::Entry,
+    replacing: Rc<Cell<bool>>,
+}
+
+impl Field {
+    fn new(entry: gtk::Entry) -> Self {
+        Self {
+            entry,
+            replacing: Rc::new(Cell::new(false)),
+        }
+    }
+
+    fn downgrade(&self) -> WeakField {
+        WeakField {
+            entry: self.entry.downgrade(),
+            replacing: self.replacing.clone(),
+        }
+    }
+}
+
+impl std::ops::Deref for Field {
+    type Target = gtk::Entry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entry
+    }
+}
+
+#[derive(Clone)]
+struct WeakField {
+    entry: glib::WeakRef<gtk::Entry>,
+    replacing: Rc<Cell<bool>>,
+}
+
+impl WeakField {
+    fn upgrade(&self) -> Option<Field> {
+        Some(Field {
+            entry: self.entry.upgrade()?,
+            replacing: self.replacing.clone(),
+        })
+    }
 }
 
 /// Makes the label that `label` builds wrap at [`TEXT_WIDTH_CHARS`], with
@@ -263,7 +317,7 @@ fn history_button(icon: &str, tooltip: &str) -> gtk::Button {
 /// The parts of the row of the field.
 struct FieldRow {
     row: gtk::Box,
-    field: gtk::Entry,
+    field: Field,
     back: gtk::Button,
     forward: gtk::Button,
     languages: LanguageSlots,
@@ -275,10 +329,11 @@ struct FieldRow {
 /// Forward left of it and the switch of the reading language and the
 /// Capture button beside it.
 fn field_row() -> FieldRow {
-    let field = gtk::Entry::builder()
+    let entry = gtk::Entry::builder()
         .placeholder_text(FIELD_PLACEHOLDER)
         .css_classes(["lookup"])
         .build();
+    let field = Field::new(entry);
     replace_on_paste(&field);
     field.set_hexpand(true);
     let capture = gtk::Button::builder()
@@ -297,7 +352,7 @@ fn field_row() -> FieldRow {
     let (switch, languages, language_buttons) = language_switch();
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.append(&history);
-    row.append(&field);
+    row.append(&field.entry);
     row.append(&switch);
     row.append(&capture);
     FieldRow {
@@ -407,7 +462,7 @@ fn fill_listed(
     container: &gtk::Box,
     listed: Option<&Listed<'_>>,
     pill_classes: &[&str],
-    field: Option<&gtk::Entry>,
+    field: Option<&Field>,
     preview: usize,
 ) {
     clear(container);
@@ -433,7 +488,7 @@ fn fill_listed(
 fn pills(
     items: &[String],
     classes: &[&str],
-    field: Option<&gtk::Entry>,
+    field: Option<&Field>,
     preview: usize,
     tooltip: &str,
 ) -> Wrap {
@@ -456,7 +511,7 @@ fn pills(
 }
 
 /// Shared pill behavior for flat translations and independent synonym meanings.
-fn synonym_pill(item: &str, classes: &[&str], field: Option<&gtk::Entry>) -> gtk::Widget {
+fn synonym_pill(item: &str, classes: &[&str], field: Option<&Field>) -> gtk::Widget {
     let pill = gtk::Label::builder()
         .label(item)
         .css_classes(classes)
@@ -486,7 +541,7 @@ fn synonym_pill(item: &str, classes: &[&str], field: Option<&gtk::Entry>) -> gtk
 fn fill_synonym_groups(
     container: &gtk::Box,
     texts: Option<&SynonymTexts<'_>>,
-    field: &gtk::Entry,
+    field: &Field,
     open: &Rc<Cell<bool>>,
 ) {
     clear(container);
@@ -566,7 +621,7 @@ fn disclosure(
 /// what the source says it is, with how many synonyms it has at the end;
 /// under them its synonyms as links, the first [`SYNONYM_PREVIEW`] shown.
 /// The source's whole label is the tooltip of the head.
-fn meaning_card(group: &addict_dictionary::index::SynonymGroup, field: &gtk::Entry) -> gtk::Box {
+fn meaning_card(group: &addict_dictionary::index::SynonymGroup, field: &Field) -> gtk::Box {
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
@@ -989,7 +1044,7 @@ fn network_error(error: &glib::Error) -> bool {
 /// as a paste does, then a dash and the groups, each its persons as a tag,
 /// its tense and its mood, dimmer, with a dot between two; then the note,
 /// dim, on a line of its own.
-fn fill_analysis(container: &gtk::Box, analysis: &Analysis, field: &gtk::Entry) {
+fn fill_analysis(container: &gtk::Box, analysis: &Analysis, field: &Field) {
     clear(container);
     for line in &analysis.lines {
         let row = Wrap::new();
@@ -1019,7 +1074,7 @@ fn analysis_part(text: &str, class: &str) -> gtk::Label {
 
 /// The lemma as a serif link in the accent that puts it into `field` as a
 /// paste does.
-fn lemma_link(lemma: &str, field: &gtk::Entry) -> gtk::Button {
+fn lemma_link(lemma: &str, field: &Field) -> gtk::Button {
     let link = gtk::Button::builder()
         .child(&analysis_part(lemma, "lemma"))
         .css_classes(["lemma-link"])
@@ -1075,7 +1130,7 @@ fn fill_glosses(
     chosen: Option<&ChosenGloss<'_>>,
     clicked: &SenseChosen,
     look_up: &LookUp,
-    field: &gtk::Entry,
+    field: &Field,
 ) {
     clear(container);
     let glosses = match texts {
@@ -1234,7 +1289,7 @@ fn gloss_explained(chosen: &ChosenGloss<'_>, lookup: Option<&str>, look_up: &Loo
 /// The row of a gloss that names a form: its number, the description, dim,
 /// the lemma as a link into `field`, then the analysis of the word for it
 /// or what the source adds, dim.
-fn form_row(form: &FormRow<'_>, field: &gtk::Entry) -> Wrap {
+fn form_row(form: &FormRow<'_>, field: &Field) -> Wrap {
     let row = Wrap::new();
     row.add_css_class("analysis-line");
     let number = analysis_part(&form.number.to_string(), "number");
@@ -1328,7 +1383,7 @@ fn sense_row(sense: &SenseText<'_>, chosen: &SenseChosen) -> gtk::Button {
 fn explained_box(
     explained: &Explained<'_>,
     action: Option<&gtk::Button>,
-    field: &gtk::Entry,
+    field: &Field,
 ) -> gtk::Box {
     let below = explained_tail(action, explained.definition.as_ref());
     let synonyms = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -1717,7 +1772,7 @@ fn result_area() -> ResultArea {
 /// Puts `answer` into the answer of `result`, the note without a key and
 /// the row of the word as a whole; hides them for `None`. Each translation
 /// is a link that puts it into `field`.
-fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &gtk::Entry) {
+fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &Field) {
     let widgets = &result.answer;
     let shown = answer.is_some_and(|answer| {
         answer.word.is_some() || answer.sentence.is_some() || answer.missing.is_some()
@@ -1805,7 +1860,7 @@ pub struct View {
     retry: gtk::Button,
     /// What is said about the dictionary indexes; hidden when both are open.
     indexes: gtk::Label,
-    field: gtk::Entry,
+    field: Field,
     /// Left of the field: puts the text before into it.
     back: gtk::Button,
     /// Left of the field, after Back: puts the text after into it.
@@ -2029,12 +2084,18 @@ impl View {
         failure.command.replace(command);
     }
 
-    /// Runs `changed` with the text of the field each time the user changes
-    /// it; [`View::set_field_text`] does not run it. Called once.
-    pub fn connect_sentence_changed(&self, changed: impl Fn(&str) + 'static) {
-        let handler = self
-            .field
-            .connect_changed(move |field| changed(field.text().as_str()));
+    /// Reports the text and origin of each editable field change.
+    /// [`View::set_field_text`] blocks this handler. Called once.
+    pub fn connect_sentence_changed(&self, changed: impl Fn(&str, FieldEdit) + 'static) {
+        let replacing = self.field.replacing.clone();
+        let handler = self.field.connect_changed(move |field| {
+            let origin = if replacing.get() {
+                FieldEdit::Replaced
+            } else {
+                FieldEdit::Typed
+            };
+            changed(field.text().as_str(), origin);
+        });
         self.sentence_handler.replace(Some(handler));
     }
 
@@ -2480,7 +2541,7 @@ mod tests {
     use addict_engine::recording::{AudioFailure, CommonsFile, Credit};
     use gtk::{gio, glib, prelude::*};
 
-    use super::{CreditReady, PlaybackMedia, View, fill_listed};
+    use super::{CreditReady, Field, PlaybackMedia, View, fill_listed};
     use crate::view::{
         BACK_TOOLTIP, COPIED_LABEL, COPY_LABEL, FORWARD_TOOLTIP, Listed, PLAY_TOOLTIP,
         PLAYBACK_FAILED, RECORDING_NEEDS_NETWORK, SHOW_LESS,
@@ -2960,7 +3021,7 @@ mod tests {
         use crate::view::SynonymTexts;
         use addict_dictionary::{format::SenseMetadata, index::SynonymGroup};
         gtk::init().expect("a display");
-        let field = gtk::Entry::new();
+        let field = Field::new(gtk::Entry::new());
         let submitted = Rc::new(Cell::new(false));
         let heard = submitted.clone();
         field.connect_activate(move |_| heard.set(true));
@@ -3039,7 +3100,7 @@ mod tests {
     #[ignore = "needs a display; run alone"]
     fn a_synonym_click_puts_it_into_the_field() {
         gtk::init().expect("a display");
-        let field = gtk::Entry::new();
+        let field = Field::new(gtk::Entry::new());
         field.set_text("I sat on the bank of the river.");
         let submitted = std::rc::Rc::new(std::cell::Cell::new(false));
         let heard = submitted.clone();
@@ -3201,7 +3262,8 @@ mod tests {
         assert!(play.parent().is_none());
         let focus = gtk::prelude::GtkWindowExt::focus(&window).expect("a focus");
         assert!(
-            focus == view.field.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&view.field)
+            focus == view.field.entry.clone().upcast::<gtk::Widget>()
+                || focus.is_ancestor(&view.field.entry)
         );
         window.destroy();
     }

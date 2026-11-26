@@ -19,11 +19,7 @@ const USER_AGENT: &str = concat!(
     " (https://github.com/doqhu/addict)"
 );
 
-/// The worker deadline, with time for both requests when needed.
-pub const CREDIT_LIMIT: Duration = Duration::from_secs(10);
-
-/// Deadline and size bound for buffering a remote pronunciation for GTK.
-pub const AUDIO_LIMIT: Duration = Duration::from_secs(20);
+/// Size bound for buffering a remote pronunciation for GTK.
 const AUDIO_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

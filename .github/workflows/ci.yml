@@ -71,9 +71,8 @@ jobs:
       - name: Test the workspace
         run: runuser -u tester -- cargo test --locked --workspace
 
-      # Keep Linux dependencies out of the engine and directory environment
-      # reads out of the shared crates. Check the engine on its own.
-      - name: Guard dependencies and directory reads
+      # Check the shared engine and controller independently of the GTK app.
+      - name: Guard shared dependencies, directory reads and platform predicates
         run: runuser -u tester -- scripts/check.sh guard
 
   # The release trigger: the guard and the tag filters of the workflows.

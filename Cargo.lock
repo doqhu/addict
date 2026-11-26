@@ -6,6 +6,7 @@ version = 4
 name = "addict-app"
 version = "0.5.0"
 dependencies = [
+ "addict-controller",
  "addict-core",
  "addict-deepl",
  "addict-dictionary",
@@ -25,6 +26,16 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "zbus",
+]
+
+[[package]]
+name = "addict-controller"
+version = "0.5.0"
+dependencies = [
+ "addict-core",
+ "addict-deepl",
+ "addict-dictionary",
+ "addict-engine",
 ]
 
 [[package]]

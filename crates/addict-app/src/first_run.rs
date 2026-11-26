@@ -48,9 +48,6 @@ pub const DECLINED: &str = "declined";
 /// How many bytes of the file are read.
 const CHOICE_LIMIT: u64 = 64;
 
-/// How long a read or a write of the file may take on the runner.
-pub const FILE_LIMIT: Duration = Duration::from_secs(2);
-
 /// The title of the dialog.
 pub const TITLE: &str = "Download dictionaries";
 
@@ -1367,6 +1364,7 @@ impl Drop for Offer {
 mod tests {
     use std::path::PathBuf;
 
+    use addict_controller::deadlines::MANIFEST_LIMIT;
     use addict_dictionary::Index;
 
     use super::*;
@@ -1516,7 +1514,9 @@ mod tests {
             assert_eq!(offer.as_ref(), Some(expected));
             assert_eq!(stub.seen(), requests);
 
-            let recovery = recovery_manifest(&downloader, dir.0.clone()).await.unwrap();
+            let recovery = recovery_manifest(&downloader, dir.0.clone(), MANIFEST_LIMIT)
+                .await
+                .unwrap();
             assert_eq!(&recovery, expected);
             assert_eq!(stub.seen(), [requests.clone(), requests].concat());
         }
@@ -1594,7 +1594,9 @@ mod tests {
             .collect();
         let stub = recovery_stub(entries, &xz);
         let downloader = Downloader::with_base_url(stub.base_url());
-        let manifest = recovery_manifest(&downloader, data.clone()).await.unwrap();
+        let manifest = recovery_manifest(&downloader, data.clone(), MANIFEST_LIMIT)
+            .await
+            .unwrap();
         assert_eq!(
             manifest
                 .indexes
@@ -1618,7 +1620,9 @@ mod tests {
         assert_eq!(fs::read(data.join("wikdict-ru-es.index")).unwrap(), manual);
         assert_eq!(fs::read(data.join("freedict.index")).unwrap(), published);
         assert_eq!(fs::read(dir.file()).unwrap(), choice);
-        let complete = recovery_manifest(&downloader, data).await.unwrap();
+        let complete = recovery_manifest(&downloader, data, MANIFEST_LIMIT)
+            .await
+            .unwrap();
         assert!(complete.indexes.is_empty());
         assert_eq!(
             stub.seen()
@@ -1670,7 +1674,9 @@ mod tests {
             &xz,
         );
         let downloader = Downloader::with_base_url(stub.base_url());
-        let manifest = recovery_manifest(&downloader, dir.0.clone()).await.unwrap();
+        let manifest = recovery_manifest(&downloader, dir.0.clone(), MANIFEST_LIMIT)
+            .await
+            .unwrap();
         assert_eq!(
             manifest
                 .indexes
@@ -1754,7 +1760,11 @@ mod tests {
             let stub = Stub::start(routes).unwrap();
             let downloader = Downloader::with_base_url(stub.base_url());
             for _ in 0..2 {
-                assert!(recovery_manifest(&downloader, dir.0.clone()).await.is_err());
+                assert!(
+                    recovery_manifest(&downloader, dir.0.clone(), MANIFEST_LIMIT)
+                        .await
+                        .is_err()
+                );
                 assert_eq!(fs::read(dir.0.join("oewn.index")).unwrap(), good);
             }
             assert_eq!(

@@ -20,7 +20,6 @@ use std::{
     future::Future,
     path::{Path, PathBuf},
     rc::Rc,
-    time::Duration,
 };
 
 use addict_core::APP_ID;
@@ -35,15 +34,6 @@ use addict_platform::{
 use gtk::{glib, prelude::*};
 
 use crate::{cache::Footprint, file_import, view::Binding};
-
-/// How long saving the key may take.
-pub const KEY_SAVE_LIMIT: Duration = Duration::from_secs(2);
-
-/// How long reading the size of the cache, or clearing it, may take.
-pub const CACHE_LIMIT: Duration = Duration::from_secs(5);
-
-/// How long reading the saved startup state may take.
-pub const STARTUP_READ_LIMIT: Duration = Duration::from_secs(2);
 
 /// What the Startup section shows when the window opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
