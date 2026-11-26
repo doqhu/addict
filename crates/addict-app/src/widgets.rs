@@ -143,6 +143,9 @@ fn put_into_field(field: &Field, text: &str) {
     field.emit_activate();
 }
 
+/// A synonym-pill callback.
+type SynonymChosen = Rc<RefCell<Option<Rc<dyn Fn(String)>>>>;
+
 /// How a change reached the editable field.
 #[derive(Clone, Copy)]
 pub enum FieldEdit {
@@ -154,6 +157,7 @@ pub enum FieldEdit {
 struct Field {
     entry: gtk::Entry,
     replacing: Rc<Cell<bool>>,
+    synonym_chosen: SynonymChosen,
 }
 
 impl Field {
@@ -161,6 +165,7 @@ impl Field {
         Self {
             entry,
             replacing: Rc::new(Cell::new(false)),
+            synonym_chosen: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -168,6 +173,7 @@ impl Field {
         WeakField {
             entry: self.entry.downgrade(),
             replacing: self.replacing.clone(),
+            synonym_chosen: self.synonym_chosen.clone(),
         }
     }
 }
@@ -184,6 +190,7 @@ impl std::ops::Deref for Field {
 struct WeakField {
     entry: glib::WeakRef<gtk::Entry>,
     replacing: Rc<Cell<bool>>,
+    synonym_chosen: SynonymChosen,
 }
 
 impl WeakField {
@@ -191,6 +198,7 @@ impl WeakField {
         Some(Field {
             entry: self.entry.upgrade()?,
             replacing: self.replacing.clone(),
+            synonym_chosen: self.synonym_chosen.clone(),
         })
     }
 }
@@ -528,7 +536,11 @@ fn synonym_pill(item: &str, classes: &[&str], field: Option<&Field>) -> gtk::Wid
     let field = field.downgrade();
     let word = item.to_owned();
     link.connect_clicked(move |_| {
-        if let Some(field) = field.upgrade() {
+        // A synonym is a controller choice; it sets the field and submits.
+        let handler = field.synonym_chosen.borrow().clone();
+        if let Some(handler) = handler {
+            handler(word.clone());
+        } else if let Some(field) = field.upgrade() {
             put_into_field(&field, &word);
         }
     });
@@ -2246,6 +2258,11 @@ impl View {
     /// clicked.
     pub fn connect_gloss_chosen(&self, chosen: impl Fn(usize) + 'static) {
         self.gloss_chosen.replace(Some(Rc::new(chosen)));
+    }
+
+    /// Runs `chosen` with a synonym word each time its pill is clicked.
+    pub fn connect_synonym_chosen(&self, chosen: impl Fn(String) + 'static) {
+        self.field.synonym_chosen.replace(Some(Rc::new(chosen)));
     }
 
     /// Runs `look_up` with the English word of the chosen gloss each time

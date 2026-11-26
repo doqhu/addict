@@ -2504,7 +2504,7 @@ fn refusal_text(refusal: Refusal, key_location: KeyLocation<'_>, my: Language) -
 }
 
 /// The result the window shows and the sense or gloss chosen in it.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shown {
     lookup: Option<Lookup>,
     /// The chosen language and the one that gave the shown result, when

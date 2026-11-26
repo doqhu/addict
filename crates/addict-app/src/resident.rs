@@ -155,8 +155,7 @@ use std::{
 };
 
 use addict_controller::{
-    self as controller, Controller, Dispatcher, LookupState, Platform, StartFacts, TypedWord,
-    ViewState,
+    self as controller, Ask, Controller, Dispatcher, Effect, Platform, StartFacts, ViewState,
     deadlines::{
         AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CACHE_LIMIT, CLIPBOARD_LIMIT,
         CREDIT_LIMIT, DOWNLOAD_LIMIT, FIRST_RUN_FILE_LIMIT, KEY_SAVE_LIMIT, LANGUAGE_FILE_LIMIT,
@@ -200,23 +199,19 @@ use crate::{
     at_once,
     cache::{self, Cached},
     capture::{self, Capture},
-    dictionaries::{Articles, Dictionaries, Indexes, Looked},
+    dictionaries::{Articles, Dictionaries, Indexes},
     download::{self, Downloader},
     english, entries, evidence,
     first_run::{self, Offer},
-    history::History,
     language,
-    manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
+    manual::{self, CLIPBOARD_MAX_CHARS, NoLine},
     my_language,
-    online::{self, Kept, Subject},
+    online::{self, Kept, Kind, Subject},
     recording::Recording,
     settings::{self, CacheState, KeyState, Settings, StartupEnd, StartupShown},
     style,
     translate::{self, Translated},
-    view::{
-        Binding, Choice, Held, Lookup, NOTHING_SELECTED_TEXT, Online, Shown, command_in,
-        failure_text, too_long_text,
-    },
+    view::{Binding, Held, NOTHING_SELECTED_TEXT, Online, command_in, failure_text, too_long_text},
     widgets::{FieldEdit, PlaybackMedia, View},
 };
 
@@ -254,6 +249,8 @@ enum Event {
     Sentence(String, FieldEdit),
     /// The word with this index in the shown sentence was clicked.
     Word(usize),
+    /// A synonym word was clicked: it goes into the field.
+    Synonym(String),
     /// The sense with this index in the shown list was clicked.
     Sense(usize),
     /// The English gloss with this index in the shown article was clicked.
@@ -277,17 +274,8 @@ enum Event {
         outcome: Outcome<Translated>,
         elapsed: Option<evidence::Elapsed>,
     },
-    /// The lookup started as number `run` ended, answered by `language`:
-    /// the chosen one, or the one that had the word when the chosen one had
-    /// no entry for it.
-    Lookup {
-        run: u64,
-        generation: u64,
-        language: Language,
-        outcome: Outcome<Looked>,
-    },
-    /// The shared controller's complete typed lookup snapshot.
-    Controller(ViewState),
+    /// The shared controller's complete snapshot and effects.
+    Controller(Box<ViewState>, Vec<Effect>),
     /// The online request about `subject`, sent from `source` for the text
     /// with the number `text`, ended. `elapsed` is as for a definition.
     Translated {
@@ -383,6 +371,9 @@ enum Event {
     /// text, or why there is none.
     Clipboard(u64, Result<String, Missed>),
 }
+
+/// A queued controller render batch.
+type ControllerQueue = Arc<Mutex<VecDeque<(ViewState, Vec<Effect>)>>>;
 
 /// Starts one attempt to bind the shortcuts; its events go to `sender`. With
 /// `timed`, an activation carries the time the worker thread received it.
@@ -529,16 +520,25 @@ struct Session {
     sender: UnboundedSender<Event>,
     /// Weak: the worker must go when the resident state is dropped.
     current: Weak<RefCell<Option<ShortcutHandle>>>,
-    /// The text of the field, a word or a sentence, and what was chosen in
-    /// it.
-    manual: Manual,
-    /// The texts the field held, for Back and Forward; kept for the life of
-    /// the process, hidden window included.
-    history: History,
-    /// Where the lookup of the chosen word stands.
-    looking_up: LookingUp,
-    /// The result the window shows and the sense chosen in it.
-    shown: Shown,
+    /// The controller's snapshot rendered last: the field's text and words,
+    /// what was chosen in it, the shown result and the history buttons.
+    /// The online texts are asked from it.
+    view_state: ViewState,
+    /// The last applied `field.revision`; controller text applies on a rise.
+    applied_field_revision: u64,
+    /// The text of the field the controller was last told of, or set.
+    sent_text: String,
+    /// How many `FieldEdited` events were sent to the controller.
+    edits_sent: u64,
+    /// `edits_sent` when an event that lets the controller set the field
+    /// (Back, Forward, a synonym, clearing) was sent last. A controller text
+    /// applies only while no edit followed it: a newer one is on its way.
+    edits_at_set: u64,
+    /// The applied `field.revision` when the field was cleared for a read,
+    /// until a snapshot of the clear comes: an older one is not rendered.
+    cleared_at: Option<u64>,
+    /// Online requests of the word asked while its offline lookup runs.
+    deferred: Vec<Subject>,
     /// Weak: the runner must go when the resident state is dropped. Never
     /// upgrades when the runner could not be started.
     work: WorkRef<Work>,
@@ -789,35 +789,6 @@ impl Capturing {
     }
 }
 
-/// Where the lookup of the word chosen in a [`Session`] stands; at first
-/// none runs.
-#[derive(Default)]
-struct LookingUp {
-    /// The lookup whose outcome is awaited; dropping it cancels the lookup.
-    job: Option<Job>,
-    typed: Option<TypedRun>,
-    revision: u64,
-    /// The language that gave the result of the last started lookup, once
-    /// it ended with one; `None` before. The word's online requests are
-    /// sent from it.
-    answered: Option<Language>,
-    /// The online requests of the word, alone or in its sentence, asked
-    /// while its lookup runs: they are sent once it ends, from the language
-    /// that answered.
-    deferred: Vec<Subject>,
-}
-
-struct TypedRun {
-    run: u64,
-    pending: bool,
-}
-
-impl LookingUp {
-    fn pending(&self) -> bool {
-        self.job.is_some() || self.typed.as_ref().is_some_and(|typed| typed.pending)
-    }
-}
-
 /// Where the read of the clipboard of a [`Session`] stands; at first none
 /// runs.
 #[derive(Default)]
@@ -892,6 +863,7 @@ impl Session {
             Event::Retry => self.retry(),
             Event::Sentence(text, origin) => self.sentence_changed(text, origin),
             Event::Word(index) => self.word_chosen(index),
+            Event::Synonym(word) => self.synonym_chosen(word),
             Event::Sense(index) => self.sense_chosen(index),
             Event::Gloss(index) => self.gloss_chosen(index),
             Event::Submitted => self.submitted(),
@@ -905,13 +877,7 @@ impl Session {
                 outcome,
                 elapsed,
             } => self.definition_translated(number, source, outcome, elapsed),
-            Event::Lookup {
-                run,
-                generation,
-                language,
-                outcome,
-            } => self.looked_up(run, generation, language, outcome),
-            Event::Controller(state) => self.render_controller(state),
+            Event::Controller(state, effects) => self.render_controller(*state, effects),
             Event::Translated {
                 text,
                 subject,
@@ -968,17 +934,20 @@ impl Session {
                     self.check = None;
                     self.view.render_indexes(indexes, self.my_language);
                     self.relist_first_run();
+                    self.report_indexes();
                 }
             }
             Event::ImportRefreshing(ready) => {
                 self.check = None;
                 let _ = ready.send(self.indexes.begin_import());
+                self.report_indexes();
             }
             Event::Imported(completed) => completed.apply(|generation, indexes| {
                 if self.indexes.update(generation, indexes) {
                     self.check = None;
                     self.view.render_indexes(indexes, self.my_language);
                     self.relist_first_run();
+                    self.report_indexes();
                 }
             }),
             Event::SettingsDownload => self.settings_download(),
@@ -1532,7 +1501,7 @@ impl Session {
     fn capture(&mut self, activation_token: Option<&str>) {
         match self
             .capturing
-            .press(self.manual.reading() == Some(Source::Ocr))
+            .press(self.view_state.reading_source == Some(Source::Ocr))
         {
             CapturePress::Ignored => return,
             CapturePress::Restart => self.give_up_capture(),
@@ -1601,7 +1570,7 @@ impl Session {
     fn give_up_capture(&mut self) {
         self.capturing.job = None;
         self.capturing.activation_token = None;
-        self.manual.set_reading(None);
+        self.set_reading_source(None);
     }
 
     /// The snapshot of the job with `number` is there and is being
@@ -1611,7 +1580,7 @@ impl Session {
         if !self.is_capturing(number) {
             return;
         }
-        self.manual.set_reading(Some(Source::Ocr));
+        self.set_reading_source(Some(Source::Ocr));
         self.view.set_capture_sensitive(true);
         self.reveal_capture();
     }
@@ -1647,7 +1616,7 @@ impl Session {
     fn capture_ended(&mut self, captured: Captured, timing: &Timing) {
         self.capturing.job = None;
         self.view.set_capture_sensitive(true);
-        self.manual.set_reading(None);
+        self.set_reading_source(None);
         let line = match captured {
             Captured::Text(text) => {
                 sentence::recognized(&text).ok_or(Failure::Ocr(OcrFailure::Empty))
@@ -1676,8 +1645,7 @@ impl Session {
             }
         };
         self.view.clear_source_failure();
-        let edit = self.manual.recognized(line);
-        self.replace_field(edit);
+        self.replace_field(line, Source::Ocr);
         self.reveal_capture();
     }
 
@@ -1686,8 +1654,8 @@ impl Session {
     /// ran.
     fn give_up_read(&mut self) -> bool {
         let copied = self.copying.end().is_some();
-        if self.manual.reading() == Some(Source::Clipboard) {
-            self.manual.set_reading(None);
+        if self.view_state.reading_source == Some(Source::Clipboard) {
+            self.set_reading_source(None);
         }
         copied
     }
@@ -1697,10 +1665,34 @@ impl Session {
     /// the source line goes.
     fn clear_for_read(&mut self) {
         self.view.clear_source_failure();
-        let edit = self.manual.edit(String::new());
+        // The controller clears the field (`field.revision` rises); the
+        // window shows it cleared at once, before its snapshot comes, and
+        // the snapshots queued before it are not rendered.
+        self.cleared_at = Some(self.applied_field_revision);
+        self.dispatch_setting_field(controller::Event::FieldCleared);
         self.view.set_field_text("");
+        self.sent_text.clear();
+        // Whatever the online requests of the old text still report is not
+        // rendered.
+        self.translating_word = None;
+        self.translating_sentence = None;
+        self.translating_definition = None;
+        self.deferred.clear();
+        // Text 0 is carried by no sent request: no old answer is kept.
+        self.online = Kept::default();
+        let view = &mut self.view_state;
+        view.sentence.clear();
+        view.words.clear();
+        view.chosen = None;
+        view.input = None;
+        view.context = None;
+        view.looking_up = false;
+        view.shown.show(None);
+        view.window_state = window_state(view.reading_source, None);
+        self.render_manual();
         self.render_history();
-        self.text_replaced(edit, FieldEdit::Replaced);
+        self.render_shown();
+        self.render_online();
     }
 
     /// Starts the read of the primary selection and the clipboard as the
@@ -1709,8 +1701,8 @@ impl Session {
     /// ends without text.
     fn start_copy(&mut self) {
         let number = self.copying.begin();
-        self.manual.set_reading(Some(Source::Clipboard));
-        self.view.render(self.manual.state(), self.manual.source());
+        self.set_reading_source(Some(Source::Clipboard));
+        self.render_window();
         let late = self.sender.clone();
         glib::timeout_add_local_once(CLIPBOARD_LIMIT, move || {
             let _ = late.unbounded_send(Event::Clipboard(
@@ -1790,21 +1782,19 @@ impl Session {
         };
         match line {
             Ok(line) => {
-                let edit = self.manual.copied(&line);
-                self.replace_field(edit);
-                if self.at_once {
-                    self.ask_whole();
-                }
+                // With Translate sentence at once on, the controller's
+                // snapshot asks for the whole sentence ([`Ask::Replaced`]).
+                self.replace_field(line, Source::Clipboard);
             }
             Err(missed) => {
                 eprintln!(
                     "addict: no text from the selection or the clipboard: {}",
                     missed.reason
                 );
-                if self.manual.reading() == Some(Source::Clipboard) {
-                    self.manual.set_reading(None);
+                if self.view_state.reading_source == Some(Source::Clipboard) {
+                    self.set_reading_source(None);
                 }
-                self.view.render(self.manual.state(), self.manual.source());
+                self.render_window();
                 let line = missed_line(read.selection.get(), missed.too_long);
                 self.view.render_source_failure(&line);
             }
@@ -1816,7 +1806,7 @@ impl Session {
     /// the caller gave a token if it has one, and for a launch GTK has already
     /// applied the launcher's.
     fn reveal(&self) {
-        self.view.render(self.manual.state(), self.manual.source());
+        self.render_window();
         self.focus();
         if let Some(recording) = &self.recording {
             recording.shown_without_press();
@@ -1840,123 +1830,100 @@ impl Session {
     /// selection and the clipboard are given up: the user's text wins, and the state no
     /// longer says that a source is read.
     fn sentence_changed(&mut self, text: String, origin: FieldEdit) {
+        self.give_up_for_new_text();
+        // The edit ends the reading of a source in the controller too; its
+        // snapshot renders the window.
+        self.send_edit(text, matches!(origin, FieldEdit::Replaced), None);
+    }
+
+    /// What goes before another text from the user, typed, walked to or
+    /// clicked: the source line, a snapshot being recognized and a read of
+    /// the selection and the clipboard.
+    fn give_up_for_new_text(&mut self) {
         self.view.clear_source_failure();
         let gave_up_capture =
-            self.capturing.job.is_some() && self.manual.reading() == Some(Source::Ocr);
+            self.capturing.job.is_some() && self.view_state.reading_source == Some(Source::Ocr);
         if gave_up_capture {
             self.give_up_capture();
         }
-        let gave_up_read = self.give_up_read();
-        let edit = self.manual.edit(text);
-        self.text_replaced(edit, origin);
-        // A typed text is not recorded, but Back can go from it.
-        self.render_history();
-        if gave_up_capture || gave_up_read {
-            self.view.render(self.manual.state(), self.manual.source());
-        }
+        self.give_up_read();
+    }
+
+    /// Tells the controller the field holds `text`, counted for the field
+    /// guard ([`Session::apply_snapshot`]).
+    fn send_edit(&mut self, text: String, replaced: bool, source: Option<Source>) {
+        self.sent_text.clone_from(&text);
+        self.edits_sent += 1;
+        self.dispatch_controller(controller::Event::FieldEdited {
+            text,
+            replaced,
+            source,
+        });
+    }
+
+    /// Sends an event that lets the controller set the field's text: its
+    /// text applies only while no edit follows it.
+    fn dispatch_setting_field(&mut self, event: controller::Event) {
+        self.edits_at_set = self.edits_sent;
+        self.dispatch_controller(event);
     }
 
     /// A text that did not come from the field, recognized, selected or
-    /// copied, replaced the manual input as `edit`: the
-    /// field shows it, and what follows a new text follows.
-    fn replace_field(&mut self, edit: Edit) {
-        self.view.set_field_text(self.manual.sentence());
-        // `Cleared` is any new text with no word chosen; an empty one is
-        // not recorded.
-        if edit != Edit::Same {
-            self.history.record(self.manual.sentence());
-        }
-        self.render_history();
-        self.text_replaced(edit, FieldEdit::Replaced);
+    /// copied, replaced the manual input: the field shows it, the
+    /// controller records it, and what follows a new text follows.
+    fn replace_field(&mut self, text: String, source: Source) {
+        self.view.set_field_text(&text);
+        self.send_edit(text, true, Some(source));
     }
 
     /// Back or Alt+Left: the text before in the history is put into the
-    /// field as a paste puts it, so it is looked up and submitted again. A
-    /// typed text that is not in the history is recorded first, so Forward
-    /// comes back to it.
+    /// field by the controller, looked up and submitted again.
     fn back(&mut self) {
-        let current = self.view.field_text();
-        let text = self.history.back(&current).map(str::to_owned);
-        self.walked(text);
+        self.give_up_for_new_text();
+        self.dispatch_setting_field(controller::Event::Back);
     }
 
     /// Forward or Alt+Right: the text after in the history is put into the
     /// field as Back puts one.
     fn forward(&mut self) {
-        let text = self.history.forward().map(str::to_owned);
-        self.walked(text);
-    }
-
-    /// Puts `text`, where Back or Forward led, into the field. Nothing is
-    /// recorded: its submit records the text at the position, which changes
-    /// nothing.
-    fn walked(&mut self, text: Option<String>) {
-        if let Some(text) = text {
-            self.view.put_into_field(&text);
-        }
-        self.render_history();
+        self.give_up_for_new_text();
+        self.dispatch_setting_field(controller::Event::Forward);
     }
 
     /// Whether Back and Forward can be pressed, for the field's text now.
     fn render_history(&self) {
-        self.view.set_history(
-            self.history.can_back(&self.view.field_text()),
-            self.history.can_forward(),
-        );
+        self.view
+            .set_history(self.view_state.can_back, self.view_state.can_forward);
     }
 
-    /// What follows a new text in the field, typed, pasted or recognized:
-    /// the online texts of the old one are given up, and a lone word is
-    /// looked up at once.
-    fn text_replaced(&mut self, edit: Edit, origin: FieldEdit) {
-        if edit == Edit::Same {
-            return;
-        }
-        // Cancels the online requests; whatever they still report has the
-        // number of an old text.
-        self.translating_word = None;
-        self.looking_up.deferred.clear();
-        self.translating_sentence = None;
-        self.online = Kept::of(self.manual.text_number(), self.manual.kind());
-        self.render_online();
-        match edit {
-            Edit::Same => {}
-            Edit::Cleared => {
-                // Cancels the lookup; whatever it still reports has an old
-                // number.
-                self.retire_lookup();
-                self.render_manual();
-                self.show_result(None);
-            }
-            Edit::Lone(run) => self.start_lookup_from(run, origin),
-        }
-    }
-
-    /// A word was clicked: it becomes the input, with its sentence when it
-    /// has one, and is looked up. In a sentence, what is not yet known
-    /// online about the word and about its sentence is asked for.
+    /// A word was clicked: the controller makes it the input, with its
+    /// sentence when it has one, and looks it up; then it asks for the
+    /// word's online texts ([`Session::word_asked`]).
     fn word_chosen(&mut self, index: usize) {
-        // A click that came before the field's newer text was handled here
-        // names a word of a sentence that is no longer shown.
-        if self.field_is_newer() {
+        // A click that came before the field's newer text was handled, or
+        // before the controller rendered it, names a word of a sentence
+        // that is no longer shown.
+        if self.field_is_newer() || self.sent_text != self.view_state.sentence {
             return;
         }
-        let Some(run) = self.manual.choose(index) else {
-            return;
-        };
-        self.start_lookup(run);
-        // The lookup queues ahead of the online jobs.
+        self.dispatch_controller(controller::Event::WordChosen { index });
+    }
+
+    /// The word with `index` was chosen in the snapshot just rendered: in a
+    /// sentence, what is not yet known online about the word and about its
+    /// sentence is asked for. The lookup queues ahead of the online jobs.
+    fn word_asked(&mut self, index: usize) {
         // A word that is a sentence alone in a recognized text has no
         // sentence: its article only, nothing sent online.
-        let Some((number, span)) = self.manual.sentence_of(index) else {
+        let Some((number, span)) = self.view_state.context.clone() else {
             self.render_online();
             return;
         };
-        let long = online::is_long(&self.manual.sentence()[span]);
+        let long = online::is_long(&self.view_state.sentence[span]);
         let click = self.online.click(index, number, long);
         if click.gave_up {
             self.translating_word = None;
-            self.looking_up.deferred.clear();
+            self.deferred.clear();
         }
         if click.gave_up_sentence {
             self.translating_sentence = None;
@@ -1971,123 +1938,173 @@ impl Session {
     /// online itself, with no word chosen, unless it is already pending,
     /// answered or too long. A lone word or an empty field sends nothing.
     fn ask_whole(&mut self) {
-        if self.field_is_newer() {
+        if self.snapshot_is_old() {
             return;
         }
-        let long = online::is_long(self.manual.sentence());
+        let long = online::is_long(&self.view_state.sentence);
         if let Some(subject) = self.online.ask_whole(long) {
             self.start_translation(subject);
         }
         self.render_online();
     }
 
-    /// The text of the field was submitted, by Enter or by a paste: a lone
-    /// word is asked for online, unless it was already. Nothing else
-    /// changes, and an empty field or a sentence sends nothing.
+    /// The text of the field was submitted, by Enter or by a paste: the
+    /// controller records it and asks for its online texts
+    /// ([`Session::submit_asked`]).
     fn submitted(&mut self) {
         // As for a click: the field may hold a newer text already.
         if self.field_is_newer() {
             return;
         }
-        self.history.record(self.manual.sentence());
-        self.render_history();
+        self.dispatch_controller(controller::Event::FieldSubmitted);
+    }
+
+    /// The text of the snapshot just rendered was submitted: a lone word is
+    /// asked for online, unless it was already. Nothing else changes, and
+    /// an empty field or a sentence sends nothing.
+    fn submit_asked(&mut self) {
         if self.online.submit() {
             self.start_translation(Subject::Lone);
             self.render_online();
         }
     }
 
-    /// Whether the field holds a newer text than the one handled here: an
-    /// event that came before that text was handled is about what is no
-    /// longer shown.
+    /// Whether the field holds a newer text than the one last given to the
+    /// controller: an event that came before that text was handled is
+    /// about what is no longer shown.
     fn field_is_newer(&self) -> bool {
-        self.view.field_text() != self.manual.sentence()
+        self.view.field_text() != self.sent_text
     }
 
-    /// Shows the input that was just chosen and starts its lookup, which has
-    /// the number `run`; for a reading language without an offline
-    /// dictionary no lookup starts, and the line that says so is shown. The
-    /// online texts are not touched.
-    fn start_lookup(&mut self, run: u64) {
-        self.start_lookup_from(run, FieldEdit::Replaced);
+    /// Whether the field holds another text than the snapshot just
+    /// rendered: what the snapshot asks is about what is no longer shown.
+    fn snapshot_is_old(&self) -> bool {
+        self.view.field_text() != self.view_state.sentence
     }
 
-    fn retire_lookup(&mut self) {
-        self.looking_up.job = None;
-        if let Some(typed) = self.looking_up.typed.take()
-            && let Some(controller) = &self.controller
-        {
-            controller.dispatch(controller::Event::TypedLookupRetired { run: typed.run });
+    /// The controller rendered a snapshot: a controller-set text goes into
+    /// the field when `field.revision` rises, a new text gives up the
+    /// online texts of the old one, the effects run in order, the window
+    /// renders, and the online words waiting for the lookup go.
+    fn render_controller(&mut self, state: ViewState, effects: Vec<Effect>) {
+        // A snapshot from before the field was cleared for a read is not
+        // rendered: the window shows the clear already.
+        let before_clear = self
+            .cleared_at
+            .is_some_and(|cleared_at| state.field.revision <= cleared_at);
+        if !before_clear {
+            self.cleared_at = None;
+            if state.revision > self.view_state.revision {
+                let previous = std::mem::replace(&mut self.view_state, state);
+                self.apply_snapshot(&previous);
+            }
+        }
+        // Every effect of every render runs, in order; what such an old
+        // snapshot asks online is about a text no longer shown.
+        for effect in effects {
+            if before_clear
+                && matches!(
+                    effect,
+                    Effect::AskOnline(_) | Effect::RequestDefinition { .. }
+                )
+            {
+                continue;
+            }
+            self.run_effect(effect);
+        }
+        if !self.view_state.looking_up {
+            // Offline done: what waited for it goes online from the
+            // answering language.
+            self.send_deferred();
         }
     }
 
-    fn start_lookup_from(&mut self, run: u64, origin: FieldEdit) {
-        // The lookup of another word, if it runs, is replaced.
-        self.retire_lookup();
-        self.looking_up.answered = None;
+    fn apply_snapshot(&mut self, previous: &ViewState) {
+        let field = &self.view_state.field;
+        // The shell keeps its own text while typing: the controller's
+        // applies only when it set it itself, and only while no edit was
+        // sent after the event that let it: then a newer text is on its way
+        // and the controller comes to it (AD-21).
+        if field.revision > self.applied_field_revision {
+            self.applied_field_revision = field.revision;
+            if self.edits_sent == self.edits_at_set {
+                let text = field.text.clone();
+                self.view.set_field_text(&text);
+                self.sent_text = text;
+            }
+        }
+        // A new result or another choice gives up the translation of the
+        // definition of the one before.
+        if previous.shown.generation() != self.view_state.shown.generation()
+            || previous.shown.choice() != self.view_state.shown.choice()
+        {
+            self.translating_definition = None;
+        }
+        // A new text cancels the online requests of the old one; whatever
+        // they still report has the number of an old text.
+        if self.view_state.text_number != previous.text_number {
+            self.translating_word = None;
+            self.deferred.clear();
+            self.translating_sentence = None;
+            self.online = Kept::of(
+                self.view_state.text_number,
+                Kind::of(self.view_state.words.len()),
+            );
+        }
         self.render_manual();
-        let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
-            self.show_result(None);
-            return;
-        };
-        let sender = self.sender.clone();
-        let language = self.language;
-        let generation = self.indexes.generation;
-        if matches!(origin, FieldEdit::Typed)
-            && let Some(controller) = &self.controller
-        {
-            if controller.dispatch(controller::Event::WordTyped(TypedWord {
-                run,
-                word,
-                reading: language,
-                target: self.my_language,
-                known_indexes: self.indexes.known,
-                index_generation: generation,
-            })) {
-                self.looking_up.typed = Some(TypedRun { run, pending: true });
-                self.show_result(Some(Lookup::Pending));
-            } else {
-                self.show_result(Some(Lookup::Unfinished));
-                self.send_deferred();
+        self.render_history();
+        self.render_shown();
+        self.render_online();
+    }
+
+    /// Runs a controller effect.
+    fn run_effect(&mut self, effect: Effect) {
+        match effect {
+            Effect::CheckIndexes { index_generation } => {
+                self.check_lookup_indexes(index_generation);
             }
-            return;
-        }
-        let started = manual::offline(
-            self.work.upgrade().as_deref(),
-            LOOKUP_LIMIT,
-            self.articles.clone(),
-            word,
-            language,
-            self.my_language,
-            self.indexes.known,
-            move |language, outcome| {
-                // On the worker: the UI thread wakes for the event.
-                let _ = sender.unbounded_send(Event::Lookup {
-                    run,
-                    generation,
-                    language,
-                    outcome,
-                });
-            },
-        );
-        match started {
-            Ok(job) => {
-                self.looking_up.job = Some(job);
-                self.show_result(Some(Lookup::Pending));
+            Effect::RequestDefinition { number, request } => {
+                self.request_definition(number, request);
             }
-            Err(lookup) => {
-                let checks = manual::checks_again(&lookup, language);
-                self.show_result(Some(*lookup));
-                // No lookup event comes: what waited for one goes now.
-                self.send_deferred();
-                if checks {
-                    self.check_lookup_indexes();
+            Effect::ObserveIndexes {
+                generation,
+                indexes,
+            } => self.observe_lookup_indexes(generation, indexes),
+            Effect::RecordLookup(answered) => {
+                if let Some(recording) = &self.recording {
+                    recording.looked_up(answered);
                 }
             }
+            Effect::AskOnline(ask) => self.ask_online(ask),
         }
     }
 
-    fn check_lookup_indexes(&mut self) {
+    /// What the snapshot just rendered asks of the online texts, unless the
+    /// field holds a newer text already, whose own snapshot comes next.
+    fn ask_online(&mut self, ask: Ask) {
+        if self.snapshot_is_old() {
+            return;
+        }
+        match ask {
+            Ask::Chosen { index } => self.word_asked(index),
+            Ask::Submitted => self.submit_asked(),
+            Ask::Replaced => {
+                // Translate sentence at once: a sentence read at a press.
+                if self.at_once && self.view_state.source == Source::Clipboard {
+                    self.ask_whole();
+                }
+            }
+            Ask::Again => self.ask_again(),
+        }
+    }
+
+    /// The lookup of the shown word found a dictionary missing: the indexes
+    /// are checked again, unless a newer refresh, an import's, already owns
+    /// that.
+    fn check_lookup_indexes(&mut self, index_generation: u64) {
+        if index_generation != self.indexes.generation {
+            return;
+        }
         self.check = start_check(
             self.work.upgrade().as_deref(),
             self.articles.clone(),
@@ -2096,91 +2113,26 @@ impl Session {
         );
     }
 
-    fn render_controller(&mut self, state: ViewState) {
-        if state.revision <= self.looking_up.revision {
-            return;
-        }
-        self.looking_up.revision = state.revision;
-        let Some(lookup) = state.typed_lookup else {
-            return;
-        };
-        let LookupState::Resolved(result) = lookup.state else {
-            return;
-        };
-        self.record_lookup(result.evidence);
-        if result.check_indexes && lookup.index_generation == self.indexes.generation {
-            self.check_lookup_indexes();
-        }
-        if !self.manual.awaits(lookup.run) || self.field_is_newer() {
-            return;
-        }
-        let Some(typed) = &mut self.looking_up.typed else {
-            return;
-        };
-        if typed.run != lookup.run || !typed.pending {
-            return;
-        }
-        typed.pending = false;
-        if let Some(indexes) = result.indexes {
-            self.observe_lookup_indexes(lookup.index_generation, indexes);
-        }
-        self.looking_up.answered = result.answered;
-        self.show_answered(
-            Some(result.lookup),
-            result.answered.unwrap_or(self.language),
-        );
-        self.send_deferred();
-    }
-
-    fn record_lookup(&self, answered: Option<evidence::Answered>) {
-        if let (Some(recording), Some(answered)) = (&self.recording, answered) {
-            recording.looked_up(answered);
-        }
-    }
-
     fn observe_lookup_indexes(&mut self, generation: u64, indexes: Indexes) {
         if self.indexes.update(generation, indexes) {
             self.view.render_indexes(indexes, self.my_language);
+            self.report_indexes();
         }
     }
 
-    /// A lookup ended, answered by `language`. Only the last started one is
-    /// shown, with the line that names the language when it is not the
-    /// chosen one, and the word's online requests asked while it ran are
-    /// sent then, from that language; where it found the indexes is shown
-    /// for every one that read them, and every one that was not given up is
-    /// recorded.
-    fn looked_up(
-        &mut self,
-        run: u64,
-        generation: u64,
-        language: Language,
-        outcome: Outcome<Looked>,
-    ) {
-        self.record_lookup(evidence::answered(&outcome));
-        if let Outcome::Finished(looked) = &outcome {
-            self.observe_lookup_indexes(generation, looked.indexes);
-        }
-        if !self.manual.awaits(run) {
-            return;
-        }
-        self.looking_up.job = None;
-        let Some(input) = self.manual.input() else {
-            return;
-        };
-        let finished = matches!(outcome, Outcome::Finished(_));
-        if let Some(lookup) = manual::result_in(outcome, input.word(), language) {
-            self.show_answered(Some(lookup), language);
-        }
-        // A lookup that did not finish names no language: the chosen one.
-        self.looking_up.answered = finished.then_some(language);
-        self.send_deferred();
+    /// Tells the controller where the `IndexCache` stands now: its lookups
+    /// start from what it knows, and carry its generation.
+    fn report_indexes(&self) {
+        self.dispatch_controller(controller::Event::KnownIndexes {
+            generation: self.indexes.generation,
+            indexes: self.indexes.known,
+        });
     }
 
     /// Sends the word's online requests held while its lookup ran, now that
     /// no lookup runs, from the language that answered or the chosen one.
     fn send_deferred(&mut self) {
-        let deferred = std::mem::take(&mut self.looking_up.deferred);
+        let deferred = std::mem::take(&mut self.deferred);
         if deferred.is_empty() {
             return;
         }
@@ -2201,34 +2153,34 @@ impl Session {
     /// is sent for it, neither the word nor its sentence
     /// ([`translate::is_sent`]).
     fn start_translation(&mut self, subject: Subject) {
-        let text = self.manual.text_number();
+        let text = self.view_state.text_number;
         let Some(number) = self.online.request_number(subject) else {
             return;
         };
         // With Russian as my language a Russian word is read offline only:
         // nothing is sent for it or its sentence, nothing is recorded, and
         // its request is not awaited.
-        if let Some(input) = self.manual.input()
+        if let Some(input) = &self.view_state.input
             && !translate::is_sent(input, subject, self.my_language)
         {
             self.online.withdraw(subject);
             return;
         }
         let word = matches!(subject, Subject::Word(_) | Subject::Lone);
-        if word && self.looking_up.pending() {
-            if !self.looking_up.deferred.contains(&subject) {
-                self.looking_up.deferred.push(subject);
+        if word && self.view_state.looking_up {
+            if !self.deferred.contains(&subject) {
+                self.deferred.push(subject);
             }
             return;
         }
         // The whole sentence, asked for with no word chosen, is Russian when
         // it has a Cyrillic letter.
-        let russian = match self.manual.input() {
+        let russian = match &self.view_state.input {
             Some(input) => is_russian(input.word()),
-            None => is_russian(self.manual.sentence()),
+            None => is_russian(&self.view_state.sentence),
         };
         let source =
-            translate::source_of(subject, self.language, self.looking_up.answered, russian);
+            translate::source_of(subject, self.language, self.view_state.answered, russian);
         let request = self.online_request(subject, source);
         let started = self.send_online(request, subject.into(), move |outcome, elapsed| {
             Event::Translated {
@@ -2351,53 +2303,38 @@ impl Session {
     /// word.
     fn render_online(&self) {
         self.view.render_online(
-            &self.online.shown(self.manual.chosen()),
+            &self.online.shown(self.view_state.chosen),
             self.key_file.as_deref(),
         );
-    }
-
-    /// The one place the shown result changes: the sense chosen in the one
-    /// before is forgotten.
-    fn show_result(&mut self, lookup: Option<Lookup>) {
-        self.show_answered(lookup, self.language);
-    }
-
-    /// As [`Session::show_result`], for a result that the language `found`
-    /// gave: when it is not the chosen one, an article says so.
-    fn show_answered(&mut self, lookup: Option<Lookup>, found: Language) {
-        self.translating_definition = None;
-        self.shown.show_elsewhere(lookup, self.language, found);
-        self.render_shown();
     }
 
     /// Shows the result and the sense chosen in it as they are now.
     fn render_shown(&self) {
         self.view
-            .render_result(&self.shown, self.key_file.as_deref());
+            .render_result(&self.view_state.shown, self.key_file.as_deref());
     }
 
-    /// A sense was clicked: it is the chosen one when the shown result is an
-    /// article that has it. Nothing is looked up or read. A click on the
-    /// chosen sense renders too: GTK keeps a clicked link in the visited
-    /// colour until the markup is set again.
+    /// A synonym was clicked: the controller puts it into the field,
+    /// records it, looks it up and submits it.
+    fn synonym_chosen(&mut self, word: String) {
+        self.give_up_for_new_text();
+        self.dispatch_setting_field(controller::Event::SynonymChosen(word));
+    }
+
+    /// A sense was clicked: the controller chooses it. Nothing is looked up
+    /// or read. A click on the chosen sense renders too: GTK keeps a
+    /// clicked link in the visited colour until the markup is set again.
     fn sense_chosen(&mut self, index: usize) {
-        let previous = self.shown.choice();
-        if self.shown.choose(index) {
-            self.chosen(previous);
-        }
+        self.dispatch_controller(controller::Event::SenseChosen { index });
     }
 
-    /// An English gloss was clicked: it is the chosen one, instead of any
-    /// sense, when the shown result is an article of a language beside
-    /// English that has it. Nothing is looked up or read.
+    /// An English gloss was clicked: the controller chooses it, instead of
+    /// any sense, when the shown result is an article of a language beside
+    /// English that has it, and has it translated as it is chosen, with no
+    /// button: once, and again only after a refusal. Nothing is looked up
+    /// or read.
     fn gloss_chosen(&mut self, index: usize) {
-        let previous = self.shown.choice();
-        if self.shown.choose_gloss(index) {
-            self.chosen(previous);
-            // A gloss is translated as it is chosen, with no button: once,
-            // and again only after a refusal.
-            self.definition_action();
-        }
+        self.dispatch_controller(controller::Event::GlossChosen { index });
     }
 
     /// The English word of a gloss was clicked: it goes into the field as a
@@ -2410,16 +2347,6 @@ impl Session {
         self.language_chosen(language::reading(Language::En, self.my_language));
     }
 
-    /// Something was chosen where `previous` was: the job translating the
-    /// definition of another choice is cancelled, and the result is shown
-    /// anew.
-    fn chosen(&mut self, previous: Option<Choice>) {
-        if previous != self.shown.choice() {
-            self.translating_definition = None;
-        }
-        self.render_shown();
-    }
-
     /// "Translate definition into" my language was pressed: the definition
     /// of the chosen sense or gloss is sent alone, from its own language
     /// into my language, as a job of its own, unless the field holds a
@@ -2429,9 +2356,18 @@ impl Session {
         if self.field_is_newer() {
             return;
         }
-        let Some((number, request)) = self.shown.request_definition() else {
+        // The controller owns `Shown`; it renders `definition` pending and
+        // emits a `RequestDefinition` effect.
+        self.dispatch_controller(controller::Event::DefinitionAction);
+    }
+
+    /// Sends the definition request online; a job that cannot start is
+    /// answered at once. The shell runs the online production.
+    fn request_definition(&mut self, number: u64, request: Request) {
+        // The field holds a newer text, whose snapshot forgets this one.
+        if self.snapshot_is_old() {
             return;
-        };
+        }
         let source = request.source;
         let started = self.send_online(
             Some(request),
@@ -2446,10 +2382,9 @@ impl Session {
         match started {
             Ok(job) => self.translating_definition = Some(job),
             Err(online) => {
-                self.shown.answer_definition(number, online);
+                self.dispatch_controller(controller::Event::DefinitionAnswered { number, online });
             }
         }
-        self.render_shown();
     }
 
     /// The definition request, sent from `source`, ended; it is recorded as
@@ -2466,10 +2401,7 @@ impl Session {
         else {
             return;
         };
-        if self.shown.answer_definition(number, online) {
-            self.translating_definition = None;
-            self.render_shown();
-        }
+        self.dispatch_controller(controller::Event::DefinitionAnswered { number, online });
     }
 
     /// The user chose `language`, by a press in the switch or a click on a
@@ -2496,12 +2428,14 @@ impl Session {
         let language = language::reading(self.saved_language, self.my_language);
         self.view.set_language(language);
         // The shown result names its pair by the pressed language.
-        self.shown.set_pressed(language);
+        self.dispatch_controller(controller::Event::SetPressed(language));
         if language == self.language {
             return;
         }
         self.language = language;
-        self.ask_again();
+        // The controller redoes the offline result and asks the online
+        // texts again ([`Session::ask_again`]).
+        self.dispatch_controller(controller::Event::SetReading(language));
     }
 
     /// The user chose `language` in Settings or in the first-run offer: my
@@ -2551,15 +2485,13 @@ impl Session {
         // and its job cancelled.
         self.translating_definition = None;
         let reading = language::reading(self.saved_language, language);
-        self.shown.set_my_language(language);
         // Rendered for the new pair: a result looked up for the language
-        // before shows none of its translations.
-        self.shown.set_pressed(reading);
-        self.render_shown();
+        // before shows none of its translations. The controller redoes the
+        // offline result and asks the online texts again.
+        self.dispatch_controller(controller::Event::SetMyLanguage { language, reading });
         self.view
             .set_reading_languages(reading_languages(language), reading);
         self.language = reading;
-        self.ask_again();
     }
 
     /// The user chose `english` in Settings: the spelling of English from
@@ -2580,11 +2512,10 @@ impl Session {
     fn apply_english(&mut self, english: English) {
         let changed = english != self.english;
         self.english = english;
-        self.shown.set_english(english);
-        self.render_shown();
+        self.dispatch_controller(controller::Event::SetEnglish(english));
         if changed && self.my_language == Language::En {
             self.translating_definition = None;
-            self.ask_again();
+            self.dispatch_controller(controller::Event::AskAgain);
         }
     }
 
@@ -2592,12 +2523,12 @@ impl Session {
     /// `source`, into my language in the spelling of English chosen.
     /// With no word chosen, only the whole sentence has one.
     fn online_request(&self, subject: Subject, source: Language) -> Option<Request> {
-        match (self.manual.input(), subject) {
+        match (&self.view_state.input, subject) {
             (Some(input), _) => {
                 translate::request(input, subject, source, self.my_language, self.english)
             }
             (None, Subject::Sentence(_)) => translate::whole_request(
-                self.manual.sentence(),
+                &self.view_state.sentence,
                 source,
                 self.my_language,
                 self.english,
@@ -2606,37 +2537,31 @@ impl Session {
         }
     }
 
-    /// Redoes the offline result of the shown word and forgets and asks again
-    /// its online texts, after the reading language, my language or, with
-    /// English mine, the spelling of English changed.
+    /// The controller redid the offline result of the shown word, after the
+    /// reading language, my language or, with English mine, the spelling of
+    /// English changed: its online texts are forgotten and asked again, as
+    /// its click or its submit asked them: a word of a sentence with its
+    /// sentence, a lone word only when it was submitted, and the whole
+    /// sentence when it was asked. Without a word only the whole sentence
+    /// is.
     fn ask_again(&mut self) {
-        // The field holds a newer text, whose own event comes next and is
-        // handled in the new language.
-        if self.field_is_newer() {
-            return;
-        }
         // Cancels the online requests; whatever they still report has a
         // number that is no longer awaited.
         self.translating_word = None;
-        self.looking_up.deferred.clear();
+        self.deferred.clear();
         self.translating_sentence = None;
         let whole = self.online.asks_whole();
         let submitted = self.online.forget();
         if whole {
-            let long = online::is_long(self.manual.sentence());
+            let long = online::is_long(&self.view_state.sentence);
             if let Some(subject) = self.online.ask_whole(long) {
                 self.start_translation(subject);
             }
         }
-        if let Some(run) = self.manual.again() {
-            self.start_lookup(run);
-            let chosen = self.manual.chosen().and_then(|index| {
-                self.manual
-                    .sentence_of(index)
-                    .map(|sentence| (index, sentence))
-            });
+        if self.view_state.input.is_some() {
+            let chosen = self.view_state.chosen.zip(self.view_state.context.clone());
             if let Some((index, (number, span))) = chosen {
-                let long = online::is_long(&self.manual.sentence()[span]);
+                let long = online::is_long(&self.view_state.sentence[span]);
                 for subject in self.online.click(index, number, long).ask {
                     self.start_translation(subject);
                 }
@@ -2758,12 +2683,34 @@ impl Session {
 
     /// Shows the state, the sentence and the chosen word as they are now.
     fn render_manual(&self) {
-        self.view.render(self.manual.state(), self.manual.source());
+        self.render_window();
         self.view.render_sentence(
-            self.manual.sentence(),
-            self.manual.words(),
-            self.manual.chosen(),
+            &self.view_state.sentence,
+            &self.view_state.words,
+            self.view_state.chosen,
         );
+    }
+
+    /// The window state and source line from the controller snapshot.
+    fn render_window(&self) {
+        self.view
+            .render(self.view_state.window_state, self.view_state.source);
+    }
+
+    /// A source is being read now, or none is: the controller is told, and
+    /// the window shows its state at once, before the snapshot comes.
+    fn set_reading_source(&mut self, source: Option<Source>) {
+        self.dispatch_controller(controller::Event::SetReadingSource(source));
+        let view = &mut self.view_state;
+        view.reading_source = source;
+        view.window_state = window_state(source, view.input.as_ref());
+    }
+
+    /// Sends a fact to the shared controller.
+    fn dispatch_controller(&self, event: controller::Event) {
+        if let Some(controller) = &self.controller {
+            controller.dispatch(event);
+        }
     }
 
     /// The shortcut was pressed: a running capture and read are given up,
@@ -2782,7 +2729,7 @@ impl Session {
         // Started, not awaited: the window is presented below.
         self.start_copy();
         // Before `present()`: the first frame has the labels.
-        self.view.render(self.manual.state(), self.manual.source());
+        self.render_window();
         self.focus();
         // Also before it: the feedback is for the next commit.
         let recorded = self.recording.as_ref().zip(receipt_ns).map(|(r, receipt)| {
@@ -3209,6 +3156,10 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
     view.connect_add_key(move || {
         let _ = add_key.unbounded_send(Event::Window(WindowEvent::Settings));
     });
+    let synonym = sender.clone();
+    view.connect_synonym_chosen(move |word| {
+        let _ = synonym.unbounded_send(Event::Synonym(word));
+    });
     let sense = sender.clone();
     view.connect_sense_chosen(move |index| {
         let _ = sense.unbounded_send(Event::Sense(index));
@@ -3432,7 +3383,7 @@ fn start_controller(
     key_source: &KeySource,
     sender: &UnboundedSender<Event>,
 ) -> io::Result<Controller> {
-    let queue = Arc::new(Mutex::new(VecDeque::new()));
+    let queue: ControllerQueue = Arc::new(Mutex::new(VecDeque::new()));
     let context = glib::MainContext::default();
     let sender = sender.clone();
     controller::start(
@@ -3443,11 +3394,11 @@ fn start_controller(
         StartFacts {
             key_source: key_source.clone(),
         },
-        move |state, _effects| {
+        move |state, effects| {
             let first = {
                 let mut pending = queue.lock().expect("controller render queue");
                 let first = pending.is_empty();
-                pending.push_back(state);
+                pending.push_back((state, effects));
                 first
             };
             if first {
@@ -3460,8 +3411,8 @@ fn start_controller(
                     // can deliver the next one. Enqueueing can continue now.
                     let pending =
                         std::mem::take(&mut *queue.lock().expect("controller render queue"));
-                    for state in pending {
-                        let _ = sender.unbounded_send(Event::Controller(state));
+                    for (state, effects) in pending {
+                        let _ = sender.unbounded_send(Event::Controller(Box::new(state), effects));
                     }
                 });
             }
@@ -3831,10 +3782,13 @@ fn start(
         timed,
         sender,
         current: Rc::downgrade(&handle),
-        manual: Manual::default(),
-        history: History::default(),
-        looking_up: LookingUp::default(),
-        shown: Shown::default(),
+        view_state: ViewState::default(),
+        applied_field_revision: 0,
+        sent_text: String::new(),
+        edits_sent: 0,
+        edits_at_set: 0,
+        cleared_at: None,
+        deferred: Vec::new(),
         work,
         controller: controller.as_ref().map(Controller::dispatcher),
         articles,
@@ -4491,10 +4445,13 @@ mod tests {
             timed: false,
             sender,
             current: Weak::new(),
-            manual: Manual::default(),
-            history: History::default(),
-            looking_up: LookingUp::default(),
-            shown: Shown::default(),
+            view_state: ViewState::default(),
+            applied_field_revision: 0,
+            sent_text: String::new(),
+            edits_sent: 0,
+            edits_at_set: 0,
+            cleared_at: None,
+            deferred: Vec::new(),
             work: Arc::downgrade(&work),
             controller: None,
             articles: articles.clone(),
@@ -4580,6 +4537,51 @@ mod tests {
         None
     }
 
+    /// Gives `session` a running controller, as `start` does; the session
+    /// lives as long as the returned owner.
+    fn attach_controller(session: &mut super::Session) -> super::Controller {
+        let controller =
+            super::start_controller(&session.dirs, &session.key_source, &session.sender).unwrap();
+        session.work = controller.work();
+        session.controller = Some(controller.dispatcher());
+        session.articles = controller.dictionaries();
+        controller
+    }
+
+    /// Handles the session's events until `done` holds, for at most 5 s.
+    fn pump_until(
+        session: &mut super::Session,
+        events: &mut futures_channel::mpsc::UnboundedReceiver<Event>,
+        done: impl Fn(&super::Session) -> bool,
+    ) {
+        use futures_util::{
+            StreamExt,
+            future::{Either, select},
+        };
+        let context = gtk::glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done(session) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the session did not settle"
+            );
+            let next = context.block_on(async {
+                match select(
+                    events.next(),
+                    gtk::glib::timeout_future(std::time::Duration::from_millis(100)),
+                )
+                .await
+                {
+                    Either::Left((event, _)) => event,
+                    Either::Right(_) => None,
+                }
+            });
+            if let Some(event) = next {
+                session.handle(event);
+            }
+        }
+    }
+
     #[test]
     #[ignore = "needs a display; run alone"]
     fn a_gtk_edit_renders_the_controller_article_and_enter_waits_for_its_language() {
@@ -4589,7 +4591,6 @@ mod tests {
             format::{Contents, Headword, SenseRecord, encode},
             import::{self, Source as IndexSource},
         };
-        use futures_util::future::{Either, select};
 
         const DEFINITION: &str = "the ground alongside a river";
         let data = KeyTestDir::new("addict-typed-lookup");
@@ -4630,61 +4631,73 @@ mod tests {
             },
         );
         drop(work);
-        let controller =
-            start_controller(&session.dirs, &session.key_source, &session.sender).unwrap();
-        session.work = controller.work();
-        session.controller = Some(controller.dispatcher());
-        session.articles = controller.dictionaries();
+        let _controller = attach_controller(&mut session);
         let canned = Arc::new(Canned::new(Ok("берег")));
         session.translator = canned.clone();
-        session.history.record("earlier");
+        // An earlier text in the history, submitted while the window was
+        // empty: nothing of it is asked online.
+        session.dispatch_controller(controller::Event::FieldEdited {
+            text: "earlier".to_owned(),
+            replaced: false,
+            source: None,
+        });
+        session.dispatch_controller(controller::Event::FieldSubmitted);
+        session.dispatch_controller(controller::Event::FieldEdited {
+            text: String::new(),
+            replaced: false,
+            source: None,
+        });
+        pump_until(&mut session, &mut events, |session| {
+            // Two new texts: the earlier one, then none.
+            session.view_state.text_number == 2
+        });
         session.window.present();
         let entry =
             find::<gtk::Entry>(session.view.root().upcast_ref(), &|_| true).expect("lookup entry");
-        let context = glib::MainContext::default();
-        let mut handle_next = |session: &mut Session| {
-            let event = context.block_on(async {
-                match select(events.next(), glib::timeout_future(Duration::from_secs(5))).await {
-                    Either::Left((Some(event), _)) => event,
-                    _ => panic!("no resident event"),
-                }
-            });
-            session.handle(event);
-        };
 
         entry.insert_text("bank", &mut 0);
-        while session.looking_up.answered != Some(Language::En) {
-            handle_next(&mut session);
-        }
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.answered == Some(Language::En)
+        });
         assert!(
             find::<gtk::Label>(session.view.root().upcast_ref(), &|label| {
                 label.text() == DEFINITION && label.is_visible()
             })
             .is_some()
         );
-        assert!(
-            !session.history.can_back("earlier"),
-            "typing keeps no history"
-        );
         assert!(canned.asked().is_empty(), "typing sends no online request");
+        // Typing keeps no history: back at the earlier text, Back has
+        // nowhere to go.
+        entry.set_text("earlier");
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "earlier" && !session.view_state.looking_up
+        });
+        assert!(!session.view_state.can_back, "typing keeps no history");
 
         entry.delete_text(0, -1);
-        while !session.manual.sentence().is_empty() {
-            handle_next(&mut session);
-        }
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence.is_empty()
+        });
         session.handle(Event::LanguageChosen(Language::Es));
         assert_eq!(session.language, Language::Es);
         entry.insert_text("bank", &mut 0);
         entry.emit_activate();
-        while session.looking_up.deferred.is_empty() {
-            handle_next(&mut session);
-        }
-        assert!(session.looking_up.pending());
-        assert!(session.history.can_back("bank"), "Enter records the word");
+        pump_until(&mut session, &mut events, |session| {
+            !session.deferred.is_empty()
+        });
+        assert!(session.view_state.looking_up);
         assert!(canned.asked().is_empty(), "Enter waits for the lookup");
-        while session.looking_up.pending() || session.translating_word.is_some() {
-            handle_next(&mut session);
-        }
+        pump_until(&mut session, &mut events, |session| {
+            !session.view_state.looking_up
+                && session.deferred.is_empty()
+                && session.translating_word.is_none()
+        });
+        // Enter records the word: from the earlier text Back goes to it.
+        entry.set_text("earlier");
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "earlier" && !session.view_state.looking_up
+        });
+        assert!(session.view_state.can_back, "Enter records the word");
         let requests = canned.asked();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].text, "bank");
@@ -4697,33 +4710,32 @@ mod tests {
     #[ignore = "needs a display; run alone"]
     fn a_delayed_typed_snapshot_refreshes_a_refusal_without_overwriting_newer_indexes() {
         use super::*;
-        use crate::dictionaries::Answer;
+        use crate::dictionaries::State;
         use futures_util::future::{Either, select};
 
         gtk::init().expect("a display");
         let (mut session, mut events, work) =
             test_session("io.github.doqhu.Addict.TypedSnapshotTest", Dirs::default());
         drop(work);
-        let controller =
-            start_controller(&session.dirs, &session.key_source, &session.sender).unwrap();
-        session.work = controller.work();
-        session.controller = Some(controller.dispatcher());
-        session.articles = controller.dictionaries();
+        let _controller = attach_controller(&mut session);
         let context = glib::MainContext::default();
+        // The snapshot of the settled lookup of `word`, read in `language`,
+        // with its effects, not yet handled.
         let mut completed = |session: &mut Session, word: &str, language: Language| {
-            session.language = language;
+            if language != session.language {
+                session.language = language;
+                session.dispatch_controller(controller::Event::SetReading(language));
+            }
             session.view.set_field_text(word);
             session.sentence_changed(word.to_owned(), FieldEdit::Typed);
             context.block_on(async {
                 let wait = async {
                     while let Some(event) = events.next().await {
-                        if let Event::Controller(snapshot) = event
-                            && snapshot.typed_lookup.as_ref().is_some_and(|lookup| {
-                                session.manual.awaits(lookup.run)
-                                    && matches!(lookup.state, LookupState::Resolved(_))
-                            })
+                        if let Event::Controller(snapshot, effects) = event
+                            && snapshot.sentence == word
+                            && !snapshot.looking_up
                         {
-                            return snapshot;
+                            return (snapshot, effects);
                         }
                     }
                     panic!("resident event channel closed");
@@ -4735,41 +4747,50 @@ mod tests {
             })
         };
 
-        let refused = completed(&mut session, "banco", Language::Es);
+        // A missing Spanish dictionary refreshes the index check even when
+        // its snapshot comes after a newer text.
+        let (refused, effects) = completed(&mut session, "banco", Language::Es);
+        assert_eq!(
+            refused.shown.lookup(),
+            Some(&crate::view::Lookup::NoDictionary(Language::Es))
+        );
         session.view.set_field_text("new text");
         session.sentence_changed("new text".to_owned(), FieldEdit::Replaced);
-        session.render_controller(refused);
+        session.render_controller(*refused, effects);
         assert!(
             session.check.take().is_some(),
             "a stale refusal still refreshes"
         );
 
-        let refused = completed(&mut session, "otro", Language::Es);
-        let generation = session.indexes.begin_import();
-        session.render_controller(refused);
+        // An import already owning the refresh wins.
+        let (refused, effects) = completed(&mut session, "otro", Language::Es);
+        session.indexes.begin_import();
+        session.report_indexes();
+        session.render_controller(*refused, effects);
         assert!(
             session.check.is_none(),
             "the import already owns the refresh"
         );
 
-        let observed = completed(&mut session, "bank", Language::En);
-        session.view.set_field_text("river");
-        let edit = session.manual.edit("river".to_owned());
-        let Edit::Lone(run) = edit else {
-            panic!("a legacy lookup");
-        };
-        session.text_replaced(edit, FieldEdit::Replaced);
-        session.looked_up(
-            run,
-            generation,
-            Language::En,
-            Outcome::Finished(Looked {
-                answer: Answer::NoEntry,
+        // A lookup started in the new generation reports the indexes; a
+        // delayed one of the old generation does not overwrite them.
+        let generation = session.indexes.generation;
+        let (observed, effects) = completed(&mut session, "bank", Language::En);
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            Effect::ObserveIndexes { generation: g, .. } if *g == generation
+        )));
+        session.render_controller(*observed, effects);
+        let current = session.indexes.current().expect("observed indexes");
+        assert_eq!(current.definitions, State::Missing);
+        session.render_controller(
+            session.view_state.clone(),
+            vec![Effect::ObserveIndexes {
+                generation: generation - 1,
                 indexes: Indexes::OPEN,
-            }),
+            }],
         );
-        session.render_controller(observed);
-        assert_eq!(session.indexes.current(), Some(Indexes::OPEN));
+        assert_eq!(session.indexes.current(), Some(current));
         session.window.destroy();
     }
 
@@ -5028,27 +5049,24 @@ mod tests {
         use std::sync::Arc;
 
         use addict_core::translation::Canned;
-        use futures_util::StreamExt;
-        use gtk::glib;
 
         use crate::view::{Online, Whole};
         gtk::init().expect("a display");
         let (mut session, mut events, _work) =
             test_session("io.github.doqhu.Addict.AtOnceTest", Dirs::default());
+        let _controller = attach_controller(&mut session);
         let canned = Arc::new(Canned::new(Ok("Я сидел на берегу реки.")));
         session.translator = canned.clone();
         session.language = Language::En;
-        let context = glib::MainContext::default();
         let line = "I sat on the bank of the river.";
 
         assert!(session.at_once);
         let number = session.copying.begin();
         session.handle(Event::Clipboard(number, Ok(line.to_owned())));
-        assert_eq!(session.manual.chosen(), None);
-        while session.translating_sentence.is_some() {
-            let event = context.block_on(events.next()).expect("an event");
-            session.handle(event);
-        }
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == line && session.translating_sentence.is_none()
+        });
+        assert_eq!(session.view_state.chosen, None);
         let asked = canned.asked();
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].text, line);
@@ -5065,10 +5083,12 @@ mod tests {
         );
         // A click on `bank` sends the word alone.
         session.word_chosen(4);
-        while session.translating_word.is_some() || session.looking_up.job.is_some() {
-            let event = context.block_on(events.next()).expect("an event");
-            session.handle(event);
-        }
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.chosen == Some(4)
+                && !session.view_state.looking_up
+                && session.deferred.is_empty()
+                && session.translating_word.is_none()
+        });
         let asked = canned.asked();
         assert_eq!(asked.len(), 2);
         assert_eq!(asked[1].text, "bank");
@@ -5084,9 +5104,123 @@ mod tests {
             number,
             Ok("The bank was closed.".to_owned()),
         ));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "The bank was closed."
+        });
         assert!(session.translating_sentence.is_none());
         assert_eq!(session.online.shown(None), Default::default());
         assert_eq!(canned.asked().len(), 2);
+    }
+
+    /// Puts `texts` into the field one after another as the user would
+    /// submit them, with a controller attached, and waits for them: Back
+    /// has somewhere to go.
+    fn submit_texts(
+        session: &mut super::Session,
+        events: &mut futures_channel::mpsc::UnboundedReceiver<Event>,
+        texts: &[&str],
+    ) {
+        use super::FieldEdit;
+        for text in texts {
+            session.view.set_field_text(text);
+            session.sentence_changed((*text).to_owned(), FieldEdit::Typed);
+            session.submitted();
+        }
+        let last = texts.last().copied().unwrap_or_default().to_owned();
+        pump_until(session, events, move |session| {
+            session.view_state.sentence == last
+                && session.view_state.can_back
+                && !session.view_state.looking_up
+        });
+    }
+
+    /// A line read after the field was cleared for the read, but handled
+    /// before the controller's snapshot of the clear, stays in the field,
+    /// and its words can be clicked: the older snapshot never overwrites
+    /// it (AD-21). Run alone: GTK starts once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_read_line_handled_before_the_cleared_snapshot_keeps_the_line() {
+        gtk::init().expect("a display");
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.ClearedLineTest", Dirs::default());
+        let _controller = attach_controller(&mut session);
+        session.at_once = false;
+        let line = "I sat on the bank of the river.";
+
+        session.clear_for_read();
+        let number = session.copying.begin();
+        // Before any snapshot of the clear is handled.
+        session.handle(Event::Clipboard(number, Ok(line.to_owned())));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == line && !session.view_state.looking_up
+        });
+        assert_eq!(session.view.field_text(), line);
+        assert_eq!(session.sent_text, line);
+        assert_eq!(session.view_state.field.text, line);
+
+        session.word_chosen(4);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.chosen == Some(4) && !session.view_state.looking_up
+        });
+        assert_eq!(session.view.field_text(), line);
+    }
+
+    /// A key typed right after Back, before Back's snapshot comes, is kept:
+    /// the controller's text of Back does not overwrite it, and the shell
+    /// and the controller agree on the typed text after. Run alone.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_keystroke_after_back_before_its_snapshot_is_kept() {
+        use super::FieldEdit;
+        gtk::init().expect("a display");
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.BackKeystrokeTest", Dirs::default());
+        let _controller = attach_controller(&mut session);
+        submit_texts(&mut session, &mut events, &["river", "bank"]);
+        let revision = session.applied_field_revision;
+
+        session.back();
+        session.view.set_field_text("banks");
+        session.sentence_changed("banks".to_owned(), FieldEdit::Typed);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "banks" && !session.view_state.looking_up
+        });
+        assert_eq!(session.view.field_text(), "banks");
+        assert_eq!(session.sent_text, "banks");
+        assert_eq!(session.view_state.field.text, "banks");
+        assert!(
+            session.applied_field_revision > revision,
+            "Back's revision is applied, its text is not"
+        );
+        // The shell is in step: a word click of the typed text is taken.
+        assert!(!session.field_is_newer());
+    }
+
+    /// Back while the selection and the clipboard are being read gives the
+    /// read up, as a typed text does: the line it reports later does not
+    /// replace Back's text. Run alone.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn back_during_a_clipboard_read_gives_the_read_up() {
+        gtk::init().expect("a display");
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.BackReadTest", Dirs::default());
+        let _controller = attach_controller(&mut session);
+        submit_texts(&mut session, &mut events, &["river", "bank"]);
+
+        let number = session.copying.begin();
+        session.back();
+        assert!(!session.copying.is_running(number), "the read is given up");
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "river" && !session.view_state.looking_up
+        });
+        session.handle(Event::Clipboard(
+            number,
+            Ok("The bank was closed.".to_owned()),
+        ));
+        assert_eq!(session.view.field_text(), "river");
+        assert_eq!(session.sent_text, "river");
     }
 
     /// A saved Russian with English mine ends pressed whichever file is
@@ -5150,16 +5284,26 @@ mod tests {
         gtk::init().expect("a display");
         let (mut session, _events, _work) =
             test_session("io.github.doqhu.Addict.EnglishTest", Dirs::default());
-        // A chosen word in the manual only: the field stays empty, so it is
-        // newer, and a change of language or spelling sends nothing.
-        let _ = session.manual.edit("Me gusta el color rojo.".to_owned());
-        let color = session
-            .manual
-            .words()
+        // A chosen word in the controller only: the field stays empty, so
+        // it is newer, and a change of language or spelling sends nothing.
+        let sentence = "Me gusta el color rojo.".to_owned();
+        let words = addict_core::sentence::words(&sentence);
+        let color = words
             .iter()
-            .position(|word| &session.manual.sentence()[word.clone()] == "color")
+            .position(|word| &sentence[word.clone()] == "color")
             .expect("color");
-        session.manual.choose(color).expect("a word");
+        session.view_state.input = Some(
+            addict_core::input::Input::new(
+                "color",
+                Some(&sentence),
+                addict_core::input::Source::Manual,
+            )
+            .unwrap(),
+        );
+        session.view_state.sentence = sentence;
+        session.view_state.words = words;
+        session.view_state.chosen = Some(color);
+        session.view_state.source = addict_core::input::Source::Manual;
         // What the session sends for the word, as `start_translation` asks.
         let target_lang = |session: &super::Session| {
             let request = session
@@ -5182,7 +5326,7 @@ mod tests {
         // Back to the start: nothing read, Russian mine, US.
         session.my_language = Language::Ru;
         session.english = English::Us;
-        session.shown = Default::default();
+        session.view_state.shown = Default::default();
         session.settings.render_english(English::Us);
         session.settings.show_english(false);
         session
@@ -5233,8 +5377,18 @@ mod tests {
     fn the_indexes_line_and_the_definition_button_follow_my_language() {
         use addict_engine::dictionaries::{Indexes, State};
         gtk::init().expect("a display");
-        let (mut session, _events, _work) =
+        let (mut session, mut events, _work) =
             test_session("io.github.doqhu.Addict.MyTextsTest", Dirs::default());
+        let _controller = attach_controller(&mut session);
+        // The definition button names my language, which the controller's
+        // snapshot carries.
+        let mine = |session: &mut super::Session,
+                    events: &mut futures_channel::mpsc::UnboundedReceiver<Event>,
+                    language: Language| {
+            pump_until(session, events, |session| {
+                session.view_state.shown.translating().my == language
+            });
+        };
         let indexes = Indexes {
             definitions: State::Open,
             spanish: State::Open,
@@ -5255,6 +5409,7 @@ mod tests {
 
         // My language read after the indexes, as at startup.
         session.handle(Event::MyLanguageRead(Language::Es));
+        mine(&mut session, &mut events, Language::Es);
         assert_eq!(session.view.indexes_line(), (false, String::new()));
         assert_eq!(
             session.view.definition_action_text(),
@@ -5263,12 +5418,14 @@ mod tests {
 
         // Back to Russian, then English chosen in Settings.
         session.handle(Event::MyLanguageChosen(Language::Ru));
+        mine(&mut session, &mut events, Language::Ru);
         assert!(session.view.indexes_line().0);
         assert_eq!(
             session.view.definition_action_text(),
             "Translate definition into Russian"
         );
         session.handle(Event::MyLanguageChosen(Language::En));
+        mine(&mut session, &mut events, Language::En);
         assert_eq!(session.view.indexes_line(), (false, String::new()));
         assert_eq!(
             session.view.definition_action_text(),

@@ -138,8 +138,9 @@ that an artifact works on a target distribution.
   `zbus` or `ksni`; `scripts/check.sh` guards it, so a second frontend can
   reuse it.
 - `crates/addict-controller` -- the platform-independent event loop, view
-  snapshots, product deadlines and shared runner. It handles offline lookups
-  of typed words.
+  snapshots, product deadlines and shared runner. It owns the field, offline
+  lookups and their superseding, the shown result with its chosen sense or
+  gloss, the definition state, and the Back/Forward history.
 - `crates/addict-app` -- the `addict` program: the resident process, the
   window and the commands.
 

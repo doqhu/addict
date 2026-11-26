@@ -266,8 +266,8 @@ mod wrap;
 mod stub;
 
 use addict_engine::{
-    at_once, cache, dictionaries, download, english, evidence, history, language, manual,
-    my_language, online, translate, view,
+    at_once, cache, dictionaries, download, english, evidence, language, manual, my_language,
+    online, translate, view,
 };
 
 use std::{

@@ -1,25 +1,38 @@
-//! Shared product state and its event loop. The first migrated flow is the
-//! offline lookup of a typed word.
+//! Shared product state and its event loop: the field, the manual input,
+//! offline lookups, the shown result with its chosen sense or gloss, and
+//! history. One thread, ordered full snapshots, rising revision; GTK-free
+//! and platform-free.
+//!
+//! A shell renders [`ViewState`], dispatches [`Event`]s and runs
+//! [`Effect`]s. Product state lives here, not in the shell; online
+//! translation is still produced by the shell, which [`Effect::AskOnline`]
+//! tells when to ask.
 
 pub mod deadlines;
 
 use std::{
     io,
+    ops::Range,
     sync::{Arc, Weak, mpsc},
     thread::{self, JoinHandle},
 };
 
-use addict_core::{dirs::Dirs, translation::Source as Language};
+use addict_core::{
+    dirs::Dirs,
+    input::{Input, Source, WindowState},
+    translation::{English, Request, Source as Language},
+};
 use addict_deepl::key::KeySource;
 use addict_engine::{
     dictionaries::{Dictionaries, Indexes, Looked},
     evidence::{self, Answered},
-    manual,
-    view::Lookup,
+    history::History,
+    manual::{self, Edit, Manual},
+    view::{Lookup, Online, Shown},
     work::{Job, Outcome, Work},
 };
 
-/// Platform facts supplied by the shell. Typed lookup has no platform branches.
+/// Platform facts supplied by the shell.
 pub struct Platform {
     pub name: String,
 }
@@ -33,56 +46,161 @@ pub struct StartFacts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestId(u64);
 
-/// The word and the dictionary context at the time of the edit.
-#[derive(Debug)]
-pub struct TypedWord {
-    /// The number of this lookup in the shell's `Manual` state.
-    pub run: u64,
-    pub word: String,
-    pub reading: Language,
-    pub target: Language,
-    pub known_indexes: Option<Indexes>,
-    pub index_generation: u64,
+/// The text field: what it holds and how often the controller set it.
+///
+/// The shell keeps its own text while typing; it replaces its text only
+/// when `revision` rises. The controller raises `revision` only when it
+/// sets the text itself: Back, Forward, a synonym, or clearing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Field {
+    pub text: String,
+    pub revision: u64,
 }
 
 /// Facts sent to the controller by the shell.
+#[derive(Debug)]
 pub enum Event {
-    WordTyped(TypedWord),
-    TypedLookupRetired { run: u64 },
+    /// The field holds `text`, which the shell put there itself. `replaced`
+    /// is true when a new text was put in rather than typed: a paste, a
+    /// read selection or clipboard, a capture. `source` names where a
+    /// replaced text came from when it was read rather than pasted:
+    /// [`Source::Ocr`] for a capture, [`Source::Clipboard`] for the
+    /// selection or the clipboard; `None` otherwise.
+    FieldEdited {
+        text: String,
+        replaced: bool,
+        source: Option<Source>,
+    },
+    /// The field is cleared for a read; the controller sets it empty.
+    FieldCleared,
+    /// The text of the field was submitted, by Enter or by a paste.
+    FieldSubmitted,
+    /// The word with this index in the shown sentence was chosen.
+    WordChosen { index: usize },
+    /// The sense with this index in the shown list was chosen.
+    SenseChosen { index: usize },
+    /// The English gloss with this index in the shown article was chosen.
+    GlossChosen { index: usize },
+    /// A synonym was chosen: its word goes into the field and is submitted.
+    SynonymChosen(String),
+    /// Back was pressed.
+    Back,
+    /// Forward was pressed.
+    Forward,
+    /// The reading language changed.
+    SetReading(Language),
+    /// My language changed, and with it the reading language to `reading`.
+    SetMyLanguage {
+        language: Language,
+        reading: Language,
+    },
+    /// The reading language pressed in the switch changed (rendering only).
+    SetPressed(Language),
+    /// A source is being read now (capture, clipboard), or no longer.
+    SetReadingSource(Option<Source>),
+    /// The spelling of English changed.
+    SetEnglish(English),
+    /// The shell's `IndexCache` stands at `generation`, knowing `indexes`.
+    KnownIndexes {
+        generation: u64,
+        indexes: Option<Indexes>,
+    },
+    /// Redo the offline result of the shown word and ask its online texts
+    /// again.
+    AskAgain,
+    /// The user explicitly requested the selected dictionary definition.
+    DefinitionAction,
+    /// A definition translation ended with this `online` for `number`.
+    DefinitionAnswered { number: u64, online: Online },
+}
+
+/// What the shell's online translation is to ask now, read from the
+/// snapshot the effect comes with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    /// The word with this index in a sentence was chosen: what is not yet
+    /// known online about it and its sentence.
+    Chosen { index: usize },
+    /// The field's text was submitted: Enter, a paste, Back, Forward or a
+    /// synonym.
+    Submitted,
+    /// A read text (selection, clipboard, capture) replaced the field.
+    Replaced,
+    /// The offline result was redone after the reading language, my
+    /// language or the spelling of English changed: forget and ask again.
+    Again,
 }
 
 /// Commands for the shell. Offline lookup uses only the Rust runner.
-#[derive(Debug)]
-pub enum Effect {}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    /// The shell's `IndexCache` should check where the indexes stand and
+    /// report back with [`Event::KnownIndexes`]. `index_generation` is the
+    /// generation at emission; a shell refresh newer than this already owns
+    /// it.
+    CheckIndexes { index_generation: u64 },
+    /// The controller asks online for a definition; the shell sends it and
+    /// reports back with [`Event::DefinitionAnswered`] carrying `number`.
+    RequestDefinition { number: u64, request: Request },
+    /// A lookup started at `generation` read where the dictionary indexes
+    /// stand; the shell updates its `IndexCache`.
+    ObserveIndexes { generation: u64, indexes: Indexes },
+    /// A lookup ended; the shell records its evidence.
+    RecordLookup(Answered),
+    /// The shell's online translation asks what `Ask` says.
+    AskOnline(Ask),
+}
 
 /// The entire controller-owned view state at one revision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewState {
     pub revision: u64,
-    pub typed_lookup: Option<TypedLookup>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypedLookup {
-    pub id: RequestId,
-    pub run: u64,
-    pub index_generation: u64,
-    pub state: LookupState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LookupState {
-    Pending,
-    Resolved(Box<Resolution>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Resolution {
-    pub lookup: Lookup,
+    pub field: Field,
+    pub shown: Shown,
+    pub window_state: WindowState,
+    pub source: Source,
+    pub sentence: String,
+    pub words: Vec<Range<usize>>,
+    pub chosen: Option<usize>,
+    pub can_back: bool,
+    pub can_forward: bool,
+    /// The number of the text; changes with every new text, not a click.
+    pub text_number: u64,
+    /// The source being read now, if any.
+    pub reading_source: Option<Source>,
+    /// The chosen word, with its sentence when it has one.
+    pub input: Option<Input>,
+    /// The sentence of the chosen word: its number in the text and its byte
+    /// range, `None` when the word has none.
+    pub context: Option<(usize, Range<usize>)>,
+    /// Whether the offline lookup of the chosen word runs.
+    pub looking_up: bool,
+    /// The language that gave the result of the last lookup, once it
+    /// finished with one; `None` before and for one that did not finish.
     pub answered: Option<Language>,
-    pub indexes: Option<Indexes>,
-    pub evidence: Option<Answered>,
-    pub check_indexes: bool,
+}
+
+impl Default for ViewState {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            field: Field::default(),
+            shown: Shown::default(),
+            window_state: WindowState::Empty,
+            source: Source::Manual,
+            sentence: String::new(),
+            words: Vec::new(),
+            chosen: None,
+            can_back: false,
+            can_forward: false,
+            text_number: 0,
+            reading_source: None,
+            input: None,
+            context: None,
+            looking_up: false,
+            answered: None,
+        }
+    }
 }
 
 /// Receives snapshots on the controller thread. Renderers enqueue their work
@@ -126,12 +244,12 @@ impl Controller {
         self.dispatch.clone()
     }
 
-    /// Legacy jobs use this runner until their orchestration is migrated.
+    /// The one runner instance; the shell's own jobs run on it too.
     pub fn work(&self) -> Weak<Work> {
         self.work.clone()
     }
 
-    /// Both paths use the same open files and see index imports together.
+    /// The one set of dictionaries; the shell's index checks read it too.
     pub fn dictionaries(&self) -> Arc<Dictionaries> {
         self.dictionaries.clone()
     }
@@ -167,7 +285,16 @@ pub fn start(
         send: send.clone(),
         request: 0,
         revision: 0,
-        current: None,
+        field: Field::default(),
+        manual: Manual::default(),
+        history: History::default(),
+        shown: Shown::default(),
+        reading: Language::En,
+        my_language: Language::Ru,
+        known: None,
+        index_generation: 0,
+        lookup: None,
+        answered: None,
     };
     let thread = thread::Builder::new()
         .name("addict-controller".to_owned())
@@ -182,14 +309,24 @@ pub fn start(
 
 enum Message {
     Event(Event),
-    LookedUp(RequestId, Language, Box<Outcome<Looked>>),
+    LookedUp(LookedUp),
     Stop,
 }
 
+/// The end of the lookup `id`, started as `Manual`'s run `run` while the
+/// shell's indexes stood at `generation`, answered by `language`.
+struct LookedUp {
+    id: RequestId,
+    run: u64,
+    generation: u64,
+    language: Language,
+    outcome: Box<Outcome<Looked>>,
+}
+
+/// The offline lookup of the chosen word; dropping `_job` cancels it.
 struct Active {
-    word: String,
-    snapshot: TypedLookup,
-    job: Option<Job>,
+    id: RequestId,
+    _job: Job,
 }
 
 struct Model {
@@ -201,156 +338,511 @@ struct Model {
     send: mpsc::Sender<Message>,
     request: u64,
     revision: u64,
-    current: Option<Active>,
+    field: Field,
+    manual: Manual,
+    /// The texts the field held, for Back and Forward; kept for the life of
+    /// the process, hidden window included.
+    history: History,
+    shown: Shown,
+    reading: Language,
+    my_language: Language,
+    /// What the shell's `IndexCache` knows of the indexes, and its
+    /// generation.
+    known: Option<Indexes>,
+    index_generation: u64,
+    /// The lookup whose outcome is awaited.
+    lookup: Option<Active>,
+    /// The language that gave the result of the last started lookup, once
+    /// it finished.
+    answered: Option<Language>,
 }
 
 impl Model {
     fn serve(mut self, receive: mpsc::Receiver<Message>, renderer: impl Renderer) {
-        self.render(&renderer);
+        self.render(&renderer, Vec::new());
         while let Ok(message) = receive.recv() {
+            let mut effects = Vec::new();
             let changed = match message {
-                Message::Event(Event::WordTyped(word)) => {
-                    self.look_up(word);
-                    true
-                }
-                Message::Event(Event::TypedLookupRetired { run }) => self.retire(run),
-                Message::LookedUp(id, language, outcome) => self.looked_up(id, language, *outcome),
+                Message::Event(event) => self.apply(event, &mut effects),
+                Message::LookedUp(looked) => self.looked_up(looked, &mut effects),
                 Message::Stop => break,
             };
-            if changed {
-                self.render(&renderer);
+            if changed || !effects.is_empty() {
+                self.render(&renderer, effects);
             }
         }
     }
 
-    fn render(&mut self, renderer: &impl Renderer) {
+    fn render(&mut self, renderer: &impl Renderer, effects: Vec<Effect>) {
         self.revision += 1;
-        renderer.render(
-            ViewState {
-                revision: self.revision,
-                typed_lookup: self.current.as_ref().map(|active| active.snapshot.clone()),
-            },
-            Vec::new(),
-        );
+        renderer.render(self.view(), effects);
     }
 
-    fn retire(&mut self, run: u64) -> bool {
-        if self.current.as_ref().is_some_and(|a| a.snapshot.run == run) {
-            self.current = None;
-            return true;
+    fn view(&self) -> ViewState {
+        let manual = &self.manual;
+        ViewState {
+            revision: self.revision,
+            field: self.field.clone(),
+            shown: self.shown.clone(),
+            window_state: manual.state(),
+            source: manual.source(),
+            sentence: manual.sentence().to_owned(),
+            words: manual.words().to_vec(),
+            chosen: manual.chosen(),
+            can_back: self.history.can_back(manual.sentence()),
+            can_forward: self.history.can_forward(),
+            text_number: manual.text_number(),
+            reading_source: manual.reading(),
+            input: manual.input().cloned(),
+            context: manual.chosen().and_then(|index| manual.sentence_of(index)),
+            looking_up: self.lookup.is_some(),
+            answered: self.answered,
         }
-        false
     }
 
-    fn look_up(&mut self, typed: TypedWord) {
+    /// Applies `event`; says whether the view changed.
+    fn apply(&mut self, event: Event, effects: &mut Vec<Effect>) -> bool {
+        match event {
+            Event::FieldEdited {
+                text,
+                replaced,
+                source,
+            } => self.field_edited(text, replaced, source, effects),
+            Event::FieldCleared => self.field_cleared(effects),
+            Event::FieldSubmitted => self.submitted(effects),
+            Event::WordChosen { index } => self.word_chosen(index, effects),
+            Event::SenseChosen { index } => self.shown.choose(index),
+            Event::GlossChosen { index } => self.gloss_chosen(index, effects),
+            Event::SynonymChosen(word) => self.put(word, effects),
+            Event::Back => self.back(effects),
+            Event::Forward => self.forward(effects),
+            Event::SetReading(language) => self.set_reading(language, effects),
+            Event::SetMyLanguage { language, reading } => {
+                self.set_my_language(language, reading, effects)
+            }
+            Event::SetPressed(language) => {
+                self.shown.set_pressed(language);
+                true
+            }
+            Event::SetReadingSource(source) => {
+                self.manual.set_reading(source);
+                true
+            }
+            Event::SetEnglish(english) => {
+                self.shown.set_english(english);
+                true
+            }
+            Event::KnownIndexes {
+                generation,
+                indexes,
+            } => {
+                self.index_generation = generation;
+                self.known = indexes;
+                false
+            }
+            Event::AskAgain => self.ask_again(effects),
+            Event::DefinitionAction => self.definition_action(effects),
+            Event::DefinitionAnswered { number, online } => {
+                self.shown.answer_definition(number, online)
+            }
+        }
+    }
+
+    /// The shell put `text` into the field: typed, pasted or read. What was
+    /// chosen in the old text is gone, and what follows a new text follows.
+    /// A replaced text is recorded; a typed one is not, but Back can go
+    /// from it. The shell owns its text, so `field.revision` stays.
+    fn field_edited(
+        &mut self,
+        text: String,
+        replaced: bool,
+        source: Option<Source>,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        let edit = match source {
+            Some(Source::Ocr) => self.manual.recognized(text),
+            Some(Source::Clipboard) => self.manual.copied(&text),
+            Some(Source::Manual) | None => self.manual.edit(text),
+        };
+        self.field.text = self.manual.sentence().to_owned();
+        // `Cleared` is any new text with no word chosen; an empty one is
+        // not recorded.
+        if replaced && edit != Edit::Same {
+            self.history.record(self.manual.sentence());
+        }
+        self.text_replaced(edit, effects);
+        if replaced && source.is_some() {
+            effects.push(Effect::AskOnline(Ask::Replaced));
+        }
+        // An edit ends the reading of a source even when the text is the
+        // same: the window state may have changed.
+        true
+    }
+
+    /// The field is cleared for a read: the controller sets it empty.
+    fn field_cleared(&mut self, effects: &mut Vec<Effect>) -> bool {
+        let edit = self.manual.edit(String::new());
+        self.set_field(String::new());
+        self.text_replaced(edit, effects);
+        true
+    }
+
+    /// What follows a new text in the field: a lone word is looked up at
+    /// once; a new text with no word chosen hides the result, and the
+    /// lookup of the old one is given up.
+    fn text_replaced(&mut self, edit: Edit, effects: &mut Vec<Effect>) {
+        match edit {
+            Edit::Same => {}
+            Edit::Cleared => {
+                // Dropping the job cancels it; whatever it still reports
+                // is not awaited.
+                self.lookup = None;
+                self.answered = None;
+                self.shown.show(None);
+            }
+            Edit::Lone(run) => self.start_lookup(run, effects),
+        }
+    }
+
+    /// The word with `index` is chosen, with its sentence, and looked up;
+    /// its online texts are asked. An invalid index is ignored.
+    fn word_chosen(&mut self, index: usize, effects: &mut Vec<Effect>) -> bool {
+        let Some(run) = self.manual.choose(index) else {
+            return false;
+        };
+        self.start_lookup(run, effects);
+        effects.push(Effect::AskOnline(Ask::Chosen { index }));
+        true
+    }
+
+    /// An English gloss was chosen: it is translated as it is chosen, with
+    /// no button, once and again only after a refusal. Out of range or an
+    /// English article is ignored.
+    fn gloss_chosen(&mut self, index: usize, effects: &mut Vec<Effect>) -> bool {
+        if !self.shown.choose_gloss(index) {
+            return false;
+        }
+        self.definition_action(effects);
+        true
+    }
+
+    /// Records the current text; the shell asks its online texts.
+    fn submitted(&mut self, effects: &mut Vec<Effect>) -> bool {
+        self.history.record(self.manual.sentence());
+        effects.push(Effect::AskOnline(Ask::Submitted));
+        true
+    }
+
+    /// Back: the text before in the history is put into the field as a
+    /// paste puts it, so it is looked up and submitted again. A typed text
+    /// that is not in the history is recorded first, so Forward comes back
+    /// to it. At the start nothing happens.
+    fn back(&mut self, effects: &mut Vec<Effect>) -> bool {
+        let current = self.manual.sentence().to_owned();
+        let Some(text) = self.history.back(&current).map(str::to_owned) else {
+            return false;
+        };
+        self.put(text, effects)
+    }
+
+    /// Forward: the text after in the history is put into the field as Back
+    /// puts one. At the end nothing happens.
+    fn forward(&mut self, effects: &mut Vec<Effect>) -> bool {
+        let Some(text) = self.history.forward().map(str::to_owned) else {
+            return false;
+        };
+        self.put(text, effects)
+    }
+
+    /// Puts `text` into the field as a paste does: the controller sets it
+    /// (`field.revision` rises), it is a new text even when it reads as the
+    /// one held, and it is submitted. After Back or Forward the submit
+    /// records the text at the position, which changes nothing.
+    fn put(&mut self, text: String, effects: &mut Vec<Effect>) -> bool {
+        // A paste replaces the text with none first, then with the new one.
+        let cleared = self.manual.edit(String::new());
+        self.text_replaced(cleared, effects);
+        let edit = self.manual.edit(text.clone());
+        self.set_field(text);
+        self.text_replaced(edit, effects);
+        self.submitted(effects)
+    }
+
+    /// The controller sets the field text itself: `field.revision` rises.
+    fn set_field(&mut self, text: String) {
+        self.field.text = text;
+        self.field.revision += 1;
+    }
+
+    fn set_reading(&mut self, language: Language, effects: &mut Vec<Effect>) -> bool {
+        self.reading = language;
+        self.shown.set_pressed(language);
+        self.ask_again(effects)
+    }
+
+    fn set_my_language(
+        &mut self,
+        language: Language,
+        reading: Language,
+        effects: &mut Vec<Effect>,
+    ) -> bool {
+        self.my_language = language;
+        self.shown.set_my_language(language);
+        // Rendered for the new pair: a result looked up for the language
+        // before shows none of its translations.
+        self.reading = reading;
+        self.shown.set_pressed(reading);
+        self.ask_again(effects)
+    }
+
+    /// Redoes the offline result of the shown word, if there is one; the
+    /// shell forgets and asks again its online texts.
+    fn ask_again(&mut self, effects: &mut Vec<Effect>) -> bool {
+        if let Some(run) = self.manual.again() {
+            self.start_lookup(run, effects);
+        }
+        effects.push(Effect::AskOnline(Ask::Again));
+        true
+    }
+
+    fn definition_action(&mut self, effects: &mut Vec<Effect>) -> bool {
+        let Some((number, request)) = self.shown.request_definition() else {
+            return false;
+        };
+        effects.push(Effect::RequestDefinition { number, request });
+        true
+    }
+
+    /// Shows the input that was just chosen and starts its lookup as run
+    /// `run`, superseding any earlier one; for a reading language without
+    /// an offline dictionary no lookup starts, and the line that says so is
+    /// shown.
+    fn start_lookup(&mut self, run: u64, effects: &mut Vec<Effect>) {
         // Dropping the old job cancels it. Any outcome already queued still
-        // carries its old request id.
-        self.current = None;
+        // carries its old request id and run.
+        self.lookup = None;
+        self.answered = None;
+        let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
+            self.shown.show(None);
+            return;
+        };
         self.request += 1;
         let id = RequestId(self.request);
         let send = self.send.clone();
+        let language = self.reading;
+        let generation = self.index_generation;
         let started = manual::offline(
             Some(&self.work),
             deadlines::LOOKUP_LIMIT,
             self.dictionaries.clone(),
-            typed.word.clone(),
-            typed.reading,
-            typed.target,
-            typed.known_indexes,
+            word,
+            language,
+            self.my_language,
+            self.known,
             move |language, outcome| {
-                let _ = send.send(Message::LookedUp(id, language, Box::new(outcome)));
+                // On the worker: only the queue is touched.
+                let _ = send.send(Message::LookedUp(LookedUp {
+                    id,
+                    run,
+                    generation,
+                    language,
+                    outcome: Box::new(outcome),
+                }));
             },
         );
-        let (job, state) = match started {
-            Ok(job) => (Some(job), LookupState::Pending),
-            Err(lookup) => (
-                None,
-                LookupState::Resolved(Box::new(Resolution {
-                    check_indexes: manual::checks_again(&lookup, typed.reading),
-                    lookup: *lookup,
-                    answered: None,
-                    indexes: None,
-                    evidence: None,
-                })),
-            ),
-        };
-        self.current = Some(Active {
-            word: typed.word,
-            snapshot: TypedLookup {
-                id,
-                run: typed.run,
-                index_generation: typed.index_generation,
-                state,
-            },
-            job,
-        });
+        match started {
+            Ok(job) => {
+                self.lookup = Some(Active { id, _job: job });
+                self.shown.show(Some(Lookup::Pending));
+            }
+            Err(lookup) => {
+                let checks = manual::checks_again(&lookup, language);
+                self.shown.show(Some(*lookup));
+                if checks {
+                    effects.push(Effect::CheckIndexes {
+                        index_generation: generation,
+                    });
+                }
+            }
+        }
     }
 
-    fn looked_up(&mut self, id: RequestId, language: Language, outcome: Outcome<Looked>) -> bool {
-        let Some(current) = &mut self.current else {
-            return false;
-        };
-        if current.snapshot.id != id || current.job.take().is_none() {
+    /// A lookup ended. Where it found the indexes is reported for every
+    /// one that read them, and every one is recorded; only the last
+    /// started one, whose word is still chosen, is shown, with the line
+    /// that names the answering language when it is not the chosen one.
+    fn looked_up(&mut self, looked: LookedUp, effects: &mut Vec<Effect>) -> bool {
+        let LookedUp {
+            id,
+            run,
+            generation,
+            language,
+            outcome,
+        } = looked;
+        if let Outcome::Finished(looked) = outcome.as_ref() {
+            effects.push(Effect::ObserveIndexes {
+                generation,
+                indexes: looked.indexes,
+            });
+        }
+        if let Some(answered) = evidence::answered(&outcome) {
+            effects.push(Effect::RecordLookup(answered));
+        }
+        let current = self.lookup.as_ref().is_some_and(|active| active.id == id);
+        if !current || !self.manual.awaits(run) {
             return false;
         }
-        let indexes = match &outcome {
-            Outcome::Finished(looked) => Some(looked.indexes),
-            _ => None,
+        self.lookup = None;
+        let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
+            return true;
         };
-        let evidence = evidence::answered(&outcome);
-        let Some(lookup) = manual::result_in(outcome, &current.word, language) else {
-            return false;
-        };
-        current.snapshot.state = LookupState::Resolved(Box::new(Resolution {
-            lookup,
-            answered: indexes.map(|_| language),
-            indexes,
-            evidence,
-            check_indexes: false,
-        }));
+        let finished = matches!(outcome.as_ref(), Outcome::Finished(_));
+        if let Some(lookup) = manual::result_in(*outcome, &word, language) {
+            self.shown
+                .show_elsewhere(Some(lookup), self.reading, language);
+        }
+        // A lookup that did not finish names no language: the chosen one.
+        self.answered = finished.then_some(language);
         true
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, time::Duration};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        thread,
+        time::Duration,
+    };
 
+    use addict_core::translation::Source as Language;
     use addict_deepl::key::KeySource;
     use addict_dictionary::{
         format::{Contents, Headword, SenseRecord, encode},
-        import::{self, Source},
+        import::{self, Source as IndexSource},
     };
+    use addict_engine::view::Choice;
 
     use super::*;
 
     const WAIT: Duration = Duration::from_secs(5);
     const DEFINITION: &str = "the ground alongside a river";
+    const RIVER: &str = "a large natural stream of water";
+    /// What a check finds after the Spanish import.
+    const SPANISH: Indexes = Indexes {
+        spanish: addict_engine::dictionaries::State::Open,
+        ..Indexes::OPEN
+    };
+    static TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
+    /// A data directory with an English index of `bank` and `river`, and on
+    /// request a Spanish one of `banco` with its English gloss.
     struct TestData(PathBuf);
 
     impl TestData {
         fn with_bank() -> Self {
-            let dir = std::env::temp_dir().join(format!("addict-tracer-{}", std::process::id()));
+            let unique = TEST_DIR.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir()
+                .join(format!("addict-controller-{}-{unique}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
             fs::create_dir(&dir).unwrap();
             let data = Self(dir);
-            let index = encode(&Contents {
-                source: "oewn".to_owned(),
-                senses: vec![SenseRecord {
-                    definition: DEFINITION.to_owned(),
-                    members: vec!["bank".to_owned()],
+            data.write(
+                IndexSource::Oewn,
+                Contents {
+                    source: "oewn".to_owned(),
+                    senses: vec![
+                        SenseRecord {
+                            definition: DEFINITION.to_owned(),
+                            members: vec!["bank".to_owned(), "shore".to_owned()],
+                            ..Default::default()
+                        },
+                        SenseRecord {
+                            definition: RIVER.to_owned(),
+                            members: vec!["river".to_owned()],
+                            ..Default::default()
+                        },
+                    ],
+                    headwords: vec![
+                        Headword {
+                            word: "bank".to_owned(),
+                            senses: vec![0],
+                            ..Default::default()
+                        },
+                        Headword {
+                            word: "river".to_owned(),
+                            senses: vec![1],
+                            ..Default::default()
+                        },
+                        Headword {
+                            word: "shore".to_owned(),
+                            senses: vec![0],
+                            ..Default::default()
+                        },
+                    ],
                     ..Default::default()
-                }],
-                headwords: vec![Headword {
-                    word: "bank".to_owned(),
-                    senses: vec![0],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-            .unwrap();
-            fs::write(import::index_path(&data.0, Source::Oewn), index).unwrap();
+                },
+            );
             data
+        }
+
+        fn with_banco() -> Self {
+            let data = Self::with_bank();
+            data.write(
+                IndexSource::KaikkiEs,
+                Contents {
+                    source: "kaikki-es".to_owned(),
+                    senses: vec![SenseRecord {
+                        definition: "Empresa que ofrece servicios monetarios.".to_owned(),
+                        ..Default::default()
+                    }],
+                    headwords: vec![Headword {
+                        word: "banco".to_owned(),
+                        senses: vec![0],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            );
+            data.write(
+                IndexSource::WikdictEsRu,
+                Contents {
+                    source: "es-ru".to_owned(),
+                    headwords: vec![Headword {
+                        word: "banco".to_owned(),
+                        translations: vec!["банк".to_owned()],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            );
+            data.write(
+                IndexSource::KaikkiEnSpanish,
+                Contents {
+                    source: "es-en".to_owned(),
+                    senses: vec![SenseRecord {
+                        definition: "bank".to_owned(),
+                        ..Default::default()
+                    }],
+                    headwords: vec![Headword {
+                        word: "banco".to_owned(),
+                        senses: vec![0],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            );
+            data
+        }
+
+        fn write(&self, source: IndexSource, contents: Contents) {
+            fs::write(
+                import::index_path(&self.0, source),
+                encode(&contents).unwrap(),
+            )
+            .unwrap();
         }
     }
 
@@ -360,9 +852,10 @@ mod tests {
         }
     }
 
+    /// A scripted shell: events in, snapshots and effects out, in order.
     struct FakeShell {
         controller: Controller,
-        renders: mpsc::Receiver<ViewState>,
+        renders: mpsc::Receiver<(ViewState, Vec<Effect>)>,
         revision: u64,
     }
 
@@ -381,10 +874,9 @@ mod tests {
                 StartFacts {
                     key_source: KeySource::pending(),
                 },
-                move |view, effects: Vec<Effect>| {
+                move |view, effects| {
                     assert_ne!(thread::current().id(), caller);
-                    assert!(effects.is_empty());
-                    send.send(view).unwrap();
+                    send.send((view, effects)).unwrap();
                 },
             )
             .unwrap();
@@ -393,128 +885,529 @@ mod tests {
                 renders,
                 revision: 0,
             };
-            assert!(shell.next().is_none());
+            let (view, effects) = shell.next();
+            assert_eq!(view.field, Field::default());
+            assert!(effects.is_empty());
             shell
         }
 
-        fn next(&mut self) -> Option<TypedLookup> {
-            let view = self.renders.recv_timeout(WAIT).expect("controller render");
+        /// The next render; its revision is newer than the last one.
+        fn next(&mut self) -> (ViewState, Vec<Effect>) {
+            let (view, effects) = self.renders.recv_timeout(WAIT).expect("controller render");
             assert!(view.revision > self.revision);
             self.revision = view.revision;
-            view.typed_lookup
+            (view, effects)
         }
 
-        fn type_word(&self, run: u64, word: &str, reading: Language) {
-            assert!(self.controller.dispatch(Event::WordTyped(TypedWord {
-                run,
-                word: word.to_owned(),
-                reading,
-                target: Language::Ru,
-                known_indexes: Some(Indexes::MISSING),
-                index_generation: 7,
-            })));
+        /// Renders until the lookup of the chosen word has ended.
+        fn settled(&mut self) -> (ViewState, Vec<Effect>) {
+            loop {
+                let (view, effects) = self.next();
+                if !view.looking_up {
+                    return (view, effects);
+                }
+            }
         }
+
+        fn dispatch(&self, event: Event) {
+            assert!(self.controller.dispatch(event));
+        }
+
+        /// `event` changes nothing: the next render is the one of a marker
+        /// sent after it.
+        fn quiet(&mut self, event: Event) {
+            self.dispatch(event);
+            self.dispatch(Event::SetReadingSource(Some(Source::Clipboard)));
+            let (view, effects) = self.next();
+            assert_eq!(view.reading_source, Some(Source::Clipboard));
+            assert!(effects.is_empty(), "{effects:?}");
+            self.dispatch(Event::SetReadingSource(None));
+            self.next();
+        }
+
+        fn edit(&self, text: &str) {
+            self.dispatch(Event::FieldEdited {
+                text: text.to_owned(),
+                replaced: false,
+                source: None,
+            });
+        }
+
+        /// Types `text` and submits it, as Enter does; gives the settled
+        /// view and the effects of the submit.
+        fn submit(&mut self, text: &str) -> (ViewState, Vec<Effect>) {
+            self.edit(text);
+            self.settled();
+            self.dispatch(Event::FieldSubmitted);
+            self.next()
+        }
+
+        /// Holds the one worker until the returned sender sends or drops.
+        fn hold_worker(&self) -> (mpsc::Sender<()>, Job) {
+            let work = self.controller.work().upgrade().unwrap();
+            let (started, waiting) = mpsc::channel();
+            let (release, blocked) = mpsc::channel::<()>();
+            let gate = work.run(
+                WAIT,
+                async move {
+                    started.send(()).unwrap();
+                    let _ = blocked.recv_timeout(WAIT);
+                },
+                |_| {},
+            );
+            waiting.recv_timeout(WAIT).unwrap();
+            (release, gate)
+        }
+    }
+
+    fn article_definition(view: &ViewState) -> &str {
+        let Some(Lookup::Article(article)) = view.shown.lookup() else {
+            panic!("an article, not {:?}", view.shown.lookup());
+        };
+        &article.senses[0].definition
+    }
+
+    fn asks(effects: &[Effect]) -> Vec<Ask> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::AskOnline(ask) => Some(*ask),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
     fn a_typed_word_renders_an_article_in_a_newer_snapshot() {
         let data = TestData::with_bank();
         let mut shell = FakeShell::start(Some(data.0.clone()));
-        shell.type_word(3, "bank", Language::En);
-        let pending = shell.next().unwrap();
-        assert_eq!(pending.state, LookupState::Pending);
-        let completed = shell.next().unwrap();
-        assert_eq!(
-            (completed.run, completed.id, completed.index_generation),
-            (3, pending.id, 7)
+        shell.edit("bank");
+        let (pending, effects) = shell.next();
+        assert_eq!(pending.field.text, "bank");
+        assert_eq!(pending.shown.lookup(), Some(&Lookup::Pending));
+        assert!(pending.looking_up);
+        // Typing asks nothing online.
+        assert!(asks(&effects).is_empty());
+        let (completed, effects) = shell.next();
+        // No revision rise for typing; no history.
+        assert_eq!(completed.field.text, "bank");
+        assert_eq!(completed.field.revision, 0);
+        assert!(!completed.can_back && !completed.can_forward);
+        assert!(!completed.looking_up);
+        assert_eq!(article_definition(&completed), DEFINITION);
+        assert_eq!(completed.answered, Some(Language::En));
+        assert!(effects.contains(&Effect::RecordLookup(Answered::Article)));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::ObserveIndexes { generation: 0, .. }))
         );
-        let LookupState::Resolved(resolution) = completed.state else {
-            panic!("lookup must resolve");
-        };
-        let Lookup::Article(article) = resolution.lookup else {
-            panic!("bank must have an article");
-        };
-        assert_eq!(article.senses[0].definition, DEFINITION);
-        assert_eq!(resolution.answered, Some(Language::En));
-        assert_eq!(resolution.evidence, Some(Answered::Article));
-        assert!(resolution.indexes.is_some());
+        assert!(asks(&effects).is_empty(), "no DeepL");
 
         let dispatcher = shell.controller.dispatcher();
         let work = shell.controller.work();
         assert!(work.upgrade().is_some());
         drop(shell);
         assert!(work.upgrade().is_none());
-        assert!(!dispatcher.dispatch(Event::TypedLookupRetired { run: 3 }));
+        assert!(!dispatcher.dispatch(Event::FieldSubmitted));
     }
 
     #[test]
     fn a_replaced_lookup_cannot_settle_the_new_one_and_a_refusal_asks_for_indexes() {
         let mut shell = FakeShell::start(None);
         // Hold the worker while both edits are handled on the controller.
-        let work = shell.controller.work().upgrade().unwrap();
-        let (started, waiting) = mpsc::channel();
-        let (release, blocked) = mpsc::channel();
-        let _gate = work.run(
-            WAIT,
-            async move {
-                started.send(()).unwrap();
-                let _ = blocked.recv_timeout(WAIT);
-            },
-            |_| {},
-        );
-        waiting.recv_timeout(WAIT).unwrap();
-
-        shell.type_word(3, "bank", Language::En);
-        let old = shell.next().unwrap();
-        assert_eq!(old.state, LookupState::Pending);
-        shell.type_word(5, "river", Language::En);
-        let current = shell.next().unwrap();
-        assert_eq!(current.state, LookupState::Pending);
-        assert!(current.id.0 > old.id.0);
-        assert!(
-            shell
-                .controller
-                .dispatch(Event::TypedLookupRetired { run: old.run })
-        );
-        // A worker callback may have succeeded in enqueuing before cancellation.
+        let (release, _gate) = shell.hold_worker();
+        shell.edit("bank");
+        let (old, _) = shell.next();
+        assert_eq!(old.shown.lookup(), Some(&Lookup::Pending));
+        shell.edit("river");
+        let (current, _) = shell.next();
+        assert_eq!(current.shown.lookup(), Some(&Lookup::Pending));
+        assert_eq!(current.sentence, "river");
+        // A worker callback may have succeeded in enqueuing before
+        // cancellation: the first lookup, of the first run.
         shell
             .controller
             .dispatch
             .0
-            .send(Message::LookedUp(
-                old.id,
-                Language::En,
-                Box::new(Outcome::Panicked),
-            ))
+            .send(Message::LookedUp(LookedUp {
+                id: RequestId(1),
+                run: 1,
+                generation: 0,
+                language: Language::En,
+                outcome: Box::new(Outcome::Panicked),
+            }))
             .unwrap();
         release.send(()).unwrap();
-        let completed = shell.next().unwrap();
-        assert_eq!(completed.id, current.id);
-        let LookupState::Resolved(resolved) = completed.state else {
-            panic!("current lookup must resolve");
-        };
+        let (stale, _) = shell.next();
+        assert_eq!(stale.shown.lookup(), Some(&Lookup::Pending), "stale");
+        let (completed, _) = shell.next();
         assert_eq!(
-            resolved.lookup,
-            Lookup::NotImported {
+            completed.shown.lookup(),
+            Some(&Lookup::NotImported {
                 word: "river".to_owned()
+            })
+        );
+
+        // A missing dictionary starts no job and asks for the indexes.
+        shell.dispatch(Event::KnownIndexes {
+            generation: 7,
+            indexes: Some(Indexes::MISSING),
+        });
+        shell.dispatch(Event::SetReading(Language::Es));
+        let (refused, effects) = shell.next();
+        assert_eq!(
+            refused.shown.lookup(),
+            Some(&Lookup::NoDictionary(Language::Es))
+        );
+        assert!(!refused.looking_up);
+        assert!(effects.contains(&Effect::CheckIndexes {
+            index_generation: 7
+        }));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::RecordLookup(_)))
+        );
+    }
+
+    #[test]
+    fn typing_a_sentence_looks_nothing_up_and_records_nothing() {
+        let data = TestData::with_bank();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        shell.edit("the bank of the river");
+        let (view, effects) = shell.next();
+        assert_eq!(view.sentence, "the bank of the river");
+        assert_eq!(view.field.text, "the bank of the river");
+        assert_eq!(view.field.revision, 0);
+        assert_eq!(view.words.len(), 5);
+        assert_eq!(view.chosen, None);
+        assert_eq!(view.input, None);
+        assert!(view.shown.lookup().is_none());
+        assert!(!view.looking_up);
+        assert!(!view.can_forward);
+        // Back can go from a typed text only when history has one.
+        assert!(!view.can_back);
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn clicking_two_words_looks_each_up_in_its_sentence_and_the_last_is_chosen() {
+        let data = TestData::with_bank();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        shell.edit("the bank of the river");
+        let (typed, _) = shell.next();
+        shell.dispatch(Event::WordChosen { index: 1 });
+        let (view, effects) = shell.next();
+        assert_eq!(view.chosen, Some(1));
+        assert_eq!(view.shown.lookup(), Some(&Lookup::Pending));
+        assert_eq!(asks(&effects), [Ask::Chosen { index: 1 }]);
+        let input = view.input.clone().expect("an input");
+        assert_eq!(input.word(), "bank");
+        assert_eq!(input.sentence(), Some("the bank of the river"));
+        assert_eq!(view.context, Some((0, 0..view.sentence.len())));
+        // A click is no new text.
+        assert_eq!(view.text_number, typed.text_number);
+        let (view, _) = shell.settled();
+        assert_eq!(article_definition(&view), DEFINITION);
+
+        shell.dispatch(Event::WordChosen { index: 4 });
+        let (view, effects) = shell.next();
+        assert_eq!(view.chosen, Some(4));
+        assert_eq!(asks(&effects), [Ask::Chosen { index: 4 }]);
+        let (view, _) = shell.settled();
+        assert_eq!(view.chosen, Some(4));
+        assert_eq!(view.sentence, "the bank of the river");
+        assert_eq!(view.words.len(), 5);
+        assert_eq!(article_definition(&view), RIVER);
+        assert!(!view.can_back && !view.can_forward, "nothing recorded");
+
+        // An invalid index is ignored.
+        shell.quiet(Event::WordChosen { index: 99 });
+    }
+
+    #[test]
+    fn choosing_another_word_during_a_lookup_supersedes_it() {
+        let data = TestData::with_bank();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        shell.edit("the bank of the river");
+        shell.next();
+        let (release, _gate) = shell.hold_worker();
+        shell.dispatch(Event::WordChosen { index: 1 });
+        let (first, _) = shell.next();
+        assert!(first.looking_up);
+        shell.dispatch(Event::WordChosen { index: 4 });
+        let (second, _) = shell.next();
+        assert!(second.looking_up);
+        // The outcome of the first click, enqueued before it was dropped.
+        shell
+            .controller
+            .dispatch
+            .0
+            .send(Message::LookedUp(LookedUp {
+                id: RequestId(1),
+                run: 2,
+                generation: 0,
+                language: Language::En,
+                outcome: Box::new(Outcome::Panicked),
+            }))
+            .unwrap();
+        release.send(()).unwrap();
+        let (view, _) = shell.settled();
+        assert_eq!(view.chosen, Some(4));
+        assert_eq!(article_definition(&view), RIVER);
+    }
+
+    #[test]
+    fn clearing_the_field_during_a_lookup_hides_it_and_raises_the_revision() {
+        let data = TestData::with_bank();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        let (release, _gate) = shell.hold_worker();
+        shell.edit("bank");
+        let (pending, _) = shell.next();
+        assert!(pending.looking_up);
+        shell.dispatch(Event::FieldCleared);
+        let (cleared, effects) = shell.next();
+        assert_eq!(cleared.field.text, "");
+        assert_eq!(cleared.field.revision, pending.field.revision + 1);
+        assert_eq!(cleared.shown.lookup(), None);
+        assert!(!cleared.looking_up);
+        assert!(effects.is_empty());
+        release.send(()).unwrap();
+        // The cancelled lookup shows nothing, up to a marker sent after it.
+        shell.dispatch(Event::SetReadingSource(Some(Source::Clipboard)));
+        loop {
+            let (view, _) = shell.next();
+            assert_eq!(view.shown.lookup(), None);
+            if view.reading_source.is_some() {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn picking_a_sense_twice_re_renders_and_leaves_field_and_history() {
+        let data = TestData::with_bank();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        let (before, _) = shell.submit("bank");
+        shell.dispatch(Event::SenseChosen { index: 0 });
+        let (view, effects) = shell.next();
+        assert_eq!(view.shown.choice(), Some(Choice::Sense(0)));
+        assert_eq!(view.field, before.field);
+        assert_eq!(
+            (view.can_back, view.can_forward),
+            (before.can_back, before.can_forward)
+        );
+        assert!(effects.is_empty(), "nothing is looked up or asked");
+        // Again: GTK keeps a clicked link visited until it renders again.
+        shell.dispatch(Event::SenseChosen { index: 0 });
+        let (again, _) = shell.next();
+        assert_eq!(again.shown.choice(), Some(Choice::Sense(0)));
+        assert_eq!(again.field, before.field);
+        // Out of range is ignored, and so is a gloss of an English article.
+        shell.quiet(Event::SenseChosen { index: 999 });
+        shell.quiet(Event::GlossChosen { index: 0 });
+    }
+
+    #[test]
+    fn picking_a_gloss_requests_its_definition_and_records_nothing() {
+        let data = TestData::with_banco();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        shell.quiet(Event::KnownIndexes {
+            generation: 0,
+            indexes: Some(SPANISH),
+        });
+        shell.dispatch(Event::SetReading(Language::Es));
+        shell.next();
+        shell.edit("banco");
+        let (before, _) = shell.settled();
+        let Some(Lookup::Grouped { language, .. }) = before.shown.lookup() else {
+            panic!(
+                "banco must have a Spanish article: {:?}",
+                before.shown.lookup()
+            );
+        };
+        assert_eq!(*language, Language::Es);
+        shell.dispatch(Event::GlossChosen { index: 0 });
+        let (view, effects) = shell.next();
+        assert_eq!(view.shown.choice(), Some(Choice::Gloss(0)));
+        let [Effect::RequestDefinition { number, request }] = effects.as_slice() else {
+            panic!("the gloss is translated as it is chosen: {effects:?}");
+        };
+        assert_eq!(request.text, "bank");
+        assert_eq!(request.source, Language::En);
+        assert_eq!(view.shown.definition(), Some(&Online::Pending));
+        assert_eq!(view.field, before.field);
+        assert!(!view.can_back && !view.can_forward, "nothing recorded");
+        // Again: no second request while one is pending.
+        shell.dispatch(Event::GlossChosen { index: 0 });
+        let (_, effects) = shell.next();
+        assert!(effects.is_empty());
+        // An answer for another number is dropped; the awaited one shows.
+        shell.quiet(Event::DefinitionAnswered {
+            number: number + 1,
+            online: Online::Translated("банк".into()),
+        });
+        shell.dispatch(Event::DefinitionAnswered {
+            number: *number,
+            online: Online::Translated("банк".into()),
+        });
+        let (answered, _) = shell.next();
+        assert_eq!(
+            answered.shown.definition(),
+            Some(&Online::Translated("банк".into()))
+        );
+        // Out of range is ignored.
+        shell.quiet(Event::GlossChosen { index: 9 });
+    }
+
+    #[test]
+    fn back_and_forward_restore_the_field_and_look_it_up_again() {
+        let data = TestData::with_bank();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        let (bank, effects) = shell.submit("bank");
+        assert_eq!(asks(&effects), [Ask::Submitted]);
+        assert!(!bank.can_back);
+        let (river, _) = shell.submit("river");
+        assert!(river.can_back && !river.can_forward);
+        assert_eq!(river.field.revision, 0);
+
+        shell.dispatch(Event::Back);
+        let (back, effects) = shell.next();
+        assert_eq!(back.field.text, "bank");
+        assert_eq!(back.field.revision, 1);
+        assert_eq!(back.sentence, "bank");
+        assert_eq!(back.shown.lookup(), Some(&Lookup::Pending));
+        assert!(!back.can_back && back.can_forward);
+        assert_eq!(asks(&effects), [Ask::Submitted]);
+        assert!(back.text_number > river.text_number);
+        let (back, _) = shell.settled();
+        assert_eq!(article_definition(&back), DEFINITION);
+
+        shell.dispatch(Event::Forward);
+        let (forward, effects) = shell.next();
+        assert_eq!(forward.field.text, "river");
+        assert_eq!(forward.field.revision, 2);
+        assert!(forward.can_back && !forward.can_forward);
+        assert_eq!(asks(&effects), [Ask::Submitted]);
+        let (forward, _) = shell.settled();
+        assert_eq!(article_definition(&forward), RIVER);
+
+        // Nothing was recorded by the walk: Back leads to bank again.
+        shell.dispatch(Event::Back);
+        let (again, _) = shell.next();
+        assert_eq!(again.field.text, "bank");
+        assert!(!again.can_back);
+        shell.settled();
+    }
+
+    #[test]
+    fn back_and_forward_at_the_edges_do_nothing() {
+        let mut shell = FakeShell::start(None);
+        shell.quiet(Event::Back);
+        shell.quiet(Event::Forward);
+        shell.submit("bank");
+        shell.quiet(Event::Back);
+        shell.quiet(Event::Forward);
+    }
+
+    #[test]
+    fn back_from_a_typed_text_records_it_so_forward_comes_back() {
+        let data = TestData::with_bank();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        shell.submit("bank");
+        shell.edit("river");
+        let (typed, _) = shell.settled();
+        assert!(typed.can_back && !typed.can_forward);
+        shell.dispatch(Event::Back);
+        let (back, _) = shell.next();
+        assert_eq!(back.field.text, "bank");
+        assert!(back.can_forward);
+        shell.settled();
+        shell.dispatch(Event::Forward);
+        let (forward, _) = shell.next();
+        assert_eq!(forward.field.text, "river");
+        shell.settled();
+    }
+
+    #[test]
+    fn a_synonym_is_set_recorded_looked_up_and_submitted() {
+        let data = TestData::with_bank();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        shell.submit("bank");
+        shell.dispatch(Event::SynonymChosen("shore".to_owned()));
+        let (view, effects) = shell.next();
+        assert_eq!(view.field.text, "shore");
+        assert_eq!(view.field.revision, 1);
+        assert_eq!(view.sentence, "shore");
+        assert_eq!(view.shown.lookup(), Some(&Lookup::Pending));
+        assert_eq!(asks(&effects), [Ask::Submitted]);
+        assert!(view.can_back && !view.can_forward, "recorded");
+        let (view, _) = shell.settled();
+        assert_eq!(article_definition(&view), DEFINITION);
+    }
+
+    #[test]
+    fn a_read_text_replaces_the_field_and_is_recorded() {
+        let data = TestData::with_bank();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        shell.dispatch(Event::SetReadingSource(Some(Source::Clipboard)));
+        let (reading, _) = shell.next();
+        assert_eq!(
+            reading.window_state,
+            WindowState::Waiting {
+                source: Source::Clipboard
             }
         );
+        shell.dispatch(Event::FieldEdited {
+            text: "  the   bank ".to_owned(),
+            replaced: true,
+            source: Some(Source::Clipboard),
+        });
+        let (view, effects) = shell.next();
+        assert_eq!(view.field.text, "the bank");
+        assert_eq!(view.field.revision, 0, "the shell set its own text");
+        assert_eq!(view.source, Source::Clipboard);
+        assert_eq!(view.reading_source, None);
+        assert_eq!(asks(&effects), [Ask::Replaced]);
+        // Recorded: Back from a typed text goes to it.
+        shell.edit("river");
+        let (typed, _) = shell.settled();
+        assert!(typed.can_back);
+    }
 
-        assert!(
-            shell
-                .controller
-                .dispatch(Event::TypedLookupRetired { run: current.run })
-        );
-        assert!(shell.next().is_none());
+    #[test]
+    fn a_change_of_language_redoes_the_lookup_and_asks_again() {
+        let data = TestData::with_banco();
+        let mut shell = FakeShell::start(Some(data.0.clone()));
+        shell.quiet(Event::KnownIndexes {
+            generation: 0,
+            indexes: Some(SPANISH),
+        });
+        shell.edit("banco");
+        let (english, _) = shell.settled();
+        assert_eq!(english.answered, Some(Language::Es), "found elsewhere");
+        shell.dispatch(Event::SetReading(Language::Es));
+        let (view, effects) = shell.next();
+        assert!(view.looking_up);
+        assert_eq!(asks(&effects), [Ask::Again]);
+        let (view, _) = shell.settled();
+        assert!(matches!(
+            view.shown.lookup(),
+            Some(Lookup::Grouped {
+                language: Language::Es,
+                ..
+            })
+        ));
+        assert_eq!(view.field, english.field);
 
-        shell.type_word(7, "banco", Language::Es);
-        let refused = shell.next().unwrap();
-        assert_eq!(refused.run, 7);
-        let LookupState::Resolved(refusal) = refused.state else {
-            panic!("a missing dictionary starts no job");
-        };
-        assert_eq!(refusal.lookup, Lookup::NoDictionary(Language::Es));
-        assert!(refusal.check_indexes);
-        assert!(refusal.evidence.is_none());
+        shell.dispatch(Event::SetMyLanguage {
+            language: Language::En,
+            reading: Language::Es,
+        });
+        let (view, effects) = shell.next();
+        assert_eq!(view.shown.translating().my, Language::En);
+        assert_eq!(asks(&effects), [Ask::Again]);
+        shell.settled();
     }
 }
