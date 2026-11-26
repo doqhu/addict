@@ -5,9 +5,9 @@
 //! to change them; on Hyprland, whose configuration binds the keys, each row
 //! names what to bind and the button copies the lines for that configuration.
 //! Then the DeepL key, with a masked field to enter one, the
-//! file it is saved in and the state that file is in. The window writes the
-//! key, on the runner, and never reads it back: the field starts empty and
-//! is cleared once the key is saved. In the General section, a line says how
+//! file it is saved in and the state of the active key source. The key goes
+//! to the runner for saving. The field starts empty and is cleared once the
+//! key is saved. In the General section, a line says how
 //! much the on-disk cache of the answers holds, with a button that clears it;
 //! the cache is read and cleared on the runner. The Start at login switch asks the
 //! Background portal, on the runner, and shows only what the portal last
@@ -26,7 +26,7 @@ use std::{
 use addict_core::APP_ID;
 use addict_core::failure::login_item::StartupFailure;
 use addict_core::translation::{English, Source};
-use addict_deepl::key::{self, KeyError};
+use addict_deepl::key::{KeyError, KeySource, Secret, WriteError};
 use addict_engine::{view::failure_reason, work::Outcome};
 use addict_platform::{
     desktop::LoginEntry,
@@ -36,8 +36,8 @@ use gtk::{glib, prelude::*};
 
 use crate::{cache::Footprint, file_import, view::Binding};
 
-/// How long reading the state of the key file may take.
-pub const KEY_CHECK_LIMIT: Duration = Duration::from_secs(2);
+/// How long saving the key may take.
+pub const KEY_SAVE_LIMIT: Duration = Duration::from_secs(2);
 
 /// How long reading the size of the cache, or clearing it, may take.
 pub const CACHE_LIMIT: Duration = Duration::from_secs(5);
@@ -232,51 +232,44 @@ pub fn clear_text(result: Result<(), &str>) -> String {
 /// Where the DeepL key stands, as the window says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyState {
-    /// There is no directory to look in: no absolute `XDG_CONFIG_HOME` and no
-    /// `HOME`.
-    NoDirectory,
-    /// The file holds a key of the Free plan.
+    /// The startup read is still in progress.
+    Checking,
+    /// The source holds a key of the Free plan.
     Free,
-    /// The file holds a key of the Pro plan.
+    /// The source holds a key of the Pro plan.
     Pro,
-    /// The file gave no key.
+    /// The key could not be loaded.
     Refused(KeyError),
-    /// The state could not be read in time.
-    Unknown,
 }
 
 impl KeyState {
-    /// Reads the state of the file at `path`. This opens the file, so it runs
-    /// on the runner. The key is dropped here: only its plan is kept.
-    pub fn of(path: Option<&Path>) -> Self {
-        let Some(path) = path else {
-            return Self::NoDirectory;
-        };
-        match key::read(path) {
-            Ok(key) if key.is_free() => Self::Free,
-            Ok(_) => Self::Pro,
-            Err(error) => Self::Refused(error),
+    /// Projects the active key into its plan or refusal for display.
+    pub fn of(source: &KeySource) -> Self {
+        match source.snapshot() {
+            None => Self::Checking,
+            Some(Ok(key)) if key.is_free() => Self::Free,
+            Some(Ok(_)) => Self::Pro,
+            Some(Err(error)) => Self::Refused(error),
         }
     }
 }
 
 /// The line of a key state. No wildcard arm: a new state does not compile
 /// until it is given its line.
-pub fn key_text(state: Option<KeyState>) -> &'static str {
+pub fn key_text(state: KeyState) -> &'static str {
     match state {
-        None => "Checking…",
-        Some(KeyState::NoDirectory) => {
+        KeyState::Checking => "Checking…",
+        KeyState::Refused(KeyError::NoDirectory) => {
             "No place for the key file: set an absolute XDG_CONFIG_HOME or HOME."
         }
-        Some(KeyState::Free) => "A DeepL key of the Free plan is set.",
-        Some(KeyState::Pro) => "A DeepL key of the Pro plan is set.",
-        Some(KeyState::Refused(KeyError::Missing)) => "There is no key file.",
-        Some(KeyState::Refused(KeyError::Unreadable)) => "The key file cannot be read.",
-        Some(KeyState::Refused(KeyError::TooOpen)) => {
+        KeyState::Free => "A DeepL key of the Free plan is set.",
+        KeyState::Pro => "A DeepL key of the Pro plan is set.",
+        KeyState::Refused(KeyError::Missing) => "There is no key file.",
+        KeyState::Refused(KeyError::Unreadable) => "The key file cannot be read.",
+        KeyState::Refused(KeyError::TooOpen) => {
             "The key file must have permissions 0600; it was not read."
         }
-        Some(KeyState::Refused(KeyError::Empty)) => "The key file holds no key.",
-        Some(KeyState::Unknown) => "The key file was not checked in time.",
+        KeyState::Refused(KeyError::Empty) => "The key file holds no key.",
     }
 }
 
@@ -339,7 +332,7 @@ pub const NO_KEY_PLACE: &str =
 /// The key's line when the write of the key file did not answer in time:
 /// it may still have been written, so nothing is claimed.
 pub const SAVE_UNANSWERED: &str =
-    "The save did not answer in time; the line above shows what the key file holds.";
+    "The save did not answer in time; the line above shows the active key state.";
 
 /// The hint line that names where the key is saved.
 pub fn saved_in_text(key_file: Option<&Path>) -> String {
@@ -469,18 +462,17 @@ pub fn badge(binding: &Binding, trigger: Option<&str>) -> (&'static str, &'stati
     }
 }
 
-/// The class of the block of a key state: good when a key is set, pending
-/// while it is checked, bad otherwise. No wildcard arm, as in `key_text`.
-pub fn key_tone(state: Option<KeyState>) -> &'static str {
+/// The class of the block of a key state.
+pub fn key_tone(state: KeyState) -> &'static str {
     match state {
-        None => "pending",
-        Some(KeyState::Free | KeyState::Pro) => "good",
-        Some(KeyState::NoDirectory | KeyState::Refused(_) | KeyState::Unknown) => "bad",
+        KeyState::Checking => "pending",
+        KeyState::Free | KeyState::Pro => "good",
+        KeyState::Refused(_) => "bad",
     }
 }
 
 /// What the empty key field asks for: a set key is replaced, not entered.
-pub fn key_placeholder(state: Option<KeyState>) -> &'static str {
+pub fn key_placeholder(state: KeyState) -> &'static str {
     match key_tone(state) {
         "good" => "Paste a new key to replace it",
         _ => "Paste a DeepL key",
@@ -594,6 +586,7 @@ pub struct Settings {
     key_block: gtk::Box,
     key_icon: gtk::Image,
     key_state: gtk::Label,
+    key_row: gtk::Box,
     key_entry: gtk::PasswordEntry,
     change: gtk::Button,
     /// Who sets the keys: on Hyprland the button copies lines and is always on.
@@ -755,7 +748,7 @@ impl Settings {
         data_dir: Option<PathBuf>,
         owner: KeyOwner,
         on_change: impl Fn() + 'static,
-        on_save: impl Fn(String) + 'static,
+        on_save: impl Fn(Result<Secret, WriteError>) + 'static,
         on_clear: impl Fn() + 'static,
         on_startup: impl Fn(bool) + 'static,
         on_my_language: impl Fn(Source) + 'static,
@@ -802,7 +795,7 @@ impl Settings {
         }
 
         let key_icon = gtk::Image::builder().valign(gtk::Align::Center).build();
-        let key_state = label(key_text(None), &["key-state"]);
+        let key_state = label(key_text(KeyState::Checking), &["key-state"]);
         key_state.set_hexpand(true);
         key_state.set_valign(gtk::Align::Center);
         let key_block = gtk::Box::builder()
@@ -814,7 +807,6 @@ impl Settings {
         key_block.append(&key_state);
         let key_entry = gtk::PasswordEntry::builder()
             .show_peek_icon(true)
-            .placeholder_text(key_placeholder(None))
             .hexpand(true)
             .css_classes(["key"])
             .build();
@@ -839,7 +831,7 @@ impl Settings {
             let text = entry.text();
             let text = text.trim();
             if !text.is_empty() {
-                on_save(text.to_owned());
+                on_save(Secret::new(text));
             }
         });
         let pressed = on_save.clone();
@@ -1094,6 +1086,7 @@ impl Settings {
             key_block,
             key_icon,
             key_state,
+            key_row,
             key_entry,
             change,
             owner,
@@ -1117,7 +1110,6 @@ impl Settings {
             download_status,
         };
         settings.render_binding(&Binding::Attempting, &Bindings::default());
-        settings.render_key(None);
         settings
     }
 
@@ -1158,8 +1150,9 @@ impl Settings {
         );
     }
 
-    pub fn render_key(&self, state: Option<KeyState>) {
+    pub fn render_key(&self, state: KeyState) {
         self.key_state.set_label(key_text(state));
+        self.key_row.set_sensitive(state != KeyState::Checking);
         self.key_entry
             .set_property("placeholder-text", key_placeholder(state));
         let tone = key_tone(state);
@@ -1283,7 +1276,7 @@ mod tests {
     use std::{cell::RefCell, future::ready};
 
     use addict_core::failure::login_item::StartupFailure;
-    use addict_deepl::key::KeyError;
+    use addict_deepl::key::{self, KeyError, KeySource};
     use addict_engine::work::Outcome;
     use addict_platform::desktop::LoginEntry;
 
@@ -1813,15 +1806,14 @@ mod tests {
     #[test]
     fn every_key_state_has_a_distinct_line() {
         let states = [
-            None,
-            Some(KeyState::NoDirectory),
-            Some(KeyState::Free),
-            Some(KeyState::Pro),
-            Some(KeyState::Refused(KeyError::Missing)),
-            Some(KeyState::Refused(KeyError::Unreadable)),
-            Some(KeyState::Refused(KeyError::TooOpen)),
-            Some(KeyState::Refused(KeyError::Empty)),
-            Some(KeyState::Unknown),
+            KeyState::Checking,
+            KeyState::Free,
+            KeyState::Pro,
+            KeyState::Refused(KeyError::NoDirectory),
+            KeyState::Refused(KeyError::Missing),
+            KeyState::Refused(KeyError::Unreadable),
+            KeyState::Refused(KeyError::TooOpen),
+            KeyState::Refused(KeyError::Empty),
         ];
         let lines: std::collections::HashSet<_> = states.into_iter().map(key_text).collect();
         assert_eq!(lines.len(), states.len());
@@ -1829,23 +1821,26 @@ mod tests {
 
     #[test]
     fn the_field_asks_to_replace_only_a_key_that_is_set() {
-        assert!(key_placeholder(Some(KeyState::Pro)).contains("replace"));
-        assert!(key_placeholder(Some(KeyState::Free)).contains("replace"));
-        assert!(!key_placeholder(None).contains("replace"));
-        assert!(!key_placeholder(Some(KeyState::Refused(KeyError::Missing))).contains("replace"));
+        assert!(key_placeholder(KeyState::Pro).contains("replace"));
+        assert!(key_placeholder(KeyState::Free).contains("replace"));
+        assert!(!key_placeholder(KeyState::Refused(KeyError::NoDirectory)).contains("replace"));
+        assert!(!key_placeholder(KeyState::Refused(KeyError::Missing)).contains("replace"));
     }
 
     #[test]
     fn the_unsafe_mode_names_0600() {
-        assert!(key_text(Some(KeyState::Refused(KeyError::TooOpen))).contains("0600"));
+        assert!(key_text(KeyState::Refused(KeyError::TooOpen)).contains("0600"));
     }
 
     #[test]
     fn a_state_of_a_missing_path_or_file() {
-        assert_eq!(KeyState::of(None), KeyState::NoDirectory);
+        assert_eq!(
+            KeyState::of(&KeySource::new(Err(KeyError::NoDirectory))),
+            KeyState::Refused(KeyError::NoDirectory)
+        );
         let path = std::path::Path::new("/nonexistent/addict/deepl.key");
         assert_eq!(
-            KeyState::of(Some(path)),
+            KeyState::of(&KeySource::new(key::read(path))),
             KeyState::Refused(KeyError::Missing)
         );
     }
@@ -1859,7 +1854,7 @@ mod tests {
         let path = dir.join("deepl.key");
         std::fs::write(&path, content).expect("write");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
-        let state = KeyState::of(Some(&path));
+        let state = KeyState::of(&KeySource::new(key::read(&path)));
         std::fs::remove_dir_all(&dir).expect("cleanup");
         state
     }
@@ -1869,7 +1864,7 @@ mod tests {
         let state = state_of("free", "secret-key:fx\n", 0o600);
         assert_eq!(state, KeyState::Free);
         assert!(!format!("{state:?}").contains("secret"));
-        assert!(!key_text(Some(state)).contains("secret"));
+        assert!(!key_text(state).contains("secret"));
     }
 
     #[test]
@@ -1882,6 +1877,15 @@ mod tests {
         assert_eq!(
             state_of("empty", " \n", 0o600),
             KeyState::Refused(KeyError::Empty)
+        );
+        assert_eq!(
+            state_of("invalid", "two words\n", 0o600),
+            KeyState::Refused(KeyError::Empty)
+        );
+        let directory = std::env::temp_dir();
+        assert_eq!(
+            KeyState::of(&KeySource::new(key::read(&directory))),
+            KeyState::Refused(KeyError::Unreadable)
         );
     }
 
@@ -2036,8 +2040,8 @@ mod tests {
             detail: "x".to_owned(),
         };
         assert_eq!(badge(&not_bound, None), ("Not bound", "bad"));
-        assert_eq!(key_tone(None), "pending");
-        assert_eq!(key_tone(Some(KeyState::Pro)), "good");
-        assert_eq!(key_tone(Some(KeyState::Refused(KeyError::TooOpen))), "bad");
+        assert_eq!(key_tone(KeyState::Pro), "good");
+        assert_eq!(key_tone(KeyState::Free), "good");
+        assert_eq!(key_tone(KeyState::Refused(KeyError::TooOpen)), "bad");
     }
 }

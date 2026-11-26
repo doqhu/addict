@@ -224,6 +224,7 @@ pub(crate) mod tests {
     };
     use addict_deepl::{
         DeepL,
+        key::{self, KeyError, KeySource, Secret},
         stub::{Reply, Stub, translation_body},
     };
 
@@ -1726,6 +1727,10 @@ pub(crate) mod tests {
         }
     }
 
+    fn stub_key() -> KeySource {
+        KeySource::new(Ok(Secret::new("a-key-of-the-stub").unwrap()))
+    }
+
     /// A key file of one test with this mode, removed when the test ends.
     struct KeyFile(std::path::PathBuf);
 
@@ -1763,9 +1768,8 @@ pub(crate) mod tests {
             after: Duration::from_millis(300),
         })
         .expect("stub");
-        let key = KeyFile::new("slow", 0o600);
         let translator: Arc<dyn Translator> =
-            Arc::new(DeepL::with_base_url(&key.0, stub.base_url()));
+            Arc::new(DeepL::with_base_url(stub_key(), stub.base_url()));
         let work = Work::start().expect("runner");
         let manual = bank_of_the_river();
         let input = manual.input().expect("input");
@@ -1851,9 +1855,8 @@ pub(crate) mod tests {
     #[test]
     fn the_spanish_and_catalan_bodies_name_their_source_and_russian() {
         let stub = Stub::start(Reply::translation("банк")).expect("stub");
-        let key = KeyFile::new("spanish", 0o600);
         let translator: Arc<dyn Translator> =
-            Arc::new(DeepL::with_base_url(&key.0, stub.base_url()));
+            Arc::new(DeepL::with_base_url(stub_key(), stub.base_url()));
         let mut spanish = Manual::default();
         spanish.edit(BANCO_SENTENCE.to_owned());
         spanish.choose(BANCO).expect("run");
@@ -1941,9 +1944,8 @@ pub(crate) mod tests {
             }
         }
         let stub = Stub::start(Reply::translation("закрылся")).expect("stub");
-        let key = KeyFile::new("fallback", 0o600);
         let translator: Arc<dyn Translator> =
-            Arc::new(DeepL::with_base_url(&key.0, stub.base_url()));
+            Arc::new(DeepL::with_base_url(stub_key(), stub.base_url()));
         let mut manual = Manual::default();
         manual.edit(BANCO_SENTENCE.to_owned());
         manual.choose(CERRO).expect("run");
@@ -2000,10 +2002,8 @@ pub(crate) mod tests {
     #[test]
     fn without_a_key_a_spanish_word_is_the_key_refusal_and_nothing_leaves() {
         let stub = Stub::start(Reply::translation("банк")).expect("stub");
-        let missing =
-            std::env::temp_dir().join(format!("addict-manual-missing-{}.key", std::process::id()));
-        let _ = std::fs::remove_file(&missing);
-        let translator = Arc::new(DeepL::with_base_url(&missing, stub.base_url()));
+        let missing = KeySource::new(Err(KeyError::Missing));
+        let translator = Arc::new(DeepL::with_base_url(missing, stub.base_url()));
         let mut spanish = Manual::default();
         spanish.edit(BANCO_SENTENCE.to_owned());
         spanish.choose(BANCO).expect("run");
@@ -2037,7 +2037,8 @@ pub(crate) mod tests {
     fn a_key_file_that_is_too_open_is_a_refusal_and_nothing_leaves() {
         let stub = Stub::start(Reply::translation("берег")).expect("stub");
         let key = KeyFile::new("open", 0o644);
-        let translator = Arc::new(DeepL::with_base_url(&key.0, stub.base_url()));
+        let source = KeySource::new(key::read(&key.0));
+        let translator = Arc::new(DeepL::with_base_url(source, stub.base_url()));
         let (outcome, _) = translated(translator, &bank_of_the_river(), WAIT);
         assert_eq!(
             translation_result(outcome),
@@ -2047,13 +2048,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_deepl_error_that_echoes_the_key_renders_a_generic_refusal() {
+        use crate::view::{KeyLocation, OnlineState, online_rows};
+
+        let body = serde_json::json!({"message": "a-key-of-the-stub"}).to_string();
+        let stub = Stub::start(Reply::answer(400, &body)).expect("stub");
+        let translator = Arc::new(DeepL::with_base_url(stub_key(), stub.base_url()));
+        let (outcome, _) = translated(translator, &bank_of_the_river(), WAIT);
+        let online = translation_result(outcome).expect("shown refusal");
+        let rows = online_rows(
+            &OnlineTexts {
+                word: Some(&online),
+                ..Default::default()
+            },
+            KeyLocation::Hint("Locate the key."),
+            Language::Ru,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, OnlineState::Failed);
+        assert!(rows[0].line == "Online translation is not available.");
+        assert_eq!(stub.seen().len(), 1);
+    }
+
+    #[test]
     fn a_cached_answer_survives_a_restart_and_the_server_is_not_asked_again() {
         let stub = Stub::start(Reply::translation("берег")).expect("stub");
-        let key = KeyFile::new("cached", 0o600);
         let temp = crate::cache::tests::TempDir::new("translate");
         let started = || -> Arc<dyn Translator> {
             Arc::new(crate::cache::Cached::new(
-                DeepL::with_base_url(&key.0, stub.base_url()),
+                DeepL::with_base_url(stub_key(), stub.base_url()),
                 Some(temp.cache()),
             ))
         };
@@ -2069,8 +2092,7 @@ pub(crate) mod tests {
     #[test]
     fn a_silent_server_ends_at_the_deadline() {
         let stub = Stub::start(Reply::Silence).expect("stub");
-        let key = KeyFile::new("silent", 0o600);
-        let translator = Arc::new(DeepL::with_base_url(&key.0, stub.base_url()));
+        let translator = Arc::new(DeepL::with_base_url(stub_key(), stub.base_url()));
         let (outcome, _) = translated(translator, &bank_of_the_river(), Duration::from_secs(2));
         assert_eq!(
             translation_result(outcome),

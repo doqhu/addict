@@ -26,6 +26,9 @@
 //! for it, a repeated click leaves it alone, another word gives up only the
 //! word's, another sentence the sentence's too, and a new text gives up
 //! both.
+//! The primary session loads the DeepL key on a separate worker at startup.
+//! Only requests to DeepL and Settings saves wait for the initial result.
+//! Settings saves update the active key. Direct edits take effect at restart.
 //!
 //! Capture hides the window and starts one job on the runner, which takes
 //! the screenshot, recognizes its text and deletes the snapshot; the window
@@ -160,7 +163,10 @@ use addict_core::{
         English, Request, Source as Language, Translator, is_russian, reading_languages,
     },
 };
-use addict_deepl::{DeepL, key};
+use addict_deepl::{
+    DeepL,
+    key::{self, KeyError, KeySource, Secret, WriteError},
+};
 use addict_dictionary::release::{Manifest, Published};
 use addict_engine::{
     capture::{Captured, Failure, Timing},
@@ -355,16 +361,13 @@ enum Event {
     Tray(TrayEvent),
     /// Configure shortcuts was pressed in the Settings window.
     ChangeShortcut,
-    /// The state of the key file, as the runner read it for the Settings
-    /// window.
-    KeyFile(KeyState),
+    /// The startup key read ended and its result is in the source.
+    KeyLoaded,
     /// Save key, or Enter in the key field, was pressed in the Settings
-    /// window with this text, trimmed and not empty. `Event` has no `Debug`,
-    /// so the key is never printed.
-    SaveKey(String),
-    /// The write of the key file ended: why it failed, in one line that
-    /// does not hold the key.
-    KeySaved(Outcome<Result<(), String>>),
+    /// window with a new key or an input validation error.
+    SaveKey(Result<Secret, WriteError>),
+    /// The write of the key file ended for this save generation.
+    KeySaved(u64, Outcome<Result<(), WriteError>>),
     /// The size of the cache, as the runner read it for the Settings window.
     CacheSize(CacheState),
     /// Clear cache was pressed in the Settings window.
@@ -544,7 +547,8 @@ struct Session {
     articles: Arc<dyn Articles>,
     /// What a word or a sentence is translated by online.
     translator: Arc<dyn Translator>,
-    key_file: Option<std::path::PathBuf>,
+    key_file: Option<PathBuf>,
+    key_source: KeySource,
     /// The on-disk cache of the translator, for its size and its clear.
     cache: Arc<cache::Store>,
     /// The read of the size of the cache; dropping it gives it up.
@@ -564,8 +568,8 @@ struct Session {
     /// The request to the portal, from the switch to its end: while it is
     /// there the switch stays as it is.
     startup_job: Option<Job>,
-    /// The read of the key file's state; dropping it gives it up.
-    key_job: Option<Job>,
+    /// Identifies the save whose completion Settings is waiting for.
+    save_generation: u64,
     /// The write of the key file; a newer save replaces it.
     save_job: Option<Job>,
     /// The online request of a word, in its sentence or alone, whose outcome
@@ -864,9 +868,9 @@ impl Session {
             Event::Window(event) => dispatch_window(self, event),
             Event::Tray(event) => self.tray(event),
             Event::ChangeShortcut => self.change_shortcut(),
-            Event::KeyFile(state) => self.settings.render_key(Some(state)),
-            Event::SaveKey(text) => self.save_key(text),
-            Event::KeySaved(outcome) => self.key_saved(outcome),
+            Event::KeyLoaded => self.settings.render_key(KeyState::of(&self.key_source)),
+            Event::SaveKey(key) => self.save_key(key),
+            Event::KeySaved(generation, outcome) => self.key_saved(generation, outcome),
             Event::CacheSize(state) => self.settings.render_cache(state),
             Event::ClearCache => self.clear_cache(),
             Event::CacheCleared(outcome) => self.cache_cleared(outcome),
@@ -1928,8 +1932,7 @@ impl Session {
             return;
         };
         self.start_lookup(run);
-        // After the lookup: the runner takes its jobs in this order, so the
-        // article is read before the key file and the network are touched.
+        // The lookup queues ahead of the online jobs.
         // A word that is a sentence alone in a recognized text has no
         // sentence: its article only, nothing sent online.
         let Some((number, span)) = self.manual.sentence_of(index) else {
@@ -2723,8 +2726,8 @@ impl Session {
     }
 
     /// A choice of the tray. Show is a repeated launch: the window as it is,
-    /// no read. Settings reads the state of the key file on the runner and
-    /// shows the window; About shows its window on its About page; Exit ends
+    /// no read. Settings shows the current key state from the shared source.
+    /// About shows its window on its About page. Exit ends
     /// the application through its shutdown. A tray that cannot be had is
     /// said once and changes nothing.
     fn tray(&mut self, event: TrayEvent) {
@@ -2749,7 +2752,7 @@ impl Session {
         self.settings.clear_key_entry();
         self.settings.say_key("");
         self.settings.say_cache("");
-        self.check_key();
+        self.settings.render_key(KeyState::of(&self.key_source));
         self.check_cache();
         self.check_startup();
         self.settings.present();
@@ -2912,35 +2915,8 @@ impl Session {
         self.check_cache();
     }
 
-    /// Reads the state of the key file on the runner, for the Settings
-    /// window; a read still running is given up.
-    fn check_key(&mut self) {
-        self.settings.render_key(None);
-        let sender = self.sender.clone();
-        let path = self.key_file.clone();
-        self.key_job = self.work.upgrade().map(|work| {
-            work.run(
-                settings::KEY_CHECK_LIMIT,
-                async move { KeyState::of(path.as_deref()) },
-                move |outcome| {
-                    let state = match outcome {
-                        Outcome::Finished(state) => state,
-                        Outcome::TimedOut | Outcome::Panicked => KeyState::Unknown,
-                        // Replaced by the next press of Settings or save.
-                        Outcome::Cancelled => return,
-                    };
-                    let _ = sender.unbounded_send(Event::KeyFile(state));
-                },
-            )
-        });
-        if self.key_job.is_none() {
-            self.settings.render_key(Some(KeyState::Unknown));
-        }
-    }
-
-    /// Save key was pressed: the key file is written on the runner. A save
-    /// still running is replaced. DeepL is not asked whether the key works.
-    fn save_key(&mut self, text: String) {
+    /// Writes the key on the runner and publishes it to the shared source.
+    fn save_key(&mut self, key: Result<Secret, WriteError>) {
         let Some(path) = self.key_file.clone() else {
             self.settings
                 .say_key(&settings::save_text(Err(settings::NO_KEY_PLACE)));
@@ -2953,26 +2929,31 @@ impl Session {
         };
         self.settings.say_key("Saving the key…");
         let sender = self.sender.clone();
+        let source = self.key_source.clone();
+        self.save_generation += 1;
+        let generation = self.save_generation;
+        self.save_job.take();
         self.save_job = Some(work.run(
-            settings::KEY_CHECK_LIMIT,
-            async move { key::write(&path, &text).map_err(|error| error.to_string()) },
+            settings::KEY_SAVE_LIMIT,
+            persist_key(source, path, key),
             move |outcome| {
-                let _ = sender.unbounded_send(Event::KeySaved(outcome));
+                let _ = sender.unbounded_send(Event::KeySaved(generation, outcome));
             },
         ));
     }
 
-    /// The write of the key file ended: the field is emptied when it
-    /// worked, the line says why when it did not, and the state of the file
-    /// is read again either way. The job slot is left alone: only a newer
-    /// save replaces it, and clearing it would cancel that one.
-    fn key_saved(&mut self, outcome: Outcome<Result<(), String>>) {
+    /// Renders the active key and the latest save outcome.
+    fn key_saved(&mut self, generation: u64, outcome: Outcome<Result<(), WriteError>>) {
+        self.settings.render_key(KeyState::of(&self.key_source));
+        if generation != self.save_generation {
+            return;
+        }
+        self.save_job.take();
         let result = match outcome {
-            Outcome::Finished(result) => result,
+            Outcome::Finished(result) => result.map_err(|error| error.to_string()),
             // The write cannot be stopped, so it may have happened.
             Outcome::TimedOut => {
                 self.settings.say_key(settings::SAVE_UNANSWERED);
-                self.check_key();
                 return;
             }
             Outcome::Panicked => Err("the write did not run".to_owned()),
@@ -2985,7 +2966,6 @@ impl Session {
         self.settings.say_key(&settings::save_text(
             result.as_ref().map(|_| ()).map_err(String::as_str),
         ));
-        self.check_key();
     }
 
     /// Configure shortcuts was pressed: the portal is asked for its dialog
@@ -3558,17 +3538,46 @@ fn start_first_run(
     )
 }
 
-/// The online translator, DeepL behind the on-disk cache, the key file it
-/// reads, for the window to name, and the cache, for its size and its clear.
-/// Nothing is read, opened or connected here: the key file, the cache and the
-/// network are the runner's, at the first click on a word of a sentence or
-/// the first submit of a lone word.
-fn online_translator(dirs: &Dirs) -> (Arc<dyn Translator>, Option<PathBuf>, Arc<cache::Store>) {
-    let key_file = key::key_path(dirs.config.as_deref());
-    let deepl = DeepL::new(key_file.clone());
+/// Loads the configured key once without blocking GTK or the translation runner.
+fn start_key_load(path: Option<PathBuf>, source: &KeySource, sender: &UnboundedSender<Event>) {
+    let Some(path) = path else {
+        source.initialize(Err(KeyError::NoDirectory));
+        return;
+    };
+    let loading = source.clone();
+    let loaded = sender.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("addict-key-load".to_owned())
+        .spawn(move || {
+            loading.initialize(key::read(&path));
+            let _ = loaded.unbounded_send(Event::KeyLoaded);
+        })
+    {
+        eprintln!("addict: could not start the key reader: {error}");
+        source.initialize(Err(KeyError::Unreadable));
+        let _ = sender.unbounded_send(Event::KeyLoaded);
+    }
+}
+
+async fn persist_key(
+    source: KeySource,
+    path: PathBuf,
+    key: Result<Secret, WriteError>,
+) -> Result<(), WriteError> {
+    let key = key?;
+    let _ = source.ready().await;
+    let persisted = key::write(&path, key)?;
+    // Publish before yielding, even if the runner later reports cancellation
+    // or a timeout for the job whose write has committed.
+    source.replace(persisted);
+    Ok(())
+}
+
+/// The online translator and its cache, for the Settings size and clear.
+fn online_translator(dirs: &Dirs, deepl: DeepL) -> (Arc<dyn Translator>, Arc<cache::Store>) {
     let translator = Cached::new(deepl, dirs.cache.clone());
     let store = translator.store();
-    (Arc::new(translator), key_file, store)
+    (Arc::new(translator), store)
 }
 
 /// Hands each event of `receiver` to `session`, on the UI thread, for as
@@ -3590,6 +3599,9 @@ fn start(
 ) -> Resident {
     // The worker threads push; the main context wakes only for an event.
     let (sender, receiver) = futures_channel::mpsc::unbounded();
+    let key_file = key::key_path(dirs.config.as_deref());
+    let key_source = KeySource::pending();
+    start_key_load(key_file.clone(), &key_source, &sender);
 
     // The first attempt starts below, with the window still hidden.
     let binding = Binding::Attempting;
@@ -3665,7 +3677,7 @@ fn start(
     let english_job = start_english(work.as_deref(), english_file.clone(), &sender);
     let at_once_file = at_once::path(config);
     let at_once_job = start_at_once(work.as_deref(), at_once_file.clone(), &sender);
-    let (translator, key_file, cache) = online_translator(dirs);
+    let (translator, cache) = online_translator(dirs, DeepL::new(key_source.clone()));
     let settings = start_settings(
         &window,
         key_file.as_deref(),
@@ -3692,6 +3704,7 @@ fn start(
         articles: articles.clone(),
         translator,
         key_file,
+        key_source,
         cache,
         cache_job: None,
         clear_job: None,
@@ -3701,7 +3714,7 @@ fn start(
         startup_on: false,
         startup_read_job: None,
         startup_job: None,
-        key_job: None,
+        save_generation: 0,
         save_job: None,
         translating_word: None,
         translating_sentence: None,
@@ -4293,6 +4306,24 @@ mod tests {
         futures_channel::mpsc::UnboundedReceiver<Event>,
         std::rc::Rc<addict_engine::work::Work>,
     ) {
+        use addict_deepl::key::{self, KeyError, KeySource};
+
+        let path = key::key_path(dirs.config.as_deref());
+        let loaded = path
+            .as_deref()
+            .map_or(Err(KeyError::NoDirectory), key::read);
+        test_session_with_source(id, dirs, KeySource::new(loaded))
+    }
+
+    fn test_session_with_source(
+        id: &str,
+        dirs: Dirs,
+        key_source: addict_deepl::key::KeySource,
+    ) -> (
+        super::Session,
+        futures_channel::mpsc::UnboundedReceiver<Event>,
+        std::rc::Rc<addict_engine::work::Work>,
+    ) {
         use super::*;
         let app = gtk::Application::builder()
             .application_id(id)
@@ -4304,7 +4335,8 @@ mod tests {
         let (view, window) = build_ui(&app, &binding, &sender);
         let work = Rc::new(Work::start().unwrap());
         let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(dirs.data.clone()));
-        let (translator, key_file, cache) = online_translator(&dirs);
+        let key_file = key::key_path(dirs.config.as_deref());
+        let (translator, cache) = online_translator(&dirs, DeepL::new(key_source.clone()));
         // Not the desktop the tests run on: the portal's dialog, as on GNOME.
         let settings = start_settings(
             &window,
@@ -4332,6 +4364,7 @@ mod tests {
             articles: articles.clone(),
             translator,
             key_file,
+            key_source,
             cache,
             cache_job: None,
             clear_job: None,
@@ -4341,7 +4374,7 @@ mod tests {
             startup_on: false,
             startup_read_job: None,
             startup_job: None,
-            key_job: None,
+            save_generation: 0,
             save_job: None,
             translating_word: None,
             translating_sentence: None,
@@ -4374,6 +4407,288 @@ mod tests {
             first_run_choice: None,
         };
         (session, events, work)
+    }
+
+    struct KeyTestDir(std::path::PathBuf);
+
+    impl KeyTestDir {
+        fn new(name: &str) -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+
+            let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .expect("create a private key test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for KeyTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_committed_key_save_stays_active_when_the_runner_reports_a_timeout() {
+        use std::{future, sync::mpsc, time::Duration};
+
+        use addict_deepl::key::{self, KeyError, KeySource, Secret};
+        use addict_engine::work::{Outcome, Work};
+        use futures_util::FutureExt;
+
+        let temp = KeyTestDir::new("addict-key-timeout");
+        let path = temp.0.join("deepl.key");
+        let source = KeySource::pending();
+        let key = Secret::new("synthetic-timed-out-deepl").unwrap();
+        let mut save = Box::pin(super::persist_key(
+            source.clone(),
+            path.clone(),
+            Ok(key.clone()),
+        ));
+        assert!(save.as_mut().now_or_never().is_none());
+        assert_eq!(key::read(&path), Err(KeyError::Missing));
+        source.initialize(Err(KeyError::Missing));
+
+        let work = Work::start().unwrap();
+        let (send, receive) = mpsc::channel();
+        let _job = work.run(
+            Duration::from_secs(1),
+            async move {
+                save.await?;
+                // Hold completion until the runner has to report a timeout.
+                future::pending().await
+            },
+            move |outcome: Outcome<Result<(), key::WriteError>>| send.send(outcome).unwrap(),
+        );
+        let outcome = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(outcome, Outcome::TimedOut);
+        assert_eq!(key::read(&path), Ok(key.clone()));
+        assert_eq!(source.snapshot(), Some(Ok(key)));
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn settings_saves_update_the_active_deepl_key() {
+        use addict_core::translation::{English, Request};
+        use addict_deepl::{
+            DeepL,
+            key::{self, KeySource, Secret, WriteError},
+            stub::{Reply, Stub},
+        };
+        use addict_engine::work::Outcome;
+        use futures_util::{FutureExt, StreamExt};
+        use gtk::glib;
+        use std::fs;
+
+        fn find<T: IsA<gtk::Widget>>(
+            root: &gtk::Widget,
+            accept: &impl Fn(&T) -> bool,
+        ) -> Option<T> {
+            if let Some(widget) = root.downcast_ref::<T>().filter(|widget| accept(widget)) {
+                return Some(widget.clone());
+            }
+            let mut child = root.first_child();
+            while let Some(widget) = child {
+                if let Some(found) = find(&widget, accept) {
+                    return Some(found);
+                }
+                child = widget.next_sibling();
+            }
+            None
+        }
+
+        const INITIAL: &str = "synthetic-startup-deepl:fx";
+        const SAVED: &str = "synthetic-settings-deepl";
+        const SUPERSEDED: &str = "synthetic-superseded-deepl:fx";
+        const FREE: &str = "A DeepL key of the Free plan is set.";
+        const PRO: &str = "A DeepL key of the Pro plan is set.";
+
+        gtk::init().expect("a display");
+        let temp = KeyTestDir::new("addict-key-session");
+        let path = temp.0.join("config/deepl.key");
+        let initial = key::write(&path, Secret::new(INITIAL).unwrap()).expect("startup key");
+        let (mut session, mut events, _work) = test_session_with_source(
+            "io.github.doqhu.Addict.KeyTest",
+            Dirs {
+                config: Some(temp.0.join("config")),
+                cache: Some(temp.0.join("cache")),
+                ..Dirs::default()
+            },
+            KeySource::pending(),
+        );
+        let stub = Stub::start(Reply::translation("translated")).expect("stub");
+        (session.translator, session.cache) = super::online_translator(
+            &session.dirs,
+            DeepL::with_base_url(session.key_source.clone(), stub.base_url()),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let request = |text: &str| Request {
+            text: text.to_owned(),
+            context: None,
+            source: Language::En,
+            target: Language::Ru,
+            english: English::Us,
+        };
+        let assert_authorization = |index: usize, expected: &str| {
+            let seen = stub.seen();
+            assert_eq!(seen.len(), index + 1);
+            assert!(
+                seen[index].header("authorization")
+                    == Some(format!("DeepL-Auth-Key {expected}").as_str()),
+                "unexpected authorization"
+            );
+        };
+        let translate = |session: &super::Session, text: &str, expected: &str| {
+            let count = stub.seen().len();
+            let answer = runtime.block_on(async {
+                tokio::time::timeout(TRANSLATE_LIMIT, session.translator.translate(request(text)))
+                    .await
+            });
+            assert_eq!(answer.unwrap(), Ok("translated".to_owned()));
+            assert_authorization(count, expected);
+        };
+
+        session.show_settings();
+        let window = session.settings.window().clone();
+        let root = window.upcast_ref::<gtk::Widget>();
+        let entry = find::<gtk::PasswordEntry>(root, &|_| true).unwrap();
+        let save = find::<gtk::Button>(root, &|button| {
+            button.label().as_deref() == Some("Save key")
+        })
+        .unwrap();
+        let state = find::<gtk::Label>(root, &|label| label.has_css_class("key-state")).unwrap();
+        let error_shown = || {
+            find::<gtk::Label>(root, &|label| {
+                label.is_visible() && label.label().starts_with("The key was not saved:")
+            })
+            .is_some()
+        };
+        let context = glib::MainContext::default();
+
+        assert_eq!(state.label(), "Checking…");
+        assert!(!entry.is_sensitive());
+        let translator = session.translator.clone();
+        let mut first = translator.translate(request("first uncached request"));
+        let cached = request("a cached translation");
+        session.cache.put(&super::cache::key_of(&cached), "cached");
+        runtime.block_on(async {
+            assert!(first.as_mut().now_or_never().is_none());
+            assert_eq!(
+                translator.translate(cached).now_or_never(),
+                Some(Ok("cached".to_owned()))
+            );
+        });
+        assert!(stub.seen().is_empty());
+
+        super::start_key_load(
+            session.key_file.clone(),
+            &session.key_source,
+            &session.sender,
+        );
+        loop {
+            let event = context.block_on(events.next()).expect("startup key result");
+            let loaded = matches!(event, Event::KeyLoaded);
+            session.handle(event);
+            if loaded {
+                break;
+            }
+        }
+        assert_eq!(state.label(), FREE);
+        assert!(entry.is_sensitive());
+        let answer = runtime.block_on(async { tokio::time::timeout(TRANSLATE_LIMIT, first).await });
+        assert_eq!(answer.unwrap(), Ok("translated".to_owned()));
+        assert_authorization(0, INITIAL);
+
+        fs::remove_file(&path).expect("external removal");
+        translate(&session, "after removal", INITIAL);
+        key::write(&path, Secret::new("external-file-edit").unwrap())
+            .expect("external replacement");
+        translate(&session, "after external replacement", INITIAL);
+        assert_eq!(session.key_source.snapshot(), Some(Ok(initial)));
+
+        let mut press = |session: &mut super::Session, input: &str| {
+            entry.set_text(input);
+            assert!(save.is_sensitive());
+            save.emit_clicked();
+            loop {
+                let event = context.block_on(events.next()).expect("save request");
+                let requested = matches!(event, Event::SaveKey(_));
+                session.handle(event);
+                if requested {
+                    break;
+                }
+            }
+            loop {
+                let event = context.block_on(events.next()).expect("save outcome");
+                if matches!(event, Event::KeySaved(..)) {
+                    return event;
+                }
+                session.handle(event);
+            }
+        };
+
+        assert_eq!(state.label(), FREE);
+        let finished = press(&mut session, &format!("  {SAVED}  "));
+        assert!(matches!(
+            finished,
+            Event::KeySaved(_, Outcome::Finished(Ok(())))
+        ));
+        translate(&session, "before reporting the successful save", SAVED);
+        session.handle(finished);
+        assert!(entry.text().is_empty());
+        assert_eq!(state.label(), PRO);
+        assert!(!error_shown());
+
+        let superseded = press(&mut session, SUPERSEDED);
+        assert!(matches!(
+            superseded,
+            Event::KeySaved(_, Outcome::Finished(Ok(())))
+        ));
+        let failed = press(&mut session, "invalid input");
+        assert!(matches!(
+            failed,
+            Event::KeySaved(_, Outcome::Finished(Err(WriteError::Invalid)))
+        ));
+        session.handle(superseded);
+        assert_eq!(entry.text(), "invalid input");
+        session.handle(failed);
+        assert!(error_shown());
+        assert_eq!(state.label(), FREE);
+        let persisted = fs::read_to_string(&path).expect("persisted file");
+        assert!(
+            persisted == format!("{SUPERSEDED}\n"),
+            "unexpected persisted key"
+        );
+        translate(
+            &session,
+            "after a superseded save and validation failure",
+            SUPERSEDED,
+        );
+
+        let backup = path.with_extension("old");
+        fs::rename(&path, &backup).expect("save old file");
+        fs::create_dir(&path).expect("block atomic replacement");
+        let failed = press(&mut session, "synthetic-unwritten-deepl");
+        assert!(matches!(
+            failed,
+            Event::KeySaved(_, Outcome::Finished(Err(WriteError::Io(_))))
+        ));
+        session.handle(failed);
+        assert!(error_shown());
+        assert_eq!(state.label(), FREE);
+        assert!(path.is_dir());
+        assert!(
+            fs::read_to_string(backup).unwrap() == persisted,
+            "old key changed"
+        );
+        translate(&session, "after an I/O failure", SUPERSEDED);
+        window.destroy();
+        session.window.destroy();
     }
 
     /// With Translate sentence at once on, a sentence read at a press is

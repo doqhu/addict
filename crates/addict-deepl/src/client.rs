@@ -1,7 +1,7 @@
 //! The DeepL client: translate, the languages and the usage.
 //!
-//! Every request reads the key file first, so a key written while the
-//! application runs is found by the next request, and a request without a
+//! Every request snapshots the caller's key source first, so a key installed
+//! while the application runs is used by the next request. A request without a
 //! usable key sends nothing. The HTTP client, and with it the TLS state, is
 //! built by the first request that has a key. No request is repeated, nothing
 //! is cached in this crate and no connection is kept after its answer: between
@@ -12,10 +12,7 @@
 //! No timer runs here. A request that gets no answer stays pending until its
 //! future is dropped; the deadline is the caller's.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::OnceLock,
-};
+use std::sync::OnceLock;
 
 use addict_core::translation::{English, Refusal, Request, Source, Translating, Translator};
 use reqwest::{
@@ -24,7 +21,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::key::{self, Key};
+use crate::key::{KeyError, KeySource, Secret};
 
 /// The host of the keys of the Free plan.
 const FREE_HOST: &str = "https://api-free.deepl.com";
@@ -65,7 +62,7 @@ const AUTH_SCHEME: &str = "DeepL-Auth-Key ";
 const QUOTA_EXCEEDED: u16 = 456;
 
 /// The base URL of the requests made with `key`.
-pub fn host(key: &Key) -> &'static str {
+pub fn host(key: &Secret) -> &'static str {
     if key.is_free() { FREE_HOST } else { PRO_HOST }
 }
 
@@ -153,11 +150,10 @@ struct Translation {
     text: String,
 }
 
-/// The client. It holds the path of the key file and never the key.
+/// The client. Requests use a snapshot of the caller's key source.
 #[derive(Debug)]
 pub struct DeepL {
-    /// `None` when no key path was supplied.
-    key_file: Option<PathBuf>,
+    key_source: KeySource,
     /// The base URL of every request; `None` chooses the host by the key.
     base_url: Option<String>,
     /// Built by the first request that has a key.
@@ -165,36 +161,30 @@ pub struct DeepL {
 }
 
 impl DeepL {
-    /// Uses the supplied key file and the host of its key. Nothing is read
-    /// or opened here.
-    pub fn new(key_file: Option<PathBuf>) -> Self {
+    /// Uses the supplied source and the host of its current key.
+    pub fn new(key_source: KeySource) -> Self {
         Self {
-            key_file,
+            key_source,
             base_url: None,
             http: OnceLock::new(),
         }
     }
 
-    /// A client that reads the key from `key_file` and sends every request
+    /// A client that uses `key_source` and sends every request
     /// to `base_url`, whatever the key is.
-    pub fn with_base_url(key_file: impl Into<PathBuf>, base_url: impl Into<String>) -> Self {
+    pub fn with_base_url(key_source: KeySource, base_url: impl Into<String>) -> Self {
         Self {
-            key_file: Some(key_file.into()),
+            key_source,
             base_url: Some(base_url.into().trim_end_matches('/').to_owned()),
             http: OnceLock::new(),
         }
-    }
-
-    /// The configured path captured when this client was created.
-    pub fn key_file(&self) -> Option<&Path> {
-        self.key_file.as_deref()
     }
 
     /// The text for `request.text` in the language of `request.target`.
     /// `request.text` is in the language of `request.source` and is read in
     /// `request.context` when there is one. The context is not translated.
     pub async fn translate(&self, request: &Request) -> Result<String, Refusal> {
-        let (http, base, authorization) = self.prepared()?;
+        let (http, base, authorization) = self.prepared().await?;
         let body = TranslateBody::from(sent(request));
         let sent = http
             .post(format!("{base}/v2/translate"))
@@ -208,7 +198,7 @@ impl DeepL {
 
     /// The languages DeepL translates text from and to.
     pub async fn languages(&self) -> Result<Vec<Language>, Refusal> {
-        let (http, base, authorization) = self.prepared()?;
+        let (http, base, authorization) = self.prepared().await?;
         let sent = http
             .get(format!("{base}/v3/languages?resource=translate_text"))
             .header(AUTHORIZATION, authorization);
@@ -217,7 +207,7 @@ impl DeepL {
 
     /// How much of the quota of the key is used.
     pub async fn usage(&self) -> Result<Usage, Refusal> {
-        let (http, base, authorization) = self.prepared()?;
+        let (http, base, authorization) = self.prepared().await?;
         let sent = http
             .get(format!("{base}/v2/usage"))
             .header(AUTHORIZATION, authorization);
@@ -225,14 +215,13 @@ impl DeepL {
     }
 
     /// What every request needs: the HTTP client, the base URL and the
-    /// header with the key, read from its file now. Without a usable key
+    /// header with the key from one snapshot. Without a usable key
     /// nothing else is done.
-    fn prepared(&self) -> Result<(&reqwest::Client, &str, HeaderValue), Refusal> {
-        let key_file = self.key_file.as_deref().ok_or(Refusal::Key)?;
-        let key = key::read(key_file).map_err(|error| match error {
-            key::KeyError::Missing | key::KeyError::Empty => Refusal::Key,
-            key::KeyError::Unreadable => Refusal::UnreadableKey,
-            key::KeyError::TooOpen => Refusal::UnsafeKey,
+    async fn prepared(&self) -> Result<(&reqwest::Client, &str, HeaderValue), Refusal> {
+        let key = self.key_source.ready().await.map_err(|error| match error {
+            KeyError::NoDirectory | KeyError::Missing | KeyError::Empty => Refusal::Key,
+            KeyError::Unreadable => Refusal::UnreadableKey,
+            KeyError::TooOpen => Refusal::UnsafeKey,
         })?;
         let mut authorization = HeaderValue::from_str(&format!("{AUTH_SCHEME}{}", key.secret()))
             .map_err(|_| Refusal::Key)?;

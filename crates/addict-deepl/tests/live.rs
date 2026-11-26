@@ -7,7 +7,10 @@
 use std::{env, path::PathBuf};
 
 use addict_core::translation::{English, Request, Source, Translator};
-use addict_deepl::{DeepL, key};
+use addict_deepl::{
+    DeepL,
+    key::{self, KeyError, KeySource},
+};
 
 /// The Linux key location used by the opt-in live tests.
 fn key_file() -> Option<PathBuf> {
@@ -18,10 +21,17 @@ fn key_file() -> Option<PathBuf> {
     key::key_path(Some(&config.join("addict")))
 }
 
+fn live_client() -> DeepL {
+    let initial = key_file()
+        .as_deref()
+        .map_or(Err(KeyError::NoDirectory), key::read);
+    DeepL::new(KeySource::new(initial))
+}
+
 #[tokio::test]
 #[ignore = "calls DeepL with the key of ~/.config/addict/deepl.key"]
 async fn the_key_of_the_user_reads_the_languages_and_the_usage() {
-    let client = DeepL::new(key_file());
+    let client = live_client();
     let languages = client.languages().await.expect("the languages");
     println!("languages: {}", languages.len());
     let find = |code: &str| {
@@ -53,7 +63,7 @@ const WORDS: [(Source, &str, &str); 4] = [
 #[tokio::test]
 #[ignore = "calls DeepL with the key of ~/.config/addict/deepl.key"]
 async fn every_ordered_pair_translates_a_word_in_its_sentence() {
-    let client = DeepL::new(key_file());
+    let client = live_client();
     let mut pairs = 0;
     for (source, word, sentence) in WORDS {
         for target in Source::ALL {
@@ -85,7 +95,7 @@ async fn every_ordered_pair_translates_a_word_in_its_sentence() {
 #[tokio::test]
 #[ignore = "calls DeepL with the key of ~/.config/addict/deepl.key"]
 async fn us_and_british_english_spell_the_colour_their_own_way() {
-    let client = DeepL::new(key_file());
+    let client = live_client();
     for (english, spelling) in [(English::Us, "color"), (English::Gb, "colour")] {
         let request = Request {
             text: "Me gusta el color rojo".to_owned(),

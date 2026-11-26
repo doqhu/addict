@@ -18,13 +18,12 @@ addict-core = { path = "../addict-core" }
 reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-# Only the stub server of the tests uses it directly.
-tokio = { version = "=1.53.2", features = ["io-util", "macros", "net", "rt", "sync", "time"], optional = true }
+tokio = { version = "=1.53.2", features = ["sync"] }
 
 [features]
 # The stub server on a loopback port, for the tests of this crate and of the
 # crates that use it. The product cannot name it.
-stub = ["dep:tokio"]
+stub = ["tokio/io-util", "tokio/macros", "tokio/net", "tokio/rt", "tokio/time"]
 
 [dev-dependencies]
 addict-deepl = { path = ".", features = ["stub"] }

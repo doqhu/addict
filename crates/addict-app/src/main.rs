@@ -110,13 +110,14 @@
 //! sent, without context, only when Enter is pressed in the field or the
 //! word was pasted there, and stands under a label of its own; typing it or
 //! clicking it sends nothing, and neither does Enter in an empty field or in
-//! a sentence, or the paste of a sentence. The key is read at each
-//! request from `$XDG_CONFIG_HOME/addict/deepl.key`, or
+//! a sentence, or the paste of a sentence. The primary session reads the key
+//! in the background at startup from `$XDG_CONFIG_HOME/addict/deepl.key`, or
 //! `$HOME/.config/addict/deepl.key`, a file only its owner may read or write:
 //! when its mode has any bit outside `0600` it is refused unread. The key
 //! can be entered in the Settings window, which writes that file with mode
-//! `0600` and never shows the key it holds. A request
-//! has a deadline. Any change of the text, an edit or a paste, drops every
+//! `0600` and updates the active key for the next request. Restart addict
+//! after editing the file directly. A request has a deadline.
+//! Any change of the text, an edit or a paste, drops every
 //! online text and gives up every request, and a click on another word gives
 //! up the request of the word before. When a request gives no translation,
 //! its line distinguishes key, connection, quota, language and timeout failures.
@@ -183,8 +184,8 @@
 //! menu of Show, Settings, About and Exit, which a click on the icon opens.
 //! Show shows the window as a repeated launch does, without a read. Settings
 //! and About are also in the main window's menu. Settings shows both shortcut assignments,
-//! the DeepL key file and its state, never the key, and a button that asks
-//! the portal to configure both actions, with live assignment updates.
+//! the DeepL key file path and the active key's plan or refusal. Its shortcut
+//! button asks the portal to configure both actions, with live assignment updates.
 //! About shows a window with the icon, the name, the version and the license
 //! of the application, and a Credits page that lists every dictionary and OCR
 //! source with its credit line. Exit ends the application. A session with no

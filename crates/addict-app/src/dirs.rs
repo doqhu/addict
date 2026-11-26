@@ -44,7 +44,10 @@ fn product_dir(xdg: Option<&OsStr>, home: Option<&Path>, fallback: &str) -> Opti
 mod tests {
     use std::{fs, os::unix::ffi::OsStrExt};
 
-    use addict_deepl::{DeepL, key};
+    use addict_deepl::{
+        DeepL,
+        key::{self, KeySource},
+    };
     use addict_dictionary::import::{Source, index_path};
     use addict_engine::{at_once, cache::Cached, english, language, my_language};
 
@@ -202,8 +205,9 @@ mod tests {
             ] {
                 assert_eq!(actual, Some(config.join(name)));
             }
-            let deepl = DeepL::new(key::key_path(config_dir));
-            assert_eq!(deepl.key_file(), Some(config.join("deepl.key").as_path()));
+            let key_path = key::key_path(config_dir).expect("configuration directory");
+            assert_eq!(key_path, config.join("deepl.key"));
+            let deepl = DeepL::new(KeySource::new(key::read(&key_path)));
             let data_dir = dirs.data.as_deref().expect("data directory");
             assert_eq!(index_path(data_dir, Source::Oewn), data.join("oewn.index"));
             assert_eq!(
