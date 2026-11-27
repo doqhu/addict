@@ -912,11 +912,29 @@ window.addict popover.main-menu modelbutton {
   min-height: 36px;
   padding: 0 10px;
   border-radius: 10px;
+  background: transparent;
+  color: var(--fg);
+  box-shadow: none;
+  outline: none;
+}
+
+window.addict popover.main-menu modelbutton:focus,
+window.addict popover.main-menu modelbutton:selected {
+  background: transparent;
+  color: var(--fg);
+  box-shadow: none;
+  outline: none;
 }
 
 window.addict popover.main-menu modelbutton:hover,
+window.addict popover.main-menu modelbutton:active,
 window.addict popover.main-menu modelbutton:focus-visible {
   background: var(--chip);
+  color: var(--fg);
+}
+
+window.addict popover.main-menu modelbutton label {
+  color: inherit;
 }
 
 /* Wide enough that a row's shortcut stands apart from its label. */
