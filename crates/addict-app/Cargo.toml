@@ -17,6 +17,7 @@ name = "harness"
 test = true
 
 [dependencies]
+addict-controller = { path = "../addict-controller" }
 addict-core = { path = "../addict-core" }
 addict-deepl = { path = "../addict-deepl" }
 addict-dictionary = { path = "../addict-dictionary" }

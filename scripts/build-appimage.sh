@@ -7,7 +7,7 @@ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 lock=$root/packaging/appimage/inputs.lock.json
 verify_inputs() {
     python3 - "$lock" "$1" "${2:-verify}" <<'PY'
-import hashlib, json, pathlib, shutil, sys, time, urllib.error, urllib.request
+import hashlib, json, pathlib, shutil, sys, tempfile, time, urllib.error, urllib.request
 lock, directory, mode = json.load(open(sys.argv[1])), pathlib.Path(sys.argv[2]), sys.argv[3]
 directory.mkdir(parents=True, exist_ok=True)
 lines = []
@@ -16,23 +16,34 @@ for item in lock['rpms'] + lock['tools'] + lock['ocr'] + lock['notices'] + lock[
     path = directory / name
     if not path.exists() and mode == 'fetch':
         print('Fetching ' + name, flush=True)
-        # One unresponsive host must not fail the build; the checksum below guards the result.
+        # A response can end early without raising a network exception.
         for attempt in range(1, 5):
+            partial = None
             try:
-                with urllib.request.urlopen(item['url'], timeout=60) as src, open(str(path)+'.part', 'wb') as dst:
-                    shutil.copyfileobj(src, dst)
-                pathlib.Path(str(path)+'.part').replace(path)
+                with tempfile.NamedTemporaryFile(dir=directory, prefix=f'.{name}.', suffix='.part', delete=False) as dst:
+                    partial = pathlib.Path(dst.name)
+                    with urllib.request.urlopen(item['url'], timeout=60) as src:
+                        shutil.copyfileobj(src, dst)
+                with partial.open('rb') as downloaded:
+                    actual = hashlib.file_digest(downloaded, 'sha256').hexdigest()
+                if actual != expected:
+                    raise ValueError(f'checksum mismatch: {name}: {actual}, expected {expected}')
+                partial.replace(path)
                 break
             except Exception as e:
+                if partial is not None:
+                    partial.unlink(missing_ok=True)
                 if attempt == 4 or isinstance(e, urllib.error.HTTPError) and e.code in (403, 404, 410):
                     raise SystemExit(f'input {name}: {e}')
                 print(f'  attempt {attempt} failed ({e}); retrying', flush=True)
                 time.sleep(5 * 3 ** (attempt - 1))
-    if not path.is_file():
-        raise SystemExit(f'missing input: {name}')
-    actual = hashlib.file_digest(open(path, 'rb'), 'sha256').hexdigest()
-    if actual != expected:
-        raise SystemExit(f'checksum mismatch: {name}: {actual}, expected {expected}')
+    else:
+        if not path.is_file():
+            raise SystemExit(f'missing input: {name}')
+        with path.open('rb') as cached:
+            actual = hashlib.file_digest(cached, 'sha256').hexdigest()
+        if actual != expected:
+            raise SystemExit(f'checksum mismatch: {name}: {actual}, expected {expected}')
     lines.append(f'{expected}  {name}\n')
 (directory / 'SHA256SUMS').write_text(''.join(lines))
 PY

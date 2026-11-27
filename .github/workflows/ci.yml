@@ -39,7 +39,7 @@ jobs:
           dnf -y install --setopt=install_weak_deps=False
           gcc pkgconf-pkg-config gtk4-devel rust cargo clippy rustfmt git
           tesseract tesseract-langpack-eng tesseract-langpack-rus util-linux
-          dbus-daemon xz
+          dbus-daemon python3 xz
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -71,10 +71,31 @@ jobs:
       - name: Test the workspace
         run: runuser -u tester -- cargo test --locked --workspace
 
-      # The engine stays free of GTK and of the Linux adapters (AD-17), and
-      # builds on its own.
-      - name: Guard the dependencies
+      # Check the shared engine and controller independently of the GTK app.
+      - name: Guard shared dependencies, directory reads and platform predicates
         run: runuser -u tester -- scripts/check.sh guard
+
+  macos:
+    # Reusable CI sees the caller's workflow name. Keep macOS out of the Linux release gate.
+    if: github.workflow != 'Release'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-controller-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: macos-controller-${{ runner.arch }}-
+
+      - name: Test the controller
+        run: cargo test --locked -p addict-controller
+
+      - name: Lint the controller
+        run: cargo clippy --locked -p addict-controller --all-targets -- -D warnings
 
   # The release trigger: the guard and the tag filters of the workflows.
   workflows:

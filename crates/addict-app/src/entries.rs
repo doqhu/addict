@@ -10,11 +10,10 @@
 use std::{
     io,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
+use addict_controller::deadlines::STARTUP_LIMIT;
 use addict_core::APP_ID;
-use addict_deepl::key;
 use addict_engine::view::failure_reason;
 use addict_platform::{
     desktop::{self, LoginEntry, Target},
@@ -29,20 +28,16 @@ const STARTUP_FILE: &str = "login-startup";
 /// directory.
 const SHORTCUT_FILE: &str = "shortcut-generation";
 
-/// How long the portal may take over one request. It can be waiting for the
-/// user to answer its dialog.
-pub const STARTUP_LIMIT: Duration = Duration::from_secs(60);
-
-/// Where the last confirmed startup state is kept, or `None` when the
-/// environment names no configuration directory.
-pub fn startup_file() -> Option<PathBuf> {
-    Some(key::config_dir()?.join(STARTUP_FILE))
+/// Where the last confirmed startup state is kept, or `None` when no
+/// configuration directory was supplied.
+pub fn startup_file(config: Option<&Path>) -> Option<PathBuf> {
+    Some(config?.join(STARTUP_FILE))
 }
 
 /// Where the shortcut worker keeps which shortcut IDs are current, or `None`
-/// when the environment names no configuration directory.
-pub fn shortcut_file() -> Option<PathBuf> {
-    Some(key::config_dir()?.join(SHORTCUT_FILE))
+/// when no configuration directory was supplied.
+pub fn shortcut_file(config: Option<&Path>) -> Option<PathBuf> {
+    Some(config?.join(SHORTCUT_FILE))
 }
 
 /// What stands at the login entry, outside the sandbox. A foreign file or a
@@ -163,7 +158,7 @@ fn remove_startup_file(path: &Path) -> Result<Option<PathBuf>, String> {
 /// listed. Everything is checked first, and a login entry of ours goes through
 /// the portal before any file goes, as the portal needs the launcher to know
 /// this application. If the portal does not confirm, nothing is removed.
-pub fn uninstall_entries() -> Result<Vec<PathBuf>, String> {
+pub fn uninstall_entries(config: Option<&Path>) -> Result<Vec<PathBuf>, String> {
     let applications = applications_dir()?;
     let launcher = desktop::check_launcher(&applications, APP_ID).map_err(|e| e.to_string())?;
     let sandboxed = startup::is_sandboxed();
@@ -174,7 +169,7 @@ pub fn uninstall_entries() -> Result<Vec<PathBuf>, String> {
         login_entry()?
     };
     let icons = checked_icons()?;
-    let state = startup_file();
+    let state = startup_file(config);
     if let Some(state) = &state {
         check_startup_file(state)?;
     }

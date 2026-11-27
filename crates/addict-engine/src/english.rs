@@ -1,6 +1,5 @@
 //! The spelling of English kept across restarts: one line, `us` or `gb`, in
-//! the file `english` of the product's configuration directory,
-//! [`addict_deepl::key::config_dir`], the directory of the DeepL key.
+//! the file `english` of the product's configuration directory.
 //!
 //! The file is read once, on the runner, after the start, and written on the
 //! runner each time the English spelling row of Settings changes; never on
@@ -24,10 +23,10 @@ const ENGLISH_FILE: &str = "english";
 /// How many bytes of the file are read. A code and its line break are three.
 const ENGLISH_LIMIT: u64 = 64;
 
-/// The English-spelling file of the product, or `None` when the environment
-/// names no configuration directory. Nothing is read here.
-pub fn path() -> Option<PathBuf> {
-    Some(addict_deepl::key::config_dir()?.join(ENGLISH_FILE))
+/// The English-spelling file of the product, or `None` when no
+/// configuration directory was supplied. Nothing is read here.
+pub fn path(config: Option<&Path>) -> Option<PathBuf> {
+    Some(config?.join(ENGLISH_FILE))
 }
 
 /// The variant the file at `path` holds; US for no path, a missing or

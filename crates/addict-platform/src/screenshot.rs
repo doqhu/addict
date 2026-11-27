@@ -7,10 +7,22 @@
 //! path of the snapshot or one [`CaptureFailure`]. It has no limit of its
 //! own; the caller bounds the wait.
 
-use std::path::PathBuf;
+use std::{
+    collections::HashMap,
+    future::{self, Future},
+    path::PathBuf,
+    time::Duration,
+};
 
 use addict_core::failure::capture::CaptureFailure;
-use ashpd::desktop::screenshot::{ScreenshotOptions, ScreenshotProxy};
+use futures_util::{FutureExt, StreamExt};
+use zbus::{
+    Connection, MatchRule, MessageStream,
+    message::Type,
+    zvariant::{OwnedObjectPath, OwnedValue, Value},
+};
+
+use tokio::time::{Instant, timeout_at};
 
 use crate::portal::{self, PortalFailure};
 
@@ -29,19 +41,128 @@ impl From<PortalFailure> for CaptureFailure {
 /// the local path of the image it made. Where the portal has no host Registry
 /// the request is made unregistered, which the interactive picker allows.
 pub async fn capture(app_id: &str) -> Result<PathBuf, CaptureFailure> {
-    let connection = portal::connection_degrading_without_registry(app_id).await?;
+    capture_until(app_id, future::pending()).await
+}
 
-    let proxy = ScreenshotProxy::with_connection(connection)
-        .await
-        .map_err(|e| portal::classify("Screenshot portal", &e))?;
-    let options = ScreenshotOptions::default().set_interactive(true);
-    let shot = proxy
-        .screenshot(None, options)
-        .await
-        .and_then(|request| request.response())
-        .map_err(|e| portal::classify("screenshot", &e))?;
+/// Captures on a dedicated bus connection. Cancellation closes the portal
+/// request on that same connection before returning to the caller.
+pub async fn capture_until(
+    app_id: &str,
+    cancelled: impl Future<Output = ()>,
+) -> Result<PathBuf, CaptureFailure> {
+    tokio::pin!(cancelled);
+    let connection = tokio::select! {
+        biased;
+        () = &mut cancelled => return Err(CaptureFailure::Cancelled),
+        connection = portal::connection_degrading_without_registry(app_id) => connection?,
+    };
 
-    let path = file_path_from_uri(shot.uri().as_str()).ok_or(CaptureFailure::NoImage)?;
+    ask(&connection, cancelled).await
+}
+
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
+const REQUEST: &str = "org.freedesktop.portal.Request";
+/// A bound on cleanup after cancellation, independent of the picker deadline.
+const CLOSE_LIMIT: Duration = Duration::from_secs(1);
+
+async fn ask(
+    connection: &Connection,
+    cancelled: impl Future<Output = ()>,
+) -> Result<PathBuf, CaptureFailure> {
+    tokio::pin!(cancelled);
+    // Subscribe before Screenshot so even a response on a different handle
+    // can be queued while the method reply is still in flight.
+    let prepare = async {
+        let rule = MatchRule::builder()
+            .msg_type(Type::Signal)
+            .sender(PORTAL)?
+            .interface(REQUEST)?
+            .member("Response")?
+            .build();
+        MessageStream::for_match_rule(rule, connection, None).await
+    };
+    let responses = tokio::select! {
+        biased;
+        () = &mut cancelled => return Err(CaptureFailure::Cancelled),
+        prepared = prepare => prepared.map_err(|e| portal::from_zbus("Screenshot portal", &e))?,
+    };
+    let options = HashMap::from([
+        ("handle_token", Value::from("capture")),
+        ("interactive", Value::from(true)),
+    ]);
+    let body = ("", options);
+    let method = connection.call_method(
+        Some(PORTAL),
+        "/org/freedesktop/portal/desktop",
+        Some("org.freedesktop.portal.Screenshot"),
+        "Screenshot",
+        &body,
+    );
+    tokio::pin!(method);
+    let (reply, cleanup_deadline) = tokio::select! {
+        biased;
+        reply = &mut method => (reply, None),
+        () = &mut cancelled => {
+            let deadline = Instant::now() + CLOSE_LIMIT;
+            let reply = timeout_at(deadline, &mut method).await
+                .map_err(|_| CaptureFailure::Cancelled)?;
+            (reply, Some(deadline))
+        }
+    };
+    let reply = reply.map_err(|e| portal::from_zbus("screenshot", &e))?;
+    let returned: OwnedObjectPath = reply
+        .body()
+        .deserialize()
+        .map_err(|e| portal::from_zbus("screenshot", &e))?;
+    let mut responses = responses.filter_map(|message| {
+        future::ready(message.ok().filter(|message| {
+            message
+                .header()
+                .path()
+                .is_some_and(|path| path.as_str() == returned.as_str())
+        }))
+    });
+    let deadline = match cleanup_deadline {
+        Some(deadline) => deadline,
+        None => tokio::select! {
+            biased;
+            response = responses.next() => return decode(response),
+            () = &mut cancelled => Instant::now() + CLOSE_LIMIT,
+        },
+    };
+    let close =
+        connection.call_method(Some(PORTAL), returned.as_str(), Some(REQUEST), "Close", &());
+    let _ = timeout_at(deadline, close).await;
+    // If the picker completed concurrently with Close, pass the ready file
+    // to the caller so its normal ownership guard can remove it.
+    match responses.next().now_or_never().flatten() {
+        Some(response) => decode(Some(response)),
+        None => Err(CaptureFailure::Cancelled),
+    }
+}
+
+fn decode(response: Option<zbus::Message>) -> Result<PathBuf, CaptureFailure> {
+    let response =
+        response.ok_or_else(|| CaptureFailure::Failed("screenshot: no portal response".into()))?;
+    let (code, data): (u32, HashMap<String, OwnedValue>) = response
+        .body()
+        .deserialize()
+        .map_err(|e| portal::from_zbus("screenshot", &e))?;
+    match code {
+        0 => {}
+        1 => return Err(CaptureFailure::Cancelled),
+        2 => return Err(CaptureFailure::Ended),
+        _ => {
+            return Err(CaptureFailure::Failed(format!(
+                "screenshot: unknown response code {code}"
+            )));
+        }
+    }
+    let path = data
+        .get("uri")
+        .and_then(|uri| <&str>::try_from(uri).ok())
+        .and_then(file_path_from_uri)
+        .ok_or(CaptureFailure::NoImage)?;
     if path.is_file() {
         Ok(path)
     } else {

@@ -15,20 +15,36 @@
 //! translated without a sentence; a dim line under them names DeepL.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
-//! [`binding_texts`], [`indexes_text`], [`failure_text`], [`NOTHING_SELECTED_TEXT`], [`too_long_text`],
+//! [`binding_texts`], [`indexes_text`], [`capture_failure_text`], [`recognize_failure_text`], [`selection_failure_text`], [`NOTHING_SELECTED_TEXT`], [`too_long_text`],
 //! [`sentence_markup`],
 //! [`choice_texts`] and [`online_rows`] are pure, and
 //! so is [`Shown`], the result with the sense chosen in it; they are tested
 //! without a display. This module owns no
 //! widget: `View` puts the results into its own.
 
+mod capture;
+pub mod fatal;
+pub mod file_choice;
+pub mod first_run;
+pub mod playback;
+mod recognize;
+mod selection;
+pub mod settings;
+
+#[cfg(test)]
+use capture::CAPTURE_RETRY;
+pub use capture::capture_failure_text;
+pub use recognize::recognize_failure_text;
+pub use selection::selection_failure_text;
+pub use settings::*;
+
 use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 
 use addict_core::{
     dictionary::{Article, LexicalEntry, PartOfSpeech, Pos, Pronunciation, Sense},
-    failure::{capture::CaptureFailure, login_item::StartupFailure, recognize::OcrFailure},
+    failure::login_item::StartupFailure,
     input::{Source, WindowState},
-    translation::{English, Refusal, Request, Source as Language, reading_languages},
+    translation::{English, Refusal, Request, Source as Language},
 };
 
 use addict_dictionary::{
@@ -38,10 +54,7 @@ use addict_dictionary::{
     pairs,
 };
 
-use crate::{
-    capture::Failure,
-    dictionaries::{IndexFile, Indexes, State},
-};
+use crate::dictionaries::{IndexFile, Indexes, State};
 
 /// The two texts of one window state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,95 +234,14 @@ pub const CAPTURE_LABEL: &str = "Capture";
 
 /// The tooltip of the button left of the field that puts the text before
 /// into it, naming its hotkey.
-pub const BACK_TOOLTIP: &str = "Back (Alt+Left)";
+pub fn back_tooltip(key: &str) -> String {
+    format!("Back ({key})")
+}
 
 /// The tooltip of the button left of the field that puts the text after
 /// into it, naming its hotkey.
-pub const FORWARD_TOOLTIP: &str = "Forward (Alt+Right)";
-
-/// The package of the Tesseract data of `language`. No wildcard arm: a new
-/// language does not compile until it is given its package.
-pub(crate) fn ocr_package(language: Language) -> &'static str {
-    match language {
-        Language::En => "tesseract-langpack-eng",
-        Language::Es => "tesseract-langpack-spa",
-        Language::Ca => "tesseract-langpack-cat",
-        Language::Ru => "tesseract-langpack-rus",
-    }
-}
-
-/// The name of `language` before "OCR data" in the line of missing data.
-fn ocr_language(language: Language) -> &'static str {
-    match language {
-        Language::En => "English",
-        Language::Es => "Spanish",
-        Language::Ca => "Catalan",
-        Language::Ru => "Russian",
-    }
-}
-
-/// The command that installs Tesseract with the data of `language`.
-pub fn install_tesseract(language: Language) -> String {
-    format!("sudo dnf install tesseract {}", ocr_package(language))
-}
-
-/// The command that installs the Tesseract data of `language`.
-pub fn install_language(language: Language) -> String {
-    format!("sudo dnf install {}", ocr_package(language))
-}
-
-/// What the source line says when the snapshot file is not there, whether
-/// the capture or the recognition found it missing.
-const NO_SNAPSHOT_FILE: &str = "The snapshot file was not found.";
-
-/// What ends the line of a capture that left no snapshot: the way back to the
-/// region picker, on the button that has the keyboard focus then.
-const CAPTURE_RETRY: &str = "Press Capture to try again.";
-
-/// `line`, what happened to a capture that left no snapshot, and the way back.
-fn with_retry(line: &str) -> Cow<'static, str> {
-    format!("{line} {CAPTURE_RETRY}").into()
-}
-
-/// What the source line says for `failure`, a capture recognized in
-/// `language` that gave no text. A capture that left no snapshot names the
-/// retry; a recognition has its own line. The portal's code 2, which GNOME
-/// also gives for Esc, claims no cause; a missing Tesseract or missing data of
-/// the language names the command that installs it with the package of that
-/// language. No wildcard arm: a new failure does not compile until it is
-/// given its line.
-pub fn failure_text(failure: &Failure, language: Language) -> Cow<'static, str> {
-    match failure {
-        Failure::Capture(failure) => match failure {
-            CaptureFailure::Cancelled => with_retry("The capture was cancelled."),
-            CaptureFailure::Ended => with_retry("No snapshot was taken."),
-            CaptureFailure::Unavailable => with_retry("Screen capture is not available here."),
-            CaptureFailure::Failed(detail) => {
-                let detail = detail.trim_end_matches('.');
-                with_retry(&format!("The screen capture failed: {detail}."))
-            }
-            CaptureFailure::NoImage => with_retry(NO_SNAPSHOT_FILE),
-        },
-        Failure::CaptureTimedOut => with_retry("No area was chosen in time."),
-        Failure::Ocr(failure) => match failure {
-            OcrFailure::NoImage => with_retry(NO_SNAPSHOT_FILE),
-            OcrFailure::TesseractMissing => format!(
-                "Tesseract is not installed. Install it with: {}",
-                install_tesseract(language)
-            )
-            .into(),
-            OcrFailure::LanguageMissing => format!(
-                "{} OCR data is not installed. Install it with: {}",
-                ocr_language(language),
-                install_language(language)
-            )
-            .into(),
-            OcrFailure::Failed(detail) => format!("Text recognition failed: {detail}").into(),
-            OcrFailure::Empty => "No text was recognized.".into(),
-            OcrFailure::TimedOut => "Text recognition took too long.".into(),
-        },
-        Failure::Unfinished => with_retry("The capture did not finish."),
-    }
+pub fn forward_tooltip(key: &str) -> String {
+    format!("Forward ({key})")
 }
 
 /// What the source line says when neither the primary selection nor the
@@ -323,21 +255,6 @@ pub const COPY_LABEL: &str = "Copy";
 
 /// What that button says once pressed, until the line changes.
 pub const COPIED_LABEL: &str = "Copied";
-
-/// The runnable command `line` names, built by the same functions that
-/// wrote it into the line: the install of Tesseract for a language, then the
-/// install of a language's data. `None` for a line that names none.
-pub fn command_in(line: &str) -> Option<String> {
-    let tesseract = reading_languages(Language::Ru)
-        .into_iter()
-        .map(install_tesseract);
-    let data = reading_languages(Language::Ru)
-        .into_iter()
-        .map(install_language);
-    tesseract
-        .chain(data)
-        .find(|command| line.contains(command.as_str()))
-}
 
 /// Where a text too long to take was held at a press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1779,6 +1696,13 @@ pub enum Choice {
     Gloss(usize),
 }
 
+/// Where the shell keeps the DeepL key, or its guidance when no file is configured.
+#[derive(Debug, Clone, Copy)]
+pub enum KeyLocation<'a> {
+    File(&'a Path),
+    Hint(&'a str),
+}
+
 /// The parts of `lookup` with the sense `chosen` in it, as
 /// [`choice_texts`] gives them; for the tests.
 #[cfg(test)]
@@ -1792,7 +1716,7 @@ pub fn result_texts<'a>(
         lookup,
         chosen.map(Choice::Sense),
         definition,
-        key_file,
+        key_file.map_or(tests::NO_KEY_LOCATION, KeyLocation::File),
         None,
         Translating::default(),
     )
@@ -1801,7 +1725,7 @@ pub fn result_texts<'a>(
 /// The parts of `lookup` with `choice` in it; a choice the result does not
 /// have is no choice. The online translation of the definition,
 /// `definition`, stands under the chosen sense or gloss when its text is not
-/// blank. A refusal about the key names `key_file`, as in
+/// blank. A refusal about the key uses `key_location`, as in
 /// [`online_rows`]. An article that the language `elsewhere.1` gave for a
 /// word the chosen language `elsewhere.0` had no entry for has the line
 /// that names both. The translations row of an article is for the target
@@ -1813,14 +1737,14 @@ pub fn choice_texts<'a>(
     lookup: &'a Lookup,
     choice: Option<Choice>,
     definition: Option<&'a Online>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     elsewhere: Option<(Language, Language)>,
     translating: Translating,
 ) -> ResultTexts<'a> {
     let elsewhere = elsewhere
         .filter(|(chosen, found)| chosen != found)
         .map(|(chosen, found)| elsewhere_text(chosen, found));
-    let texts = lookup_texts(lookup, choice, definition, key_file, translating);
+    let texts = lookup_texts(lookup, choice, definition, key_location, translating);
     match lookup {
         // Without the Russian article only its translations show, and the
         // hint says the article is not downloaded: no line names it.
@@ -1847,7 +1771,7 @@ fn lookup_texts<'a>(
     lookup: &'a Lookup,
     choice: Option<Choice>,
     definition: Option<&'a Online>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     translating: Translating,
 ) -> ResultTexts<'a> {
     let chosen = match choice {
@@ -1873,7 +1797,7 @@ fn lookup_texts<'a>(
             article,
             chosen,
             definition,
-            key_file,
+            key_location,
             translating.target(Language::En),
             translating.my,
         ),
@@ -1882,7 +1806,7 @@ fn lookup_texts<'a>(
             grouped,
             choice,
             definition,
-            key_file,
+            key_location,
             translating.target(*language),
             translating.my,
         ),
@@ -1929,7 +1853,7 @@ fn article_texts<'a>(
     article: &'a Article,
     chosen: Option<usize>,
     definition: Option<&'a Online>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     target: Language,
     my: Language,
 ) -> ResultTexts<'a> {
@@ -1939,7 +1863,7 @@ fn article_texts<'a>(
         &[],
         chosen,
         definition,
-        key_file,
+        key_location,
         my,
     );
     ResultTexts {
@@ -1980,7 +1904,7 @@ fn grouped_texts<'a>(
     grouped: &'a Grouped,
     choice: Option<Choice>,
     definition: Option<&'a Online>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     target: Language,
     my: Language,
 ) -> ResultTexts<'a> {
@@ -2001,7 +1925,7 @@ fn grouped_texts<'a>(
         groups,
         chosen,
         definition,
-        key_file,
+        key_location,
         my,
     );
     let hint = match &grouped.definitions {
@@ -2073,7 +1997,7 @@ fn grouped_texts<'a>(
                         .filter(|_| !text.trim().is_empty() && !no_key)
                         .map(|online| Block {
                             label: definition_label(my),
-                            line: online_line(online, key_file, my),
+                            line: online_line(online, key_location, my),
                         }),
                     no_key,
                 }
@@ -2101,7 +2025,7 @@ fn sense_texts<'a>(
     groups: &'a [addict_dictionary::index::SynonymGroup],
     chosen: Option<usize>,
     definition: Option<&'a Online>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     my: Language,
 ) -> (Option<&'static str>, Vec<SenseText<'a>>) {
     let chosen = chosen.filter(|index| *index < senses.len());
@@ -2131,7 +2055,7 @@ fn sense_texts<'a>(
                         .filter(|_| !sense.definition.trim().is_empty())
                         .map(|online| Block {
                             label: definition_label(my),
-                            line: online_line(online, key_file, my),
+                            line: online_line(online, key_location, my),
                         }),
                     synonyms: Listed::of_cow(SYNONYMS_LABEL, synonyms, NO_SYNONYMS),
                 }),
@@ -2230,7 +2154,7 @@ pub enum OnlineState {
 /// line reads. The line is text, never markup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnlineRow<'a> {
-    pub label: &'static str,
+    pub label: Cow<'a, str>,
     pub line: Cow<'a, str>,
     pub state: OnlineState,
     /// The translation of the word, which stands out from the sentence.
@@ -2253,9 +2177,10 @@ pub enum OnlineKind {
 }
 
 impl OnlineRow<'_> {
-    /// The same row, holding its own line.
+    /// The same row, holding its own label and line.
     pub fn into_owned(self) -> OnlineRow<'static> {
         OnlineRow {
+            label: Cow::Owned(self.label.into_owned()),
             line: Cow::Owned(self.line.into_owned()),
             ..self
         }
@@ -2373,12 +2298,12 @@ pub fn answer_texts<'a>(
 /// sentence and the sentence, in this order; empty when there is none. A
 /// row's line is the pending line, the translation as it came, the line of
 /// a refusal or the line of a text that is too long. A refusal about the
-/// key names `key_file`, or says how to make it known when there is none;
+/// key uses `key_location` for the file path or the shell's hint;
 /// one about the language names `my` language, which the texts are sent
 /// into.
 pub fn online_rows<'a>(
     texts: &OnlineTexts<'a>,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     my: Language,
 ) -> Vec<OnlineRow<'a>> {
     let mut rows = Vec::new();
@@ -2386,7 +2311,7 @@ pub fn online_rows<'a>(
         rows.push(online_row(
             ONLINE_WORD_LABEL,
             online,
-            key_file,
+            key_location,
             my,
             OnlineKind::Word,
         ));
@@ -2395,7 +2320,7 @@ pub fn online_rows<'a>(
         rows.push(online_row(
             ONLINE_LONE_LABEL,
             online,
-            key_file,
+            key_location,
             my,
             OnlineKind::Lone,
         ));
@@ -2405,12 +2330,12 @@ pub fn online_rows<'a>(
             Whole::Asked(online) => online_row(
                 ONLINE_SENTENCE_LABEL,
                 online,
-                key_file,
+                key_location,
                 my,
                 OnlineKind::Sentence,
             ),
             Whole::TooLong => OnlineRow {
-                label: ONLINE_SENTENCE_LABEL,
+                label: Cow::Borrowed(ONLINE_SENTENCE_LABEL),
                 line: Cow::Borrowed(ONLINE_TOO_LONG),
                 state: OnlineState::Failed,
                 word: false,
@@ -2426,7 +2351,7 @@ pub fn online_rows<'a>(
 fn online_row<'a>(
     label: &'static str,
     online: &'a Online,
-    key_file: Option<&Path>,
+    key_location: KeyLocation<'_>,
     my: Language,
     kind: OnlineKind,
 ) -> OnlineRow<'a> {
@@ -2436,8 +2361,8 @@ fn online_row<'a>(
         Online::Refused(_) => OnlineState::Failed,
     };
     OnlineRow {
-        label,
-        line: online_line(online, key_file, my),
+        label: Cow::Borrowed(label),
+        line: online_line(online, key_location, my),
         state,
         word: kind != OnlineKind::Sentence,
         kind,
@@ -2448,19 +2373,23 @@ fn online_row<'a>(
 /// The line of one online request: the pending line, the translation as it
 /// came or the line of a refusal, for a text sent into `my` language. No
 /// wildcard arm: a new state does not compile until it is given its line.
-fn online_line<'a>(online: &'a Online, key_file: Option<&Path>, my: Language) -> Cow<'a, str> {
+fn online_line<'a>(
+    online: &'a Online,
+    key_location: KeyLocation<'_>,
+    my: Language,
+) -> Cow<'a, str> {
     match online {
         Online::Pending => Cow::Borrowed(ONLINE_PENDING),
         Online::Translated(text) => Cow::Borrowed(text),
-        Online::Refused(refusal) => Cow::Owned(refusal_text(*refusal, key_file, my)),
+        Online::Refused(refusal) => Cow::Owned(refusal_text(*refusal, key_location, my)),
     }
 }
 
 /// The line of `refusal`, which says what failed. A refusal about the key
-/// names `key_file`, or says how to make it known when there is none; one
+/// uses `key_location` for the file path or the shell's hint; one
 /// about the language names `my` language, which the text was sent into. No
 /// wildcard arm: a new refusal does not compile until it is given its line.
-fn refusal_text(refusal: Refusal, key_file: Option<&Path>, my: Language) -> String {
+fn refusal_text(refusal: Refusal, key_location: KeyLocation<'_>, my: Language) -> String {
     let unsupported;
     let line = match refusal {
         Refusal::Key => "A DeepL key is required.",
@@ -2483,11 +2412,9 @@ fn refusal_text(refusal: Refusal, key_file: Option<&Path>, my: Language) -> Stri
         refusal,
         Refusal::Key | Refusal::UnreadableKey | Refusal::UnsafeKey | Refusal::RejectedKey
     ) {
-        match key_file {
-            Some(path) => format!("{line} Key file: {}", path.display()),
-            None => format!(
-                "{line} Set an absolute XDG_CONFIG_HOME or HOME to locate addict/deepl.key."
-            ),
+        match key_location {
+            KeyLocation::File(path) => format!("{line} Key file: {}", path.display()),
+            KeyLocation::Hint(hint) => format!("{line} {hint}"),
         }
     } else {
         line.to_owned()
@@ -2495,7 +2422,7 @@ fn refusal_text(refusal: Refusal, key_file: Option<&Path>, my: Language) -> Stri
 }
 
 /// The result the window shows and the sense or gloss chosen in it.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shown {
     lookup: Option<Lookup>,
     /// The chosen language and the one that gave the shown result, when
@@ -2766,6 +2693,7 @@ pub fn failure_reason(failure: &StartupFailure) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::KeyLocation;
     use addict_core::{
         dictionary::{Article, Dictionary, Sample, Sense},
         input::{Source, WindowState},
@@ -2781,12 +2709,11 @@ mod tests {
         PENDING, ResultTexts, SYNONYMS_LABEL, Shown, SynonymTexts, Translating, UNFINISHED, Whole,
         binding_texts, indexes_text, online_rows, result_texts, sentence_markup, texts,
     };
-    use addict_core::failure::{capture::CaptureFailure, recognize::OcrFailure};
-
-    use super::{
-        Held, NOTHING_SELECTED_TEXT, command_in, failure_text, install_language, install_tesseract,
-        too_long_text,
+    use addict_core::failure::{
+        Ended, capture::CaptureFailure, recognize::OcrFailure, selection::SelectionFailure,
     };
+
+    use super::{Held, NOTHING_SELECTED_TEXT, too_long_text};
 
     /// The label of the Russian translations, as 0.3.0 shows it.
     const RUSSIAN_LABEL: &str = "Russian, for the word as a whole:";
@@ -2794,12 +2721,9 @@ mod tests {
     /// The line of an article without Russian translations, as 0.3.0
     /// shows it.
     const NO_TRANSLATION: &str = "The dictionary has no Russian translation of this word.";
-    use crate::{
-        capture::Failure,
-        dictionaries::{
-            Indexes, State,
-            tests::{FREEDICT, OEWN},
-        },
+    use crate::dictionaries::{
+        Indexes, State,
+        tests::{FREEDICT, OEWN},
     };
     use addict_dictionary::lookup::{Grouped, VerbForm};
     use std::borrow::Cow;
@@ -2919,7 +2843,7 @@ mod tests {
                     EXPLANATION_MARK.to_owned(),
                     "  land <near> & water  ".to_owned(),
                     super::definition_label(Language::Ru).to_owned(),
-                    super::online_line(&online, Some(path), Language::Ru).into_owned(),
+                    super::online_line(&online, KeyLocation::File(path), Language::Ru).into_owned(),
                     format!("{SYNONYMS_LABEL} shore"),
                     String::new(),
                     format!("{RUSSIAN_LABEL} берег"),
@@ -2939,6 +2863,8 @@ mod tests {
         assert!(!read(&texts).contains(&super::definition_label(Language::Ru).to_owned()));
     }
 
+    pub(super) const NO_KEY_LOCATION: KeyLocation<'_> = KeyLocation::Hint("Locate the key.");
+
     const SENTENCE: &str = "I sat on the bank.";
 
     fn translated(text: &str) -> Online {
@@ -2946,16 +2872,23 @@ mod tests {
     }
 
     /// The labels and lines of the rows of `texts`, with no key file.
-    fn online(texts: &OnlineTexts<'_>) -> Vec<(&'static str, String, OnlineState, bool)> {
-        online_rows(texts, None, Language::Ru)
+    fn online(texts: &OnlineTexts<'_>) -> Vec<(String, String, OnlineState, bool)> {
+        online_rows(texts, NO_KEY_LOCATION, Language::Ru)
             .into_iter()
-            .map(|row| (row.label, row.line.into_owned(), row.state, row.word))
+            .map(|row| {
+                (
+                    row.label.into_owned(),
+                    row.line.into_owned(),
+                    row.state,
+                    row.word,
+                )
+            })
             .collect()
     }
 
     #[test]
     fn without_an_online_text_there_is_no_row() {
-        assert!(online_rows(&OnlineTexts::default(), None, Language::Ru).is_empty());
+        assert!(online_rows(&OnlineTexts::default(), NO_KEY_LOCATION, Language::Ru).is_empty());
     }
 
     #[test]
@@ -2970,13 +2903,13 @@ mod tests {
             }),
             [
                 (
-                    ONLINE_WORD_LABEL,
+                    ONLINE_WORD_LABEL.to_owned(),
                     "берег".to_owned(),
                     OnlineState::Translated,
                     true
                 ),
                 (
-                    ONLINE_SENTENCE_LABEL,
+                    ONLINE_SENTENCE_LABEL.to_owned(),
                     "Я сидел на берегу реки.".to_owned(),
                     OnlineState::Translated,
                     false
@@ -2995,7 +2928,7 @@ mod tests {
                 lone: Some(&lone),
             }),
             [(
-                ONLINE_LONE_LABEL,
+                ONLINE_LONE_LABEL.to_owned(),
                 "банк".to_owned(),
                 OnlineState::Translated,
                 true
@@ -3013,7 +2946,7 @@ mod tests {
                 lone: None,
             }),
             [(
-                ONLINE_SENTENCE_LABEL,
+                ONLINE_SENTENCE_LABEL.to_owned(),
                 "Я сидел.".to_owned(),
                 OnlineState::Translated,
                 false
@@ -3046,7 +2979,7 @@ mod tests {
                 sentence: Some(&whole),
                 lone: None,
             },
-            None,
+            NO_KEY_LOCATION,
             Language::Ru,
         ) {
             assert_eq!(row.line, "<b>берег</b> & банк");
@@ -3064,13 +2997,13 @@ mod tests {
             }),
             [
                 (
-                    ONLINE_WORD_LABEL,
+                    ONLINE_WORD_LABEL.to_owned(),
                     ONLINE_PENDING.to_owned(),
                     OnlineState::Pending,
                     true
                 ),
                 (
-                    ONLINE_SENTENCE_LABEL,
+                    ONLINE_SENTENCE_LABEL.to_owned(),
                     ONLINE_PENDING.to_owned(),
                     OnlineState::Pending,
                     false
@@ -3084,7 +3017,7 @@ mod tests {
                 lone: Some(&Online::Pending),
             }),
             [(
-                ONLINE_LONE_LABEL,
+                ONLINE_LONE_LABEL.to_owned(),
                 ONLINE_PENDING.to_owned(),
                 OnlineState::Pending,
                 true
@@ -3108,7 +3041,7 @@ mod tests {
             Refusal::TimedOut,
             Refusal::Other,
         ] {
-            let line = super::refusal_text(refusal, None, Language::Ru);
+            let line = super::refusal_text(refusal, NO_KEY_LOCATION, Language::Ru);
             let refused = Online::Refused(refusal);
             let whole = Whole::Asked(refused.clone());
             assert_eq!(
@@ -3118,9 +3051,14 @@ mod tests {
                     lone: None,
                 }),
                 [
-                    (ONLINE_WORD_LABEL, line.clone(), OnlineState::Failed, true),
                     (
-                        ONLINE_SENTENCE_LABEL,
+                        ONLINE_WORD_LABEL.to_owned(),
+                        line.clone(),
+                        OnlineState::Failed,
+                        true
+                    ),
+                    (
+                        ONLINE_SENTENCE_LABEL.to_owned(),
                         line.clone(),
                         OnlineState::Failed,
                         false
@@ -3134,7 +3072,12 @@ mod tests {
                     sentence: None,
                     lone: Some(&refused),
                 }),
-                [(ONLINE_LONE_LABEL, line.clone(), OnlineState::Failed, true)],
+                [(
+                    ONLINE_LONE_LABEL.to_owned(),
+                    line.clone(),
+                    OnlineState::Failed,
+                    true
+                )],
                 "{refusal:?}"
             );
         }
@@ -3153,13 +3096,13 @@ mod tests {
             }),
             [
                 (
-                    ONLINE_WORD_LABEL,
+                    ONLINE_WORD_LABEL.to_owned(),
                     "берег".to_owned(),
                     OnlineState::Translated,
                     true
                 ),
                 (
-                    ONLINE_SENTENCE_LABEL,
+                    ONLINE_SENTENCE_LABEL.to_owned(),
                     ONLINE_TOO_LONG.to_owned(),
                     OnlineState::Failed,
                     false
@@ -3189,7 +3132,7 @@ mod tests {
     #[test]
     fn the_capture_texts_are_one_line_each_and_name_no_cause() {
         assert_eq!(CAPTURE_LABEL, "Capture");
-        let empty = failure_text(&Failure::Ocr(OcrFailure::Empty), Language::En);
+        let empty = failure_text(&FailureCase::Ocr(OcrFailure::Empty), Language::En);
         assert_eq!(empty, "No text was recognized.");
         for text in [CAPTURE_LABEL, &empty] {
             assert_eq!(text.lines().count(), 1, "{text}");
@@ -3205,24 +3148,88 @@ mod tests {
         assert_ne!(waiting.status, empty);
     }
 
+    /// Test cases that exercise both source-message families together.
+    #[derive(Debug, PartialEq, Eq)]
+    enum FailureCase {
+        Capture(CaptureFailure),
+        CaptureTimedOut,
+        Ocr(OcrFailure),
+        RecognitionDeadline,
+        Unfinished,
+    }
+
+    fn ocr_package(language: Language) -> &'static str {
+        match language {
+            Language::En => "tesseract-langpack-eng",
+            Language::Es => "tesseract-langpack-spa",
+            Language::Ca => "tesseract-langpack-cat",
+            Language::Ru => "tesseract-langpack-rus",
+        }
+    }
+
+    fn install_tesseract(language: Language) -> String {
+        format!("sudo dnf install tesseract {}", ocr_package(language))
+    }
+
+    fn install_language(language: Language) -> String {
+        format!("sudo dnf install {}", ocr_package(language))
+    }
+
+    fn command_in(line: &str) -> Option<String> {
+        reading_languages(Language::Ru)
+            .into_iter()
+            .map(install_tesseract)
+            .chain(
+                reading_languages(Language::Ru)
+                    .into_iter()
+                    .map(install_language),
+            )
+            .find(|command| line.contains(command.as_str()))
+    }
+
+    fn failure_text(failure: &FailureCase, language: Language) -> std::borrow::Cow<'static, str> {
+        match failure {
+            FailureCase::Capture(failure) => {
+                super::capture_failure_text(&Ended::Shell(failure.clone()))
+            }
+            FailureCase::CaptureTimedOut => super::capture_failure_text(&Ended::DeadlinePassed),
+            FailureCase::Ocr(failure) => {
+                let hint = match failure {
+                    OcrFailure::EngineMissing => Some(install_tesseract(language)),
+                    OcrFailure::LanguageMissing => Some(install_language(language)),
+                    _ => None,
+                };
+                super::recognize_failure_text(
+                    &Ended::Shell(failure.clone()),
+                    language,
+                    hint.as_deref(),
+                )
+            }
+            FailureCase::RecognitionDeadline => {
+                super::recognize_failure_text(&Ended::DeadlinePassed, language, None)
+            }
+            FailureCase::Unfinished => super::capture_failure_text(&Ended::Unfinished),
+        }
+    }
+
     /// Every failure of a capture, each once.
-    fn every_failure() -> Vec<Failure> {
+    fn every_failure() -> Vec<FailureCase> {
         vec![
-            Failure::Capture(CaptureFailure::Cancelled),
-            Failure::Capture(CaptureFailure::Ended),
-            Failure::Capture(CaptureFailure::Unavailable),
-            Failure::Capture(CaptureFailure::Failed("no portal answer".to_owned())),
-            Failure::Capture(CaptureFailure::NoImage),
-            Failure::CaptureTimedOut,
-            Failure::Ocr(OcrFailure::NoImage),
-            Failure::Ocr(OcrFailure::TesseractMissing),
-            Failure::Ocr(OcrFailure::LanguageMissing),
-            Failure::Ocr(OcrFailure::Failed(
+            FailureCase::Capture(CaptureFailure::Cancelled),
+            FailureCase::Capture(CaptureFailure::Ended),
+            FailureCase::Capture(CaptureFailure::Unavailable),
+            FailureCase::Capture(CaptureFailure::Failed("no portal answer".to_owned())),
+            FailureCase::Capture(CaptureFailure::NoImage),
+            FailureCase::CaptureTimedOut,
+            FailureCase::Ocr(OcrFailure::NoImage),
+            FailureCase::Ocr(OcrFailure::EngineMissing),
+            FailureCase::Ocr(OcrFailure::LanguageMissing),
+            FailureCase::Ocr(OcrFailure::Failed(
                 "tesseract exit status 1: bad".to_owned(),
             )),
-            Failure::Ocr(OcrFailure::Empty),
-            Failure::Ocr(OcrFailure::TimedOut),
-            Failure::Unfinished,
+            FailureCase::Ocr(OcrFailure::Empty),
+            FailureCase::RecognitionDeadline,
+            FailureCase::Unfinished,
         ]
     }
 
@@ -3257,14 +3264,13 @@ mod tests {
         for failure in every_failure() {
             let left_no_snapshot = !matches!(
                 failure,
-                Failure::Ocr(
-                    OcrFailure::TesseractMissing
+                FailureCase::Ocr(
+                    OcrFailure::EngineMissing
                         | OcrFailure::LanguageMissing
                         | OcrFailure::Failed(_)
                         | OcrFailure::Empty
-                        | OcrFailure::TimedOut
                 )
-            );
+            ) && failure != FailureCase::RecognitionDeadline;
             let text = failure_text(&failure, Language::En);
             assert_eq!(
                 text.ends_with(super::CAPTURE_RETRY),
@@ -3283,8 +3289,8 @@ mod tests {
                 let same_file = matches!(
                     (a, b),
                     (
-                        Failure::Capture(CaptureFailure::NoImage),
-                        Failure::Ocr(OcrFailure::NoImage)
+                        FailureCase::Capture(CaptureFailure::NoImage),
+                        FailureCase::Ocr(OcrFailure::NoImage)
                     )
                 );
                 if !same_file {
@@ -3306,7 +3312,7 @@ mod tests {
     #[test]
     fn code_2_claims_no_cause() {
         let ended =
-            failure_text(&Failure::Capture(CaptureFailure::Ended), Language::En).to_lowercase();
+            failure_text(&FailureCase::Capture(CaptureFailure::Ended), Language::En).to_lowercase();
         assert!(!ended.contains("cancel"), "{ended}");
         assert!(!ended.contains("esc"), "{ended}");
     }
@@ -3318,12 +3324,12 @@ mod tests {
                 let text = failure_text(&failure, language);
                 assert_eq!(
                     text.contains(&install_tesseract(language)),
-                    failure == Failure::Ocr(OcrFailure::TesseractMissing),
+                    failure == FailureCase::Ocr(OcrFailure::EngineMissing),
                     "{text}"
                 );
                 assert_eq!(
                     text.contains(&install_language(language)),
-                    failure == Failure::Ocr(OcrFailure::LanguageMissing),
+                    failure == FailureCase::Ocr(OcrFailure::LanguageMissing),
                     "{text}"
                 );
             }
@@ -3332,7 +3338,7 @@ mod tests {
 
     #[test]
     fn missing_ocr_data_names_the_package_of_the_language() {
-        let missing = Failure::Ocr(OcrFailure::LanguageMissing);
+        let missing = FailureCase::Ocr(OcrFailure::LanguageMissing);
         assert_eq!(
             failure_text(&missing, Language::Es),
             "Spanish OCR data is not installed. Install it with: sudo dnf install tesseract-langpack-spa"
@@ -3342,14 +3348,14 @@ mod tests {
             "Catalan OCR data is not installed. Install it with: sudo dnf install tesseract-langpack-cat"
         );
         assert_eq!(
-            failure_text(&Failure::Ocr(OcrFailure::TesseractMissing), Language::Ca),
+            failure_text(&FailureCase::Ocr(OcrFailure::EngineMissing), Language::Ca),
             "Tesseract is not installed. Install it with: sudo dnf install tesseract tesseract-langpack-cat"
         );
         // Every other line is the same in every language.
         for failure in every_failure() {
             if !matches!(
                 failure,
-                Failure::Ocr(OcrFailure::TesseractMissing | OcrFailure::LanguageMissing)
+                FailureCase::Ocr(OcrFailure::EngineMissing | OcrFailure::LanguageMissing)
             ) {
                 for language in reading_languages(Language::Ru) {
                     assert_eq!(
@@ -3367,8 +3373,12 @@ mod tests {
             for failure in every_failure() {
                 let text = failure_text(&failure, language);
                 let expected = match failure {
-                    Failure::Ocr(OcrFailure::TesseractMissing) => Some(install_tesseract(language)),
-                    Failure::Ocr(OcrFailure::LanguageMissing) => Some(install_language(language)),
+                    FailureCase::Ocr(OcrFailure::EngineMissing) => {
+                        Some(install_tesseract(language))
+                    }
+                    FailureCase::Ocr(OcrFailure::LanguageMissing) => {
+                        Some(install_language(language))
+                    }
                     _ => None,
                 };
                 assert_eq!(command_in(&text), expected, "{text}");
@@ -3376,7 +3386,7 @@ mod tests {
         }
         assert_eq!(
             command_in(&failure_text(
-                &Failure::Ocr(OcrFailure::LanguageMissing),
+                &FailureCase::Ocr(OcrFailure::LanguageMissing),
                 Language::Ca
             ))
             .as_deref(),
@@ -3384,7 +3394,7 @@ mod tests {
         );
         assert_eq!(
             command_in(&failure_text(
-                &Failure::Ocr(OcrFailure::TesseractMissing),
+                &FailureCase::Ocr(OcrFailure::EngineMissing),
                 Language::En
             ))
             .as_deref(),
@@ -3970,7 +3980,7 @@ mod tests {
 
     #[test]
     fn the_unsupported_language_line_names_no_pair() {
-        let line = super::refusal_text(Refusal::UnsupportedLanguage, None, Language::Ru);
+        let line = super::refusal_text(Refusal::UnsupportedLanguage, NO_KEY_LOCATION, Language::Ru);
         assert!(!line.contains("EN"), "{line}");
         assert!(line.contains("DeepL"), "{line}");
     }
@@ -4497,7 +4507,7 @@ mod tests {
             shown.lookup().expect("a result"),
             shown.choice(),
             shown.definition(),
-            None,
+            NO_KEY_LOCATION,
             shown.elsewhere(),
             Translating::default(),
         )
@@ -4662,7 +4672,7 @@ mod tests {
                 lookup,
                 chosen.map(super::Choice::Sense),
                 None,
-                None,
+                NO_KEY_LOCATION,
                 None,
                 english,
             )
@@ -4734,7 +4744,7 @@ mod tests {
             &lookup,
             None,
             None,
-            None,
+            NO_KEY_LOCATION,
             Some((Language::Es, Language::Ru)),
             spanish,
         );
@@ -4752,7 +4762,7 @@ mod tests {
             &translations_only,
             None,
             None,
-            None,
+            NO_KEY_LOCATION,
             Some((Language::Es, Language::Ru)),
             spanish,
         );
@@ -5090,7 +5100,7 @@ mod tests {
 
     fn row(kind: super::OnlineKind, line: &str, state: OnlineState) -> super::OnlineRow<'static> {
         super::OnlineRow {
-            label: "",
+            label: Cow::Borrowed(""),
             line: Cow::Owned(line.to_owned()),
             state,
             word: kind != super::OnlineKind::Sentence,
@@ -5511,7 +5521,7 @@ mod tests {
             lookup,
             shown.choice(),
             Some(&Online::Pending),
-            None,
+            NO_KEY_LOCATION,
             None,
             Translating::default(),
         );
@@ -5568,7 +5578,7 @@ mod tests {
                 shown.lookup().expect("article"),
                 shown.choice(),
                 shown.definition(),
-                None,
+                NO_KEY_LOCATION,
                 None,
                 Translating::default(),
             );
@@ -5886,36 +5896,69 @@ mod tests {
             Refusal::TimedOut,
             Refusal::Other,
         ];
+        let hint = "Open Settings to configure the key.";
+        let path = std::path::Path::new("/config/<key>&/deepl.key");
+        let mut shown = definition_shown();
+        shown.choose(0);
         let mut lines = std::collections::BTreeSet::new();
         for refusal in refusals {
-            let line = super::refusal_text(refusal, None, Language::Ru);
-            assert!(lines.insert(line.clone()), "{line}");
             let online = Online::Refused(refusal);
-            let line_shown = super::online_rows(
-                &OnlineTexts {
-                    lone: Some(&online),
-                    ..OnlineTexts::default()
-                },
-                Some(std::path::Path::new("/config/<key>&/deepl.key")),
-                Language::Ru,
-            )
-            .remove(0)
-            .line;
+            let texts = OnlineTexts {
+                lone: Some(&online),
+                ..OnlineTexts::default()
+            };
+            let line = |location| {
+                let rows = super::online_rows(&texts, location, Language::Ru);
+                let choice = super::choice_texts(
+                    shown.lookup().expect("article"),
+                    shown.choice(),
+                    Some(&online),
+                    location,
+                    None,
+                    shown.translating(),
+                );
+                let definition = choice.senses[0]
+                    .explained
+                    .as_ref()
+                    .and_then(|explanation| explanation.definition.as_ref())
+                    .expect("online definition");
+                assert_eq!(definition.line, rows[0].line);
+                rows.into_iter()
+                    .next()
+                    .expect("online row")
+                    .line
+                    .into_owned()
+            };
+            let without_path = line(KeyLocation::Hint(hint));
+            let with_path = line(KeyLocation::File(path));
             if matches!(
                 refusal,
                 Refusal::Key | Refusal::UnreadableKey | Refusal::UnsafeKey | Refusal::RejectedKey
             ) {
-                assert!(
-                    line_shown.contains("/config/<key>&/deepl.key"),
-                    "{line_shown}"
-                );
-                assert!(
-                    line.contains("XDG_CONFIG_HOME") && line.contains("HOME"),
-                    "{line}"
-                );
+                let prefix = without_path.strip_suffix(hint).expect("caller hint");
+                assert_eq!(with_path, format!("{prefix}Key file: {}", path.display()));
             } else {
-                assert!(!line_shown.contains("deepl.key"), "{line_shown}");
+                assert_eq!(without_path, with_path);
+                assert!(!without_path.contains(hint));
             }
+            assert!(lines.insert(without_path.clone()), "{without_path}");
+        }
+    }
+
+    #[test]
+    fn every_selection_failure_says_that_nothing_is_selected() {
+        for failure in [
+            Ended::Shell(SelectionFailure::NoPermission),
+            Ended::Shell(SelectionFailure::WrongApp),
+            Ended::Shell(SelectionFailure::Unavailable),
+            Ended::Shell(SelectionFailure::Cancelled),
+            Ended::DeadlinePassed,
+            Ended::Unfinished,
+        ] {
+            assert_eq!(
+                super::selection_failure_text(&failure),
+                NOTHING_SELECTED_TEXT
+            );
         }
     }
 
@@ -6406,7 +6449,14 @@ mod tests {
     /// The texts of `lookup` for `my` language mine and `pressed` pressed,
     /// with nothing chosen.
     fn for_pair(lookup: &Lookup, my: Language, pressed: Language) -> ResultTexts<'_> {
-        super::choice_texts(lookup, None, None, None, None, Translating { my, pressed })
+        super::choice_texts(
+            lookup,
+            None,
+            None,
+            NO_KEY_LOCATION,
+            None,
+            Translating { my, pressed },
+        )
     }
 
     /// Whether `text` has a Cyrillic letter.
@@ -6752,7 +6802,7 @@ mod tests {
         );
         // The answer without the dictionary's label is still Russian's.
         let rows = [super::OnlineRow {
-            label: ONLINE_SENTENCE_LABEL,
+            label: Cow::Borrowed(ONLINE_SENTENCE_LABEL),
             line: Cow::Borrowed("Я сидел на берегу."),
             state: OnlineState::Translated,
             word: false,
@@ -6785,7 +6835,14 @@ mod tests {
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(article())));
         let lookup = shown.lookup().expect("article").clone();
-        let before = super::choice_texts(&lookup, None, None, None, None, shown.translating());
+        let before = super::choice_texts(
+            &lookup,
+            None,
+            None,
+            NO_KEY_LOCATION,
+            None,
+            shown.translating(),
+        );
         assert!(cyrillic(&translations_and_glosses(&before)));
         shown.set_my_language(Language::En);
         shown.set_pressed(Language::Es);
@@ -6796,7 +6853,14 @@ mod tests {
                 pressed: Language::Es,
             }
         );
-        let after = super::choice_texts(&lookup, None, None, None, None, shown.translating());
+        let after = super::choice_texts(
+            &lookup,
+            None,
+            None,
+            NO_KEY_LOCATION,
+            None,
+            shown.translating(),
+        );
         let said = translations_and_glosses(&after);
         assert!(!cyrillic(&said), "{said}");
         assert_eq!(
@@ -6848,7 +6912,7 @@ mod tests {
                     lookup,
                     Some(super::Choice::Sense(0)),
                     Some(&translation),
-                    None,
+                    NO_KEY_LOCATION,
                     None,
                     translating,
                 );
@@ -6863,7 +6927,7 @@ mod tests {
                 &catalan,
                 Some(super::Choice::Gloss(1)),
                 Some(&translation),
-                None,
+                NO_KEY_LOCATION,
                 None,
                 translating,
             );
@@ -6881,7 +6945,8 @@ mod tests {
             };
             let lookup = grouped_in(read);
             let Some(super::GlossTexts::Glosses(glosses)) =
-                super::choice_texts(&lookup, None, None, None, None, translating).glosses
+                super::choice_texts(&lookup, None, None, NO_KEY_LOCATION, None, translating)
+                    .glosses
             else {
                 panic!("glosses");
             };
@@ -6899,7 +6964,7 @@ mod tests {
                     lone: Some(&lone),
                     ..OnlineTexts::default()
                 },
-                None,
+                NO_KEY_LOCATION,
                 my,
             );
             let language = translating.answer_language(Some(&english));
@@ -6916,7 +6981,7 @@ mod tests {
                     sentence: Some(&whole),
                     lone: Some(&unsupported),
                 },
-                None,
+                NO_KEY_LOCATION,
                 my,
             ) {
                 assert_eq!(row.line, refused);
@@ -6925,7 +6990,7 @@ mod tests {
                 &english,
                 Some(super::Choice::Sense(0)),
                 Some(&unsupported),
-                None,
+                NO_KEY_LOCATION,
                 None,
                 translating,
             );
@@ -6999,7 +7064,8 @@ mod tests {
                 let translating = Translating { my, pressed };
                 for lookup in &lookups {
                     let language = translating.answer_language(Some(lookup));
-                    let plain = super::choice_texts(lookup, None, None, None, None, translating);
+                    let plain =
+                        super::choice_texts(lookup, None, None, NO_KEY_LOCATION, None, translating);
                     for online in &states {
                         for choice in [
                             None,
@@ -7010,7 +7076,7 @@ mod tests {
                                 lookup,
                                 choice,
                                 Some(online),
-                                None,
+                                NO_KEY_LOCATION,
                                 Some((Language::En, Language::Es)),
                                 translating,
                             );
@@ -7034,7 +7100,7 @@ mod tests {
                                 },
                                 OnlineTexts::default(),
                             ] {
-                                let rows = online_rows(&texts, None, my);
+                                let rows = online_rows(&texts, NO_KEY_LOCATION, my);
                                 said.push(format!("{rows:?}"));
                                 let answer = super::answer_texts(
                                     plain.translations.as_ref(),

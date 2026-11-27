@@ -312,9 +312,10 @@ addict keeps its settings as small files in `~/.config/addict`
 `~/.var/app/io.github.doqhu.Addict/config/addict`). Settings writes most of
 them, so you rarely need to edit one:
 
-- `deepl.key` -- the DeepL API key. Enter it in Settings, which writes the
-  file with mode `0600`; a file with any permission beyond `0600` is
-  refused.
+- `deepl.key` -- the DeepL API key. addict loads it in the background at
+  startup and refuses files with permissions beyond `0600`. Saving a key
+  in Settings writes the file with mode `0600` and applies the key to the
+  next DeepL request. Restart addict after editing the file directly.
 - `tesseract`, `tessdata` -- where to find Tesseract and its data (see above).
 - `vulkan-drivers` -- which Vulkan driver GTK uses. By default addict picks
   the driver of the GPU that drives the display, so a sleeping discrete GPU

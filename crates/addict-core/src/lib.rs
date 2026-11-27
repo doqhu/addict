@@ -1,6 +1,7 @@
 //! Addict core: GTK-free product types (word, context, dictionaries, providers).
 
 pub mod dictionary;
+pub mod dirs;
 pub mod failure;
 pub mod input;
 pub mod reduction;

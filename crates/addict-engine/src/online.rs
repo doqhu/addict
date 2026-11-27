@@ -16,8 +16,7 @@
 //! word only. An outcome is kept only when it carries the number of this text
 //! and its request is still awaited here.
 //!
-//! Sending the requests is [`translate`](crate::translate)'s and
-//! `resident`'s; the texts shown for the state are
+//! The controller sends requests with [`translate`](crate::translate); the texts shown for the state are
 //! [`view`](crate::view)'s.
 
 use std::collections::BTreeMap;

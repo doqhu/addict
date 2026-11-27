@@ -10,7 +10,7 @@ use std::{
     future::Future,
     io,
     pin::Pin,
-    sync::{Arc, mpsc as std_mpsc},
+    sync::{Arc, Mutex, mpsc as std_mpsc},
     thread::JoinHandle,
     time::Duration,
 };
@@ -39,7 +39,7 @@ pub enum Outcome<T> {
 pub struct Work {
     jobs: Option<mpsc::UnboundedSender<Supervisor>>,
     /// Disconnects when the worker thread is over.
-    ended: std_mpsc::Receiver<()>,
+    ended: Mutex<std_mpsc::Receiver<()>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -78,7 +78,7 @@ impl Work {
             })?;
         Ok(Self {
             jobs: Some(jobs),
-            ended,
+            ended: Mutex::new(ended),
             thread: Some(thread),
         })
     }
@@ -110,7 +110,8 @@ impl Drop for Work {
         let Some(thread) = self.thread.take() else {
             return;
         };
-        match self.ended.recv_timeout(STOP_LIMIT) {
+        let ended = self.ended.get_mut().expect("worker shutdown receiver");
+        match ended.recv_timeout(STOP_LIMIT) {
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
                 // A job broke the rule and blocks the thread: leave it behind
                 // rather than hang the caller.

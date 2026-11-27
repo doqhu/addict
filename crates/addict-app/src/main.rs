@@ -110,13 +110,14 @@
 //! sent, without context, only when Enter is pressed in the field or the
 //! word was pasted there, and stands under a label of its own; typing it or
 //! clicking it sends nothing, and neither does Enter in an empty field or in
-//! a sentence, or the paste of a sentence. The key is read at each
-//! request from `$XDG_CONFIG_HOME/addict/deepl.key`, or
+//! a sentence, or the paste of a sentence. The primary session reads the key
+//! in the background at startup from `$XDG_CONFIG_HOME/addict/deepl.key`, or
 //! `$HOME/.config/addict/deepl.key`, a file only its owner may read or write:
 //! when its mode has any bit outside `0600` it is refused unread. The key
 //! can be entered in the Settings window, which writes that file with mode
-//! `0600` and never shows the key it holds. A request
-//! has a deadline. Any change of the text, an edit or a paste, drops every
+//! `0600` and updates the active key for the next request. Restart addict
+//! after editing the file directly. A request has a deadline.
+//! Any change of the text, an edit or a paste, drops every
 //! online text and gives up every request, and a click on another word gives
 //! up the request of the word before. When a request gives no translation,
 //! its line distinguishes key, connection, quota, language and timeout failures.
@@ -183,8 +184,8 @@
 //! menu of Show, Settings, About and Exit, which a click on the icon opens.
 //! Show shows the window as a repeated launch does, without a read. Settings
 //! and About are also in the main window's menu. Settings shows both shortcut assignments,
-//! the DeepL key file and its state, never the key, and a button that asks
-//! the portal to configure both actions, with live assignment updates.
+//! the DeepL key file path and the active key's plan or refusal. Its shortcut
+//! button asks the portal to configure both actions, with live assignment updates.
 //! About shows a window with the icon, the name, the version and the license
 //! of the application, and a Credits page that lists every dictionary and OCR
 //! source with its credit line. Exit ends the application. A session with no
@@ -233,8 +234,8 @@
 //! as a source of articles are [`dictionaries`]'s, the download of the
 //! published indexes is [`download`]'s and its first-run offer
 //! [`first_run`]'s, the online translator is
-//! `addict_deepl`'s, what is asked of it and kept is [`online`]'s, where every
-//! request to it starts is [`translate`]'s, the capture job is [`capture`]'s,
+//! `addict_deepl`'s, with requests and results owned by `addict_controller`.
+//! The capture job is [`capture`]'s,
 //! the Vulkan drivers the resident lets the loader list are [`gpu`]'s,
 //! and its portal and Tesseract adapters are `addict_platform`'s, the
 //! resident application is [`resident`]'s, the history of its field is
@@ -244,6 +245,7 @@
 
 mod about;
 mod capture;
+mod dirs;
 mod entries;
 mod file_import;
 mod first_run;
@@ -263,10 +265,11 @@ mod wrap;
 #[path = "../../addict-engine/src/download/stub.rs"]
 mod stub;
 
-use addict_engine::{
-    at_once, cache, dictionaries, download, english, evidence, history, language, manual,
-    my_language, online, translate, view,
-};
+// The settings modules moved to the controller; these engine modules remain
+// in scope for the shell's tests, which still use the same paths.
+#[cfg(test)]
+pub(crate) use addict_engine::cache;
+pub(crate) use addict_engine::{dictionaries, download, evidence, view};
 
 use std::{
     cell::RefCell,
@@ -317,16 +320,18 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let dirs = dirs::from_env();
     match cli.command {
         Some(Command::Install) => report(entries::install_entries()),
-        Some(Command::Uninstall) => report(entries::uninstall_entries()),
-        Some(Command::Import { file }) => import_file(&file),
+        Some(Command::Uninstall) => report(entries::uninstall_entries(dirs.config.as_deref())),
+        Some(Command::Import { file }) => import_file(&file, dirs.data.as_deref()),
         None => {
-            gpu::select_vulkan_drivers();
+            gpu::select_vulkan_drivers(dirs.config.as_deref());
             match open_evidence(cli.evidence.zip(cli.origin)) {
                 Ok(writer) => resident::run(
                     resident::LaunchMode::from_background(cli.background),
                     writer,
+                    dirs,
                 ),
                 Err(message) => fail(&message),
             }
@@ -342,13 +347,13 @@ fn fail(message: &str) -> ExitCode {
 
 /// Imports the dictionary file and prints the path of its index and what the
 /// index holds.
-fn import_file(file: &Path) -> ExitCode {
-    let Some(dir) = import::data_dir() else {
+fn import_file(file: &Path, data: Option<&Path>) -> ExitCode {
+    let Some(dir) = data else {
         return fail(
             "cannot find the data directory: XDG_DATA_HOME is not set to an absolute path and HOME is unset or empty",
         );
     };
-    match import::import(file, &dir, import::Origin::Manual) {
+    match import::import(file, dir, import::Origin::Manual) {
         Ok(imported) => {
             println!("{}", imported.path.display());
             println!("edition: {}", imported.edition);

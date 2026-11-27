@@ -5,8 +5,8 @@
 pub enum OcrFailure {
     /// No file is at the image path.
     NoImage,
-    /// `tesseract` is not installed: spawning it found no program.
-    TesseractMissing,
+    /// The recognition engine is not installed.
+    EngineMissing,
     /// The data of the language is not installed.
     LanguageMissing,
     /// Any other failure: the exit status with the first stderr line, an
@@ -15,6 +15,8 @@ pub enum OcrFailure {
     Failed(String),
     /// Tesseract ended well but found no text.
     Empty,
-    /// The child was still running at the limit; it was killed and reaped.
-    TimedOut,
+    /// Recognition is not available on this platform.
+    Unavailable,
+    /// The user dismissed recognition or the shell honored a cancellation.
+    Cancelled,
 }

@@ -5,7 +5,7 @@
 //! and with any runtime, or with none. Dropping it closes its connections.
 
 use std::{
-    io,
+    fmt, io,
     net::{Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex, PoisonError},
     thread::JoinHandle,
@@ -54,13 +54,35 @@ pub fn translation_body(text: &str) -> String {
 }
 
 /// One request as the stub read it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Seen {
     /// The request line, such as `POST /v2/translate HTTP/1.1`.
     pub line: String,
     /// The headers in the order they came, the names in lowercase.
     pub headers: Vec<(String, String)>,
     pub body: String,
+}
+
+impl fmt::Debug for Seen {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let headers: Vec<_> = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                let value = if name.eq_ignore_ascii_case("authorization") {
+                    "<hidden>"
+                } else {
+                    value.as_str()
+                };
+                (name, value)
+            })
+            .collect();
+        f.debug_struct("Seen")
+            .field("line", &self.line)
+            .field("headers", &headers)
+            .field("body", &self.body)
+            .finish()
+    }
 }
 
 impl Seen {

@@ -1,6 +1,5 @@
 //! The reading language kept across restarts: one line, `en`, `es`, `ca`
-//! or `ru`, in the file `language` of the product's configuration directory,
-//! [`addict_deepl::key::config_dir`], the directory of the DeepL key.
+//! or `ru`, in the file `language` of the product's configuration directory.
 //!
 //! The file is read once, on the runner, after the start, and written on the
 //! runner at each choice of the user, a press in the switch or a click on a
@@ -18,7 +17,6 @@ use std::{
     fs::{self, File},
     io::{self, Read},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use addict_core::translation::{Source, reading_languages};
@@ -29,13 +27,10 @@ const LANGUAGE_FILE: &str = "language";
 /// How many bytes of the file are read. A code and its line break are three.
 const LANGUAGE_LIMIT: u64 = 64;
 
-/// How long a read or a write of the file may take on the runner.
-pub const FILE_LIMIT: Duration = Duration::from_secs(2);
-
-/// The language file of the product, or `None` when the environment names no
-/// configuration directory. Nothing is read here.
-pub fn path() -> Option<PathBuf> {
-    Some(addict_deepl::key::config_dir()?.join(LANGUAGE_FILE))
+/// The language file of the product, or `None` when no configuration directory
+/// was supplied. Nothing is read here.
+pub fn path(config: Option<&Path>) -> Option<PathBuf> {
+    Some(config?.join(LANGUAGE_FILE))
 }
 
 /// The language the file at `path` holds; English for no path, a missing or

@@ -4,10 +4,9 @@
 //! This module owns the GTK application, its uniqueness, the window with its
 //! close and Esc handling, and the order of what happens on each event of the
 //! shortcut worker, of Retry, of a repeated launch, of the field and of a
-//! lookup, which runs on the work runner and comes back as an event. The
-//! dictionary indexes are opened and read there too: where they stand is
-//! asked once at the start and comes with the outcome of every lookup, and
-//! the window says it whenever one is missing or unreadable.
+//! lookup. The controller supplies the dictionary inventory, the offer and
+//! its progress, and Settings' import and download lines. This module
+//! renders them and opens the native file chooser when asked.
 //!
 //! The module keeps the shown result with the sense chosen in it, and a
 //! click on a sense only changes that choice.
@@ -26,11 +25,14 @@
 //! for it, a repeated click leaves it alone, another word gives up only the
 //! word's, another sentence the sentence's too, and a new text gives up
 //! both.
+//! The primary session loads the DeepL key on a separate worker at startup.
+//! Only requests to DeepL and Settings saves wait for the initial result.
+//! Settings saves update the active key. Direct edits take effect at restart.
 //!
 //! Capture hides the window and starts one job on the runner, which takes
 //! the screenshot, recognizes its text and deletes the snapshot; the window
 //! comes back in the reading state once the snapshot is there, and the
-//! recognized text, its lines joined by [`sentence::recognized`], then
+//! recognized text, its lines joined by [`addict_core::sentence::recognized`], then
 //! replaces the field as a new text with the source OCR, which follows the
 //! manual path from there. A capture without text leaves the field as it
 //! was, starts no lookup and no online request, and says why in the source
@@ -44,10 +46,8 @@
 //! it. No permission is granted anywhere on this path: the portal asks for
 //! none for an interactive screenshot. Capture cannot be pressed while the area is being chosen;
 //! once the snapshot is there it can, and it is the retry: pressing it, or
-//! editing the field, gives up the recognition that runs. Giving up is
-//! dropping the job, which kills the Tesseract child and deletes the
-//! snapshot, and shows nothing. Each capture job has a number, so what a
-//! given-up job had already sent is ignored. Every capture end that is
+//! editing the field, gives up the recognition that runs. The controller cancels the current request,
+//! which stops the adapter and releases its snapshot, and ignores late results. Every capture end that is
 //! shown, also one that could not start, is recorded with `--evidence` as it
 //! is shown; a given-up one is not. The job is [`capture`]'s.
 //!
@@ -58,29 +58,32 @@
 //! waiting state with the source "selection or clipboard", and nothing
 //! waits for the read before the window is presented. Wayland gives a
 //! client the clipboard only with its keyboard focus, so the read starts
-//! once the window is active, at once when it is already. The primary
-//! selection of the window's display, the text selected without a copy, is
-//! read first, and GTK's clipboard only when the selection gives no line.
-//! Waiting for the activity and both reads together end
-//! [`CLIPBOARD_LIMIT`] after the press, which cancels the read. A text of
-//! either as one line, of at most [`CLIPBOARD_MAX_CHARS`] characters,
-//! replaces the field as a new text with the source clipboard, without a
-//! word chosen unless it is one word, and nothing is asked online. A line
-//! that is exactly a command the window offered to copy, such as the
-//! install of Tesseract, is the user's Copy and counts as no line. When
-//! neither gives a line (empty, blank, not text, too long, a command,
-//! unreadable or late), why is written to stderr, the waiting ends, the
-//! empty state stays with its focused field, and the source line says that
-//! nothing is selected or copied, with the manual path; when one of them was
-//! too long, the line says that instead, the selection's before the
-//! clipboard's. The capture shares the line: they never run together. The
-//! line goes, like the capture's, when the field is edited, Capture or the
-//! shortcut is pressed.
+//! once the window is active, at once when it is already. The read is the
+//! controller's `ReadSelection` effect, issued after its `ShowPanel` (Linux
+//! shows first, `read_before_show` false; the window is already up, so
+//! `ShowPanel` changes nothing here). The shell reads the primary selection
+//! of the window's display, the text selected without a copy, and GTK's
+//! clipboard, raw, and sends both back in one result; a failed GTK read is
+//! written to stderr, never the text. The controller applies 0.5.0's rule
+//! and owns the deadline: [`addict_controller::deadlines::CLIPBOARD_LIMIT`]
+//! after the press it cancels the read. A text of either as one line, of
+//! at most `CLIPBOARD_MAX_CHARS` characters, replaces the field as a new
+//! text with the source clipboard, the selection's first, without a word
+//! chosen unless it is one word, and nothing is asked online. A line that
+//! is exactly a command the window offered to copy, such as the install of
+//! Tesseract, is the user's Copy and counts as no line. When neither gives
+//! a line, the waiting ends, the empty state stays with its focused field,
+//! and the source line says that nothing is selected or copied, with the
+//! manual path; when one of them was too long, the line says that instead,
+//! the selection's before the clipboard's. The capture shares the line:
+//! they never run together. The line goes, like the capture's, when the
+//! field is edited, Capture or the shortcut is pressed.
 //!
-//! Each read has a number; a new press, an edit of the field and a capture
-//! give up the read that runs, and whatever it reports later is ignored and
-//! shows no line. Retry, a launch, Show of the tray and a capture read no
-//! clipboard.
+//! Each read has the controller's request id; a new press, an edit of the
+//! field, Back, Forward and a capture give up the read that runs (the
+//! controller's `Cancel` stops the GTK reads), and whatever it reports
+//! later is ignored and shows no line. Retry, a launch, Show of the tray and
+//! a capture read no clipboard.
 //!
 //! The user reads in one language, chosen with the switch beside the
 //! field, whose three buttons are the reading languages of my language
@@ -139,70 +142,60 @@
 
 use std::{
     cell::{Cell, RefCell},
-    fs::File,
-    future::Future,
-    io::{self, Write},
-    os::fd::FromRawFd,
-    process::ExitCode,
+    collections::{HashMap, VecDeque},
+    ffi::OsString,
+    io,
+    os::unix::process::CommandExt,
+    path::{Path, PathBuf},
+    process::{Command, ExitCode},
     rc::{Rc, Weak},
-    sync::Arc,
+    sync::{Arc, Mutex, Weak as WorkRef},
     time::Duration,
 };
 
-use addict_core::{
-    APP_ID,
-    failure::recognize::OcrFailure,
-    input::{Source, window_state},
-    sentence,
-    translation::{
-        English, Request, Source as Language, Translator, is_russian, reading_languages,
+use addict_controller::{
+    self as controller, ArticleId, Bindings as ControllerBindings, Controller, Dispatcher, Effect,
+    InstallHint, InstallHints, OfferId, OfferPhase, Permission, Permissions, Platform, RequestId,
+    ShortcutNames, ShortcutState, StartFacts, ViewState,
+    deadlines::{
+        BIND_ANSWER_LIMIT, BIND_START_LIMIT, KEY_SAVE_LIMIT, SHELL_QUIT_LIMIT, STARTUP_LIMIT,
+        STARTUP_READ_LIMIT,
     },
 };
-use addict_deepl::{DeepL, key};
-use addict_dictionary::{
-    import,
-    release::{Manifest, Published},
+use addict_core::{
+    APP_ID,
+    dirs::Dirs,
+    failure::{
+        Ended,
+        capture::CaptureFailure,
+        login_item::{LoginItemShown, StartupEnd},
+        playback::PlaybackFailure,
+        recognize::OcrFailure,
+        selection::SelectionFailure,
+    },
+    input::{Source, window_state},
+    translation::{Source as Language, reading_languages},
 };
-use addict_engine::{
-    capture::{Captured, Failure, Timing},
-    recording::{AUDIO_LIMIT, AudioFailure, CREDIT_LIMIT, fetch_audio},
-    work::{Job, Outcome, Work},
-};
+use addict_deepl::key::{self, KeyError, Secret, WriteError};
+use addict_engine::work::{Job, Outcome, Work};
 use addict_platform::{
-    shortcut::{self, Action, Bindings, KeyOwner, ShortcutEvent, ShortcutHandle},
+    shortcut::{self, Action, KeyOwner, ShortcutEvent, ShortcutHandle},
     startup,
     tray::{self, TrayEvent, TrayHandle},
 };
-use futures_channel::{
-    mpsc::{UnboundedReceiver, UnboundedSender},
-    oneshot,
-};
+use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     about::About,
-    at_once,
-    cache::{self, Cached},
-    capture::{self, Capture},
-    dictionaries::{Articles, Dictionaries, Indexes, Looked},
-    download::{self, Downloader},
-    english, entries, evidence,
-    first_run::{self, Offer},
-    history::History,
-    language,
-    manual::{self, CLIPBOARD_MAX_CHARS, Edit, Manual, NoLine},
-    my_language,
-    online::{self, Kept, Subject},
+    capture, download, entries, evidence, file_import,
+    first_run::Offer,
     recording::Recording,
-    settings::{self, CacheState, KeyState, Settings, StartupEnd, StartupShown},
+    settings::{self, Settings},
     style,
-    translate::{self, Translated},
-    view::{
-        Binding, Choice, Held, Lookup, NOTHING_SELECTED_TEXT, Online, Shown, command_in,
-        failure_text, too_long_text,
-    },
-    widgets::{PlaybackMedia, View},
+    view::{Binding, Choice, FailedEndFocus, Held, failed_end_focus},
+    widgets::{FieldEdit, MediaPlayback, View, fatal_page},
 };
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
@@ -212,21 +205,9 @@ const TRIGGER: &str = "LOGO+q";
 /// bind is asked for, and ten minutes for its answer, which on GNOME is a
 /// person's in a dialog that the window may cover on a first launch.
 const BIND_LIMITS: shortcut::Limits = shortcut::Limits {
-    start: Duration::from_secs(60),
-    answer: Duration::from_secs(600),
+    start: BIND_START_LIMIT,
+    answer: BIND_ANSWER_LIMIT,
 };
-
-/// How long the read of the selection and the clipboard may take from the
-/// press, the wait for the window to be active included.
-const CLIPBOARD_LIMIT: Duration = Duration::from_secs(1);
-
-/// How long the lookup of one word may take.
-const LOOKUP_LIMIT: Duration = Duration::from_secs(2);
-
-/// How long one online request may take. A network answer is slower than a
-/// file read, and this deadline is the only thing that ends a request
-/// without an answer.
-const TRANSLATE_LIMIT: Duration = Duration::from_secs(10);
 
 /// What lives as long as the resident application.
 struct Resident {
@@ -235,160 +216,77 @@ struct Resident {
     _shortcut: Rc<RefCell<Option<ShortcutHandle>>>,
     /// Where a repeated launch reports itself.
     events: UnboundedSender<Event>,
-    /// The runner of the lookups; `None` when it could not be started.
-    _work: Option<Rc<Work>>,
-    /// What the lookups ask.
-    _articles: Arc<dyn Articles>,
+    /// Owns the lookup loop and the shared runner.
+    _controller: Option<Controller>,
     /// The icon in the top bar and its menu.
     _tray: TrayHandle,
+}
+
+/// Identity of the text and article under the rendered GTK links.
+#[derive(Clone, Copy, Default)]
+struct ViewActions {
+    text: u64,
+    article: ArticleId,
+    choice: Option<Choice>,
 }
 
 /// Everything the worker threads tell the UI thread, over one channel.
 enum Event {
     /// Presentation and input actions shared by the main window and launchers.
     Window(WindowEvent),
-    /// Retry was pressed.
-    Retry,
     /// The text of the field changed; this is the new text.
-    Sentence(String),
+    Sentence(String, FieldEdit),
     /// The word with this index in the shown sentence was clicked.
-    Word(usize),
+    Word(u64, usize),
+    /// A synonym word was clicked: it goes into the field.
+    Synonym(ArticleId, String),
     /// The sense with this index in the shown list was clicked.
-    Sense(usize),
+    Sense(ArticleId, usize),
     /// The English gloss with this index in the shown article was clicked.
-    Gloss(usize),
+    Gloss(ArticleId, usize),
     /// The text of the field was submitted, by Enter or by a paste.
     Submitted,
     /// Back was pressed, or Alt+Left.
     Back,
     /// Forward was pressed, or Alt+Right.
     Forward,
+    PlayPressed(ArticleId, String),
     /// The user explicitly requested the selected dictionary definition.
-    DefinitionAction,
+    DefinitionAction(ArticleId, Choice),
     /// The English word of a gloss was clicked: it is looked up in English.
-    LookUpEnglish(String),
-    /// The separate definition job ended with its individual request number;
-    /// it was sent from `source`. `elapsed` is the time the request took, as
-    /// the worker saw it; taken only when evidence is recorded.
-    DefinitionTranslated {
-        number: u64,
-        source: Language,
-        outcome: Outcome<Translated>,
-        elapsed: Option<evidence::Elapsed>,
-    },
-    /// The lookup started as number `run` ended, answered by `language`:
-    /// the chosen one, or the one that had the word when the chosen one had
-    /// no entry for it.
-    Lookup {
-        run: u64,
-        generation: u64,
-        language: Language,
-        outcome: Outcome<Looked>,
-    },
-    /// The online request about `subject`, sent from `source` for the text
-    /// with the number `text`, ended. `elapsed` is as for a definition.
-    Translated {
-        text: u64,
-        subject: Subject,
-        source: Language,
-        number: u64,
-        outcome: Outcome<Translated>,
-        elapsed: Option<evidence::Elapsed>,
-    },
-    /// The language file, read on the runner after the start, holds this
-    /// reading language.
-    LanguageRead(Language),
-    /// The user pressed the button of this language in the switch.
-    LanguageChosen(Language),
-    /// The my-language file, read on the runner after the start, holds this
-    /// language.
-    MyLanguageRead(Language),
-    /// The user chose this language in the My language row of Settings.
-    MyLanguageChosen(Language),
-    /// The English-spelling file, read on the runner after the start, holds
-    /// this spelling.
-    EnglishRead(English),
-    /// The user chose this spelling in the English spelling row of Settings.
-    EnglishChosen(English),
-    /// The file of Translate sentence at once, read on the runner after the
-    /// start, holds this state.
-    AtOnceRead(bool),
-    /// The user moved the Translate sentence at once switch to this state.
-    AtOnceChosen(bool),
-    /// The check at the start says where the dictionary indexes stand.
-    Indexes {
-        generation: u64,
-        indexes: Indexes,
-    },
-    /// The post-import check finished off-thread. Acknowledge only after
-    /// the resident cache and view have received these states.
-    ImportRefreshing(oneshot::Sender<u64>),
-    Imported(ImportCompletion),
-    SettingsDownload,
-    RecoveryPrepared(u64, Outcome<Result<Manifest, String>>),
-    /// The first-run offer to download a dictionary is due; this is the
-    /// manifest of the published indexes.
-    FirstRunOffer(u64, Manifest),
-    /// Download was pressed in the first-run dialog.
-    FirstRunDownload(u64),
-    /// Not now was pressed in the first-run dialog.
-    FirstRunNotNow(u64),
-    /// This many bytes of the asset of the named index came.
-    FirstRunProgress(u64, String, u64),
-    /// Cancel was pressed on the row of the named index, or, with `None`,
-    /// the dialog's own.
-    FirstRunCancel(u64, Option<String>),
-    /// The download and the install of the named index ended: its path, or
-    /// why not, in one line.
-    FirstRunInstalled(u64, String, Outcome<Result<std::path::PathBuf, String>>),
+    LookUpEnglish(ArticleId, usize, String),
+    /// The shared controller's complete snapshot and effects.
+    Controller(Box<ViewState>, Vec<Effect>),
+    /// A setting was changed in the window, or an OS effect answered: the
+    /// controller decides everything that follows.
+    Setting(controller::Event),
     /// Capture was pressed.
     Capture,
     /// The window hidden for a capture is off the screen.
-    Hidden,
-    /// The capture job with this number has its snapshot and recognizes it
-    /// now.
-    Captured(u64),
-    /// The capture job with this number ended.
-    Recognized(u64, Outcome<Capture>),
+    Hidden(RequestId),
+    /// A shell capture effect finished and can release its cancellation handle.
+    CaptureFinished(RequestId, controller::Event),
     /// The window became active.
     Active,
     /// A choice of the tray's menu, or its end.
     Tray(TrayEvent),
-    /// Configure shortcuts was pressed in the Settings window.
-    ChangeShortcut,
-    /// The state of the key file, as the runner read it for the Settings
-    /// window.
-    KeyFile(KeyState),
-    /// Save key, or Enter in the key field, was pressed in the Settings
-    /// window with this text, trimmed and not empty. `Event` has no `Debug`,
-    /// so the key is never printed.
-    SaveKey(String),
-    /// The write of the key file ended: why it failed, in one line that
-    /// does not hold the key.
-    KeySaved(Outcome<Result<(), String>>),
-    /// The size of the cache, as the runner read it for the Settings window.
-    CacheSize(CacheState),
-    /// Clear cache was pressed in the Settings window.
-    ClearCache,
-    /// The clear of the cache on the runner ended: why it failed, in one
-    /// line.
-    CacheCleared(Outcome<Result<(), String>>),
-    /// The saved startup state, as the runner read it for the Settings window.
-    StartupRead(Outcome<StartupShown>),
-    /// The user moved the Start at login switch to this state.
-    ToggleStartup(bool),
-    /// The change of the startup state on the runner ended.
-    StartupChanged(Outcome<StartupEnd>),
-    /// The read of the clipboard with this number ended: the line of its
-    /// text, or why there is none.
-    Clipboard(u64, Result<String, Missed>),
+    /// The selection read with this id ended: the raw texts of the primary
+    /// selection and the clipboard. The controller applies its rule.
+    SelectionRead(RequestId, controller::SelectionText),
 }
+
+/// A queued controller render batch.
+type ControllerQueue = Arc<Mutex<VecDeque<(ViewState, Vec<Effect>)>>>;
 
 /// Starts one attempt to bind the shortcuts; its events go to `sender`. With
 /// `timed`, an activation carries the time the worker thread received it.
-fn start_shortcut(sender: &UnboundedSender<Event>, timed: bool) -> ShortcutHandle {
+fn start_shortcut(
+    sender: &UnboundedSender<Event>,
+    timed: bool,
+    config: Option<&Path>,
+) -> ShortcutHandle {
     let sender = sender.clone();
-    let file = entries::shortcut_file();
+    let file = entries::shortcut_file(config);
     shortcut::start(
         APP_ID,
         KeyOwner::detect(),
@@ -460,7 +358,11 @@ fn main_menu() -> gtk::MenuButton {
 }
 
 /// The hidden window around the `view`: closing it hides it, and so does Esc.
-fn build_window(application: &gtk::Application, view: &View) -> gtk::ApplicationWindow {
+fn build_window(
+    application: &gtk::Application,
+    view: &View,
+    sender: &UnboundedSender<Event>,
+) -> gtk::ApplicationWindow {
     let header = header_bar("Addict");
     header.pack_end(&main_menu());
     let window = gtk::ApplicationWindow::builder()
@@ -473,16 +375,22 @@ fn build_window(application: &gtk::Application, view: &View) -> gtk::Application
         .titlebar(&header)
         .build();
     // Closing hides; the process and this window stay.
-    window.connect_close_request(|window| {
+    let closed = sender.clone();
+    window.connect_close_request(move |window| {
         window.set_visible(false);
+        let _ = closed.unbounded_send(Event::Setting(controller::Event::PanelClosed));
         glib::Propagation::Stop
     });
     // Bubble phase: a focused child that uses Esc itself keeps it.
     let key = gtk::EventControllerKey::new();
+    key.set_name(Some("dismiss-panel"));
     let key_window = window.downgrade();
+    let controller = view.controller_events();
     key.connect_key_pressed(move |_, key, _, _| {
         if key == gdk::Key::Escape {
-            if let Some(window) = key_window.upgrade() {
+            if !controller.dispatch(controller::Event::DismissPressed)
+                && let Some(window) = key_window.upgrade()
+            {
                 window.close();
             }
             glib::Propagation::Stop
@@ -494,26 +402,9 @@ fn build_window(application: &gtk::Application, view: &View) -> gtk::Application
     window
 }
 
-/// What takes the keyboard focus when a capture ended without text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FailedEndFocus {
-    Capture,
-    Retry,
-}
-
-/// The focus after a capture without text under `binding`: Capture, for the
-/// retry, or Retry when it is offered. No wildcard arm: a new state does not
-/// compile until it is given its focus.
-fn failed_end_focus(binding: &Binding) -> FailedEndFocus {
-    match binding {
-        Binding::NotBound { .. } => FailedEndFocus::Retry,
-        Binding::Attempting | Binding::Bound => FailedEndFocus::Capture,
-    }
-}
-
 /// The state the event loop keeps between events, on the UI thread.
 struct Session {
-    binding: Binding,
+    dirs: Dirs,
     view: View,
     window: gtk::ApplicationWindow,
     /// Present only with `--evidence`.
@@ -524,1197 +415,419 @@ struct Session {
     sender: UnboundedSender<Event>,
     /// Weak: the worker must go when the resident state is dropped.
     current: Weak<RefCell<Option<ShortcutHandle>>>,
-    /// The text of the field, a word or a sentence, and what was chosen in
-    /// it.
-    manual: Manual,
-    /// The texts the field held, for Back and Forward; kept for the life of
-    /// the process, hidden window included.
-    history: History,
-    /// Where the lookup of the chosen word stands.
-    looking_up: LookingUp,
-    /// The result the window shows and the sense chosen in it.
-    shown: Shown,
+    /// The controller's snapshot rendered last: the field's text and words,
+    /// what was chosen in it, the shown result and the history buttons.
+    view_state: ViewState,
+    view_actions: Rc<Cell<ViewActions>>,
+    /// The last applied `field.revision`; controller text applies on a rise.
+    applied_field_revision: u64,
+    /// The text of the field the controller was last told of, or set.
+    sent_text: String,
+    /// How many `FieldEdited` events were sent to the controller.
+    edits_sent: u64,
+    /// `edits_sent` when an event that lets the controller set the field
+    /// (Back, Forward, a synonym, clearing) was sent last. A controller text
+    /// applies only while no edit followed it: a newer one is on its way.
+    edits_at_set: u64,
+    /// Advances when the shell handles Read, so older snapshots and capture
+    /// presentation cannot overwrite the locally cleared field or its focus.
+    read_sequence: u64,
     /// Weak: the runner must go when the resident state is dropped. Never
     /// upgrades when the runner could not be started.
-    work: Weak<Work>,
-    articles: Arc<dyn Articles>,
-    /// What a word or a sentence is translated by online.
-    translator: Arc<dyn Translator>,
-    key_file: Option<std::path::PathBuf>,
-    /// The on-disk cache of the translator, for its size and its clear.
-    cache: Arc<cache::Store>,
-    /// The read of the size of the cache; dropping it gives it up.
-    cache_job: Option<Job>,
-    /// The clear of the cache; a newer clear replaces it.
-    clear_job: Option<Job>,
+    work: WorkRef<Work>,
+    controller: Option<Dispatcher>,
+    playback: Option<(RequestId, MediaPlayback)>,
+    quit_timer: Rc<RefCell<Option<glib::SourceId>>>,
+    quit_timed_out: Rc<Cell<bool>>,
+    restart: Rc<dyn Fn()>,
+    /// Where the Linux key file is, for the `StoreKey` effect.
+    key_file: Option<PathBuf>,
+    /// The jobs of the settings effects; each is kept until its one result
+    /// arrives, since dropping a `Job` cancels it.
+    store_job: Option<Job>,
+    startup_job: Option<Job>,
+    startup_read_job: Option<Job>,
     /// The Settings window, reached from the main window or tray.
     settings: Settings,
     /// The About window, which the tray shows.
     about: About,
-    /// Independent assignments reported by the portal for this session.
-    bindings: Bindings,
-    /// The state the portal last confirmed, as the switch shows it.
-    startup_on: bool,
-    /// The read of the saved startup state; dropping it gives it up.
-    startup_read_job: Option<Job>,
-    /// The request to the portal, from the switch to its end: while it is
-    /// there the switch stays as it is.
-    startup_job: Option<Job>,
-    /// The read of the key file's state; dropping it gives it up.
-    key_job: Option<Job>,
-    /// The write of the key file; a newer save replaces it.
-    save_job: Option<Job>,
-    /// The online request of a word, in its sentence or alone, whose outcome
-    /// is awaited; dropping it cancels the request.
-    translating_word: Option<Job>,
-    /// The same for the request of the sentence.
-    translating_sentence: Option<Job>,
-    /// Dropping this separate job cancels the selected definition request.
-    translating_definition: Option<Job>,
-    /// The online texts of the text the field holds.
-    online: Kept,
-    /// The check of the indexes at the start, or the last one a Spanish or
-    /// Catalan word without its indexes asked for, which replaces any still running;
-    /// dropping it cancels the check.
-    check: Option<Job>,
-    /// Where the indexes stood when last asked, by a check or a lookup;
-    /// `None` until the first answer.
-    indexes: IndexCache,
     /// Where the capture stands.
     capturing: Capturing,
     /// Where the read of the selection and the clipboard of a press stands.
     copying: Copying,
-    /// The language the user reads: the sentence requests are sent from
-    /// it, and its indexes are looked up first. Always
-    /// [`language::reading`] of `saved_language` and `my_language`.
-    language: Language,
-    /// The reading language of the language file or of the user's last
-    /// choice, kept apart from `language`: it falls back while it is my
-    /// language and comes back when it no longer is, and only it is
-    /// written.
-    saved_language: Language,
-    /// Where the reading language is kept across restarts; `None` when the
-    /// environment names no configuration directory.
-    language_file: Option<std::path::PathBuf>,
-    /// Whether the user chose the language in this session: the read of the
-    /// file, should it come later, changes nothing then.
-    language_chosen: bool,
-    /// The read or the write of the language file on the runner.
-    language_job: Option<Job>,
-    /// The language the online translations are made into.
-    my_language: Language,
-    /// Where my language is kept across restarts; `None` when the
-    /// environment names no configuration directory.
-    my_language_file: Option<std::path::PathBuf>,
-    /// Whether the user chose my language in this session: the read of the
-    /// file, should it come later, changes nothing then.
-    my_language_chosen: bool,
-    /// The pending startup read, or the write after `my_language_chosen`.
-    my_language_job: Option<Job>,
-    /// The spelling of English: an English target is spelled so, and any
-    /// other target ignores it.
-    english: English,
-    /// Where the spelling of English is kept across restarts; `None` when
-    /// the environment names no configuration directory.
-    english_file: Option<std::path::PathBuf>,
-    /// Whether the user chose the spelling in this session: the read of the
-    /// file, should it come later, changes nothing then.
-    english_chosen: bool,
-    /// The read or the write of the English-spelling file on the runner.
-    english_job: Option<Job>,
-    /// Whether a sentence read at a press of the clipboard shortcut is
-    /// translated online at once, before a click on a word.
-    at_once: bool,
-    /// Where that choice is kept across restarts; `None` when the
-    /// environment names no configuration directory.
-    at_once_file: Option<std::path::PathBuf>,
-    /// Whether the user moved the switch in this session: the read of the
-    /// file, should it come later, changes nothing then.
-    at_once_chosen: bool,
-    /// The read or the write of that file on the runner.
-    at_once_job: Option<Job>,
-    /// Where the first-run offer to download a dictionary stands.
-    first_run: FirstRun,
-    download_run: u64,
-    /// Where the dictionaries are downloaded from: [`download::BASE_URL`],
-    /// a stub in the tests.
-    release: String,
-    /// Independent of recovery, which must never cancel a remembered choice.
-    first_run_choice: Option<Job>,
+    /// The dialog rendered from the current offer, if its parent was shown.
+    download_offer: Option<(OfferId, Offer)>,
 }
 
-/// Reject checks and lookups that started before an in-app import's
-/// refresh. A late old answer must not put Missing back in the cache.
-#[derive(Default)]
-struct IndexCache {
-    generation: u64,
-    known: Option<Indexes>,
-    known_generation: u64,
-}
-
-impl IndexCache {
-    fn update(&mut self, generation: u64, indexes: Indexes) -> bool {
-        if generation != self.generation {
-            return false;
-        }
-        self.known = Some(indexes);
-        self.known_generation = generation;
-        true
-    }
-
-    fn current(&self) -> Option<Indexes> {
-        self.known
-            .filter(|_| self.known_generation == self.generation)
-    }
-
-    fn begin_import(&mut self) -> u64 {
-        self.generation += 1;
-        self.generation
-    }
-}
-
-struct ImportCompletion {
-    generation: u64,
-    indexes: Indexes,
-    ready: oneshot::Sender<()>,
-}
-
-impl ImportCompletion {
-    fn apply(self, apply: impl FnOnce(u64, Indexes)) {
-        apply(self.generation, self.indexes);
-        let _ = self.ready.send(());
-    }
-}
-
-/// Where the first-run offer of a [`Session`] stands. When the index check
-/// and my-language read have resolved, the runner reads the choice file and
-/// fetches the manifest if all required indexes are missing. The dialog
-/// waits for a visible window on a `--background` launch.
-enum FirstRun {
-    /// Waiting for the startup results.
-    Unasked,
-    /// The choice file is read and the manifest fetched; dropping the job
-    /// gives them up.
-    Asking {
-        _job: Job,
-    },
-    Preparing {
-        _job: Job,
-    },
-    /// The offer is due and waits for the window to be shown.
-    Pending(Manifest),
-    /// The dialog is shown and waits for a press.
-    Shown {
-        offer: Offer,
-        manifest: Manifest,
-        recovery: bool,
-    },
-    /// Download was pressed: the indexes of the queue are installed one
-    /// after another into `dir`. `running` is the index whose job runs;
-    /// dropping the job gives that one up.
-    Installing {
-        offer: Offer,
-        queue: first_run::Queue,
-        dir: std::path::PathBuf,
-        running: Option<(String, Job)>,
-        recovery: bool,
-    },
-    /// The install ended, and the dialog says how.
-    Ended {
-        _offer: Offer,
-    },
-    /// Nothing is offered in this run.
-    Done,
-}
-
-/// Where the capture of a [`Session`] stands; at first no capture runs.
+/// GTK presentation state and cancellation handles for controller effects.
 #[derive(Default)]
 struct Capturing {
-    /// The capture job, from Capture to its end; dropping it cancels the
-    /// job, which kills its Tesseract child and deletes its snapshot.
-    job: Option<Job>,
-    /// The number of the last started capture job. An event that carries
-    /// another number, or comes when no job runs, is from a job that was
-    /// given up.
-    number: u64,
-    /// Between Capture and the start of its job, while the window leaves
-    /// the screen.
-    hiding: bool,
-    /// The language the last started capture job recognizes, which its
-    /// line of missing data names.
-    language: Language,
-    /// Kept through the picker until the capture's window is presented again.
+    pending: HashMap<RequestId, CaptureEffect>,
     activation_token: Option<String>,
+    edits_at_recognition: u64,
 }
 
-/// What a press of Capture or of the screenshot shortcut does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CapturePress {
-    /// A capture is on its way or its area is being chosen: nothing new.
-    Ignored,
-    /// A new capture starts.
-    Start,
-    /// The recognition that runs is given up and a new capture starts.
-    Restart,
+enum CaptureEffect {
+    Settling {
+        read_sequence: u64,
+        hidden: bool,
+    },
+    Picker {
+        cancel: Option<tokio::sync::oneshot::Sender<()>>,
+        _job: Job,
+    },
+    Recognition(Job),
 }
 
-impl Capturing {
-    /// What a press does now; `recognizing` says that the job has its snapshot.
-    /// Dropping a job that waits for the area could leave an open picker whose
-    /// snapshot nobody deletes, so that one is left alone.
-    fn press(&self, recognizing: bool) -> CapturePress {
-        match (self.hiding, self.job.is_some(), recognizing) {
-            (true, _, _) | (false, true, false) => CapturePress::Ignored,
-            (false, true, true) => CapturePress::Restart,
-            (false, false, _) => CapturePress::Start,
-        }
-    }
-
-    /// The number of the job that starts now.
-    fn next_number(&mut self) -> u64 {
-        self.number += 1;
-        self.number
-    }
-
-    /// Whether the job with `number` is the one that runs.
-    fn is_running(&self, number: u64) -> bool {
-        self.job.is_some() && number == self.number
-    }
-}
-
-/// Where the lookup of the word chosen in a [`Session`] stands; at first
-/// none runs.
-#[derive(Default)]
-struct LookingUp {
-    /// The lookup whose outcome is awaited; dropping it cancels the lookup.
-    job: Option<Job>,
-    /// The language that gave the result of the last started lookup, once
-    /// it ended with one; `None` before. The word's online requests are
-    /// sent from it.
-    answered: Option<Language>,
-    /// The online requests of the word, alone or in its sentence, asked
-    /// while its lookup runs: they are sent once it ends, from the language
-    /// that answered.
-    deferred: Vec<Subject>,
-}
-
-/// Where the read of the clipboard of a [`Session`] stands; at first none
-/// runs.
+/// Where the read of the selection and the clipboard of a [`Session`] stands;
+/// at first none runs.
 #[derive(Default)]
 struct Copying {
-    /// The read, from the press to its end.
+    /// The read, from its effect to its one result.
     read: Option<ClipboardRead>,
-    /// The number of the last started read. An event that carries another
-    /// number, or comes when none runs, is from a read that was given up.
-    number: u64,
 }
 
-/// One read of the primary selection, then of the clipboard.
+/// One read of the primary selection and the clipboard.
 struct ClipboardRead {
-    /// Cancels the read of the clipboard; `None` while the window is not yet
-    /// active and nothing is read.
+    /// The controller's request; its result event carries it back.
+    id: RequestId,
+    /// Cancels both reads; `None` while the window is not yet active and
+    /// nothing is read.
     cancellable: Option<gio::Cancellable>,
-    /// Set when the selection was too long, with its length, so that a read
-    /// of the clipboard that runs out of time still says so.
-    selection: Rc<Cell<Option<(Held, usize)>>>,
-}
-
-impl Copying {
-    /// A new read starts, and the one before ends; the number of the new
-    /// one is given back.
-    fn begin(&mut self) -> u64 {
-        self.end();
-        self.number += 1;
-        self.read = Some(ClipboardRead {
-            cancellable: None,
-            selection: Rc::default(),
-        });
-        self.number
-    }
-
-    /// Whether the read with `number` is the one that runs.
-    fn is_running(&self, number: u64) -> bool {
-        self.read.is_some() && number == self.number
-    }
-
-    /// The read ends: one that reads is cancelled. The read that ran, if one
-    /// did.
-    fn end(&mut self) -> Option<ClipboardRead> {
-        let read = self.read.take()?;
-        if let Some(cancellable) = &read.cancellable {
-            cancellable.cancel();
-        }
-        Some(read)
-    }
 }
 
 impl Session {
     fn handle(&mut self, event: Event) {
         self.dispatch(event);
-        self.first_indexes();
-        self.offer_when_shown();
+        self.show_download_offer();
     }
 
     fn dispatch(&mut self, event: Event) {
         match event {
             Event::Window(event) => dispatch_window(self, event),
             Event::Tray(event) => self.tray(event),
-            Event::ChangeShortcut => self.change_shortcut(),
-            Event::KeyFile(state) => self.settings.render_key(Some(state)),
-            Event::SaveKey(text) => self.save_key(text),
-            Event::KeySaved(outcome) => self.key_saved(outcome),
-            Event::CacheSize(state) => self.settings.render_cache(state),
-            Event::ClearCache => self.clear_cache(),
-            Event::CacheCleared(outcome) => self.cache_cleared(outcome),
-            Event::StartupRead(outcome) => self.startup_read(outcome),
-            Event::ToggleStartup(enable) => self.toggle_startup(enable),
-            Event::StartupChanged(outcome) => self.startup_changed(outcome),
-            Event::Retry => self.retry(),
-            Event::Sentence(text) => self.sentence_changed(text),
-            Event::Word(index) => self.word_chosen(index),
-            Event::Sense(index) => self.sense_chosen(index),
-            Event::Gloss(index) => self.gloss_chosen(index),
+            Event::Setting(event) => self.dispatch_controller(event),
+            Event::Sentence(text, origin) => self.sentence_changed(text, origin),
+            Event::Word(text, index) => self.word_chosen(text, index),
+            Event::Synonym(article, word) => self.synonym_chosen(article, word),
+            Event::Sense(article, index) => {
+                self.article_action(
+                    article,
+                    addict_controller::Event::SenseChosen { article, index },
+                );
+            }
+            Event::Gloss(article, index) => {
+                self.article_action(
+                    article,
+                    addict_controller::Event::GlossChosen { article, index },
+                );
+            }
             Event::Submitted => self.submitted(),
             Event::Back => self.back(),
             Event::Forward => self.forward(),
-            Event::DefinitionAction => self.definition_action(),
-            Event::LookUpEnglish(word) => self.look_up_english(&word),
-            Event::DefinitionTranslated {
-                number,
-                source,
-                outcome,
-                elapsed,
-            } => self.definition_translated(number, source, outcome, elapsed),
-            Event::Lookup {
-                run,
-                generation,
-                language,
-                outcome,
-            } => self.looked_up(run, generation, language, outcome),
-            Event::Translated {
-                text,
-                subject,
-                source,
-                number,
-                outcome,
-                elapsed,
-            } => self.translated(text, subject, source, number, outcome, elapsed),
-            Event::LanguageRead(language) => {
-                // After a choice the job is its write, which must not be
-                // dropped (and so cancelled) by the read.
-                if !self.language_chosen {
-                    self.language_job = None;
-                    self.saved_language = language;
-                    self.apply_reading_language();
-                }
+            Event::PlayPressed(article, url) => {
+                self.article_action(article, controller::Event::PlayPressed { article, url })
             }
-            Event::LanguageChosen(language) => self.language_chosen(language),
-            Event::MyLanguageRead(language) => {
-                // After a choice the job is its write, which must not be
-                // dropped (and so cancelled) by the read.
-                if !self.my_language_chosen {
-                    self.my_language_job = None;
-                    self.settings.render_my_language(language);
-                    self.apply_my_language(language);
-                }
+            Event::DefinitionAction(article, choice) => self.article_action(
+                article,
+                addict_controller::Event::DefinitionAction { article, choice },
+            ),
+            Event::LookUpEnglish(article, index, word) => {
+                self.look_up_english(article, index, word)
             }
-            Event::MyLanguageChosen(language) => self.my_language_chosen(language),
-            Event::EnglishRead(english) => {
-                // After a choice the job is its write, which must not be
-                // dropped (and so cancelled) by the read.
-                if !self.english_chosen {
-                    self.english_job = None;
-                    self.settings.render_english(english);
-                    self.apply_english(english);
-                }
-            }
-            Event::EnglishChosen(english) => self.english_chosen(english),
-            Event::AtOnceRead(at_once) => {
-                // After a choice the job is its write, which must not be
-                // dropped (and so cancelled) by the read.
-                if !self.at_once_chosen {
-                    self.at_once_job = None;
-                    self.at_once = at_once;
-                    self.settings.render_at_once(at_once);
-                }
-            }
-            Event::AtOnceChosen(at_once) => self.at_once_chosen(at_once),
-            Event::Indexes {
-                generation,
-                indexes,
-            } => {
-                if self.indexes.update(generation, indexes) {
-                    self.check = None;
-                    self.view.render_indexes(indexes, self.my_language);
-                    self.relist_first_run();
-                }
-            }
-            Event::ImportRefreshing(ready) => {
-                self.check = None;
-                let _ = ready.send(self.indexes.begin_import());
-            }
-            Event::Imported(completed) => completed.apply(|generation, indexes| {
-                if self.indexes.update(generation, indexes) {
-                    self.check = None;
-                    self.view.render_indexes(indexes, self.my_language);
-                    self.relist_first_run();
-                }
-            }),
-            Event::SettingsDownload => self.settings_download(),
-            Event::RecoveryPrepared(run, outcome) => self.recovery_prepared(run, outcome),
-            Event::FirstRunOffer(run, manifest) if run == self.download_run => {
-                self.first_run_offer(manifest)
-            }
-            Event::FirstRunDownload(run) if run == self.download_run => self.first_run_download(),
-            Event::FirstRunNotNow(run) if run == self.download_run => self.first_run_not_now(),
-            Event::FirstRunProgress(run, name, received) if run == self.download_run => {
-                self.first_run_progress(&name, received)
-            }
-            Event::FirstRunCancel(run, name) if run == self.download_run => {
-                self.first_run_cancel(name)
-            }
-            Event::FirstRunInstalled(run, name, outcome) if run == self.download_run => {
-                self.first_run_installed(&name, outcome)
-            }
-            Event::FirstRunOffer(..)
-            | Event::FirstRunDownload(..)
-            | Event::FirstRunNotNow(..)
-            | Event::FirstRunProgress(..)
-            | Event::FirstRunCancel(..)
-            | Event::FirstRunInstalled(..) => {}
+            Event::Controller(state, effects) => self.render_controller(*state, effects),
             Event::Capture => self.capture(None),
-            Event::Hidden => self.start_capture(),
-            Event::Captured(number) => self.snapshot_taken(number),
-            Event::Recognized(number, outcome) => self.recognized(number, outcome),
+            Event::Hidden(id) => self.capture_hidden(id),
+            Event::CaptureFinished(id, result) => {
+                let finished = self.capturing.pending.remove(&id);
+                self.dispatch_controller(result);
+                if matches!(finished, Some(CaptureEffect::Picker { .. })) {
+                    let ready = self.capturing.pending.iter().find_map(|(&id, effect)| {
+                        matches!(effect, CaptureEffect::Settling { hidden: true, .. }).then_some(id)
+                    });
+                    if let Some(id) = ready {
+                        self.start_capture(id);
+                    }
+                }
+            }
             Event::Active => self.window_active(),
-            Event::Clipboard(number, line) => self.copied(number, line),
+            Event::SelectionRead(id, text) => self.selection_read(id, text),
         }
     }
 
     /// Asks for the offer once startup has the language and index results.
     /// An offer still waiting for the manifest or window uses the latest
-    /// accepted index snapshot.
-    fn first_indexes(&mut self) {
-        if !matches!(
-            self.first_run,
-            FirstRun::Unasked | FirstRun::Asking { .. } | FirstRun::Pending(_)
-        ) || (!self.my_language_chosen && self.my_language_job.is_some())
-        {
-            return;
-        }
-        let Some(indexes) = self.indexes.current() else {
-            return;
-        };
-        let my = self.my_language;
-        let due = first_run::should_offer(&indexes, my, false);
-        match self.first_run {
-            FirstRun::Unasked if self.check.is_some() => {}
-            FirstRun::Unasked if due => {
-                self.download_run += 1;
-                self.first_run =
-                    self.work
-                        .upgrade()
-                        .map_or(FirstRun::Done, |work| FirstRun::Asking {
-                            _job: start_first_run(
-                                &work,
-                                Downloader::with_base_url(self.release.clone()),
-                                indexes,
-                                my,
-                                &self.sender,
-                                self.download_run,
-                            ),
-                        });
-            }
-            FirstRun::Unasked => self.first_run = FirstRun::Done,
-            FirstRun::Pending(_) | FirstRun::Asking { .. } if !due => {
-                self.first_run = FirstRun::Done;
-            }
-            _ => {}
-        }
-    }
-
-    /// The offer is due: it waits for the window, with every index of
-    /// `manifest`. A manifest without an index offers nothing.
-    fn first_run_offer(&mut self, manifest: Manifest) {
-        if !matches!(self.first_run, FirstRun::Asking { .. }) {
-            return;
-        }
-        self.first_run = if manifest.indexes.is_empty() {
-            eprintln!("addict: no dictionary download is offered: the manifest lists no index");
-            FirstRun::Done
-        } else {
-            FirstRun::Pending(manifest)
-        };
-    }
-
-    /// Shows the dialog of a pending offer once the window is shown.
-    fn offer_when_shown(&mut self) {
-        if !matches!(self.first_run, FirstRun::Pending(_))
-            || !self.window.is_visible()
-            || self.indexes.current().is_none()
-        {
-            return;
-        }
-        let FirstRun::Pending(manifest) = std::mem::replace(&mut self.first_run, FirstRun::Done)
-        else {
-            return;
-        };
-        self.show_download_offer(manifest, false);
-    }
-
-    fn show_download_offer(&mut self, manifest: Manifest, recovery: bool) {
-        let download = self.sender.clone();
-        let not_now = self.sender.clone();
-        let cancel = self.sender.clone();
-        let chosen = self.sender.clone();
-        let run = self.download_run;
-        let (listed, my) = if recovery {
-            (self.recovery_indexes(&manifest), None)
-        } else {
-            (self.first_run_indexes(&manifest), Some(self.my_language))
-        };
-        let parent: &gtk::Window = if recovery {
-            self.settings.window()
-        } else {
-            self.window.upcast_ref()
-        };
-        let offer = Offer::new(
-            parent,
-            &listed,
-            recovery,
-            my,
-            move |language| {
-                let _ = chosen.unbounded_send(Event::MyLanguageChosen(language));
-            },
-            move || {
-                let _ = download.unbounded_send(Event::FirstRunDownload(run));
-            },
-            move || {
-                let _ = not_now.unbounded_send(Event::FirstRunNotNow(run));
-            },
-            move |name| {
-                let _ = cancel.unbounded_send(Event::FirstRunCancel(run, name));
-            },
-        );
-        offer.present();
-        if recovery {
-            self.settings
-                .render_download(false, "The dictionary download dialog is open.");
-        }
-        self.first_run = FirstRun::Shown {
-            offer,
-            manifest,
-            recovery,
-        };
-    }
-
-    /// The indexes of `manifest` that the first-run offer lists and
-    /// installs: those my language needs that the latest accepted snapshot
-    /// does not show present. The rows and the queue both come from here,
-    /// so they agree.
-    fn first_run_indexes(&self, manifest: &Manifest) -> Vec<Published> {
-        let indexes = self.indexes.known;
-        first_run::offered(&manifest.indexes, self.my_language, |name| {
-            indexes.is_some_and(|indexes| first_run::is_present(&indexes, name))
-        })
-    }
-
-    /// The indexes of a recovery manifest that the Settings offer lists
-    /// and installs: those of my language's set. The manifest holds only
-    /// what is missing or unreadable, so no presence is asked; indexes of
-    /// other languages stay out, and none is removed.
-    fn recovery_indexes(&self, manifest: &Manifest) -> Vec<Published> {
-        first_run::offered(&manifest.indexes, self.my_language, |_| false)
-    }
-
-    /// An offer that waits for a press lists anew what my language needs,
-    /// after my language or the snapshot changed. A recovery offer left
-    /// with nothing to list closes, and Settings says why.
-    fn relist_first_run(&mut self) {
-        match &self.first_run {
-            FirstRun::Shown {
-                offer,
-                manifest,
-                recovery: false,
-            } => {
-                offer.render_my_language(self.my_language);
-                offer.list(&self.first_run_indexes(manifest));
-            }
-            FirstRun::Shown {
-                offer,
-                manifest,
-                recovery: true,
-            } => {
-                let listed = self.recovery_indexes(manifest);
-                if listed.is_empty() {
-                    offer.close();
-                    self.first_run = FirstRun::Done;
-                    self.settings
-                        .render_download(false, &first_run::nothing_text(self.my_language));
-                } else {
-                    offer.list(&listed);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// A change of my language in Settings offers what the new language's
-    /// set lacks, through the Settings offer for missing indexes. Only when
-    /// no offer, preparation or install is under way: the first-run offer
-    /// decides for itself, and a waiting offer follows by
-    /// [`Self::relist_first_run`].
-    fn offer_missing_for_my_language(&mut self) {
-        // A waiting recovery offer, re-listed already, may have been closed
-        // (it only hides): it is shown again.
-        if let FirstRun::Shown {
-            offer,
-            recovery: true,
-            ..
-        } = &self.first_run
-        {
-            offer.present();
-            return;
-        }
-        if !matches!(self.first_run, FirstRun::Done | FirstRun::Ended { .. }) {
-            return;
-        }
-        let lacks = self
-            .indexes
-            .known
-            .is_some_and(|indexes| !first_run::missing(&indexes, self.my_language).is_empty());
-        if lacks {
-            self.settings_download();
-        }
-    }
-
-    /// Explicit recovery supersedes an unstarted automatic offer, while an
-    /// active preparation or installation keeps its job and progress.
-    fn settings_download(&mut self) {
-        match &self.first_run {
-            FirstRun::Preparing { .. } => return,
-            FirstRun::Installing { offer, .. }
-            | FirstRun::Shown {
-                offer,
-                recovery: true,
-                ..
-            } => {
-                offer.present();
-                return;
-            }
-            _ => {}
-        }
-        let (Some(work), Some(dir)) = (self.work.upgrade(), import::data_dir()) else {
-            self.settings
-                .render_download(false, &first_run::recovery_failed_text(first_run::NO_PLACE));
-            return;
-        };
-        self.download_run += 1;
-        let run = self.download_run;
-        let prepared = self.sender.clone();
-        let downloader = Downloader::with_base_url(self.release.clone());
-        // The manifest has its own deadline inside; the health scan of
-        // every installed index needs the longer one.
-        let job = work.run(
-            download::DOWNLOAD_LIMIT,
-            async move {
-                download::recovery_manifest(&downloader, dir)
-                    .await
-                    .map_err(|error| error.to_string())
-            },
-            move |outcome| {
-                let _ = prepared.unbounded_send(Event::RecoveryPrepared(run, outcome));
-            },
-        );
-        self.first_run = FirstRun::Preparing { _job: job };
-        self.settings.render_download(true, first_run::FETCHING);
-    }
-
-    fn recovery_prepared(&mut self, run: u64, outcome: Outcome<Result<Manifest, String>>) {
-        if run != self.download_run || !matches!(self.first_run, FirstRun::Preparing { .. }) {
-            return;
-        }
-        self.first_run = FirstRun::Done;
-        match outcome {
-            Outcome::Finished(Ok(manifest)) if self.recovery_indexes(&manifest).is_empty() => {
-                self.settings
-                    .render_download(false, &first_run::nothing_text(self.my_language));
-            }
-            Outcome::Finished(Ok(manifest)) => self.show_download_offer(manifest, true),
-            outcome => {
-                let why = match outcome {
-                    Outcome::Finished(Err(error)) => error,
-                    Outcome::TimedOut => "the dictionary check did not finish in time".to_owned(),
-                    _ => first_run::STOPPED.to_owned(),
-                };
-                self.settings
-                    .render_download(false, &first_run::recovery_failed_text(&why));
-            }
-        }
-    }
-
-    /// Download was pressed: the indexes of the manifest are downloaded and
-    /// installed on the runner, one after another, each within
-    /// [`download::DOWNLOAD_LIMIT`].
-    fn first_run_download(&mut self) {
-        if !matches!(self.first_run, FirstRun::Shown { .. }) {
-            return;
-        }
-        let FirstRun::Shown {
-            offer,
-            manifest,
-            recovery,
-        } = std::mem::replace(&mut self.first_run, FirstRun::Done)
-        else {
-            return;
-        };
-        offer.installing();
-        let indexes = if recovery {
-            self.recovery_indexes(&manifest)
-        } else {
-            self.first_run_indexes(&manifest)
-        };
-        let mut queue = first_run::Queue::new(indexes);
-        let (Some(_), Some(dir)) = (self.work.upgrade(), import::data_dir()) else {
-            let why = first_run::NO_PLACE;
-            eprintln!("addict: the dictionary download failed: {why}");
-            queue.cancel_all();
-            offer.show(&queue);
-            let text = if recovery {
-                first_run::recovery_failed_text(why)
-            } else {
-                first_run::failed_text(why)
-            };
-            offer.ended(first_run::FAILED_HEADING, &text, false);
-            self.settings.render_download(false, &text);
-            self.first_run = FirstRun::Ended { _offer: offer };
-            return;
-        };
-        offer.show(&queue);
-        self.first_run = FirstRun::Installing {
-            offer,
-            queue,
-            dir,
-            running: None,
-            recovery,
-        };
-        self.first_run_next();
-    }
-
-    /// Starts the next queued index when none runs; once every index has
-    /// ended, the dialog says how it went and the indexes are checked
-    /// again, so the line of the window follows.
-    fn first_run_next(&mut self) {
-        let FirstRun::Installing {
-            offer,
-            queue,
-            dir,
-            running,
-            recovery,
-        } = &mut self.first_run
-        else {
-            return;
-        };
-        if running.is_some() {
-            return;
-        }
-        while let Some(published) = queue.next() {
-            let Some(work) = self.work.upgrade() else {
-                queue.finished(&published.name, Err(first_run::NO_PLACE.to_owned()));
-                continue;
-            };
-            let name = published.name.clone();
-            let dir = dir.clone();
-            let progress = self.sender.clone();
-            let installed = self.sender.clone();
-            let (of, ended) = (name.clone(), name.clone());
-            let run = self.download_run;
-            let recovery = *recovery;
-            let articles = self.articles.clone();
-            let refresh = self.sender.clone();
-            let downloader = Downloader::with_base_url(self.release.clone());
-            let job = work.run(
-                download::DOWNLOAD_LIMIT,
-                async move {
-                    install_download(
-                        downloader,
-                        published,
-                        dir,
-                        recovery,
-                        articles,
-                        refresh,
-                        move |received| {
-                            let _ = progress.unbounded_send(Event::FirstRunProgress(
-                                run,
-                                of.clone(),
-                                received,
-                            ));
-                        },
-                    )
-                    .await
-                },
-                move |outcome| {
-                    // On the worker: the UI thread wakes for the event.
-                    let _ = installed.unbounded_send(Event::FirstRunInstalled(run, ended, outcome));
-                },
-            );
-            *running = Some((name, job));
-            offer.show(queue);
-            return;
-        }
-        offer.show(queue);
-        if !queue.is_done() {
-            return;
-        }
-        let FirstRun::Installing {
-            offer,
-            queue,
-            recovery,
-            ..
-        } = std::mem::replace(&mut self.first_run, FirstRun::Done)
-        else {
-            return;
-        };
-        let text = if recovery {
-            first_run::recovery_summary_text(&queue)
-        } else {
-            first_run::summary_text(&queue)
-        };
-        offer.ended(
-            first_run::ended_heading(&queue),
-            &text,
-            first_run::is_complete(&queue),
-        );
-        self.settings.render_download(false, &text);
-        self.first_run = FirstRun::Ended { _offer: offer };
-    }
-
-    /// Bytes of the running index came: its row says how many.
-    fn first_run_progress(&mut self, name: &str, received: u64) {
-        let FirstRun::Installing {
-            offer,
-            queue,
-            running: Some((running, _)),
-            ..
-        } = &mut self.first_run
-        else {
-            return;
-        };
-        if running != name {
-            return;
-        }
-        queue.progress(name, received);
-        offer.show(queue);
-    }
-
-    /// Cancel was pressed on a row, or on the dialog: that index, or every
-    /// index that has not ended, ends as cancelled. The job of the running
-    /// one is dropped, so nothing of it is put in place, and the next index
-    /// starts.
-    fn first_run_cancel(&mut self, name: Option<String>) {
-        let FirstRun::Installing {
-            offer,
-            queue,
-            running,
-            ..
-        } = &mut self.first_run
-        else {
-            return;
-        };
-        let was_running = match &name {
-            Some(name) => queue.cancel(name),
-            None => queue.cancel_all(),
-        };
-        if was_running {
-            // Its outcome, Cancelled, comes later and is ignored.
-            *running = None;
-        }
-        // A queued row says Cancelled at once, while another one runs.
-        offer.show(queue);
-        self.first_run_next();
-    }
-
-    /// The running index ended: its row says how, and the next one starts.
-    /// An end of an index that no longer runs, as one cancelled, changes
-    /// nothing.
-    fn first_run_installed(
-        &mut self,
-        name: &str,
-        outcome: Outcome<Result<std::path::PathBuf, String>>,
-    ) {
-        let FirstRun::Installing { queue, running, .. } = &mut self.first_run else {
-            return;
-        };
-        if running.as_ref().is_none_or(|(running, _)| running != name) {
-            return;
-        }
-        *running = None;
-        let result = match outcome {
-            Outcome::Finished(Ok(_)) => Ok(()),
-            Outcome::Finished(Err(error)) => Err(error),
-            Outcome::TimedOut => Err(first_run::late_text(download::DOWNLOAD_LIMIT)),
-            Outcome::Cancelled | Outcome::Panicked => Err(first_run::STOPPED.to_owned()),
-        };
-        if let Err(error) = &result {
-            eprintln!(
-                "addict: the dictionary download failed: {}",
-                first_run::failure_text(name, error)
-            );
-        }
-        queue.finished(name, result);
-        self.first_run_next();
-    }
-
-    /// Not now was pressed: the choice is written on the runner, and the
-    /// offer is not made again. A write that fails is written to stderr.
-    fn first_run_not_now(&mut self) {
-        let FirstRun::Shown { recovery, .. } = &self.first_run else {
-            return;
-        };
-        if *recovery {
-            self.first_run = FirstRun::Done;
-            self.settings.render_download(false, "");
-            return;
-        }
-        let path = first_run::path();
-        let job = self.work.upgrade().map(|work| {
-            work.run(
-                first_run::FILE_LIMIT,
-                async move { first_run::write(path.as_deref()) },
-                |outcome| match outcome {
-                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                    Outcome::Finished(Err(e)) => {
-                        eprintln!(
-                            "addict: the answer to the dictionary download was not kept: {e}"
-                        );
-                    }
-                    Outcome::TimedOut | Outcome::Panicked => {
-                        eprintln!("addict: the answer to the dictionary download was not kept");
-                    }
-                },
-            )
-        });
-        if job.is_none() {
-            eprintln!("addict: the answer to the dictionary download was not kept: no runner");
-        }
-        self.first_run_choice = job;
-        self.first_run = FirstRun::Done;
-    }
-
-    /// Capture was pressed: the window hides, so it is not in the capture,
-    /// and Capture cannot be pressed again until the snapshot is there. The
-    /// job starts once the hide has reached the screen. A press while a
-    /// snapshot is being recognized gives that recognition up and starts a
-    /// new capture; a press queued behind one whose area is being chosen
-    /// starts nothing. The source line goes.
     fn capture(&mut self, activation_token: Option<&str>) {
-        match self
-            .capturing
-            .press(self.manual.reading() == Some(Source::Ocr))
-        {
-            CapturePress::Ignored => return,
-            CapturePress::Restart => self.give_up_capture(),
-            CapturePress::Start => {}
-        }
-        // The capture's text is the one to come: a read that runs is given up.
+        // The window stops waiting for a read; the controller cancels the
+        // read itself, before any result still queued in the Read adapter.
         self.give_up_read();
+        if self.controller.is_none() {
+            let failure = Ended::Unfinished;
+            self.capturing.activation_token = activation_token.map(str::to_owned);
+            self.view
+                .render_source_failure(&crate::view::capture_failure_text(&failure), None);
+            self.reveal_capture(self.read_sequence, true);
+            self.record_capture(evidence::Read::capture_failed(&failure), Default::default());
+            return;
+        }
+        self.dispatch_controller(addict_controller::Event::CapturePressed {
+            activation_token: activation_token.map(str::to_owned),
+        });
+    }
+
+    fn hide_for_capture(
+        &mut self,
+        id: RequestId,
+        read_sequence: u64,
+        activation_token: Option<String>,
+    ) {
+        if read_sequence != self.read_sequence {
+            self.picker_cancelled(id);
+            return;
+        }
         self.view.clear_source_failure();
-        self.capturing.hiding = true;
-        self.capturing.activation_token = activation_token.map(str::to_owned);
+        self.capturing.activation_token = activation_token;
         let settle = if self.window.is_visible() {
             HIDE_SETTLE
         } else {
             Duration::ZERO
         };
-        // Hidden, so on Wayland the compositor places the window anew when it
-        // comes back. The opacity of a GTK 4 toplevel is ignored, and making
-        // its children transparent left the window in GNOME's capture.
+        // GNOME's picker freezes the screen when it opens. Give the
+        // compositor time to finish animating the hidden window first.
         self.window.set_visible(false);
-        self.view.set_capture_sensitive(false);
+        self.capturing.pending.insert(
+            id,
+            CaptureEffect::Settling {
+                read_sequence,
+                hidden: false,
+            },
+        );
         let hidden = self.sender.clone();
-        // GNOME's capture interface freezes the screen as it opens, and the
-        // shell animates a window that goes away: started at once, the
-        // capture shows the window still there. A window that was closed
-        // already has nothing to wait for.
         glib::timeout_add_local_once(settle, move || {
-            let _ = hidden.unbounded_send(Event::Hidden);
+            let _ = hidden.unbounded_send(Event::Hidden(id));
         });
     }
 
-    /// The window is off the screen: the capture job starts.
-    fn start_capture(&mut self) {
-        if !self.capturing.hiding {
+    fn capture_hidden(&mut self, id: RequestId) {
+        if let Some(CaptureEffect::Settling { hidden, .. }) = self.capturing.pending.get_mut(&id) {
+            *hidden = true;
+            self.start_capture(id);
+        }
+    }
+
+    fn start_capture(&mut self, id: RequestId) {
+        let Some(&CaptureEffect::Settling {
+            read_sequence,
+            hidden: true,
+        }) = self.capturing.pending.get(&id)
+        else {
+            return;
+        };
+        if read_sequence != self.read_sequence {
+            self.capturing.pending.remove(&id);
+            self.picker_cancelled(id);
             return;
         }
-        self.capturing.hiding = false;
-        let number = self.capturing.next_number();
-        self.capturing.language = self.language;
-        let captured = self.sender.clone();
-        let ended = self.sender.clone();
-        let started = capture::start(
-            self.work.upgrade().as_deref(),
-            self.capturing.language,
-            move || {
-                // On the worker: the UI thread wakes for the event.
-                let _ = captured.unbounded_send(Event::Captured(number));
-            },
-            move |outcome| {
-                let _ = ended.unbounded_send(Event::Recognized(number, outcome));
-            },
-        );
-        match started {
-            Ok(job) => self.capturing.job = Some(job),
-            Err(capture) => self.capture_ended(capture.captured, &capture.timing),
-        }
-    }
-
-    /// Whether the capture job with `number` is the one that runs.
-    fn is_capturing(&self, number: u64) -> bool {
-        self.capturing.is_running(number)
-    }
-
-    /// Gives up the capture job: dropping it kills its Tesseract child and
-    /// deletes its snapshot; it shows nothing.
-    fn give_up_capture(&mut self) {
-        self.capturing.job = None;
-        self.capturing.activation_token = None;
-        self.manual.set_reading(None);
-    }
-
-    /// The snapshot of the job with `number` is there and is being
-    /// recognized: the window comes back and says so while there is no
-    /// input, and Capture can be pressed again, as the retry.
-    fn snapshot_taken(&mut self, number: u64) {
-        if !self.is_capturing(number) {
+        if self
+            .capturing
+            .pending
+            .values()
+            .any(|effect| matches!(effect, CaptureEffect::Picker { .. }))
+        {
             return;
         }
-        self.manual.set_reading(Some(Source::Ocr));
-        self.view.set_capture_sensitive(true);
-        self.reveal_capture();
+        self.capturing.pending.remove(&id);
+        self.dispatch_controller(addict_controller::Event::PickerStarted { id });
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        let sender = self.sender.clone();
+        let work = self.work.upgrade();
+        if let Some(job) = capture::start_picker(
+            work.as_deref(),
+            async move {
+                let _ = cancelled.await;
+            },
+            move |result, capture_ms| {
+                let _ = sender.unbounded_send(Event::CaptureFinished(
+                    id,
+                    addict_controller::Event::AreaCaptured {
+                        id,
+                        result,
+                        capture_ms,
+                    },
+                ));
+            },
+        ) {
+            self.capturing.pending.insert(
+                id,
+                CaptureEffect::Picker {
+                    cancel: Some(cancel),
+                    _job: job,
+                },
+            );
+        }
     }
 
-    fn reveal_capture(&mut self) {
+    fn picker_cancelled(&self, id: RequestId) {
+        self.dispatch_controller(addict_controller::Event::AreaCaptured {
+            id,
+            result: Err(Ended::Shell(CaptureFailure::Cancelled)),
+            capture_ms: None,
+        });
+    }
+
+    fn recognize_capture(
+        &mut self,
+        id: RequestId,
+        image: controller::ImageRef,
+        language: Language,
+        read_sequence: u64,
+    ) {
+        if read_sequence != self.read_sequence {
+            drop(image);
+            self.dispatch_controller(addict_controller::Event::TextRecognized {
+                id,
+                result: Err(Ended::Shell(OcrFailure::Cancelled)),
+                timing: Default::default(),
+            });
+            return;
+        }
+        self.capturing.edits_at_recognition = self.edits_sent;
+        let sender = self.sender.clone();
+        let work = self.work.upgrade();
+        if let Some(job) = capture::start_recognition(
+            work.as_deref(),
+            self.dirs.config.clone(),
+            image,
+            language,
+            move |result, timing| {
+                let _ = sender.unbounded_send(Event::CaptureFinished(
+                    id,
+                    addict_controller::Event::TextRecognized { id, result, timing },
+                ));
+            },
+        ) {
+            self.capturing
+                .pending
+                .insert(id, CaptureEffect::Recognition(job));
+        }
+    }
+
+    fn cancel_capture_effect(&mut self, id: RequestId) {
+        match self.capturing.pending.get_mut(&id) {
+            Some(CaptureEffect::Settling { .. }) => {
+                self.capturing.pending.remove(&id);
+                self.picker_cancelled(id);
+            }
+            Some(CaptureEffect::Picker { cancel, .. }) => {
+                if let Some(cancel) = cancel.take() {
+                    let _ = cancel.send(());
+                }
+            }
+            Some(CaptureEffect::Recognition(job)) => job.cancel(),
+            None => {}
+        }
+    }
+
+    fn reveal_capture(&mut self, read_sequence: u64, retry: bool) {
+        if read_sequence != self.read_sequence {
+            return;
+        }
         if let Some(token) = self.capturing.activation_token.take() {
             self.window.set_startup_id(&token);
         }
         self.reveal();
-    }
-
-    /// The capture job with `number` ended; one that was given up shows
-    /// nothing.
-    fn recognized(&mut self, number: u64, outcome: Outcome<Capture>) {
-        if !self.is_capturing(number) {
-            return;
-        }
-        // A cancelled job was dropped here on purpose and shows nothing.
-        let Some((captured, timing)) = capture::captured_result(outcome) else {
-            return;
-        };
-        self.capture_ended(captured, &timing);
-    }
-
-    /// The capture is over with `captured`: Capture can be pressed again. A
-    /// text replaces the field as a new text from the capture and the
-    /// source line goes; anything else, a text without a word among it,
-    /// leaves the field as it was, starts nothing and says why in the
-    /// source line. The window is shown either way, with the field focused
-    /// after a text and, after anything else, Capture for the retry, or Retry
-    /// when it is offered. With `--evidence` the end is recorded as shown,
-    /// with `timing`.
-    fn capture_ended(&mut self, captured: Captured, timing: &Timing) {
-        self.capturing.job = None;
-        self.view.set_capture_sensitive(true);
-        self.manual.set_reading(None);
-        let line = match captured {
-            Captured::Text(text) => {
-                sentence::recognized(&text).ok_or(Failure::Ocr(OcrFailure::Empty))
+        if retry {
+            match failed_end_focus(&self.view_state.settings.binding) {
+                FailedEndFocus::Capture => self.view.focus_capture(),
+                FailedEndFocus::Retry => self.view.focus_retry(),
             }
-            Captured::Failed(failure) => Err(failure),
-        };
+        }
+    }
+
+    fn record_capture(&self, read: evidence::Read, timing: addict_engine::capture::Timing) {
         if let Some(recording) = &self.recording {
-            let read = match &line {
-                Ok(_) => evidence::Read::Recognized,
-                Err(failure) => evidence::Read::failed(failure),
-            };
-            recording.ocr_ended(&evidence::ocr_record(read, timing));
+            recording.ocr_ended(&evidence::ocr_record(read, &timing));
         }
-        let line = match line {
-            Ok(line) => line,
-            Err(failure) => {
-                eprintln!("addict: no text from the capture: {failure:?}");
-                self.reveal_capture();
-                self.view
-                    .render_source_failure(&failure_text(&failure, self.capturing.language));
-                match failed_end_focus(&self.binding) {
-                    FailedEndFocus::Capture => self.view.focus_capture(),
-                    FailedEndFocus::Retry => self.view.focus_retry(),
-                }
-                return;
-            }
-        };
-        self.view.clear_source_failure();
-        let edit = self.manual.recognized(line);
-        self.replace_field(edit);
-        self.reveal_capture();
     }
 
-    /// Gives up the read of the selection and the clipboard: it is
-    /// cancelled, and whatever it reports later is ignored. Whether a read
-    /// ran.
+    /// The window stops waiting for the read of the selection and the
+    /// clipboard. The controller gives the read up on the actions that
+    /// replace it, and its `Cancel` effect stops the GTK reads; this only
+    /// ends what the window shows now. Whether a read ran.
     fn give_up_read(&mut self) -> bool {
-        let copied = self.copying.end().is_some();
-        if self.manual.reading() == Some(Source::Clipboard) {
-            self.manual.set_reading(None);
+        let read = self.copying.read.is_some();
+        if self.view_state.reading_source == Some(Source::Clipboard) {
+            self.set_reading_source(None);
         }
-        copied
+        read
     }
 
     /// Clears the field for the read that starts now: a new empty text, so
     /// the lookup and the online requests of the old one are given up, and
-    /// the source line goes.
+    /// the source line goes. The window waits with the source clipboard
+    /// until the controller's snapshot comes.
     fn clear_for_read(&mut self) {
         self.view.clear_source_failure();
-        let edit = self.manual.edit(String::new());
+        // The controller clears the field (`field.revision` rises); the
+        // window shows it cleared at once, before its snapshot comes, and
+        // the snapshots queued before it are not rendered.
+        self.read_sequence += 1;
+        self.dispatch_setting_field(addict_controller::Event::ReadPressed {
+            sequence: self.read_sequence,
+        });
         self.view.set_field_text("");
+        self.sent_text.clear();
+        let view = &mut self.view_state;
+        view.source_failure = None;
+        view.reading_source = Some(Source::Clipboard);
+        view.sentence.clear();
+        view.words.clear();
+        view.chosen = None;
+        view.input = None;
+        view.context = None;
+        view.looking_up = false;
+        view.shown.show(None);
+        view.online.clear();
+        self.view_actions.set(ViewActions::default());
+        view.window_state = window_state(view.reading_source, None);
+        self.render_manual();
         self.render_history();
-        self.text_replaced(edit);
+        self.render_shown();
+        self.render_online();
     }
 
-    /// Starts the read of the primary selection and the clipboard as the
-    /// next number: the window waits with the source clipboard, the read
-    /// starts once the window is active, and after [`CLIPBOARD_LIMIT`] it
-    /// ends without text.
-    fn start_copy(&mut self) {
-        let number = self.copying.begin();
-        self.manual.set_reading(Some(Source::Clipboard));
-        self.view.render(self.manual.state(), self.manual.source());
-        let late = self.sender.clone();
-        glib::timeout_add_local_once(CLIPBOARD_LIMIT, move || {
-            let _ = late.unbounded_send(Event::Clipboard(
-                number,
-                Err(Missed::because(format!(
-                    "no answer within {CLIPBOARD_LIMIT:?}"
-                ))),
-            ));
+    /// The read of the primary selection and the clipboard starts for `id`:
+    /// the window waits with the source clipboard, and the GTK reads start
+    /// once the window is active, at once when it is. A press that a newer
+    /// one has replaced is given up.
+    fn read_selection(&mut self, id: RequestId, read_sequence: u64) {
+        if read_sequence != self.read_sequence {
+            self.send_selection(id, Err(Ended::Shell(SelectionFailure::Cancelled)));
+            return;
+        }
+        self.copying.read = Some(ClipboardRead {
+            id,
+            cancellable: None,
         });
+        self.render_window();
         if self.window.is_active() {
             self.read_clipboard();
         }
     }
 
-    /// The window became active: the read of the clipboard that waits for
-    /// it starts.
+    /// The window became active: the read of the selection and the clipboard
+    /// that waits for it starts.
     fn window_active(&mut self) {
         if self.window.is_active() {
             self.read_clipboard();
         }
     }
 
-    /// Reads the primary selection of the window's display for the read that
-    /// runs and still waits, and the clipboard when the selection gives no
-    /// line; nothing else does. Both reads share its cancellable.
+    /// Reads both the primary selection of the window's display and the
+    /// clipboard for the read that runs and still waits, raw, and sends them
+    /// in one result. A source with no text or a failed read gives `None`;
+    /// the error goes to stderr. Both reads share its cancellable.
     fn read_clipboard(&mut self) {
-        let number = self.copying.number;
         let Some(read) = self.copying.read.as_mut() else {
             return;
         };
@@ -1723,69 +836,94 @@ impl Session {
         }
         let cancellable = gio::Cancellable::new();
         read.cancellable = Some(cancellable.clone());
-        let too_long = read.selection.clone();
+        let id = read.id;
         let sender = self.sender.clone();
         let display = WidgetExt::display(&self.window);
+        let selection_clipboard = display.primary_clipboard();
         let clipboard = display.clipboard();
-        read_line(
-            &display.primary_clipboard(),
+        read_text(
+            &selection_clipboard,
             Held::Selection,
             &cancellable.clone(),
-            move |primary| {
-                let Err(selection) = primary else {
-                    let _ = sender.unbounded_send(Event::Clipboard(number, primary));
-                    return;
-                };
-                too_long.set(selection.too_long);
-                read_line(&clipboard, Held::Clipboard, &cancellable, move |copied| {
-                    let line = copied.map_err(|copied| Missed {
-                        reason: format!(
-                            "selection: {}; clipboard: {}",
-                            selection.reason, copied.reason
-                        ),
-                        too_long: copied.too_long,
-                    });
-                    let _ = sender.unbounded_send(Event::Clipboard(number, line));
-                });
+            move |selection| {
+                read_text(
+                    &clipboard,
+                    Held::Clipboard,
+                    &cancellable,
+                    move |clipboard| {
+                        let _ = sender.unbounded_send(Event::SelectionRead(
+                            id,
+                            controller::SelectionText {
+                                selection,
+                                clipboard,
+                            },
+                        ));
+                    },
+                );
             },
         );
     }
 
-    /// The read of the primary selection and the clipboard with `number`
-    /// ended; one that was given up shows nothing. A `line` replaces the
-    /// field as a new text with the source clipboard; with Translate
-    /// sentence at once on, a text of more words is asked for online as a
-    /// whole sentence, and nothing else is asked. Without one, the reason is logged, the waiting ends and the
-    /// source line says that a text was too long, when one was, or else that
-    /// nothing is selected or copied.
-    fn copied(&mut self, number: u64, line: Result<String, Missed>) {
-        if !self.copying.is_running(number) {
+    /// The raw texts of the read with `id` came back; one given up since is
+    /// ignored. The controller applies the line rule, the length limit and
+    /// the source line.
+    fn selection_read(&mut self, id: RequestId, text: controller::SelectionText) {
+        if !self.copying.read.as_ref().is_some_and(|read| read.id == id) {
             return;
         }
-        let Some(read) = self.copying.end() else {
-            return;
+        self.copying.read = None;
+        self.send_selection(id, Ok(text));
+    }
+
+    /// Gives up a read whose `Cancel` came: both GTK reads are cancelled and
+    /// the one cancelled result is sent. Whether `id` was the read.
+    fn cancel_read_effect(&mut self, id: RequestId) -> bool {
+        let Some(read) = self.copying.read.take() else {
+            return false;
         };
-        match line {
-            Ok(line) => {
-                let edit = self.manual.copied(&line);
-                self.replace_field(edit);
-                if self.at_once {
-                    self.ask_whole();
-                }
-            }
-            Err(missed) => {
-                eprintln!(
-                    "addict: no text from the selection or the clipboard: {}",
-                    missed.reason
-                );
-                if self.manual.reading() == Some(Source::Clipboard) {
-                    self.manual.set_reading(None);
-                }
-                self.view.render(self.manual.state(), self.manual.source());
-                let line = missed_line(read.selection.get(), missed.too_long);
-                self.view.render_source_failure(&line);
-            }
+        if read.id != id {
+            self.copying.read = Some(read);
+            return false;
         }
+        if let Some(cancellable) = &read.cancellable {
+            cancellable.cancel();
+        }
+        self.send_selection(id, Err(Ended::Shell(SelectionFailure::Cancelled)));
+        true
+    }
+
+    /// A controller effect is given up: the read when it is that request,
+    /// else the capture.
+    fn cancel_effect(&mut self, id: RequestId) {
+        if self
+            .playback
+            .as_ref()
+            .is_some_and(|(playing, _)| *playing == id)
+        {
+            self.stop_playback();
+        } else if !self.cancel_read_effect(id) {
+            self.cancel_capture_effect(id);
+        }
+    }
+
+    /// Shows the window for the press when it is not shown for it yet: Linux
+    /// presents at the press, so this does nothing there, and the order of
+    /// a read-before-show platform is the controller's to decide.
+    fn show_panel(&self, read_sequence: Option<u64>) {
+        if read_sequence
+            .is_none_or(|sequence| sequence == self.read_sequence && !self.window.is_visible())
+        {
+            self.reveal();
+        }
+    }
+
+    /// Sends the one result of the read with `id` to the controller.
+    fn send_selection(
+        &mut self,
+        id: RequestId,
+        result: Result<controller::SelectionText, Ended<SelectionFailure>>,
+    ) {
+        self.dispatch_controller(addict_controller::Event::SelectionRead { id, result });
     }
 
     /// Shows the window with the state as it is now, the field focused, with
@@ -1793,8 +931,10 @@ impl Session {
     /// the caller gave a token if it has one, and for a launch GTK has already
     /// applied the launcher's.
     fn reveal(&self) {
-        self.view.render(self.manual.state(), self.manual.source());
-        self.focus();
+        if self.view_state.fatal.is_none() {
+            self.render_window();
+            self.focus();
+        }
         if let Some(recording) = &self.recording {
             recording.shown_without_press();
         }
@@ -1804,7 +944,7 @@ impl Session {
     /// The field takes the keyboard focus, unless Retry is offered: then the
     /// focus is Retry's.
     fn focus(&self) {
-        if !matches!(self.binding, Binding::NotBound { .. }) {
+        if !matches!(self.view_state.settings.binding, Binding::NotBound { .. }) {
             self.view.focus_field();
         }
     }
@@ -1816,861 +956,518 @@ impl Session {
     /// The source line goes. A snapshot being recognized and a read of the
     /// selection and the clipboard are given up: the user's text wins, and the state no
     /// longer says that a source is read.
-    fn sentence_changed(&mut self, text: String) {
-        self.view.clear_source_failure();
-        let gave_up_capture =
-            self.capturing.job.is_some() && self.manual.reading() == Some(Source::Ocr);
-        if gave_up_capture {
-            self.give_up_capture();
-        }
-        let gave_up_read = self.give_up_read();
-        let edit = self.manual.edit(text);
-        self.text_replaced(edit);
-        // A typed text is not recorded, but Back can go from it.
-        self.render_history();
-        if gave_up_capture || gave_up_read {
-            self.view.render(self.manual.state(), self.manual.source());
-        }
+    fn sentence_changed(&mut self, text: String, origin: FieldEdit) {
+        self.give_up_for_new_text();
+        // The edit ends the reading of a source in the controller too; its
+        // snapshot renders the window.
+        self.send_edit(text, matches!(origin, FieldEdit::Replaced), None);
     }
 
-    /// A text that did not come from the field, recognized, selected or
-    /// copied, replaced the manual input as `edit`: the
-    /// field shows it, and what follows a new text follows.
-    fn replace_field(&mut self, edit: Edit) {
-        self.view.set_field_text(self.manual.sentence());
-        // `Cleared` is any new text with no word chosen; an empty one is
-        // not recorded.
-        if edit != Edit::Same {
-            self.history.record(self.manual.sentence());
-        }
-        self.render_history();
-        self.text_replaced(edit);
+    /// What goes before another text from the user, typed, walked to or
+    /// clicked: the source line, a snapshot being recognized and a read of
+    /// the selection and the clipboard.
+    fn give_up_for_new_text(&mut self) {
+        self.view.clear_source_failure();
+        self.give_up_read();
+    }
+
+    /// Tells the controller the field holds `text`, counted for the field
+    /// guard ([`Session::apply_snapshot`]).
+    fn send_edit(&mut self, text: String, replaced: bool, source: Option<Source>) {
+        self.sent_text.clone_from(&text);
+        self.edits_sent += 1;
+        self.dispatch_controller(addict_controller::Event::FieldEdited {
+            text,
+            replaced,
+            source,
+        });
+    }
+
+    /// Sends an event that lets the controller set the field's text: its
+    /// text applies only while no edit follows it.
+    fn dispatch_setting_field(&mut self, event: controller::Event) {
+        self.edits_at_set = self.edits_sent;
+        self.dispatch_controller(event);
     }
 
     /// Back or Alt+Left: the text before in the history is put into the
-    /// field as a paste puts it, so it is looked up and submitted again. A
-    /// typed text that is not in the history is recorded first, so Forward
-    /// comes back to it.
+    /// field by the controller, looked up and submitted again.
     fn back(&mut self) {
-        let current = self.view.field_text();
-        let text = self.history.back(&current).map(str::to_owned);
-        self.walked(text);
+        self.give_up_for_new_text();
+        self.dispatch_setting_field(addict_controller::Event::Back);
     }
 
     /// Forward or Alt+Right: the text after in the history is put into the
     /// field as Back puts one.
     fn forward(&mut self) {
-        let text = self.history.forward().map(str::to_owned);
-        self.walked(text);
-    }
-
-    /// Puts `text`, where Back or Forward led, into the field. Nothing is
-    /// recorded: its submit records the text at the position, which changes
-    /// nothing.
-    fn walked(&mut self, text: Option<String>) {
-        if let Some(text) = text {
-            self.view.put_into_field(&text);
-        }
-        self.render_history();
+        self.give_up_for_new_text();
+        self.dispatch_setting_field(addict_controller::Event::Forward);
     }
 
     /// Whether Back and Forward can be pressed, for the field's text now.
     fn render_history(&self) {
-        self.view.set_history(
-            self.history.can_back(&self.view.field_text()),
-            self.history.can_forward(),
-        );
+        self.view
+            .set_history(self.view_state.can_back, self.view_state.can_forward);
     }
 
-    /// What follows a new text in the field, typed, pasted or recognized:
-    /// the online texts of the old one are given up, and a lone word is
-    /// looked up at once.
-    fn text_replaced(&mut self, edit: Edit) {
-        if edit == Edit::Same {
+    /// A word link belongs to the text it was drawn for.
+    fn word_chosen(&mut self, text: u64, index: usize) {
+        if self.field_is_newer() || self.snapshot_is_old() || text != self.view_state.text_number {
             return;
         }
-        // Cancels the online requests; whatever they still report has the
-        // number of an old text.
-        self.translating_word = None;
-        self.looking_up.deferred.clear();
-        self.translating_sentence = None;
-        self.online = Kept::of(self.manual.text_number(), self.manual.kind());
-        self.render_online();
-        match edit {
-            Edit::Same => {}
-            Edit::Cleared => {
-                // Cancels the lookup; whatever it still reports has an old
-                // number.
-                self.looking_up.job = None;
-                self.render_manual();
-                self.show_result(None);
-            }
-            Edit::Lone(run) => self.start_lookup(run),
-        }
+        self.dispatch_controller(addict_controller::Event::WordChosen { text, index });
     }
 
-    /// A word was clicked: it becomes the input, with its sentence when it
-    /// has one, and is looked up. In a sentence, what is not yet known
-    /// online about the word and about its sentence is asked for.
-    fn word_chosen(&mut self, index: usize) {
-        // A click that came before the field's newer text was handled here
-        // names a word of a sentence that is no longer shown.
-        if self.field_is_newer() {
-            return;
-        }
-        let Some(run) = self.manual.choose(index) else {
-            return;
-        };
-        self.start_lookup(run);
-        // After the lookup: the runner takes its jobs in this order, so the
-        // article is read before the key file and the network are touched.
-        // A word that is a sentence alone in a recognized text has no
-        // sentence: its article only, nothing sent online.
-        let Some((number, span)) = self.manual.sentence_of(index) else {
-            self.render_online();
-            return;
-        };
-        let long = online::is_long(&self.manual.sentence()[span]);
-        let click = self.online.click(index, number, long);
-        if click.gave_up {
-            self.translating_word = None;
-            self.looking_up.deferred.clear();
-        }
-        if click.gave_up_sentence {
-            self.translating_sentence = None;
-        }
-        for subject in click.ask {
-            self.start_translation(subject);
-        }
-        self.render_online();
-    }
-
-    /// The whole text of the field, a sentence of more words, is asked for
-    /// online itself, with no word chosen, unless it is already pending,
-    /// answered or too long. A lone word or an empty field sends nothing.
-    fn ask_whole(&mut self) {
-        if self.field_is_newer() {
-            return;
-        }
-        let long = online::is_long(self.manual.sentence());
-        if let Some(subject) = self.online.ask_whole(long) {
-            self.start_translation(subject);
-        }
-        self.render_online();
-    }
-
-    /// The text of the field was submitted, by Enter or by a paste: a lone
-    /// word is asked for online, unless it was already. Nothing else
-    /// changes, and an empty field or a sentence sends nothing.
+    /// Records and submits the current text.
     fn submitted(&mut self) {
-        // As for a click: the field may hold a newer text already.
-        if self.field_is_newer() {
-            return;
+        if !self.field_is_newer() {
+            self.dispatch_controller(addict_controller::Event::FieldSubmitted);
         }
-        self.history.record(self.manual.sentence());
-        self.render_history();
-        if self.online.submit() {
-            self.start_translation(Subject::Lone);
+    }
+
+    /// Whether the field holds a newer text than the one last given to the
+    /// controller: an event that came before that text was handled is
+    /// about what is no longer shown.
+    fn field_is_newer(&self) -> bool {
+        self.view.field_text() != self.sent_text
+    }
+
+    /// Whether the field holds another text than the snapshot just
+    /// rendered: what the snapshot asks is about what is no longer shown.
+    fn snapshot_is_old(&self) -> bool {
+        self.view.field_text() != self.view_state.sentence
+    }
+
+    /// Applies the newest snapshot and handles every effect, even when the
+    /// visual state of that snapshot has already been superseded.
+    fn render_controller(&mut self, state: ViewState, effects: Vec<Effect>) {
+        if state.revision > self.view_state.revision
+            && (state.read_sequence == self.read_sequence || state.fatal.is_some())
+        {
+            let previous = std::mem::replace(&mut self.view_state, state);
+            if let Some(fatal) = self.view_state.fatal.as_ref() {
+                let restart = self.restart.clone();
+                let page = fatal_page(fatal, move || restart());
+                self.stop_playback();
+                if let Some((_, offer)) = self.download_offer.take() {
+                    offer.close();
+                }
+                self.settings.window().set_visible(false);
+                self.window.set_child(Some(&page));
+                self.reveal();
+            } else {
+                self.apply_snapshot(&previous);
+            }
+        }
+        for effect in effects {
+            self.run_effect(effect);
+        }
+    }
+
+    fn apply_snapshot(&mut self, previous: &ViewState) {
+        let current = &self.view_state;
+        let field = &current.field;
+        // Apply a controller-set field only while no newer edit is on its way.
+        if field.revision > self.applied_field_revision {
+            self.applied_field_revision = field.revision;
+            let edits_at_set = if current.ocr_field_revision == Some(field.revision) {
+                self.capturing.edits_at_recognition
+            } else {
+                self.edits_at_set
+            };
+            if self.edits_sent == edits_at_set && !self.field_is_newer() {
+                self.view.set_field_text(&field.text);
+                self.sent_text.clone_from(&field.text);
+            }
+        }
+        if previous.capture_sensitive != current.capture_sensitive {
+            self.view.set_capture_sensitive(current.capture_sensitive);
+        }
+        if previous.source_failure != current.source_failure
+            || previous.source_copy != current.source_copy
+        {
+            match &current.source_failure {
+                Some(message) => self
+                    .view
+                    .render_source_failure(message, current.source_copy.as_deref()),
+                None => self.view.clear_source_failure(),
+            }
+        }
+        self.view_actions.set(ViewActions {
+            text: current.text_number,
+            article: current.article_id(),
+            choice: current.shown.choice(),
+        });
+        if previous.text_number != current.text_number
+            || previous.chosen != current.chosen
+            || previous.source != current.source
+            || previous.window_state != current.window_state
+        {
+            self.render_manual();
+        }
+        if previous.can_back != current.can_back || previous.can_forward != current.can_forward {
+            self.render_history();
+        }
+        if previous.back_tooltip != current.back_tooltip
+            || previous.forward_tooltip != current.forward_tooltip
+        {
+            self.view
+                .set_history_tooltips(&current.back_tooltip, &current.forward_tooltip);
+        }
+        if previous.shown.generation() != current.shown.generation()
+            || previous.shown.translating() != current.shown.translating()
+            || previous.choice_revision != current.choice_revision
+        {
+            self.render_shown();
+        } else if previous.shown.definition() != current.shown.definition() {
+            self.view
+                .render_definition(&current.shown, current.key_location.as_view_location());
+        }
+        if previous.online != current.online {
             self.render_online();
         }
+        let my = current.settings.my_language;
+        let reading = current.settings.reading;
+        if previous.settings.my_language != my || previous.settings.reading != reading {
+            self.view
+                .set_reading_languages(reading_languages(my), reading);
+            self.view.set_language(reading);
+            // The definition button names my language, so it follows a
+            // choice made in Settings too. The indexes line does as well.
+            self.render_shown();
+        }
+        if previous.playback != current.playback {
+            self.view.render_playback(current.playback.as_ref());
+        }
+        self.settings.render(&current.settings);
+        // The main window's binding row follows both the binding state and
+        // its assignments: a `Changed` report can keep `Bound` and still
+        // change what the row says.
+        if previous.settings.binding != current.settings.binding
+            || previous.settings.bindings != current.settings.bindings
+        {
+            self.view.render_binding(&current.settings.binding);
+        }
+        if let Some(indexes) = current.downloads.indexes
+            && (previous.downloads.indexes != Some(indexes) || previous.settings.my_language != my)
+        {
+            self.view.render_indexes(indexes, my);
+        }
+        if previous.downloads.settings_busy != current.downloads.settings_busy
+            || previous.downloads.settings_line != current.downloads.settings_line
+        {
+            self.settings.render_download(
+                current.downloads.settings_busy,
+                &current.downloads.settings_line,
+            );
+        }
+        if previous.downloads.import != current.downloads.import {
+            self.settings.render_import(&current.downloads.import);
+        }
+        self.update_download_offer(previous);
     }
 
-    /// Whether the field holds a newer text than the one handled here: an
-    /// event that came before that text was handled is about what is no
-    /// longer shown.
-    fn field_is_newer(&self) -> bool {
-        self.view.field_text() != self.manual.sentence()
-    }
-
-    /// Shows the input that was just chosen and starts its lookup, which has
-    /// the number `run`; for a reading language without an offline
-    /// dictionary no lookup starts, and the line that says so is shown. The
-    /// online texts are not touched.
-    fn start_lookup(&mut self, run: u64) {
-        // The lookup of another word, if it runs, is replaced.
-        self.looking_up.job = None;
-        self.looking_up.answered = None;
-        self.render_manual();
-        let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
-            self.show_result(None);
+    fn update_download_offer(&mut self, previous: &ViewState) {
+        let state = &self.view_state.downloads;
+        let next_id = state.offer.as_ref().map(|offer| offer.id);
+        if self
+            .download_offer
+            .as_ref()
+            .is_some_and(|(id, _)| Some(*id) != next_id)
+            && let Some((_, offer)) = self.download_offer.take()
+        {
+            offer.close();
+        }
+        let (Some((id, offer)), Some(next)) = (&self.download_offer, &state.offer) else {
             return;
         };
-        let sender = self.sender.clone();
-        let language = self.language;
-        let generation = self.indexes.generation;
-        let started = manual::offline(
-            self.work.upgrade().as_deref(),
-            LOOKUP_LIMIT,
-            self.articles.clone(),
-            word,
-            language,
-            self.my_language,
-            self.indexes.known,
-            move |language, outcome| {
-                // On the worker: the UI thread wakes for the event.
-                let _ = sender.unbounded_send(Event::Lookup {
-                    run,
-                    generation,
-                    language,
-                    outcome,
-                });
-            },
-        );
-        match started {
-            Ok(job) => {
-                self.looking_up.job = Some(job);
-                self.show_result(Some(Lookup::Pending));
-            }
-            Err(lookup) => {
-                let checks = manual::checks_again(&lookup, language);
-                self.show_result(Some(*lookup));
-                // No lookup event comes: what waited for one goes now.
-                self.send_deferred();
-                if checks {
-                    self.check = start_check(
-                        self.work.upgrade().as_deref(),
-                        self.articles.clone(),
-                        &self.sender,
-                        self.indexes.generation,
-                    );
+        let old = previous
+            .downloads
+            .offer
+            .as_ref()
+            .filter(|old| old.id == *id);
+        if old.is_none_or(|old| old.listed != next.listed) {
+            offer.list(&next.listed);
+        }
+        if !next.recovery && old.is_none_or(|old| old.my_language != next.my_language) {
+            offer.render_my_language(next.my_language);
+        }
+        match &next.phase {
+            OfferPhase::Installing(queue) => {
+                if !old.is_some_and(|old| matches!(old.phase, OfferPhase::Installing(_))) {
+                    offer.installing();
+                }
+                if old.is_none_or(|old| old.phase != next.phase) {
+                    offer.show(queue);
                 }
             }
-        }
-    }
-
-    /// A lookup ended, answered by `language`. Only the last started one is
-    /// shown, with the line that names the language when it is not the
-    /// chosen one, and the word's online requests asked while it ran are
-    /// sent then, from that language; where it found the indexes is shown
-    /// for every one that read them, and every one that was not given up is
-    /// recorded.
-    fn looked_up(
-        &mut self,
-        run: u64,
-        generation: u64,
-        language: Language,
-        outcome: Outcome<Looked>,
-    ) {
-        if let Some(recording) = &self.recording
-            && let Some(answered) = evidence::answered(&outcome)
-        {
-            recording.looked_up(answered);
-        }
-        if let Outcome::Finished(looked) = &outcome
-            && self.indexes.update(generation, looked.indexes)
-        {
-            self.view.render_indexes(looked.indexes, self.my_language);
-        }
-        if !self.manual.awaits(run) {
-            return;
-        }
-        self.looking_up.job = None;
-        let Some(input) = self.manual.input() else {
-            return;
-        };
-        let finished = matches!(outcome, Outcome::Finished(_));
-        if let Some(lookup) = manual::result_in(outcome, input.word(), language) {
-            self.show_answered(Some(lookup), language);
-        }
-        // A lookup that did not finish names no language: the chosen one.
-        self.looking_up.answered = finished.then_some(language);
-        self.send_deferred();
-    }
-
-    /// Sends the word's online requests held while its lookup ran, now that
-    /// no lookup runs, from the language that answered or the chosen one.
-    fn send_deferred(&mut self) {
-        let deferred = std::mem::take(&mut self.looking_up.deferred);
-        if deferred.is_empty() {
-            return;
-        }
-        for subject in deferred {
-            self.start_translation(subject);
-        }
-        self.render_online();
-    }
-
-    /// Sends the online request about `subject` that [`Kept`] has just
-    /// asked for, as a job in the slot of its subject, into my language. A
-    /// request that could not start is a refusal at once. The sentence is
-    /// sent from the chosen language at once. The word, alone or in its
-    /// sentence, waits while its lookup runs, and is then sent from the
-    /// language that answered, or from the chosen one when none did. A
-    /// Russian word and its sentence are sent from Russian whatever is
-    /// chosen ([`translate::source_of`]); with Russian as my language nothing
-    /// is sent for it, neither the word nor its sentence
-    /// ([`translate::is_sent`]).
-    fn start_translation(&mut self, subject: Subject) {
-        let text = self.manual.text_number();
-        let Some(number) = self.online.request_number(subject) else {
-            return;
-        };
-        // With Russian as my language a Russian word is read offline only:
-        // nothing is sent for it or its sentence, nothing is recorded, and
-        // its request is not awaited.
-        if let Some(input) = self.manual.input()
-            && !translate::is_sent(input, subject, self.my_language)
-        {
-            self.online.withdraw(subject);
-            return;
-        }
-        let word = matches!(subject, Subject::Word(_) | Subject::Lone);
-        if word && self.looking_up.job.is_some() {
-            if !self.looking_up.deferred.contains(&subject) {
-                self.looking_up.deferred.push(subject);
-            }
-            return;
-        }
-        // The whole sentence, asked for with no word chosen, is Russian when
-        // it has a Cyrillic letter.
-        let russian = match self.manual.input() {
-            Some(input) => is_russian(input.word()),
-            None => is_russian(self.manual.sentence()),
-        };
-        let source =
-            translate::source_of(subject, self.language, self.looking_up.answered, russian);
-        let request = self.online_request(subject, source);
-        let started = self.send_online(request, subject.into(), move |outcome, elapsed| {
-            Event::Translated {
+            OfferPhase::Ended {
+                heading,
                 text,
-                subject,
-                source,
-                number,
-                outcome,
-                elapsed,
+                complete,
+            } if old.is_none_or(|old| old.phase != next.phase) => {
+                if !old.is_some_and(|old| matches!(old.phase, OfferPhase::Installing(_))) {
+                    offer.installing();
+                }
+                if let Some(queue) = next.queue() {
+                    offer.show(queue);
+                }
+                offer.ended(heading, text, *complete);
             }
-        });
-        match started {
-            // Replaces, and so cancels, the request the slot held.
-            Ok(job) => *self.slot(subject) = Some(job),
-            Err(online) => {
-                self.online.answer(text, subject, number, online);
-            }
+            _ => {}
+        }
+        if state.present > previous.downloads.present {
+            offer.present();
         }
     }
 
-    /// Starts the online `request` for `requested` as a job; every online
-    /// request of the session starts here. When it ends, `event` makes, on
-    /// the worker, what the UI thread is told from its outcome and the time
-    /// it took. A request that could not start is recorded at once and its
-    /// refusal is given back.
-    fn send_online(
-        &self,
-        request: Option<Request>,
-        requested: evidence::Requested,
-        event: impl FnOnce(Outcome<Translated>, Option<evidence::Elapsed>) -> Event + Send + 'static,
-    ) -> Result<Job, Online> {
-        let sender = self.sender.clone();
-        let probe = self.probe();
-        // A request that is not there is recorded with the language it would
-        // have been sent from.
-        let source = request
-            .as_ref()
-            .map_or(self.language, |request| request.source);
-        let started = translate::translate(
-            self.work.upgrade().as_deref(),
-            TRANSLATE_LIMIT,
-            self.translator.clone(),
-            request,
-            move |outcome| {
-                // On the worker: the UI thread wakes for the event, and the
-                // delay is the request's, not the redraw's.
-                let elapsed = probe.ended();
-                let _ = sender.unbounded_send(event(outcome, elapsed));
+    fn show_download_offer(&mut self) {
+        let Some(state) = self.view_state.downloads.offer.as_ref() else {
+            return;
+        };
+        if self.download_offer.is_some() || (!state.recovery && !self.window.is_visible()) {
+            return;
+        }
+        let parent = if state.recovery {
+            self.settings.window()
+        } else {
+            self.window.upcast_ref()
+        };
+        let id = state.id;
+        let download = self.sender.clone();
+        let not_now = self.sender.clone();
+        let cancel = self.sender.clone();
+        let chosen = self.sender.clone();
+        let offer = Offer::new(
+            parent,
+            &state.listed,
+            state.recovery,
+            (!state.recovery).then_some(state.my_language),
+            move |language| {
+                let _ = chosen.unbounded_send(Event::Setting(controller::Event::MyLanguageChosen(
+                    language,
+                )));
+            },
+            move || {
+                let _ = download
+                    .unbounded_send(Event::Setting(controller::Event::OfferDownloadPressed(id)));
+            },
+            move || {
+                let _ = not_now
+                    .unbounded_send(Event::Setting(controller::Event::OfferNotNowPressed(id)));
+            },
+            move |name| {
+                let _ = cancel.unbounded_send(Event::Setting(
+                    controller::Event::OfferCancelPressed(id, name),
+                ));
             },
         );
-        if let Err(online) = &started {
-            self.record(translate::translation_unstarted(
-                online, requested, source, probe,
-            ));
+        offer.present();
+        match &state.phase {
+            OfferPhase::Listing => {}
+            OfferPhase::Installing(queue) => {
+                offer.installing();
+                offer.show(queue);
+            }
+            OfferPhase::Ended {
+                heading,
+                text,
+                complete,
+            } => {
+                offer.installing();
+                if let Some(queue) = state.queue() {
+                    offer.show(queue);
+                }
+                offer.ended(heading, text, *complete);
+            }
         }
-        started
+        if !state.recovery {
+            self.dispatch_controller(controller::Event::OfferPresented(id));
+        }
+        self.download_offer = Some((id, offer));
     }
 
-    /// What an ended online request for `requested`, sent from `source`,
-    /// shows, after its record is written when there is one; `None` for a
-    /// request that was given up: it shows nothing and is not recorded.
-    fn online_ended(
-        &self,
-        outcome: Outcome<Translated>,
-        requested: evidence::Requested,
-        source: Language,
-        elapsed: Option<evidence::Elapsed>,
-    ) -> Option<Online> {
-        let (online, record) = translate::translation_ended(outcome, requested, source, elapsed)?;
-        self.record(record);
-        Some(online)
-    }
-
-    /// The measuring of an online request that starts now; it measures
-    /// nothing unless evidence is recorded.
-    fn probe(&self) -> evidence::Probe {
-        evidence::Probe::start(self.recording.is_some())
-    }
-
-    /// Writes the `record` of an online request, when there is one. Whether
-    /// there is one is [`translate`]'s to say.
-    fn record(&self, record: Option<evidence::Record>) {
-        if let Some((recording, record)) = self.recording.as_ref().zip(record) {
-            recording.translated_online(&record);
+    /// Runs a controller effect.
+    fn run_effect(&mut self, effect: Effect) {
+        match effect {
+            Effect::CaptureArea {
+                id,
+                read_sequence,
+                activation_token,
+            } => {
+                self.hide_for_capture(id, read_sequence, activation_token);
+            }
+            Effect::Recognize {
+                id,
+                image,
+                language,
+                read_sequence,
+            } => {
+                self.recognize_capture(id, image, language, read_sequence);
+            }
+            Effect::Cancel(id) => self.cancel_effect(id),
+            Effect::ReadSelection { id, read_sequence } => {
+                self.read_selection(id, read_sequence);
+            }
+            Effect::ShowPanel { read_sequence } => self.show_panel(read_sequence),
+            Effect::HidePanel => self.window.close(),
+            Effect::OpenUrl { url } => {
+                gtk::UriLauncher::new(&url).launch(
+                    Some(&self.window),
+                    gio::Cancellable::NONE,
+                    |result| {
+                        if let Err(error) = result {
+                            eprintln!("addict: cannot open link: {error}");
+                        }
+                    },
+                );
+            }
+            Effect::WriteClipboard { text } => self.window.clipboard().set_text(&text),
+            Effect::Play { id, path } => {
+                self.stop_playback();
+                let controller = self.controller.clone();
+                let media = MediaPlayback::start(&path, move |result| {
+                    if let Some(controller) = &controller {
+                        controller.dispatch(controller::Event::Played { id, result });
+                    }
+                });
+                self.playback = Some((id, media));
+            }
+            Effect::Quit => self.quit(),
+            Effect::PresentCapture {
+                read_sequence,
+                retry,
+            } => self.reveal_capture(read_sequence, retry),
+            Effect::RecordCapture { read, timing } => self.record_capture(read, timing),
+            Effect::ChooseFile { id } => {
+                let parent = self.settings.window().clone();
+                let sender = self.sender.clone();
+                glib::spawn_future_local(async move {
+                    let result = file_import::choose(&parent).await;
+                    let _ = sender.unbounded_send(Event::Setting(controller::Event::FileChosen {
+                        id,
+                        result,
+                    }));
+                });
+            }
+            Effect::RecordLookup(answered) => {
+                if let Some(recording) = &self.recording {
+                    recording.looked_up(answered);
+                }
+            }
+            Effect::RecordOnline(record) => {
+                if let Some(recording) = &self.recording {
+                    recording.translated_online(&record);
+                }
+            }
+            Effect::StoreKey { id, key } => self.store_key(id, key),
+            Effect::SetLoginItem { id, on } => self.set_login_item(id, on),
+            Effect::ReadLoginItem => self.read_login_item(),
+            Effect::BindShortcuts => self.bind_shortcuts(),
+            Effect::ConfigureShortcuts => self.configure_shortcuts(),
         }
     }
 
-    /// The slot of the job that asks about `subject`. No wildcard arm: a new
-    /// subject does not compile until it is given its slot.
-    fn slot(&mut self, subject: Subject) -> &mut Option<Job> {
-        match subject {
-            Subject::Word(_) | Subject::Lone => &mut self.translating_word,
-            Subject::Sentence(_) => &mut self.translating_sentence,
+    fn stop_playback(&mut self) {
+        if let Some((id, media)) = self.playback.take()
+            && media.stop()
+        {
+            self.dispatch_controller(controller::Event::Played {
+                id,
+                result: Err(PlaybackFailure::Cancelled),
+            });
         }
     }
 
-    /// An online request ended. Its outcome is kept and shown only when it
-    /// belongs to the text the field holds and is still awaited; a cancelled
-    /// one was given up and shows nothing. Every one that was not given up
-    /// is recorded, shown or not.
-    fn translated(
-        &mut self,
-        text: u64,
-        subject: Subject,
-        source: Language,
-        number: u64,
-        outcome: Outcome<Translated>,
-        elapsed: Option<evidence::Elapsed>,
-    ) {
-        let Some(online) = self.online_ended(outcome, subject.into(), source, elapsed) else {
-            return;
-        };
-        if self.online.answer(text, subject, number, online) {
-            *self.slot(subject) = None;
-            self.render_online();
-        }
-    }
-
-    /// Shows the online texts as they are now, with those of the chosen
-    /// word.
+    /// Updates the word and sentence rows without rebuilding the article.
     fn render_online(&self) {
-        self.view.render_online(
-            &self.online.shown(self.manual.chosen()),
-            self.key_file.as_deref(),
-        );
-    }
-
-    /// The one place the shown result changes: the sense chosen in the one
-    /// before is forgotten.
-    fn show_result(&mut self, lookup: Option<Lookup>) {
-        self.show_answered(lookup, self.language);
-    }
-
-    /// As [`Session::show_result`], for a result that the language `found`
-    /// gave: when it is not the chosen one, an article says so.
-    fn show_answered(&mut self, lookup: Option<Lookup>, found: Language) {
-        self.translating_definition = None;
-        self.shown.show_elsewhere(lookup, self.language, found);
-        self.render_shown();
+        self.view.render_online_rows(&self.view_state.online);
     }
 
     /// Shows the result and the sense chosen in it as they are now.
     fn render_shown(&self) {
-        self.view
-            .render_result(&self.shown, self.key_file.as_deref());
-    }
-
-    /// A sense was clicked: it is the chosen one when the shown result is an
-    /// article that has it. Nothing is looked up or read. A click on the
-    /// chosen sense renders too: GTK keeps a clicked link in the visited
-    /// colour until the markup is set again.
-    fn sense_chosen(&mut self, index: usize) {
-        let previous = self.shown.choice();
-        if self.shown.choose(index) {
-            self.chosen(previous);
-        }
-    }
-
-    /// An English gloss was clicked: it is the chosen one, instead of any
-    /// sense, when the shown result is an article of a language beside
-    /// English that has it. Nothing is looked up or read.
-    fn gloss_chosen(&mut self, index: usize) {
-        let previous = self.shown.choice();
-        if self.shown.choose_gloss(index) {
-            self.chosen(previous);
-            // A gloss is translated as it is chosen, with no button: once,
-            // and again only after a refusal.
-            self.definition_action();
-        }
-    }
-
-    /// The English word of a gloss was clicked: it goes into the field as a
-    /// paste puts it, and English becomes the reading language, as the user
-    /// chose it, or the first reading language when English is mine. The
-    /// field is newer than the shown text then, so the language change asks
-    /// nothing for the old one; the field's own events look the word up.
-    fn look_up_english(&mut self, word: &str) {
-        self.view.put_into_field(word);
-        self.language_chosen(language::reading(Language::En, self.my_language));
-    }
-
-    /// Something was chosen where `previous` was: the job translating the
-    /// definition of another choice is cancelled, and the result is shown
-    /// anew.
-    fn chosen(&mut self, previous: Option<Choice>) {
-        if previous != self.shown.choice() {
-            self.translating_definition = None;
-        }
-        self.render_shown();
-    }
-
-    /// "Translate definition into" my language was pressed: the definition
-    /// of the chosen sense or gloss is sent alone, from its own language
-    /// into my language, as a job of its own, unless the field holds a
-    /// newer text or the shown result offers no definition to send.
-    fn definition_action(&mut self) {
-        // As for a click: the field may hold a newer text already.
-        if self.field_is_newer() {
-            return;
-        }
-        let Some((number, request)) = self.shown.request_definition() else {
-            return;
-        };
-        let source = request.source;
-        let started = self.send_online(
-            Some(request),
-            evidence::Requested::Definition,
-            move |outcome, elapsed| Event::DefinitionTranslated {
-                number,
-                source,
-                outcome,
-                elapsed,
-            },
+        self.view.render_result(
+            &self.view_state.shown,
+            self.view_state.key_location.as_view_location(),
         );
-        match started {
-            Ok(job) => self.translating_definition = Some(job),
-            Err(online) => {
-                self.shown.answer_definition(number, online);
-            }
-        }
-        self.render_shown();
+        self.view.render_playback(self.view_state.playback.as_ref());
     }
 
-    /// The definition request, sent from `source`, ended; it is recorded as
-    /// a word's is, with that source.
-    fn definition_translated(
-        &mut self,
-        number: u64,
-        source: Language,
-        outcome: Outcome<Translated>,
-        elapsed: Option<evidence::Elapsed>,
-    ) {
-        let Some(online) =
-            self.online_ended(outcome, evidence::Requested::Definition, source, elapsed)
-        else {
-            return;
-        };
-        if self.shown.answer_definition(number, online) {
-            self.translating_definition = None;
-            self.render_shown();
+    fn accepts_article(&self, article: ArticleId) -> bool {
+        !self.field_is_newer() && !self.snapshot_is_old() && article == self.view_state.article_id()
+    }
+
+    fn article_action(&self, article: ArticleId, event: controller::Event) {
+        if self.accepts_article(article) {
+            self.dispatch_controller(event);
         }
     }
 
-    /// The user chose `language`, by a press in the switch or a click on a
-    /// gloss's English word: it is the saved reading language from now on,
-    /// kept in the language file by a write on the runner at each such
-    /// choice, and what the window shows of the current word is asked anew
-    /// in it. A change of the switch caused by my language writes nothing.
-    fn language_chosen(&mut self, language: Language) {
-        self.language_chosen = true;
-        self.saved_language = language;
-        self.apply_reading_language();
-        // Saved even when it equals the one in use: the file may still hold
-        // another, its read not having come yet.
-        self.save_language();
+    /// A synonym submits a replacement field in the current reading language.
+    fn synonym_chosen(&mut self, article: ArticleId, word: String) {
+        if self.accepts_article(article) {
+            self.give_up_for_new_text();
+            self.dispatch_setting_field(addict_controller::Event::SynonymChosen { article, word });
+        }
     }
 
-    /// Makes [`language::reading`] of the saved language and my language
-    /// the reading language and the switch shows it. When it changed, the
-    /// word shown, if there is one, has its offline result redone and its
-    /// online texts forgotten and asked again, as its click or its submit
-    /// asked them: a word of a sentence with its sentence, a lone word only
-    /// when it was submitted. Without a word nothing is sent.
-    fn apply_reading_language(&mut self) {
-        let language = language::reading(self.saved_language, self.my_language);
-        self.view.set_language(language);
-        // The shown result names its pair by the pressed language.
-        self.shown.set_pressed(language);
-        if language == self.language {
+    /// The English link submits the gloss's word; the controller owns the
+    /// reading language it chooses on the way.
+    fn look_up_english(&mut self, article: ArticleId, index: usize, word: String) {
+        if !self.accepts_article(article) {
             return;
         }
-        self.language = language;
-        self.ask_again();
-    }
-
-    /// The user chose `language` in Settings or in the first-run offer: my
-    /// language from now on, kept in the my-language file by a write on the
-    /// runner, and what the window shows of the current word is asked anew
-    /// into it. Settings and a first-run offer that waits for a press show
-    /// it, and the offer lists what it needs.
-    fn my_language_chosen(&mut self, language: Language) {
-        let changed = language != self.my_language;
-        self.my_language_chosen = true;
-        // Saved even when it equals the one in use: the file may still hold
-        // another, its read not having come yet.
-        self.apply_my_language(language);
-        self.save_my_language();
-        // The choice may come from Settings or from the first-run offer:
-        // both show it, and the offer lists what it needs.
-        self.settings.render_my_language(language);
-        self.relist_first_run();
-        if changed {
-            // The first-run decision for the new language first: an offer
-            // it ends leaves the set to the Settings offer.
-            self.first_indexes();
-            self.offer_missing_for_my_language();
-        }
-    }
-
-    /// Makes `language` the language of the online translations: the switch
-    /// shows its reading languages, with [`language::reading`] of the saved
-    /// language pressed, and the shown word is asked again once, into it and
-    /// from the reading language that results; a chosen definition is
-    /// translated into it from now on, and the line of the indexes names
-    /// what it lacks. Nothing is written of a reading language that falls
-    /// back.
-    fn apply_my_language(&mut self, language: Language) {
-        // The English spelling row is offered only while English is mine.
-        self.settings.show_english(language == Language::En);
-        if language == self.my_language {
-            return;
-        }
-        self.my_language = language;
-        // The line of the indexes was said for the language before: the
-        // index of the Russian translations is asked by Russian mine only.
-        if let Some(indexes) = self.indexes.known {
-            self.view.render_indexes(indexes, language);
-        }
-        // A definition translated into the language before is forgotten,
-        // and its job cancelled.
-        self.translating_definition = None;
-        let reading = language::reading(self.saved_language, language);
-        self.shown.set_my_language(language);
-        // Rendered for the new pair: a result looked up for the language
-        // before shows none of its translations.
-        self.shown.set_pressed(reading);
-        self.render_shown();
-        self.view
-            .set_reading_languages(reading_languages(language), reading);
-        self.language = reading;
-        self.ask_again();
-    }
-
-    /// The user chose `english` in Settings: the spelling of English from
-    /// now on, kept in the English-spelling file by a write on the runner.
-    fn english_chosen(&mut self, english: English) {
-        self.english_chosen = true;
-        // Saved even when it equals the one in use: the file may still hold
-        // another, its read not having come yet.
-        self.apply_english(english);
-        self.save_english();
-    }
-
-    /// Makes `english` the spelling of English. Only when it changed while
-    /// English is my language is anything redone: the translation of a
-    /// definition is forgotten, and its job cancelled, and the shown word
-    /// is asked again in the new spelling. With any other language mine the
-    /// requests do not change, so nothing is asked again.
-    fn apply_english(&mut self, english: English) {
-        let changed = english != self.english;
-        self.english = english;
-        self.shown.set_english(english);
-        self.render_shown();
-        if changed && self.my_language == Language::En {
-            self.translating_definition = None;
-            self.ask_again();
-        }
-    }
-
-    /// The online request about `subject` of the current input, read in
-    /// `source`, into my language in the spelling of English chosen.
-    /// With no word chosen, only the whole sentence has one.
-    fn online_request(&self, subject: Subject, source: Language) -> Option<Request> {
-        match (self.manual.input(), subject) {
-            (Some(input), _) => {
-                translate::request(input, subject, source, self.my_language, self.english)
-            }
-            (None, Subject::Sentence(_)) => translate::whole_request(
-                self.manual.sentence(),
-                source,
-                self.my_language,
-                self.english,
-            ),
-            (None, Subject::Word(_) | Subject::Lone) => None,
-        }
-    }
-
-    /// Redoes the offline result of the shown word and forgets and asks again
-    /// its online texts, after the reading language, my language or, with
-    /// English mine, the spelling of English changed.
-    fn ask_again(&mut self) {
-        // The field holds a newer text, whose own event comes next and is
-        // handled in the new language.
-        if self.field_is_newer() {
-            return;
-        }
-        // Cancels the online requests; whatever they still report has a
-        // number that is no longer awaited.
-        self.translating_word = None;
-        self.looking_up.deferred.clear();
-        self.translating_sentence = None;
-        let whole = self.online.asks_whole();
-        let submitted = self.online.forget();
-        if whole {
-            let long = online::is_long(self.manual.sentence());
-            if let Some(subject) = self.online.ask_whole(long) {
-                self.start_translation(subject);
-            }
-        }
-        if let Some(run) = self.manual.again() {
-            self.start_lookup(run);
-            let chosen = self.manual.chosen().and_then(|index| {
-                self.manual
-                    .sentence_of(index)
-                    .map(|sentence| (index, sentence))
-            });
-            if let Some((index, (number, span))) = chosen {
-                let long = online::is_long(&self.manual.sentence()[span]);
-                for subject in self.online.click(index, number, long).ask {
-                    self.start_translation(subject);
-                }
-            } else if submitted && self.online.submit() {
-                self.start_translation(Subject::Lone);
-            }
-        }
-        self.render_online();
-    }
-
-    /// Writes the reading language to its file on the runner. A write that
-    /// fails is written to stderr and nothing else: the choice holds until
-    /// the application ends.
-    fn save_language(&mut self) {
-        let path = self.language_file.clone();
-        let language = self.saved_language;
-        self.language_job = self.work.upgrade().map(|work| {
-            work.run(
-                language::FILE_LIMIT,
-                async move { language::write(path.as_deref(), language) },
-                |outcome| match outcome {
-                    // Replaced by a newer choice, which is written instead.
-                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                    Outcome::Finished(Err(e)) => {
-                        eprintln!("addict: the reading language was not kept: {e}");
-                    }
-                    Outcome::TimedOut | Outcome::Panicked => {
-                        eprintln!("addict: the reading language was not kept");
-                    }
-                },
-            )
+        self.give_up_for_new_text();
+        self.dispatch_setting_field(addict_controller::Event::LookUpEnglish {
+            article,
+            index,
+            word,
         });
-        if self.language_job.is_none() {
-            eprintln!("addict: the reading language was not kept: no runner");
-        }
-    }
-
-    /// Writes my language to its file on the runner. A write that fails is
-    /// written to stderr and nothing else: the choice holds until the
-    /// application ends.
-    fn save_my_language(&mut self) {
-        let path = self.my_language_file.clone();
-        let language = self.my_language;
-        self.my_language_job = self.work.upgrade().map(|work| {
-            work.run(
-                language::FILE_LIMIT,
-                async move { my_language::write(path.as_deref(), language) },
-                |outcome| match outcome {
-                    // Replaced by a newer choice, which is written instead.
-                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                    Outcome::Finished(Err(e)) => {
-                        eprintln!("addict: my language was not kept: {e}");
-                    }
-                    Outcome::TimedOut | Outcome::Panicked => {
-                        eprintln!("addict: my language was not kept");
-                    }
-                },
-            )
-        });
-        if self.my_language_job.is_none() {
-            eprintln!("addict: my language was not kept: no runner");
-        }
-    }
-
-    /// Writes the spelling of English to its file on the runner. A write
-    /// that fails is written to stderr and nothing else: the choice holds
-    /// until the application ends.
-    fn save_english(&mut self) {
-        let path = self.english_file.clone();
-        let chosen = self.english;
-        self.english_job = self.work.upgrade().map(|work| {
-            work.run(
-                language::FILE_LIMIT,
-                async move { english::write(path.as_deref(), chosen) },
-                |outcome| match outcome {
-                    // Replaced by a newer choice, which is written instead.
-                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                    Outcome::Finished(Err(e)) => {
-                        eprintln!("addict: the English spelling was not kept: {e}");
-                    }
-                    Outcome::TimedOut | Outcome::Panicked => {
-                        eprintln!("addict: the English spelling was not kept");
-                    }
-                },
-            )
-        });
-        if self.english_job.is_none() {
-            eprintln!("addict: the English spelling was not kept: no runner");
-        }
-    }
-
-    /// The user moved Translate sentence at once to `at_once`: from the next
-    /// press on, kept in its file by a write on the runner. The text the
-    /// field holds is not asked for again.
-    fn at_once_chosen(&mut self, at_once: bool) {
-        self.at_once_chosen = true;
-        self.at_once = at_once;
-        let path = self.at_once_file.clone();
-        self.at_once_job = self.work.upgrade().map(|work| {
-            work.run(
-                language::FILE_LIMIT,
-                async move { at_once::write(path.as_deref(), at_once) },
-                |outcome| match outcome {
-                    // Replaced by a newer choice, which is written instead.
-                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                    Outcome::Finished(Err(e)) => {
-                        eprintln!("addict: Translate sentence at once was not kept: {e}");
-                    }
-                    Outcome::TimedOut | Outcome::Panicked => {
-                        eprintln!("addict: Translate sentence at once was not kept");
-                    }
-                },
-            )
-        });
-        if self.at_once_job.is_none() {
-            eprintln!("addict: Translate sentence at once was not kept: no runner");
-        }
     }
 
     /// Shows the state, the sentence and the chosen word as they are now.
     fn render_manual(&self) {
-        self.view.render(self.manual.state(), self.manual.source());
+        self.render_window();
         self.view.render_sentence(
-            self.manual.sentence(),
-            self.manual.words(),
-            self.manual.chosen(),
+            &self.view_state.sentence,
+            &self.view_state.words,
+            self.view_state.chosen,
         );
+    }
+
+    /// The window state and source line from the controller snapshot.
+    fn render_window(&self) {
+        self.view
+            .render(self.view_state.window_state, self.view_state.source);
+    }
+
+    /// A source is being read now, or none is: the controller is told, and
+    /// the window shows its state at once, before the snapshot comes.
+    fn set_reading_source(&mut self, source: Option<Source>) {
+        self.dispatch_controller(addict_controller::Event::SetReadingSource(source));
+        let view = &mut self.view_state;
+        view.reading_source = source;
+        view.window_state = window_state(source, view.input.as_ref());
+    }
+
+    /// Sends a fact to the shared controller.
+    fn dispatch_controller(&self, event: controller::Event) {
+        self.send_controller(event);
+    }
+
+    fn send_controller(&self, event: controller::Event) -> bool {
+        self.controller
+            .as_ref()
+            .is_some_and(|controller| controller.dispatch(event))
     }
 
     /// The shortcut was pressed: a running capture and read are given up,
     /// the field is cleared, the read of the selection and the clipboard
     /// starts and the window is shown at once in the waiting state with the
     /// source clipboard; the window does not wait for the read, which ends
-    /// at most [`CLIPBOARD_LIMIT`] after the press.
+    /// at most `CLIPBOARD_LIMIT` after the press. The controller issues
+    /// the read and its own `ShowPanel`, which changes nothing once the
+    /// window is up.
     fn activated(
         &mut self,
         activation_token: Option<&str>,
@@ -2679,10 +1476,17 @@ impl Session {
     ) {
         self.give_up_press();
         self.clear_for_read();
-        // Started, not awaited: the window is presented below.
-        self.start_copy();
+        if self.controller.is_none() {
+            // No controller issues the read or its deadline: the waiting
+            // ends at once with the line of an unfinished read.
+            self.set_reading_source(None);
+            self.view.render_source_failure(
+                &crate::view::selection_failure_text(&Ended::Unfinished),
+                None,
+            );
+        }
         // Before `present()`: the first frame has the labels.
-        self.view.render(self.manual.state(), self.manual.source());
+        self.render_window();
         self.focus();
         // Also before it: the feedback is for the next commit.
         let recorded = self.recording.as_ref().zip(receipt_ns).map(|(r, receipt)| {
@@ -2706,290 +1510,217 @@ impl Session {
     /// Gives up what a press of the shortcut replaces: a running capture,
     /// also one that is still hiding the window, and the previous read.
     fn give_up_press(&mut self) {
-        self.capturing.job = None;
         self.capturing.activation_token = None;
-        if self.capturing.hiding {
-            // The hide of the window ends in an event that starts nothing.
-            self.capturing.hiding = false;
-        }
+        self.view_state.capture_sensitive = true;
         self.view.set_capture_sensitive(true);
         self.give_up_read();
     }
 
     /// A choice of the tray. Show is a repeated launch: the window as it is,
-    /// no read. Settings reads the state of the key file on the runner and
-    /// shows the window; About shows its window on its About page; Exit ends
+    /// no read. Settings shows the current key state from the shared source.
+    /// About shows its window on its About page. Exit ends
     /// the application through its shutdown. A tray that cannot be had is
     /// said once and changes nothing.
     fn tray(&mut self, event: TrayEvent) {
         match event {
-            TrayEvent::Show => self.reveal(),
+            TrayEvent::Show => self.reopened(),
             TrayEvent::Settings => self.show_settings(),
             TrayEvent::About => self.about.present(),
-            TrayEvent::Exit => {
-                if let Some(application) = self.window.application() {
-                    application.quit();
-                }
-            }
+            TrayEvent::Exit => self.request_quit(),
             TrayEvent::Unavailable { message } => {
                 eprintln!("addict: no tray icon: {message}");
             }
         }
     }
 
+    fn reopened(&self) {
+        if !self.send_controller(controller::Event::Reopened) {
+            self.reveal();
+        }
+    }
+
+    fn request_quit(&self) {
+        if !self.send_controller(controller::Event::QuitRequested) {
+            self.quit();
+            return;
+        }
+        let Some(application) = self.window.application() else {
+            return;
+        };
+        if self.quit_timer.borrow().is_some() {
+            return;
+        }
+        let timer = self.quit_timer.clone();
+        let timed_out = self.quit_timed_out.clone();
+        let application = application.downgrade();
+        self.quit_timer.replace(Some(glib::timeout_add_local_once(
+            SHELL_QUIT_LIMIT,
+            move || {
+                timer.take();
+                if let Some(application) = application.upgrade() {
+                    timed_out.set(true);
+                    application.quit();
+                }
+            },
+        )));
+    }
+
+    fn quit(&self) {
+        if let Some(timer) = self.quit_timer.take() {
+            timer.remove();
+        }
+        if let Some(application) = self.window.application() {
+            application.quit();
+        }
+    }
+
+    /// Settings opened: the controller clears the lines and asks for what it
+    /// wants to read; this shell only presents the window.
     fn show_settings(&mut self) {
-        self.settings.render_binding(&self.binding, &self.bindings);
-        self.settings.reset_status();
-        self.settings.clear_key_entry();
-        self.settings.say_key("");
-        self.settings.say_cache("");
-        self.check_key();
-        self.check_cache();
-        self.check_startup();
+        if self.controller.is_some() {
+            self.dispatch_controller(addict_controller::Event::SettingsOpened);
+        } else {
+            // Without a controller no read or change can run (`check_startup`
+            // and `toggle_startup` in 0.5.0).
+            self.settings
+                .say_startup(addict_engine::view::STARTUP_NO_RUNNER);
+            self.settings.set_startup_sensitive(false);
+        }
         self.settings.present();
     }
 
-    /// Reads the saved startup state on the runner, for the Settings window,
-    /// and recognises an older login entry. No portal is called, and nothing
-    /// is touched while a change runs: its end shows the state.
-    fn check_startup(&mut self) {
-        if self.startup_job.is_some() {
-            return;
-        }
-        self.settings.say_startup("");
-        self.settings.set_startup_sensitive(false);
-        let Some(work) = self.work.upgrade() else {
-            self.settings.say_startup(settings::STARTUP_NO_RUNNER);
+    /// Writes the key with the shell's file format, then tells the controller
+    /// both the new active key and the end of the store, in that order when
+    /// the write commits. The key never goes into a snapshot.
+    fn store_key(&mut self, id: RequestId, key: Secret) {
+        use addict_core::failure::key_store::KeyStoreFailure as Failure;
+
+        let Some(path) = self.key_file.clone() else {
+            self.dispatch_controller(addict_controller::Event::KeyStored {
+                id,
+                result: Err(Ended::Shell(Failure::NoPlace)),
+            });
             return;
         };
-        let sender = self.sender.clone();
+        let Some(dispatcher) = self.controller.clone() else {
+            self.dispatch_controller(addict_controller::Event::KeyStored {
+                id,
+                result: Err(Ended::Shell(Failure::Unavailable)),
+            });
+            return;
+        };
+        let Some(work) = self.work.upgrade() else {
+            dispatcher.dispatch(addict_controller::Event::KeyStored {
+                id,
+                result: Err(Ended::Shell(Failure::Unavailable)),
+            });
+            return;
+        };
+        let answered = dispatcher.clone();
+        self.store_job = Some(work.run(
+            KEY_SAVE_LIMIT,
+            persist_key(path, key, dispatcher),
+            move |outcome| {
+                let result = match outcome {
+                    Outcome::Finished(Ok(())) => Ok(()),
+                    Outcome::Finished(Err(WriteError::Invalid)) => {
+                        Err(Ended::Shell(Failure::Invalid))
+                    }
+                    Outcome::Finished(Err(error)) => {
+                        Err(Ended::Shell(Failure::Failed(error.to_string())))
+                    }
+                    Outcome::Cancelled => Err(Ended::Shell(Failure::Cancelled)),
+                    Outcome::TimedOut => Err(Ended::DeadlinePassed),
+                    Outcome::Panicked => Err(Ended::Unfinished),
+                };
+                answered.dispatch(addict_controller::Event::KeyStored { id, result });
+            },
+        ));
+    }
+
+    /// Asks the Background portal through the shell's adapter.
+    fn set_login_item(&mut self, id: RequestId, on: bool) {
+        let Some(dispatcher) = self.controller.clone() else {
+            self.dispatch_controller(addict_controller::Event::LoginItemSet {
+                id,
+                result: Err(Ended::Unfinished),
+                runner_missing: true,
+            });
+            return;
+        };
+        let Some(work) = self.work.upgrade() else {
+            dispatcher.dispatch(addict_controller::Event::LoginItemSet {
+                id,
+                result: Err(Ended::Unfinished),
+                runner_missing: true,
+            });
+            return;
+        };
+        // A read queued before the toggle is given up; its answer would be
+        // about the state before the change (`toggle_startup` in 0.5.0).
+        self.startup_read_job = None;
+        let answered = dispatcher.clone();
+        self.startup_job = Some(work.run(
+            STARTUP_LIMIT,
+            request_startup_change(on, entries::startup_file(self.dirs.config.as_deref())),
+            move |outcome| {
+                let result = match outcome {
+                    Outcome::Finished(end) => Ok(end),
+                    Outcome::Cancelled => Err(Ended::Unfinished),
+                    Outcome::TimedOut => Err(Ended::DeadlinePassed),
+                    Outcome::Panicked => Err(Ended::Unfinished),
+                };
+                answered.dispatch(addict_controller::Event::LoginItemSet {
+                    id,
+                    result,
+                    runner_missing: false,
+                });
+            },
+        ));
+    }
+
+    /// Reads the live login item, without asking the portal to change it.
+    fn read_login_item(&mut self) {
+        let Some(dispatcher) = self.controller.clone() else {
+            return;
+        };
+        let Some(work) = self.work.upgrade() else {
+            dispatcher.dispatch(addict_controller::Event::LoginItemRead {
+                shown: None,
+                runner_missing: true,
+            });
+            return;
+        };
+        let state = entries::startup_file(self.dirs.config.as_deref());
         self.startup_read_job = Some(work.run(
-            settings::STARTUP_READ_LIMIT,
+            STARTUP_READ_LIMIT,
             async move {
-                let saved = entries::startup_file()
-                    .as_deref()
-                    .and_then(startup::read_saved);
+                let saved = state.as_deref().and_then(startup::read_saved);
                 // The sandbox cannot see the entry; a foreign one is no state.
                 let entry = (!startup::is_sandboxed())
                     .then(entries::login_entry)
                     .and_then(Result::ok);
-                settings::startup_shown(saved, entry)
+                login_item_shown(saved, entry)
             },
             move |outcome| {
-                let _ = sender.unbounded_send(Event::StartupRead(outcome));
-            },
-        ));
-    }
-
-    /// The saved state was read: the switch shows it and can be moved.
-    fn startup_read(&mut self, outcome: Outcome<StartupShown>) {
-        // Queued before a change started: the change's end shows the state.
-        if self.startup_job.is_some() {
-            return;
-        }
-        match outcome {
-            Outcome::Finished(shown) => {
-                self.startup_on = shown.on;
-                self.settings.render_startup(shown.on);
-                self.settings.say_startup(if shown.legacy {
-                    settings::STARTUP_LEGACY
-                } else {
-                    ""
+                // A read replaced by a newer opening says nothing
+                // (`startup_read` returned on `Cancelled` in 0.5.0).
+                let shown = match outcome {
+                    Outcome::Finished(shown) => Some(shown),
+                    Outcome::Cancelled => return,
+                    Outcome::TimedOut | Outcome::Panicked => None,
+                };
+                dispatcher.dispatch(addict_controller::Event::LoginItemRead {
+                    shown,
+                    runner_missing: false,
                 });
-            }
-            Outcome::TimedOut | Outcome::Panicked => {
-                self.settings.render_startup(self.startup_on);
-                self.settings.say_startup(settings::STARTUP_UNREAD);
-            }
-            // Replaced by the next press of Settings.
-            Outcome::Cancelled => return,
-        }
-        self.settings.set_startup_sensitive(true);
-    }
-
-    /// The user moved the switch: the portal is asked on the runner, the state
-    /// saved when it confirms, and the switch waits for the end.
-    fn toggle_startup(&mut self, enable: bool) {
-        if self.startup_job.is_some() {
-            return;
-        }
-        let Some(work) = self.work.upgrade() else {
-            self.settings.render_startup(self.startup_on);
-            self.settings.say_startup(settings::STARTUP_NO_RUNNER);
-            return;
-        };
-        self.startup_read_job = None;
-        self.settings.set_startup_sensitive(false);
-        self.settings.say_startup("Asking the desktop…");
-        let sender = self.sender.clone();
-        self.startup_job = Some(work.run(
-            entries::STARTUP_LIMIT,
-            request_startup_change(enable),
-            move |outcome| {
-                let _ = sender.unbounded_send(Event::StartupChanged(outcome));
             },
         ));
     }
 
-    /// The change ended: the switch shows what is confirmed and the line why.
-    fn startup_changed(&mut self, outcome: Outcome<StartupEnd>) {
-        let Some((on, line)) = settings::startup_outcome(&outcome, self.startup_on) else {
-            return;
-        };
-        self.startup_job = None;
-        self.startup_on = on;
-        self.settings.render_startup(on);
-        self.settings.say_startup(&line);
-        self.settings.set_startup_sensitive(true);
-    }
-
-    /// Reads the size of the cache on the runner, for the Settings window; a
-    /// read still running is given up.
-    fn check_cache(&mut self) {
-        self.settings.render_cache(CacheState::Checking);
-        let sender = self.sender.clone();
-        let cache = self.cache.clone();
-        self.cache_job = self.work.upgrade().map(|work| {
-            work.run(
-                settings::CACHE_LIMIT,
-                async move { cache.footprint() },
-                move |outcome| {
-                    let state = match outcome {
-                        Outcome::Finished(footprint) => CacheState::Read(footprint),
-                        Outcome::TimedOut | Outcome::Panicked => CacheState::Unknown,
-                        // Replaced by the next press of Settings or clear.
-                        Outcome::Cancelled => return,
-                    };
-                    let _ = sender.unbounded_send(Event::CacheSize(state));
-                },
-            )
-        });
-        if self.cache_job.is_none() {
-            self.settings.render_cache(CacheState::Unknown);
-        }
-    }
-
-    /// Clear cache was pressed: every row is deleted on the runner. A clear
-    /// still running is replaced.
-    fn clear_cache(&mut self) {
-        let Some(work) = self.work.upgrade() else {
-            self.settings
-                .say_cache(&settings::clear_text(Err("the runner is not available")));
-            return;
-        };
-        self.settings.say_cache("");
-        self.settings.render_cache(CacheState::Checking);
-        let sender = self.sender.clone();
-        let cache = self.cache.clone();
-        self.clear_job = Some(work.run(
-            settings::CACHE_LIMIT,
-            async move { cache.clear() },
-            move |outcome| {
-                let _ = sender.unbounded_send(Event::CacheCleared(outcome));
-            },
-        ));
-    }
-
-    /// The clear of the cache ended: the line says why when it failed, and
-    /// the size is read again either way. The job slot is left alone, as for
-    /// a save of the key.
-    fn cache_cleared(&mut self, outcome: Outcome<Result<(), String>>) {
-        let result = match outcome {
-            Outcome::Finished(result) => result,
-            Outcome::TimedOut => Err("the clear did not answer in time".to_owned()),
-            Outcome::Panicked => Err("the clear did not run".to_owned()),
-            // Replaced by a newer clear, whose end is awaited.
-            Outcome::Cancelled => return,
-        };
-        self.settings.say_cache(&settings::clear_text(
-            result.as_ref().map(|_| ()).map_err(String::as_str),
-        ));
-        self.check_cache();
-    }
-
-    /// Reads the state of the key file on the runner, for the Settings
-    /// window; a read still running is given up.
-    fn check_key(&mut self) {
-        self.settings.render_key(None);
-        let sender = self.sender.clone();
-        let path = self.key_file.clone();
-        self.key_job = self.work.upgrade().map(|work| {
-            work.run(
-                settings::KEY_CHECK_LIMIT,
-                async move { KeyState::of(path.as_deref()) },
-                move |outcome| {
-                    let state = match outcome {
-                        Outcome::Finished(state) => state,
-                        Outcome::TimedOut | Outcome::Panicked => KeyState::Unknown,
-                        // Replaced by the next press of Settings or save.
-                        Outcome::Cancelled => return,
-                    };
-                    let _ = sender.unbounded_send(Event::KeyFile(state));
-                },
-            )
-        });
-        if self.key_job.is_none() {
-            self.settings.render_key(Some(KeyState::Unknown));
-        }
-    }
-
-    /// Save key was pressed: the key file is written on the runner. A save
-    /// still running is replaced. DeepL is not asked whether the key works.
-    fn save_key(&mut self, text: String) {
-        let Some(path) = self.key_file.clone() else {
-            self.settings
-                .say_key(&settings::save_text(Err(settings::NO_KEY_PLACE)));
-            return;
-        };
-        let Some(work) = self.work.upgrade() else {
-            self.settings
-                .say_key(&settings::save_text(Err("the runner is not available")));
-            return;
-        };
-        self.settings.say_key("Saving the key…");
-        let sender = self.sender.clone();
-        self.save_job = Some(work.run(
-            settings::KEY_CHECK_LIMIT,
-            async move { key::write(&path, &text).map_err(|error| error.to_string()) },
-            move |outcome| {
-                let _ = sender.unbounded_send(Event::KeySaved(outcome));
-            },
-        ));
-    }
-
-    /// The write of the key file ended: the field is emptied when it
-    /// worked, the line says why when it did not, and the state of the file
-    /// is read again either way. The job slot is left alone: only a newer
-    /// save replaces it, and clearing it would cancel that one.
-    fn key_saved(&mut self, outcome: Outcome<Result<(), String>>) {
-        let result = match outcome {
-            Outcome::Finished(result) => result,
-            // The write cannot be stopped, so it may have happened.
-            Outcome::TimedOut => {
-                self.settings.say_key(settings::SAVE_UNANSWERED);
-                self.check_key();
-                return;
-            }
-            Outcome::Panicked => Err("the write did not run".to_owned()),
-            // Replaced by a newer save, whose end is awaited.
-            Outcome::Cancelled => return,
-        };
-        if result.is_ok() {
-            self.settings.clear_key_entry();
-        }
-        self.settings.say_key(&settings::save_text(
-            result.as_ref().map(|_| ()).map_err(String::as_str),
-        ));
-        self.check_key();
-    }
-
-    /// Configure shortcuts was pressed: the portal is asked for its dialog
-    /// through the worker that holds the session.
-    fn change_shortcut(&mut self) {
-        if !matches!(self.binding, Binding::Bound) {
-            self.settings.say(settings::CHANGE_UNBOUND);
-            return;
-        }
+    /// Configure shortcuts: the portal's dialog belongs to the session's
+    /// worker. The controller only says when the action is available.
+    fn configure_shortcuts(&self) {
         if let Some(current) = self.current.upgrade()
             && let Some(handle) = current.borrow().as_ref()
         {
@@ -2997,91 +1728,47 @@ impl Session {
         }
     }
 
-    fn retry(&mut self) {
-        // One attempt at a time: a press that was queued
-        // behind another one starts nothing.
-        if !matches!(self.binding, Binding::NotBound { .. }) {
-            return;
-        }
+    /// One attempt at a time: a press queued behind another starts nothing.
+    /// The controller changes the binding state before this effect arrives.
+    fn bind_shortcuts(&self) {
         let Some(current) = self.current.upgrade() else {
             return;
         };
-        self.binding = Binding::Attempting;
-        self.view.render_binding(&self.binding);
-        self.settings.render_binding(&self.binding, &self.bindings);
-        // `Failed` is the last act of the old worker, sent
-        // after its session was closed: joining it does not
-        // wait.
+        // `Failed` is the last act of the old worker, sent after its session
+        // was closed: joining it does not wait.
         current.borrow_mut().take();
-        *current.borrow_mut() = Some(start_shortcut(&self.sender, self.timed));
+        *current.borrow_mut() = Some(start_shortcut(
+            &self.sender,
+            self.timed,
+            self.dirs.config.as_deref(),
+        ));
     }
 }
 
-/// Why the selection and the clipboard gave no line: the reason for stderr,
-/// and where a text too long to take was held, with its length.
-#[derive(Debug)]
-struct Missed {
-    reason: String,
-    too_long: Option<(Held, usize)>,
-}
-
-impl Missed {
-    /// Missed for `reason`, with no text too long.
-    fn because(reason: String) -> Self {
-        Self {
-            reason,
-            too_long: None,
-        }
-    }
-}
-
-/// Whether `line` is exactly a command the window offers to copy: such a
-/// line is the user's Copy, not a text to look up.
-fn is_offered_command(line: &str) -> bool {
-    command_in(line).as_deref() == Some(line)
-}
-
-/// The source line when neither the selection nor the clipboard gave a
-/// line: that the selection was too long, when it was, else that the
-/// clipboard was, else that nothing is selected or copied.
-fn missed_line(selection: Option<(Held, usize)>, clipboard: Option<(Held, usize)>) -> String {
-    selection
-        .or(clipboard)
-        .map_or(NOTHING_SELECTED_TEXT.to_owned(), |(held, chars)| {
-            too_long_text(held, chars, CLIPBOARD_MAX_CHARS)
-        })
-}
-
-/// Reads the text of `clipboard`, which holds what is `held`, once and
-/// gives `done` its line, of at most [`CLIPBOARD_MAX_CHARS`] characters, or
-/// why there is none.
-fn read_line(
+/// Reads the raw text of `clipboard` once, for `held`, and gives `done` its
+/// text when it has one: a blank text and a failed read give `None`, and
+/// the error goes to stderr. The controller applies the line rule and the
+/// length limit. Nothing of the text is logged.
+fn read_text(
     clipboard: &gdk::Clipboard,
     held: Held,
     cancellable: &gio::Cancellable,
-    done: impl FnOnce(Result<String, Missed>) + 'static,
+    done: impl FnOnce(Option<String>) + 'static,
 ) {
     clipboard.read_text_async(Some(cancellable), move |read| {
         done(match read {
-            Ok(Some(text)) => manual::clipboard_line(&text)
-                .map_err(|no_line| match no_line {
-                    NoLine::Blank => Missed::because("blank".to_owned()),
-                    NoLine::TooLong(chars) => Missed {
-                        reason: format!("{chars} characters, over {CLIPBOARD_MAX_CHARS}"),
-                        too_long: Some((held, chars)),
-                    },
-                })
-                .and_then(|line| {
-                    if is_offered_command(&line) {
-                        Err(Missed::because(
-                            "a command the window offered to copy".to_owned(),
-                        ))
-                    } else {
-                        Ok(line)
-                    }
-                }),
-            Ok(None) => Err(Missed::because("no text".to_owned())),
-            Err(e) => Err(Missed::because(e.to_string())),
+            Ok(Some(text)) if !text.trim().is_empty() => Some(text.to_string()),
+            Ok(Some(_) | None) => None,
+            // A read given up says nothing.
+            Err(e) if e.matches(gio::IOErrorEnum::Cancelled) => None,
+            Err(e) => {
+                let what = match held {
+                    Held::Selection => "selection",
+                    Held::Clipboard => "clipboard",
+                };
+                eprintln!("addict: no text from the {what}: {e}");
+                None
+            }
         });
     });
 }
@@ -3089,14 +1776,14 @@ fn read_line(
 /// Sends what the user does in the `view` to `sender`: Retry, an edit of the
 /// field, a submit of its text, Back and Forward, Capture, a click on a word
 /// and a click on a sense.
-fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
+fn connect_view(view: &View, sender: &UnboundedSender<Event>, actions: &Rc<Cell<ViewActions>>) {
     let retry = sender.clone();
     view.connect_retry(move || {
-        let _ = retry.unbounded_send(Event::Retry);
+        let _ = retry.unbounded_send(Event::Setting(addict_controller::Event::RetryPressed));
     });
     let changed = sender.clone();
-    view.connect_sentence_changed(move |text| {
-        let _ = changed.unbounded_send(Event::Sentence(text.to_owned()));
+    view.connect_sentence_changed(move |text, origin| {
+        let _ = changed.unbounded_send(Event::Sentence(text.to_owned(), origin));
     });
     let submitted = sender.clone();
     view.connect_submitted(move || {
@@ -3111,36 +1798,63 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
         let _ = forward.unbounded_send(Event::Forward);
     });
     let chosen = sender.clone();
+    let word_actions = actions.clone();
     view.connect_word_chosen(move |index| {
-        let _ = chosen.unbounded_send(Event::Word(index));
+        let _ = chosen.unbounded_send(Event::Word(word_actions.get().text, index));
     });
     let capture = sender.clone();
     view.connect_capture(move || {
         let _ = capture.unbounded_send(Event::Capture);
     });
     let definition = sender.clone();
+    let definition_actions = actions.clone();
     view.connect_definition_action(move || {
-        let _ = definition.unbounded_send(Event::DefinitionAction);
+        let action = definition_actions.get();
+        if let Some(choice) = action.choice {
+            let _ = definition.unbounded_send(Event::DefinitionAction(action.article, choice));
+        }
     });
     let english = sender.clone();
+    let english_actions = actions.clone();
     view.connect_look_up_english(move |word| {
-        let _ = english.unbounded_send(Event::LookUpEnglish(word.to_owned()));
+        let action = english_actions.get();
+        if let Some(Choice::Gloss(index)) = action.choice {
+            let _ = english.unbounded_send(Event::LookUpEnglish(
+                action.article,
+                index,
+                word.to_owned(),
+            ));
+        }
     });
     let add_key = sender.clone();
     view.connect_add_key(move || {
         let _ = add_key.unbounded_send(Event::Window(WindowEvent::Settings));
     });
+    let synonym = sender.clone();
+    let synonym_actions = actions.clone();
+    view.connect_synonym_chosen(move |word| {
+        let _ = synonym.unbounded_send(Event::Synonym(synonym_actions.get().article, word));
+    });
     let sense = sender.clone();
+    let sense_actions = actions.clone();
     view.connect_sense_chosen(move |index| {
-        let _ = sense.unbounded_send(Event::Sense(index));
+        let _ = sense.unbounded_send(Event::Sense(sense_actions.get().article, index));
+    });
+    let play = sender.clone();
+    let play_actions = actions.clone();
+    view.connect_play_pressed(move |url| {
+        let _ = play.unbounded_send(Event::PlayPressed(play_actions.get().article, url));
     });
     let gloss = sender.clone();
+    let gloss_actions = actions.clone();
     view.connect_gloss_chosen(move |index| {
-        let _ = gloss.unbounded_send(Event::Gloss(index));
+        let _ = gloss.unbounded_send(Event::Gloss(gloss_actions.get().article, index));
     });
     let language = sender.clone();
     view.connect_language_chosen(move |chosen| {
-        let _ = language.unbounded_send(Event::LanguageChosen(chosen));
+        let _ = language.unbounded_send(Event::Setting(addict_controller::Event::ReadingChosen(
+            chosen,
+        )));
     });
 }
 
@@ -3151,11 +1865,11 @@ fn build_ui(
     application: &gtk::Application,
     binding: &Binding,
     sender: &UnboundedSender<Event>,
-) -> (View, gtk::ApplicationWindow) {
-    style::install();
+) -> (View, gtk::ApplicationWindow, Rc<Cell<ViewActions>>) {
     let view = View::new(window_state(None, None), binding);
-    connect_view(&view, sender);
-    let window = build_window(application, &view);
+    let actions = Rc::new(Cell::new(ViewActions::default()));
+    connect_view(&view, sender, &actions);
+    let window = build_window(application, &view, sender);
     // Capture phase: Alt+Left and Alt+Right are Back and Forward wherever
     // the focus is.
     window.add_controller(view.history_keys());
@@ -3165,13 +1879,22 @@ fn build_ui(
             let _ = active.unbounded_send(Event::Active);
         }
     });
-    (view, window)
+    (view, window, actions)
+}
+
+/// What the switch shows from the saved state and the login entry. The saved
+/// state wins; with none, only a legacy entry makes it on. `None` for `entry`
+/// means it could not be read.
+fn login_item_shown(
+    saved: Option<bool>,
+    entry: Option<addict_platform::desktop::LoginEntry>,
+) -> LoginItemShown {
+    settings::startup_shown(saved, entry)
 }
 
 /// One change of the switch: the checks before the portal, then the flow of
 /// [`settings::change_startup`] with the real portal and the state file.
-async fn request_startup_change(enable: bool) -> StartupEnd {
-    let state = entries::startup_file();
+async fn request_startup_change(enable: bool, state: Option<PathBuf>) -> StartupEnd {
     // Only an enable needs it: a disable must work with this binary's path gone.
     let command = if enable {
         startup::relaunch_command()
@@ -3222,16 +1945,15 @@ async fn request_startup_change(enable: bool) -> StartupEnd {
 /// shortcut, Save key and the Start at login switch go to `sender` as events.
 fn start_settings(
     window: &gtk::ApplicationWindow,
-    key_file: Option<&std::path::Path>,
+    key_file: Option<&Path>,
     owner: KeyOwner,
-    articles: Arc<dyn Articles>,
     sender: &UnboundedSender<Event>,
 ) -> Settings {
     let change = sender.clone();
     let save = sender.clone();
     let clear = sender.clone();
     let startup = sender.clone();
-    let imported = sender.clone();
+    let import = sender.clone();
     let my_language = sender.clone();
     let english = sender.clone();
     let at_once = sender.clone();
@@ -3241,98 +1963,43 @@ fn start_settings(
         key_file,
         owner,
         move || {
-            let _ = change.unbounded_send(Event::ChangeShortcut);
+            let _ =
+                change.unbounded_send(Event::Setting(addict_controller::Event::ConfigurePressed));
         },
-        move |text| {
-            let _ = save.unbounded_send(Event::SaveKey(text));
+        move |key| {
+            let _ = save.unbounded_send(Event::Setting(addict_controller::Event::SaveKey(key)));
         },
         move || {
-            let _ = clear.unbounded_send(Event::ClearCache);
+            let _ =
+                clear.unbounded_send(Event::Setting(addict_controller::Event::ClearCachePressed));
         },
-        move |enable| {
-            let _ = startup.unbounded_send(Event::ToggleStartup(enable));
-        },
-        move |chosen| {
-            let _ = my_language.unbounded_send(Event::MyLanguageChosen(chosen));
-        },
-        move |chosen| {
-            let _ = english.unbounded_send(Event::EnglishChosen(chosen));
+        move |on| {
+            let _ = startup.unbounded_send(Event::Setting(
+                addict_controller::Event::LoginItemToggled(on),
+            ));
         },
         move |chosen| {
-            let _ = at_once.unbounded_send(Event::AtOnceChosen(chosen));
+            let _ = my_language.unbounded_send(Event::Setting(
+                addict_controller::Event::MyLanguageChosen(chosen),
+            ));
         },
-        move || refresh_import(articles.clone(), imported.clone()),
+        move |chosen| {
+            let _ = english.unbounded_send(Event::Setting(
+                addict_controller::Event::EnglishChosen(chosen),
+            ));
+        },
+        move |chosen| {
+            let _ = at_once.unbounded_send(Event::Setting(addict_controller::Event::AtOnceChosen(
+                chosen,
+            )));
+        },
         move || {
-            let _ = download.unbounded_send(Event::SettingsDownload);
+            let _ = import.unbounded_send(Event::Setting(controller::Event::ImportPressed));
+        },
+        move || {
+            let _ = download.unbounded_send(Event::Setting(controller::Event::DownloadPressed));
         },
     )
-}
-
-/// The check does disk work on a separate thread. Waiting for the event's
-/// acknowledgement guarantees the next lookup sees the refreshed states
-/// before Settings advertises that the dictionary is ready.
-async fn refresh_import(
-    articles: Arc<dyn Articles>,
-    sender: UnboundedSender<Event>,
-) -> Result<(), String> {
-    let (started, generation) = oneshot::channel();
-    sender
-        .unbounded_send(Event::ImportRefreshing(started))
-        .map_err(|_| "The resident is no longer available.".to_owned())?;
-    let generation = generation
-        .await
-        .map_err(|_| "The resident is no longer available.".to_owned())?;
-    let indexes = download::blocking(move || articles.indexes()).await?;
-    let (ready, received) = oneshot::channel();
-    sender
-        .unbounded_send(Event::Imported(ImportCompletion {
-            generation,
-            indexes,
-            ready,
-        }))
-        .map_err(|_| "The resident is no longer available.".to_owned())?;
-    received
-        .await
-        .map_err(|_| "The resident did not refresh its dictionary states.".to_owned())
-}
-
-/// The writer starts finalization from its commit callback, outside the
-/// cancellable queue future. Success waits for the resident acknowledgement.
-async fn install_download(
-    downloader: Downloader,
-    published: addict_dictionary::release::Published,
-    dir: std::path::PathBuf,
-    recovery: bool,
-    articles: Arc<dyn Articles>,
-    sender: UnboundedSender<Event>,
-    progress: impl FnMut(u64),
-) -> Result<std::path::PathBuf, String> {
-    let (ready, received) = oneshot::channel();
-    let ready = std::sync::Mutex::new(Some(ready));
-    let downloader = downloader.on_commit(move || {
-        let Some(ready) = ready.lock().expect("commit callback lock").take() else {
-            return;
-        };
-        let articles = articles.clone();
-        let sender = sender.clone();
-        // Dropping this join handle detaches, rather than aborts, refresh.
-        tokio::spawn(async move {
-            let _ = ready.send(refresh_import(articles, sender).await);
-        });
-    });
-    let downloader = if recovery {
-        downloader.recovering()
-    } else {
-        downloader
-    };
-    let path = downloader
-        .install(&published, &dir, progress)
-        .await
-        .map_err(|error| error.to_string())?;
-    received
-        .await
-        .map_err(|_| "The dictionary refresh stopped.".to_owned())??;
-    Ok(path)
 }
 
 /// Starts the icon in the top bar; the choices of its menu and the tray
@@ -3345,224 +2012,130 @@ fn start_tray(sender: &UnboundedSender<Event>) -> TrayHandle {
     })
 }
 
-/// Starts the runner of the lookups. Without it the window still works; a
-/// click says that the lookup did not finish.
-fn start_work() -> Option<Rc<Work>> {
-    match Work::start() {
-        Ok(work) => Some(Rc::new(work)),
-        Err(e) => {
-            eprintln!("addict: lookups cannot run: {e}");
-            None
+/// Starts the shared lookup loop and hands its renders to the resident in
+/// FIFO order on the GTK main context.
+fn start_controller(
+    dirs: &Dirs,
+    key: Option<Result<Secret, KeyError>>,
+    recording: bool,
+    release: String,
+    sender: &UnboundedSender<Event>,
+) -> io::Result<Controller> {
+    controller::start(
+        dirs.clone(),
+        controller_platform(),
+        StartFacts {
+            key,
+            recording,
+            release,
+            ..linux_start_facts()
+        },
+        controller_renderer(sender),
+    )
+}
+
+pub(crate) const KEY_LOCATION_HINT: &str =
+    "Set an absolute XDG_CONFIG_HOME or HOME to locate addict/deepl.key.";
+
+pub(crate) fn controller_platform() -> Platform {
+    let install_hint = |code| InstallHint {
+        engine: Some(format!(
+            "sudo dnf install tesseract tesseract-langpack-{code}"
+        )),
+        data: Some(format!("sudo dnf install tesseract-langpack-{code}")),
+    };
+    Platform {
+        name: "Linux".to_owned(),
+        key_location_hint: KEY_LOCATION_HINT.to_owned(),
+        // Wayland gives the clipboard only to the focused window: show first.
+        read_before_show: false,
+        has_capture: true,
+        ocr_languages: Language::ALL.to_vec(),
+        install_hints: InstallHints {
+            en: install_hint("eng"),
+            es: install_hint("spa"),
+            ca: install_hint("cat"),
+            ru: install_hint("rus"),
+        },
+        shortcut_names: ShortcutNames {
+            back: "Alt+Left".to_owned(),
+            forward: "Alt+Right".to_owned(),
+        },
+    }
+}
+
+pub(crate) fn linux_start_facts() -> StartFacts {
+    StartFacts {
+        key: None,
+        recording: false,
+        release: String::new(),
+        permissions: Permissions {
+            accessibility: Permission::Granted,
+            screen_recording: Permission::Granted,
+        },
+        login_item: None,
+        bindings: None,
+    }
+}
+
+fn controller_renderer(sender: &UnboundedSender<Event>) -> impl controller::Renderer {
+    let queue: ControllerQueue = Arc::new(Mutex::new(VecDeque::new()));
+    let context = glib::MainContext::default();
+    let sender = sender.clone();
+    move |state, effects| {
+        let first = {
+            let mut pending = queue.lock().expect("controller render queue");
+            let first = pending.is_empty();
+            pending.push_back((state, effects));
+            first
+        };
+        if first {
+            let queue = queue.clone();
+            let sender = sender.clone();
+            // GLib may invoke immediately when the context is unowned.
+            // Only the channel is touched here. `serve` owns the widgets.
+            context.invoke(move || {
+                // The context forwards this batch before another invoke
+                // can deliver the next one. Enqueueing can continue now.
+                let pending = std::mem::take(&mut *queue.lock().expect("controller render queue"));
+                for (state, effects) in pending {
+                    let _ = sender.unbounded_send(Event::Controller(Box::new(state), effects));
+                }
+            });
         }
     }
 }
 
-/// GTK 4.20's GStreamer backend needs a file URI even for buffered audio.
-/// An anonymous file gives it a seekable source and disappears when closed.
-fn buffer_recording(audio: &[u8]) -> io::Result<File> {
-    let create = |flags| {
-        // SAFETY: The name is NUL-terminated. A nonnegative result is a new fd.
-        let fd = unsafe { libc::memfd_create(c"addict-recording".as_ptr(), flags) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: This takes sole ownership of the newly created fd.
-        Ok(unsafe { File::from_raw_fd(fd) })
+/// Loads the configured key once without blocking GTK or the translation
+/// runner. The result reaches the controller as its first `KeyChanged`.
+fn start_key_load(path: Option<PathBuf>, sender: &UnboundedSender<Event>) {
+    let loaded = sender.clone();
+    let read = move || {
+        let result = path
+            .as_deref()
+            .map_or(Err(KeyError::NoDirectory), key::read);
+        let _ = loaded.unbounded_send(Event::Setting(addict_controller::Event::KeyChanged(result)));
     };
-    let mut file = create(libc::MFD_CLOEXEC | libc::MFD_NOEXEC_SEAL).or_else(|error| {
-        if error.raw_os_error() == Some(libc::EINVAL) {
-            // Older kernels do not recognize MFD_NOEXEC_SEAL.
-            create(libc::MFD_CLOEXEC)
-        } else {
-            Err(error)
-        }
-    })?;
-    file.write_all(audio)?;
-    Ok(file)
+    if std::thread::Builder::new()
+        .name("addict-key-load".to_owned())
+        .spawn(read)
+        .is_err()
+    {
+        eprintln!("addict: could not start the key reader");
+        let _ = sender.unbounded_send(Event::Setting(addict_controller::Event::KeyChanged(Err(
+            KeyError::Unreadable,
+        ))));
+    }
 }
 
-/// Moves the outcome of a recording request from the worker to GTK.
-fn start_recording_job<T: Send + 'static>(
-    work: &Work,
-    limit: Duration,
-    run: impl Future<Output = T> + Send + 'static,
-    ready: impl FnOnce(Outcome<T>) + 'static,
-) -> Job {
-    let (send, receive) = oneshot::channel();
-    let job = work.run(limit, run, move |outcome| {
-        let _ = send.send(outcome);
-    });
-    glib::spawn_future_local(async move {
-        if let Ok(outcome) = receive.await {
-            ready(outcome);
-        }
-    });
-    job
-}
-
-/// Starts the check of the indexes in `articles` on `work`; where they stand
-/// comes to `sender` as an event.
-fn start_check(
-    work: Option<&Work>,
-    articles: Arc<dyn Articles>,
-    sender: &UnboundedSender<Event>,
-    generation: u64,
-) -> Option<Job> {
-    let checked = sender.clone();
-    manual::check_indexes(work, LOOKUP_LIMIT, articles, move |indexes| {
-        // On the worker: the UI thread wakes for the event.
-        let _ = checked.unbounded_send(Event::Indexes {
-            generation,
-            indexes,
-        });
-    })
-}
-
-/// Starts the one read of the language file at `path` on `work`; the
-/// language it holds, English for anything else, comes to `sender` as an
-/// event. Without a runner nothing is read, and English stays.
-fn start_language(
-    work: Option<&Work>,
-    path: Option<std::path::PathBuf>,
-    sender: &UnboundedSender<Event>,
-) -> Option<Job> {
-    let read = sender.clone();
-    let job = work?.run(
-        language::FILE_LIMIT,
-        async move { language::read(path.as_deref()) },
-        move |outcome| {
-            if let Outcome::Finished(language) = outcome {
-                // On the worker: the UI thread wakes for the event.
-                let _ = read.unbounded_send(Event::LanguageRead(language));
-            }
-        },
-    );
-    Some(job)
-}
-
-/// Starts the one read of the my-language file at `path` on `work`; the
-/// language it holds, Russian for anything else, comes to `sender` as an
-/// event. Without a runner nothing is read, and Russian stays.
-fn start_my_language(
-    work: Option<&Work>,
-    path: Option<std::path::PathBuf>,
-    sender: &UnboundedSender<Event>,
-) -> Option<Job> {
-    let read = sender.clone();
-    let job = work?.run(
-        language::FILE_LIMIT,
-        async move { my_language::read(path.as_deref()) },
-        move |outcome| {
-            let language = match outcome {
-                Outcome::Finished(language) => language,
-                _ => Language::Ru,
-            };
-            // On the worker: the UI thread wakes for the event.
-            let _ = read.unbounded_send(Event::MyLanguageRead(language));
-        },
-    );
-    Some(job)
-}
-
-/// Starts the one read of the file of Translate sentence at once at `path`
-/// on `work`; the state it holds comes to `sender` as an event. Without a
-/// runner nothing is read, and the default stays.
-fn start_at_once(
-    work: Option<&Work>,
-    path: Option<std::path::PathBuf>,
-    sender: &UnboundedSender<Event>,
-) -> Option<Job> {
-    let read = sender.clone();
-    let job = work?.run(
-        language::FILE_LIMIT,
-        async move { at_once::read(path.as_deref()) },
-        move |outcome| {
-            if let Outcome::Finished(at_once) = outcome {
-                // On the worker: the UI thread wakes for the event.
-                let _ = read.unbounded_send(Event::AtOnceRead(at_once));
-            }
-        },
-    );
-    Some(job)
-}
-
-/// Starts the one read of the English-spelling file at `path` on `work`;
-/// the spelling it holds, US for anything else, comes to `sender` as an
-/// event. Without a runner nothing is read, and US stays.
-fn start_english(
-    work: Option<&Work>,
-    path: Option<std::path::PathBuf>,
-    sender: &UnboundedSender<Event>,
-) -> Option<Job> {
-    let read = sender.clone();
-    let job = work?.run(
-        language::FILE_LIMIT,
-        async move { english::read(path.as_deref()) },
-        move |outcome| {
-            if let Outcome::Finished(english) = outcome {
-                // On the worker: the UI thread wakes for the event.
-                let _ = read.unbounded_send(Event::EnglishRead(english));
-            }
-        },
-    );
-    Some(job)
-}
-
-/// Starts the decision of the first-run offer on `work`, for the `indexes`
-/// of the first check: the choice file is read and, when the offer is due,
-/// the manifest is fetched by `downloader` and comes to `sender` as an
-/// event. When the manifest cannot be had, why is written to stderr and
-/// nothing is kept, so the next start asks again.
-fn start_first_run(
-    work: &Work,
-    downloader: Downloader,
-    indexes: Indexes,
-    my: Language,
-    sender: &UnboundedSender<Event>,
-    run: u64,
-) -> Job {
-    let path = first_run::path();
-    let offered = sender.clone();
-    work.run(
-        download::MANIFEST_LIMIT,
-        async move {
-            let chosen = first_run::read(path.as_deref());
-            first_run::offered_manifest(indexes, my, chosen, &downloader).await
-        },
-        move |outcome| match outcome {
-            Outcome::Finished(Ok(Some(manifest))) => {
-                // On the worker: the UI thread wakes for the event.
-                let _ = offered.unbounded_send(Event::FirstRunOffer(run, manifest));
-            }
-            Outcome::Finished(Ok(None)) | Outcome::Cancelled => {}
-            Outcome::Finished(Err(e)) => {
-                eprintln!("addict: no dictionary download is offered: {e}");
-            }
-            Outcome::TimedOut => {
-                eprintln!(
-                    "addict: no dictionary download is offered: the manifest did not come in time"
-                );
-            }
-            Outcome::Panicked => eprintln!("addict: no dictionary download is offered"),
-        },
-    )
-}
-
-/// The online translator, DeepL behind the on-disk cache, the key file it
-/// reads, for the window to name, and the cache, for its size and its clear.
-/// Nothing is read, opened or connected here: the key file, the cache and the
-/// network are the runner's, at the first click on a word of a sentence or
-/// the first submit of a lone word.
-fn online_translator() -> (
-    Arc<dyn Translator>,
-    Option<std::path::PathBuf>,
-    Arc<cache::Store>,
-) {
-    let deepl = DeepL::new();
-    let key_file = deepl.key_file().map(std::path::Path::to_owned);
-    let translator = Cached::new(deepl, cache::cache_dir());
-    let store = translator.store();
-    (Arc::new(translator), key_file, store)
+/// Writes the key file and publishes the written key to the controller
+/// before the job yields again: a committed write is active even if the
+/// runner then reports a timeout or a cancel for its job, as 0.5.0's
+/// `persist_key` made it.
+async fn persist_key(path: PathBuf, key: Secret, controller: Dispatcher) -> Result<(), WriteError> {
+    let persisted = key::write(&path, key)?;
+    controller.dispatch(addict_controller::Event::KeyChanged(Ok(persisted)));
+    Ok(())
 }
 
 /// Hands each event of `receiver` to `session`, on the UI thread, for as
@@ -3580,148 +2153,81 @@ fn serve(mut session: Session, mut receiver: UnboundedReceiver<Event>) {
 fn start(
     application: &gtk::Application,
     evidence: Option<Rc<RefCell<evidence::Writer>>>,
+    dirs: &Dirs,
+    quit_timed_out: Rc<Cell<bool>>,
+    restart: Rc<dyn Fn()>,
 ) -> Resident {
     // The worker threads push; the main context wakes only for an event.
     let (sender, receiver) = futures_channel::mpsc::unbounded();
+    let key_file = key::key_path(dirs.config.as_deref());
 
     // The first attempt starts below, with the window still hidden.
     let binding = Binding::Attempting;
     connect_settings_action(application, &sender);
     connect_menu_actions(application, &sender);
     application.set_accels_for_action("app.settings", &["<Control>comma"]);
-    let (view, window) = build_ui(application, &binding, &sender);
+    style::install();
+    let (view, window, view_actions) = build_ui(application, &binding, &sender);
 
     // Only the primary instance gets here, so a second launch records no
     // session.
     let recording = evidence.map(|writer| Recording::start(writer, &window));
     let timed = recording.is_some();
-    let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed))));
+    let config = dirs.config.as_deref();
+    let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed, config))));
     let events = sender.clone();
-    let work = start_work();
-    if let Some(work) = &work {
-        let work = Rc::downgrade(work);
-        view.connect_recording_audio({
-            let work = work.clone();
-            move |url, ready| {
-                let Some(work) = work.upgrade() else {
-                    ready(Err(AudioFailure::Failed));
-                    return None;
-                };
-                Some(start_recording_job(
-                    &work,
-                    AUDIO_LIMIT,
-                    async move {
-                        let audio = fetch_audio(url).await?;
-                        buffer_recording(&audio).map_err(|error| {
-                            eprintln!("addict: could not buffer recording: {error}");
-                            AudioFailure::Failed
-                        })
-                    },
-                    move |outcome| {
-                        let result = match outcome {
-                            Outcome::Finished(audio) => audio,
-                            Outcome::Cancelled => return,
-                            Outcome::TimedOut => Err(AudioFailure::Network),
-                            Outcome::Panicked => Err(AudioFailure::Failed),
-                        };
-                        ready(result.map(PlaybackMedia::from_recording));
-                    },
-                ))
+    let controller =
+        match start_controller(dirs, None, timed, download::BASE_URL.to_owned(), &sender) {
+            Ok(controller) => Some(controller),
+            Err(e) => {
+                eprintln!("addict: lookups cannot run: {e}");
+                let names = controller_platform().shortcut_names;
+                view.set_history_tooltips(
+                    &crate::view::back_tooltip(&names.back),
+                    &crate::view::forward_tooltip(&names.forward),
+                );
+                None
             }
-        });
-        view.connect_recording_credit(move |file, ready| {
-            let work = work.upgrade()?;
-            Some(start_recording_job(
-                &work,
-                CREDIT_LIMIT,
-                async move { file.fetch_credit().await },
-                move |outcome| {
-                    if let Outcome::Finished(credit) = outcome {
-                        ready(credit);
-                    }
-                },
-            ))
-        });
-    }
-    // Nothing is opened here: the indexes are files, and files are the
-    // runner's.
-    let articles: Arc<dyn Articles> = Arc::new(Dictionaries::in_data_dir());
-    let check = start_check(work.as_deref(), articles.clone(), &sender, 0);
-    // After the check: the runner takes its jobs in this order. Only the
-    // path is made here; the file is the runner's.
-    let language_file = language::path();
-    let language_job = start_language(work.as_deref(), language_file.clone(), &sender);
-    let my_language_file = my_language::path();
-    let my_language_job = start_my_language(work.as_deref(), my_language_file.clone(), &sender);
-    let english_file = english::path();
-    let english_job = start_english(work.as_deref(), english_file.clone(), &sender);
-    let at_once_file = at_once::path();
-    let at_once_job = start_at_once(work.as_deref(), at_once_file.clone(), &sender);
-    let (translator, key_file, cache) = online_translator();
-    let settings = start_settings(
-        &window,
-        key_file.as_deref(),
-        KeyOwner::detect(),
-        articles.clone(),
-        &sender,
-    );
+        };
+    view.set_controller(controller.as_ref().map(Controller::dispatcher));
+    // The key is read off GTK's thread; the controller publishes its result
+    // as the first `KeyChanged` once this event is dispatched.
+    start_key_load(key_file.clone(), &sender);
+    let work = controller
+        .as_ref()
+        .map_or_else(WorkRef::new, Controller::work);
+    let settings = start_settings(&window, key_file.as_deref(), KeyOwner::detect(), &sender);
     let about = About::new(&window);
     let session = Session {
-        binding,
+        dirs: dirs.clone(),
         view,
         window,
         recording,
         timed,
         sender,
         current: Rc::downgrade(&handle),
-        manual: Manual::default(),
-        history: History::default(),
-        looking_up: LookingUp::default(),
-        shown: Shown::default(),
-        work: work.as_ref().map(Rc::downgrade).unwrap_or_default(),
-        articles: articles.clone(),
-        translator,
+        view_state: ViewState::default(),
+        view_actions,
+        applied_field_revision: 0,
+        sent_text: String::new(),
+        edits_sent: 0,
+        edits_at_set: 0,
+        read_sequence: 0,
+        work,
+        controller: controller.as_ref().map(Controller::dispatcher),
+        playback: None,
+        quit_timer: Rc::default(),
+        quit_timed_out,
+        restart,
         key_file,
-        cache,
-        cache_job: None,
-        clear_job: None,
+        store_job: None,
+        startup_job: None,
+        startup_read_job: None,
         settings,
         about,
-        bindings: Bindings::default(),
-        startup_on: false,
-        startup_read_job: None,
-        startup_job: None,
-        key_job: None,
-        save_job: None,
-        translating_word: None,
-        translating_sentence: None,
-        translating_definition: None,
-        online: Kept::default(),
-        check,
-        indexes: IndexCache::default(),
         capturing: Capturing::default(),
         copying: Copying::default(),
-        language: Language::default(),
-        saved_language: Language::default(),
-        language_file,
-        language_chosen: false,
-        language_job,
-        my_language: Language::Ru,
-        my_language_file,
-        my_language_chosen: false,
-        my_language_job,
-        english: English::Us,
-        english_file,
-        english_chosen: false,
-        english_job,
-        at_once: at_once::DEFAULT,
-        at_once_file,
-        at_once_chosen: false,
-        at_once_job,
-        first_run: FirstRun::Unasked,
-        download_run: 0,
-        release: download::BASE_URL.to_owned(),
-        first_run_choice: None,
+        download_offer: None,
     };
     serve(session, receiver);
     let tray = start_tray(&events);
@@ -3729,8 +2235,7 @@ fn start(
         _hold: application.hold(),
         _shortcut: handle,
         events,
-        _work: work,
-        _articles: articles,
+        _controller: controller,
         _tray: tray,
     }
 }
@@ -3750,6 +2255,12 @@ impl LaunchMode {
             Self::Normal
         }
     }
+
+    fn forward(self, send: impl FnOnce(WindowEvent)) {
+        if self == Self::Normal {
+            send(WindowEvent::Reopened);
+        }
+    }
 }
 
 /// These events own presentation policy; binding failures only update state.
@@ -3757,73 +2268,75 @@ impl LaunchMode {
 /// callbacks used by the resident, including silent initialization failures.
 enum WindowEvent {
     Shortcut(ShortcutEvent, Option<u64>),
-    Launched(LaunchMode),
+    Reopened,
     Settings,
 }
 
 trait WindowActions {
-    fn set_bindings(&mut self, binding: Binding, assignments: Bindings);
+    fn shortcut(&mut self, state: ShortcutState);
     fn present_main(&mut self);
     fn present_settings(&mut self);
     fn clipboard(&mut self, token: Option<&str>, timestamp: u64, receipt: Option<u64>);
     fn capture(&mut self, token: Option<&str>);
-    fn shortcut_status(&mut self, message: &str);
-    fn set_rebinding(&mut self, rebinding: bool);
+}
+
+/// The shell's binding report becomes one controller event; activation stays
+/// local because it starts a Read or a Capture, not a settings change.
+fn shortcut_state(event: ShortcutEvent) -> Option<ShortcutState> {
+    let convert = |bindings: addict_platform::shortcut::Bindings| ControllerBindings {
+        clipboard: bindings.clipboard,
+        screenshot: bindings.screenshot,
+    };
+    match event {
+        ShortcutEvent::Bound { bindings } => Some(ShortcutState::Bound(convert(bindings))),
+        ShortcutEvent::Changed { bindings } => Some(ShortcutState::Changed(convert(bindings))),
+        ShortcutEvent::Failed { message } => Some(ShortcutState::Failed(message)),
+        ShortcutEvent::ConfigureEnded { message } => {
+            Some(ShortcutState::ConfigureAnswered(message))
+        }
+        ShortcutEvent::Rebinding { bindings } => Some(ShortcutState::Rebinding(convert(bindings))),
+        ShortcutEvent::RebindEnded { message } => Some(ShortcutState::RebindEnded(message)),
+        ShortcutEvent::Activated { .. } => None,
+    }
 }
 
 fn dispatch_window(ui: &mut impl WindowActions, event: WindowEvent) {
     match event {
-        WindowEvent::Launched(LaunchMode::Normal) => ui.present_main(),
-        WindowEvent::Launched(LaunchMode::Background) => {}
+        WindowEvent::Reopened => ui.present_main(),
         WindowEvent::Settings => ui.present_settings(),
-        WindowEvent::Shortcut(
-            ShortcutEvent::Bound { bindings } | ShortcutEvent::Changed { bindings },
-            _,
-        ) => ui.set_bindings(Binding::Bound, bindings),
-        WindowEvent::Shortcut(ShortcutEvent::Failed { message }, _) => {
-            eprintln!("addict: shortcut unavailable: {message}");
-            // A rebind that failed twice ends here, and Retry starts over; the
-            // rows now say why, so no line about the dialog stays beside them.
-            ui.set_rebinding(false);
-            ui.shortcut_status("");
-            ui.set_bindings(Binding::NotBound { detail: message }, Bindings::default());
-        }
-        WindowEvent::Shortcut(
+        WindowEvent::Shortcut(event, receipt) => match event {
             ShortcutEvent::Activated {
                 action,
                 activation_token,
                 timestamp_ms,
+            } => match action {
+                Action::Clipboard => {
+                    ui.clipboard(activation_token.as_deref(), timestamp_ms, receipt)
+                }
+                Action::Screenshot => ui.capture(activation_token.as_deref()),
             },
-            receipt,
-        ) => match action {
-            Action::Clipboard => ui.clipboard(activation_token.as_deref(), timestamp_ms, receipt),
-            Action::Screenshot => ui.capture(activation_token.as_deref()),
+            ShortcutEvent::Failed { message } => {
+                // 0.5.0 still printed why the portal is unavailable; the
+                // controller's line says the same in the window.
+                eprintln!("addict: shortcut unavailable: {message}");
+                ui.shortcut(ShortcutState::Failed(message));
+            }
+            event => {
+                if let Some(state) = shortcut_state(event) {
+                    ui.shortcut(state);
+                }
+            }
         },
-        WindowEvent::Shortcut(ShortcutEvent::ConfigureEnded { message }, _) => {
-            ui.shortcut_status(&settings::change_text(message.as_deref()))
-        }
-        WindowEvent::Shortcut(ShortcutEvent::Rebinding { bindings }, _) => {
-            ui.set_bindings(Binding::Bound, bindings);
-            ui.set_rebinding(true);
-            ui.shortcut_status(settings::REBINDING);
-        }
-        WindowEvent::Shortcut(ShortcutEvent::RebindEnded { message }, _) => {
-            ui.set_rebinding(false);
-            ui.shortcut_status(&settings::rebind_text(message.as_deref()));
-        }
     }
 }
 
 impl WindowActions for Session {
-    fn set_bindings(&mut self, binding: Binding, assignments: Bindings) {
-        self.binding = binding;
-        self.bindings = assignments;
-        self.view.render_binding(&self.binding);
-        self.settings.render_binding(&self.binding, &self.bindings);
+    fn shortcut(&mut self, state: ShortcutState) {
+        self.dispatch_controller(addict_controller::Event::ShortcutChanged(state));
     }
 
     fn present_main(&mut self) {
-        self.reveal();
+        self.reopened();
     }
     fn present_settings(&mut self) {
         self.show_settings();
@@ -3833,12 +2346,6 @@ impl WindowActions for Session {
     }
     fn capture(&mut self, token: Option<&str>) {
         Session::capture(self, token);
-    }
-    fn shortcut_status(&mut self, message: &str) {
-        self.settings.say(message);
-    }
-    fn set_rebinding(&mut self, rebinding: bool) {
-        self.settings.set_rebinding(rebinding);
     }
 }
 
@@ -3912,9 +2419,18 @@ fn primary(application: gtk::Application) -> Result<gtk::Application, ExitCode> 
     Ok(application)
 }
 
+/// The command to re-execute after GApplication releases its bus name.
+fn restart_command() -> Result<(PathBuf, Vec<OsString>), String> {
+    Ok((startup::launch_target()?, Vec::new()))
+}
+
 /// Runs the resident application until it quits. With `evidence`, each
 /// activation is recorded to it.
-pub fn run(mode: LaunchMode, evidence: Option<Rc<RefCell<evidence::Writer>>>) -> ExitCode {
+pub fn run(
+    mode: LaunchMode,
+    evidence: Option<Rc<RefCell<evidence::Writer>>>,
+    dirs: Dirs,
+) -> ExitCode {
     // Without a display there is nothing to be resident for: leave before the
     // application or the portal worker exist.
     if let Err(e) = gtk::init() {
@@ -3928,22 +2444,44 @@ pub fn run(mode: LaunchMode, evidence: Option<Rc<RefCell<evidence::Writer>>>) ->
     let resident: Rc<RefCell<Option<Resident>>> = Rc::default();
     let recording = evidence.is_some();
 
+    let restart = Rc::new(Cell::new(false));
+    let quit_timed_out = Rc::new(Cell::new(false));
     let slot = resident.clone();
+    let restart_flag = restart.clone();
+    let timeout_flag = quit_timed_out.clone();
     application.connect_startup(move |application| {
-        let resident = start(application, evidence.clone());
+        let app = application.downgrade();
+        let restart_flag = restart_flag.clone();
+        let restarter = Rc::new(move || {
+            if let Some(application) = app.upgrade() {
+                restart_flag.set(true);
+                application.quit();
+            }
+        });
+        let resident = start(
+            application,
+            evidence.clone(),
+            &dirs,
+            timeout_flag.clone(),
+            restarter,
+        );
         *slot.borrow_mut() = Some(resident);
     });
     let launches = resident.clone();
     connect_launches(&application, move |mode| {
-        if let Some(resident) = launches.borrow().as_ref() {
-            let _ = resident
-                .events
-                .unbounded_send(Event::Window(WindowEvent::Launched(mode)));
-        }
+        mode.forward(|event| {
+            if let Some(resident) = launches.borrow().as_ref() {
+                let _ = resident.events.unbounded_send(Event::Window(event));
+            }
+        });
     });
+    let timeout_flag = quit_timed_out.clone();
     application.connect_shutdown(move |_| {
-        // Stops the workers; the shortcut one closes the portal session.
-        resident.borrow_mut().take();
+        // A deadline can mean a worker is stuck. Leave with GApplication
+        // after the timeout without waiting for worker teardown.
+        if !timeout_flag.get() {
+            resident.borrow_mut().take();
+        }
     });
 
     // With the flag only: registering here tells whether this launch is the
@@ -3959,6 +2497,18 @@ pub fn run(mode: LaunchMode, evidence: Option<Rc<RefCell<evidence::Writer>>>) ->
         LaunchMode::Background => vec!["addict", "--background"],
     };
     let status = application.run_with_args(&args);
+    if quit_timed_out.get() {
+        std::process::exit(i32::from(status.get()));
+    }
+    drop(application);
+    if restart.get() {
+        let error = match restart_command() {
+            Ok((program, args)) => Command::new(program).args(args).exec().to_string(),
+            Err(error) => error,
+        };
+        eprintln!("addict: could not restart: {error}");
+        return ExitCode::FAILURE;
+    }
     if status == glib::ExitCode::SUCCESS {
         ExitCode::SUCCESS
     } else {
@@ -3971,15 +2521,11 @@ mod tests {
     use gtk::{gio, prelude::*};
 
     use super::{
-        CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, CapturePress, Capturing, Copying, Event,
-        FailedEndFocus, LOOKUP_LIMIT, LaunchMode, TRANSLATE_LIMIT, WindowActions, WindowEvent,
-        connect_launches, connect_menu_actions, connect_settings_action, dispatch_window,
-        failed_end_focus, is_offered_command, missed_line,
+        Event, LaunchMode, WindowActions, WindowEvent, connect_launches, connect_menu_actions,
+        connect_settings_action, dispatch_window,
     };
-    use crate::view::{
-        Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
-    };
-    use addict_core::translation::Source as Language;
+    use addict_controller::{ShortcutState, deadlines::LOOKUP_LIMIT};
+    use addict_core::{dirs::Dirs, translation::Source as Language};
 
     #[test]
     fn the_lookup_limit_is_finite_and_short() {
@@ -3989,294 +2535,428 @@ mod tests {
 
     #[test]
     fn the_translate_limit_is_finite_and_its_own() {
+        use addict_controller::deadlines::TRANSLATE_LIMIT;
         assert!(!TRANSLATE_LIMIT.is_zero());
         assert_eq!(TRANSLATE_LIMIT.as_secs(), 10);
         assert!(TRANSLATE_LIMIT > LOOKUP_LIMIT);
     }
 
     #[test]
-    fn buffered_recording_can_be_reopened_from_the_beginning() {
-        use std::os::fd::AsRawFd;
-
-        let audio = b"buffered recording";
-        let file = super::buffer_recording(audio).expect("recording descriptor");
-        let path = format!("/proc/self/fd/{}", file.as_raw_fd());
-        assert_eq!(std::fs::read(path).unwrap(), audio);
+    fn restart_command_is_the_launch_target_without_background() {
+        let (program, args) = super::restart_command().expect("launch target");
+        assert_eq!(program, addict_platform::startup::launch_target().unwrap());
+        assert!(args.is_empty(), "{args:?}");
     }
 
-    #[tokio::test]
-    async fn import_completion_refreshes_missing_languages_before_the_next_lookup() {
-        use crate::{
-            dictionaries::{Answer, Articles, Dictionaries, State},
-            manual,
-        };
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn cancel_effect_stops_media_and_reports_cancelled_playback() {
+        use super::*;
         use addict_dictionary::{
-            format::{self, Contents, Headword},
-            import::{self, Source},
+            format::{Contents, Headword, SenseRecord, encode},
+            import::{self, Source as IndexSource},
         };
-        use addict_engine::work::{Outcome, Work};
-        use futures_util::{StreamExt, pin_mut, poll};
-        use std::{path::PathBuf, sync::Arc};
 
-        struct Temp(PathBuf);
-        impl Drop for Temp {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let temp = Temp(
-            std::env::temp_dir().join(format!("addict-import-resident-{}", std::process::id())),
-        );
-        std::fs::create_dir(&temp.0).unwrap();
-        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(Some(temp.0.clone())));
-        let missing = articles.indexes();
-        assert_eq!(missing.spanish, State::Missing);
-        assert_eq!(missing.catalan, State::Missing);
-        let mut cached = super::IndexCache {
-            known: Some(missing),
-            ..Default::default()
-        };
-        let old_generation = cached.generation;
-        let work = Work::start().expect("lookup runner");
-
-        for (language, source, word) in [
-            (Language::Es, Source::WikdictEsRu, "banco"),
-            (Language::Ca, Source::WikdictCaRu, "banc"),
-        ] {
-            assert!(
-                manual::offline(
-                    Some(&work),
-                    LOOKUP_LIMIT,
-                    articles.clone(),
-                    word.to_owned(),
-                    language,
-                    Language::Ru,
-                    cached.known,
-                    |_, _| {}
-                )
-                .is_err(),
-                "initially gated by Missing"
-            );
-            // The index writer is a small fixture for the resident cache
-            // regression; the real chooser/importer is tested separately.
-            let bytes = format::encode(&Contents {
-                source: "manual-import-regression".to_owned(),
-                headwords: vec![Headword {
-                    word: word.to_owned(),
-                    translations: vec!["банк".to_owned()],
-                    ..Default::default()
-                }],
+        gtk::init().expect("a display");
+        let data = KeyTestDir::new("addict-cancel-playback");
+        let index = encode(&Contents {
+            source: "oewn".into(),
+            senses: vec![SenseRecord {
+                definition: "the ground alongside a river".into(),
+                members: vec!["bank".into()],
                 ..Default::default()
-            })
-            .unwrap();
-            std::fs::write(import::index_path(&temp.0, source), bytes).unwrap();
-        }
+            }],
+            headwords: vec![Headword {
+                word: "bank".into(),
+                senses: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(import::index_path(&data.0, IndexSource::Oewn), index).unwrap();
 
-        let (sender, mut events) = futures_channel::mpsc::unbounded();
-        let refreshed = super::refresh_import(articles.clone(), sender);
-        pin_mut!(refreshed);
-        assert!(poll!(refreshed.as_mut()).is_pending());
-        let Event::ImportRefreshing(started) = events.next().await.unwrap() else {
-            panic!("refresh start");
-        };
-        started.send(cached.begin_import()).unwrap();
-        let event = tokio::select! {
-            result = &mut refreshed => panic!("completed before resident delivery: {result:?}"),
-            event = events.next() => event.expect("completion event"),
-        };
-        let Event::Imported(completed) = event else {
-            panic!("expected import completion");
-        };
-        assert!(
-            poll!(refreshed.as_mut()).is_pending(),
-            "not ready before resident delivery"
-        );
-        assert_eq!(cached.known, Some(missing));
-        // The same ordered completion operation used by Session::handle.
-        completed.apply(|generation, indexes| assert!(cached.update(generation, indexes)));
-        refreshed.await.expect("resident acknowledgement");
-        assert!(
-            !cached.update(old_generation, missing),
-            "late pre-import events are ignored"
-        );
+        // Four seconds of mono 16-bit PCM silence at 8 kHz.
+        let path = data.0.join("silence.wav");
+        let pcm_bytes = 64_000_u32;
+        let mut wave = b"RIFF".to_vec();
+        wave.extend((36 + pcm_bytes).to_le_bytes());
+        wave.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x01\0");
+        wave.extend(8_000_u32.to_le_bytes());
+        wave.extend(16_000_u32.to_le_bytes());
+        wave.extend_from_slice(b"\x02\0\x10\0data");
+        wave.extend(pcm_bytes.to_le_bytes());
+        wave.resize(44 + pcm_bytes as usize, 0);
+        std::fs::write(&path, wave).unwrap();
 
-        for (language, word) in [(Language::Es, "banco"), (Language::Ca, "banc")] {
-            let (send, receive) = futures_channel::oneshot::channel();
-            let _job = manual::offline(
-                Some(&work),
-                LOOKUP_LIMIT,
-                articles.clone(),
-                word.to_owned(),
-                language,
-                Language::Ru,
-                cached.known,
-                move |language, outcome| {
-                    let _ = send.send((language, outcome));
-                },
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.CancelPlaybackTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
+            },
+        );
+        let _controller = attach_controller(&mut session);
+        session.dispatch_controller(controller::Event::FieldEdited {
+            text: "bank".into(),
+            replaced: false,
+            source: None,
+        });
+        pump_until(&mut session, &mut events, |session| {
+            matches!(
+                session.view_state.shown.lookup(),
+                Some(crate::view::Lookup::Article(_))
             )
-            .expect("the first lookup after completion must be allowed");
-            let (answered, Outcome::Finished(looked)) = receive.await.unwrap() else {
-                panic!("lookup did not finish");
+        });
+        let file = gio::File::for_path(path);
+        session.dispatch_controller(controller::Event::PlayPressed {
+            article: session.view_state.article_id(),
+            url: file.uri().into(),
+        });
+        pump_until(&mut session, &mut events, |session| {
+            session.playback.is_some()
+        });
+        let (id, media) = session.playback.as_ref().unwrap();
+        let id = *id;
+        let stream = media.stream().clone();
+        assert!(stream.file().is_some_and(|playing| playing.equal(&file)));
+        assert!(stream.is_playing());
+        let playing = session.view_state.playback.as_ref().unwrap();
+        assert_eq!(playing.id, id);
+        assert_eq!(playing.state, controller::PlaybackState::Playing);
+
+        session.run_effect(Effect::Cancel(id));
+        assert!(session.playback.is_none());
+        assert!(!stream.is_playing());
+        assert!(stream.file().is_none());
+        // For the current id, only Played(Cancelled) clears the controller's playback.
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.playback.is_none()
+        });
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_fatal_screen_offers_restart() {
+        use addict_controller::{FatalView, ViewState};
+        use addict_engine::view::fatal;
+        use std::{cell::Cell, rc::Rc};
+
+        gtk::init().expect("a display");
+        let (mut session, _events, _work) =
+            test_session("io.github.doqhu.Addict.FatalScreenTest", Dirs::default());
+        let restarted = Rc::new(Cell::new(0));
+        session.restart = {
+            let restarted = restarted.clone();
+            Rc::new(move || restarted.set(restarted.get() + 1))
+        };
+        session.read_sequence = 3;
+        assert!(!session.window.is_visible());
+        session.handle(Event::Controller(
+            Box::new(ViewState {
+                revision: 1,
+                fatal: Some(FatalView {
+                    heading: fatal::HEADING.to_owned(),
+                    text: fatal::TEXT.to_owned(),
+                    restart: fatal::RESTART.to_owned(),
+                }),
+                ..ViewState::default()
+            }),
+            Vec::new(),
+        ));
+        assert!(session.window.is_visible());
+        let page = session
+            .window
+            .child()
+            .unwrap()
+            .downcast::<gtk::Box>()
+            .unwrap();
+        let heading = page
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::Label>()
+            .unwrap();
+        let text = heading
+            .next_sibling()
+            .unwrap()
+            .downcast::<gtk::Label>()
+            .unwrap();
+        let restart = text
+            .next_sibling()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+        assert_eq!(heading.text(), fatal::HEADING);
+        assert_eq!(text.text(), fatal::TEXT);
+        assert_eq!(restart.label().as_deref(), Some(fatal::RESTART));
+        assert_eq!(restarted.get(), 0);
+        restart.emit_clicked();
+        assert_eq!(restarted.get(), 1);
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// Keeps the hidden test application running until the tested exit path
+    /// stops it. A broken exit fails the test without leaving GTK running.
+    fn run_quit_test(application: &gtk::Application) -> std::time::Instant {
+        use std::{cell::Cell, rc::Rc, time::Duration};
+
+        use gtk::glib;
+
+        let _hold = application.hold();
+        application.connect_activate(|_| {});
+        let watchdog_fired = Rc::new(Cell::new(false));
+        let watchdog = glib::timeout_add_local_once(Duration::from_secs(5), {
+            let application = application.clone();
+            let fired = watchdog_fired.clone();
+            move || {
+                fired.set(true);
+                application.quit();
+            }
+        });
+        let status = application.run_with_args(&["addict-test"]);
+        let stopped = std::time::Instant::now();
+        assert!(!watchdog_fired.get(), "the shell did not quit");
+        watchdog.remove();
+        assert_eq!(status, glib::ExitCode::SUCCESS);
+        stopped
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn quit_effect_clears_the_fallback_timer_and_a_held_write_triggers_it() {
+        use super::*;
+        use std::time::Instant;
+
+        use addict_engine::at_once;
+
+        gtk::init().expect("a display");
+        for (id, finish_write) in [
+            ("io.github.doqhu.Addict.QuitEffectTest", true),
+            ("io.github.doqhu.Addict.QuitTimeoutTest", false),
+        ] {
+            let dir = KeyTestDir::new(id);
+            let dirs = Dirs {
+                config: Some(dir.0.clone()),
+                ..Dirs::default()
             };
-            assert_eq!(answered, language);
-            let Answer::Grouped(grouped) = looked.answer else {
-                panic!("expected the imported language entry");
-            };
-            assert!(
-                grouped
-                    .translations_into(addict_core::translation::Source::Ru)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|text| text == "банк")
-            );
+            let path = at_once::path(dirs.config.as_deref()).unwrap();
+            let (mut session, mut events, _work) = test_session(id, dirs);
+            let application = session.window.application().unwrap();
+            let controller = attach_controller(&mut session);
+            pump_until(&mut session, &mut events, |session| {
+                session.view_state.settings.languages_read
+            });
+
+            let (release, _gate) = hold_controller_worker(&controller);
+            session.handle(Event::Setting(controller::Event::AtOnceChosen(false)));
+            pump_until(&mut session, &mut events, |session| {
+                !session.view_state.settings.at_once
+            });
+            assert!(!path.exists(), "the write is still held");
+
+            let mut release = Some(release);
+            let finish = if finish_write { release.take() } else { None };
+            let session = Rc::new(RefCell::new(session));
+            let requested = glib::spawn_future_local({
+                let session = session.clone();
+                async move {
+                    let started = Instant::now();
+                    let mut session = session.borrow_mut();
+                    session.handle(Event::Tray(TrayEvent::Exit));
+                    let source = glib::MainContext::default()
+                        .find_source_by_id(
+                            session.quit_timer.borrow().as_ref().expect("timer armed"),
+                        )
+                        .expect("active quit timer");
+                    if let Some(finish) = finish {
+                        finish.send(()).unwrap();
+                    }
+                    (started, source)
+                }
+            });
+            let render = glib::spawn_future_local({
+                let session = session.clone();
+                async move {
+                    while let Some(event) = events.next().await {
+                        session.borrow_mut().handle(event);
+                    }
+                }
+            });
+            let stopped = run_quit_test(&application);
+            render.abort();
+            let (started, source) = glib::MainContext::default().block_on(requested).unwrap();
+            let elapsed = stopped.duration_since(started);
+            let session = session.borrow();
+            assert!(source.is_destroyed());
+            assert!(session.quit_timer.borrow().is_none());
+            assert_eq!(session.quit_timed_out.get(), !finish_write);
+            if finish_write {
+                assert!(elapsed < SHELL_QUIT_LIMIT, "{elapsed:?}");
+                assert!(path.is_file());
+                assert!(!at_once::read(Some(&path)));
+            } else {
+                assert!(elapsed >= SHELL_QUIT_LIMIT, "{elapsed:?}");
+                assert!(!path.exists(), "the shell quit while the write was held");
+                release.take().unwrap().send(()).unwrap();
+            }
+            session.settings.window().destroy();
+            session.window.destroy();
         }
     }
 
-    #[tokio::test]
-    async fn downloaded_dictionaries_refresh_even_when_cancelled_after_commit_before_refresh() {
-        use crate::{
-            dictionaries::{Answer, Articles, Dictionaries, State},
-            download::Downloader,
-            manual,
-            stub::{Route, Stub},
-        };
-        use addict_dictionary::{
-            format::{self, Contents, Headword},
-            import::{self, Source},
-            release::Published,
-        };
-        use addict_engine::work::{Outcome, Work};
-        use futures_util::StreamExt;
-        use std::{collections::HashMap, path::PathBuf, sync::Arc};
-        struct Temp(PathBuf);
-        impl Drop for Temp {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let temp = Temp(std::env::temp_dir().join(format!(
-            "addict-download-cancel-resident-{}",
-            std::process::id()
-        )));
-        std::fs::create_dir(&temp.0).unwrap();
-        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(Some(temp.0.clone())));
-        let mut cached = super::IndexCache {
-            known: Some(articles.indexes()),
-            ..Default::default()
-        };
-        assert_eq!(cached.known.unwrap().spanish, State::Missing);
-        assert_eq!(cached.known.unwrap().catalan, State::Missing);
-        let work = Work::start().unwrap();
-        let (sender, mut events) = futures_channel::mpsc::unbounded();
-        for (language, source, name, word) in [
-            (Language::Es, Source::WikdictEsRu, "wikdict-es-ru", "banco"),
-            (Language::Ca, Source::WikdictCaRu, "wikdict-ca-ru", "banc"),
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn launch_show_and_exit_fall_back_with_no_or_disconnected_controller() {
+        use super::*;
+        use std::time::Instant;
+
+        gtk::init().expect("a display");
+        for (id, disconnected) in [
+            ("io.github.doqhu.Addict.NoControllerTest", false),
+            ("io.github.doqhu.Addict.DisconnectedControllerTest", true),
         ] {
-            let stale = cached.known.unwrap();
-            let stale_generation = cached.generation;
-            let bytes = format::encode(&Contents {
-                source: "download-cancel-regression".to_owned(),
-                headwords: vec![Headword {
-                    word: word.to_owned(),
-                    translations: vec!["банк".to_owned()],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-            .unwrap();
-            let mut xz = Vec::new();
-            lzma_rs::xz_compress(&mut &bytes[..], &mut xz).unwrap();
-            let published = Published::of(name, &xz);
-            let stub = Stub::start(HashMap::from([(
-                format!(
-                    "/{}/{}",
-                    addict_dictionary::release::tag(),
-                    published.asset()
-                ),
-                Route::File(xz),
-            )]))
-            .unwrap();
-            let dir = temp.0.clone();
-            let refreshed = sender.clone();
-            let dictionaries = articles.clone();
-            let (finished, ended) = futures_channel::oneshot::channel();
-            let job = work.run(
-                crate::download::DOWNLOAD_LIMIT,
-                super::install_download(
-                    Downloader::with_base_url(stub.base_url()),
-                    published,
-                    dir,
-                    true,
-                    dictionaries,
-                    refreshed,
-                    |_| {},
-                ),
-                move |outcome| {
-                    let _ = finished.send(outcome);
-                },
-            );
-            // The commit callback has fired, but its independent finalizer
-            // is paused before the availability disk check can begin.
-            let Event::ImportRefreshing(started) = events.next().await.unwrap() else {
-                panic!("refresh start");
-            };
-            assert!(
-                import::index_path(&temp.0, source).is_file(),
-                "committed before cancellation"
-            );
-            drop(job);
-            assert!(matches!(ended.await.unwrap(), Outcome::Cancelled));
-            let generation = cached.begin_import();
-            assert!(
-                !cached.update(stale_generation, stale),
-                "advance before accepting old checks"
-            );
-            started.send(generation).unwrap();
-            let Event::Imported(completed) = events.next().await.unwrap() else {
-                panic!("independent completion");
-            };
-            completed.apply(|generation, indexes| assert!(cached.update(generation, indexes)));
-            assert!(!cached.update(stale_generation, stale));
-            let (send, receive) = futures_channel::oneshot::channel();
-            let _lookup = manual::offline(
-                Some(&work),
-                LOOKUP_LIMIT,
-                articles.clone(),
-                word.to_owned(),
-                language,
-                Language::Ru,
-                cached.known,
-                move |language, outcome| {
-                    let _ = send.send((language, outcome));
-                },
-            )
-            .expect("next lookup must be allowed");
-            let (answered, Outcome::Finished(looked)) = receive.await.unwrap() else {
-                panic!("lookup failed");
-            };
-            assert_eq!(answered, language);
-            let Answer::Grouped(grouped) = looked.answer else {
-                panic!("restored article");
-            };
-            assert!(
-                grouped
-                    .translations_into(addict_core::translation::Source::Ru)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|translation| translation == "банк")
-            );
+            let (mut session, _events, _work) = test_session(id, Dirs::default());
+            let application = session.window.application().unwrap();
+            if disconnected {
+                drop(attach_controller(&mut session));
+                let dispatcher = session.controller.as_ref().unwrap();
+                assert!(!dispatcher.dispatch(controller::Event::PanelClosed));
+            } else {
+                assert!(session.controller.is_none());
+            }
+
+            let requested = glib::spawn_future_local(async move {
+                assert!(!session.window.is_visible());
+                LaunchMode::Normal.forward(|event| session.handle(Event::Window(event)));
+                assert!(
+                    session.window.is_visible(),
+                    "a normal launch reveals the window"
+                );
+                session.window.set_visible(false);
+                session.handle(Event::Tray(TrayEvent::Show));
+                assert!(session.window.is_visible(), "tray Show reveals the window");
+
+                let started = Instant::now();
+                session.handle(Event::Tray(TrayEvent::Exit));
+                assert!(session.quit_timer.borrow().is_none());
+                assert!(!session.quit_timed_out.get());
+                (started, session)
+            });
+            let stopped = run_quit_test(&application);
+            let (started, session) = glib::MainContext::default().block_on(requested).unwrap();
+            let elapsed = stopped.duration_since(started);
+            assert!(elapsed < SHELL_QUIT_LIMIT, "{elapsed:?}");
+            session.settings.window().destroy();
+            session.window.destroy();
         }
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn escape_hides_the_panel_locally_or_through_the_controller() {
+        use super::*;
+        use glib::translate::IntoGlib;
+
+        gtk::init().expect("a display");
+        let (mut session, _events, _work) =
+            test_session("io.github.doqhu.Addict.DismissPanelTest", Dirs::default());
+        let controllers = session.window.observe_controllers();
+        let keys = (0..controllers.n_items())
+            .filter_map(|index| controllers.item(index))
+            .filter_map(|item| item.downcast::<gtk::EventControllerKey>().ok())
+            .find(|keys| keys.name().as_deref() == Some("dismiss-panel"))
+            .expect("the window's Escape handler");
+        let press_escape = || {
+            assert!(keys.emit_by_name::<bool>(
+                "key-pressed",
+                &[
+                    &gdk::Key::Escape.into_glib(),
+                    &0_u32,
+                    &gdk::ModifierType::empty()
+                ],
+            ));
+        };
+
+        assert!(session.controller.is_none());
+        session.window.present();
+        assert!(session.window.is_visible());
+        press_escape();
+        assert!(
+            !session.window.is_visible(),
+            "Escape closes without a controller"
+        );
+
+        // Receive the controller's renders without applying them to GTK yet.
+        let (send, renders) = std::sync::mpsc::channel();
+        let controller = controller::start(
+            Dirs::default(),
+            controller_platform(),
+            linux_start_facts(),
+            move |view, effects| send.send((view, effects)).unwrap(),
+        )
+        .unwrap();
+        connect_controller(&mut session, &controller);
+        session.window.present();
+        assert!(session.window.is_visible());
+        press_escape();
+
+        let (view, effects) = loop {
+            let (view, effects) = renders
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Escape render");
+            if !effects.is_empty() {
+                break (view, effects);
+            }
+        };
+        assert_eq!(effects, [Effect::HidePanel]);
+        assert!(session.window.is_visible(), "Escape waits for HidePanel");
+        session.render_controller(view, effects);
+        assert!(!session.window.is_visible(), "HidePanel closes the window");
+
+        drop(controller);
+        assert!(
+            !session
+                .controller
+                .as_ref()
+                .unwrap()
+                .dispatch(controller::Event::PanelClosed)
+        );
+        session.window.present();
+        assert!(session.window.is_visible());
+        press_escape();
+        assert!(
+            !session.window.is_visible(),
+            "Escape closes with a disconnected controller"
+        );
+
+        session.settings.window().destroy();
+        session.window.destroy();
     }
 
     /// A full session of the window for a test, its application registered
-    /// under `id`, no file of its own; given back with its events and the
-    /// runner it uses. Needs a display.
+    /// under `id`, with the supplied directories. Returns its events and
+    /// runner. Needs a display.
     fn test_session(
         id: &str,
+        dirs: Dirs,
     ) -> (
         super::Session,
         futures_channel::mpsc::UnboundedReceiver<Event>,
-        std::rc::Rc<addict_engine::work::Work>,
+        std::sync::Arc<addict_engine::work::Work>,
+    ) {
+        test_session_with_dirs(id, dirs)
+    }
+
+    fn test_session_with_dirs(
+        id: &str,
+        dirs: Dirs,
+    ) -> (
+        super::Session,
+        futures_channel::mpsc::UnboundedReceiver<Event>,
+        std::sync::Arc<addict_engine::work::Work>,
     ) {
         use super::*;
         let app = gtk::Application::builder()
@@ -4286,77 +2966,403 @@ mod tests {
         app.register(gio::Cancellable::NONE).unwrap();
         let (sender, events) = futures_channel::mpsc::unbounded();
         let binding = Binding::Attempting;
-        let (view, window) = build_ui(&app, &binding, &sender);
-        let work = Rc::new(Work::start().unwrap());
-        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(None));
-        let (translator, key_file, cache) = online_translator();
+        static STYLE: std::sync::Once = std::sync::Once::new();
+        STYLE.call_once(crate::style::install);
+        let (view, window, view_actions) = build_ui(&app, &binding, &sender);
+        let work = Arc::new(Work::start().unwrap());
+        let key_file = key::key_path(dirs.config.as_deref());
         // Not the desktop the tests run on: the portal's dialog, as on GNOME.
-        let settings = start_settings(
-            &window,
-            key_file.as_deref(),
-            KeyOwner::Portal,
-            articles.clone(),
-            &sender,
-        );
+        let settings = start_settings(&window, key_file.as_deref(), KeyOwner::Portal, &sender);
         let about = About::new(&window);
         let session = Session {
-            binding,
+            dirs,
             view,
             window,
             recording: None,
             timed: false,
             sender,
             current: Weak::new(),
-            manual: Manual::default(),
-            history: History::default(),
-            looking_up: LookingUp::default(),
-            shown: Shown::default(),
-            work: Rc::downgrade(&work),
-            articles: articles.clone(),
-            translator,
+            view_state: ViewState::default(),
+            view_actions,
+            applied_field_revision: 0,
+            sent_text: String::new(),
+            edits_sent: 0,
+            edits_at_set: 0,
+            read_sequence: 0,
+            work: Arc::downgrade(&work),
+            controller: None,
+            playback: None,
+            quit_timer: Rc::default(),
+            quit_timed_out: Rc::default(),
+            restart: Rc::new(|| {}),
             key_file,
-            cache,
-            cache_job: None,
-            clear_job: None,
+            store_job: None,
+            startup_job: None,
+            startup_read_job: None,
             settings,
             about,
-            bindings: Bindings::default(),
-            startup_on: false,
-            startup_read_job: None,
-            startup_job: None,
-            key_job: None,
-            save_job: None,
-            translating_word: None,
-            translating_sentence: None,
-            translating_definition: None,
-            online: Kept::default(),
-            check: None,
-            indexes: IndexCache::default(),
             capturing: Capturing::default(),
             copying: Copying::default(),
-            language: Language::default(),
-            saved_language: Language::default(),
-            language_file: None,
-            language_chosen: false,
-            language_job: None,
-            my_language: Language::Ru,
-            my_language_file: None,
-            my_language_chosen: false,
-            my_language_job: None,
-            english: English::Us,
-            english_file: None,
-            english_chosen: false,
-            english_job: None,
-            at_once: at_once::DEFAULT,
-            at_once_file: None,
-            at_once_chosen: false,
-            at_once_job: None,
-            first_run: FirstRun::Done,
-            download_run: 0,
-            release: download::BASE_URL.to_owned(),
-            first_run_choice: None,
+            download_offer: None,
         };
         (session, events, work)
+    }
+
+    struct KeyTestDir(std::path::PathBuf);
+
+    impl KeyTestDir {
+        fn new(name: &str) -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+
+            let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .expect("create a private key test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for KeyTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn find<T: IsA<gtk::Widget>>(root: &gtk::Widget, accept: &impl Fn(&T) -> bool) -> Option<T> {
+        if let Some(widget) = root.downcast_ref::<T>().filter(|widget| accept(widget)) {
+            return Some(widget.clone());
+        }
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            if let Some(found) = find(&widget, accept) {
+                return Some(found);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+
+    /// The key the real start would hand to the controller, read from the
+    /// session's configuration directory.
+    fn controller_key_source(session: &super::Session) -> addict_deepl::key::KeySource {
+        use addict_deepl::key::{self, KeyError, KeySource};
+
+        let path = key::key_path(session.dirs.config.as_deref());
+        let loaded = path
+            .as_deref()
+            .map_or(Err(KeyError::NoDirectory), key::read);
+        KeySource::new(loaded)
+    }
+
+    /// Gives `session` a running controller, as `start` does; the session
+    /// lives as long as the returned owner.
+    fn attach_controller(session: &mut super::Session) -> super::Controller {
+        attach_controller_with_release(session, String::new())
+    }
+
+    fn attach_controller_with_release(
+        session: &mut super::Session,
+        release: String,
+    ) -> super::Controller {
+        let key = controller_key_source(session).snapshot();
+        let controller =
+            super::start_controller(&session.dirs, key, false, release, &session.sender).unwrap();
+        connect_controller(session, &controller);
+        controller
+    }
+
+    fn attach_translator(
+        session: &mut super::Session,
+        translator: impl addict_core::translation::Translator + 'static,
+    ) -> super::Controller {
+        let source = controller_key_source(session);
+        let controller = addict_controller::start_with_translator(
+            session.dirs.clone(),
+            super::controller_platform(),
+            translator,
+            false,
+            source,
+            String::new(),
+            super::controller_renderer(&session.sender),
+        )
+        .unwrap();
+        connect_controller(session, &controller);
+        controller
+    }
+
+    /// Attaches a controller whose translation provider and key source are
+    /// supplied by the test, as the stub-server key tests need.
+    fn attach_translator_with_source(
+        session: &mut super::Session,
+        translator: impl addict_core::translation::Translator + 'static,
+        source: addict_deepl::key::KeySource,
+    ) -> super::Controller {
+        let controller = addict_controller::start_with_translator(
+            session.dirs.clone(),
+            super::controller_platform(),
+            translator,
+            false,
+            source,
+            String::new(),
+            super::controller_renderer(&session.sender),
+        )
+        .unwrap();
+        connect_controller(session, &controller);
+        controller
+    }
+
+    fn write_test_index(dir: &std::path::Path, source: addict_dictionary::import::Source) {
+        use addict_dictionary::{
+            format::{Contents, encode},
+            import::index_path,
+        };
+        let encoded = encode(&Contents {
+            source: source.index_name().trim_end_matches(".index").to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(index_path(dir, source), encoded).unwrap();
+    }
+
+    fn download_stub(
+        indexes: Vec<addict_dictionary::release::Published>,
+        mut routes: std::collections::HashMap<String, crate::stub::Route>,
+    ) -> crate::stub::Stub {
+        use addict_dictionary::release::{self, Manifest};
+        let manifest = Manifest {
+            format: addict_dictionary::format::VERSION,
+            indexes,
+        };
+        routes.insert(
+            format!("/{}/{}", release::tag(), release::MANIFEST_3),
+            crate::stub::Route::File(manifest.to_json().into_bytes()),
+        );
+        crate::stub::Stub::start(routes).unwrap()
+    }
+
+    fn hold_controller_worker(
+        controller: &super::Controller,
+    ) -> (std::sync::mpsc::Sender<()>, super::Job) {
+        let (started, waiting) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let wait = std::time::Duration::from_secs(5);
+        let job = controller.work().upgrade().unwrap().run(
+            wait,
+            async move {
+                started.send(()).unwrap();
+                let _ = blocked.recv_timeout(wait);
+            },
+            |_| {},
+        );
+        waiting.recv_timeout(wait).unwrap();
+        (release, job)
+    }
+
+    fn is_installing(session: &super::Session) -> bool {
+        session
+            .view_state
+            .downloads
+            .offer
+            .as_ref()
+            .is_some_and(|offer| matches!(offer.phase, super::OfferPhase::Installing(_)))
+    }
+
+    fn is_ended(session: &super::Session) -> bool {
+        session
+            .view_state
+            .downloads
+            .offer
+            .as_ref()
+            .is_some_and(|offer| matches!(offer.phase, super::OfferPhase::Ended { .. }))
+    }
+
+    fn connect_controller(session: &mut super::Session, controller: &super::Controller) {
+        session.work = controller.work();
+        session.controller = Some(controller.dispatcher());
+        session.view.set_controller(session.controller.clone());
+    }
+
+    #[derive(Clone)]
+    struct SharedCanned(std::sync::Arc<addict_core::translation::Canned>);
+
+    impl SharedCanned {
+        fn new(answer: &str) -> Self {
+            Self(std::sync::Arc::new(addict_core::translation::Canned::new(
+                Ok(answer),
+            )))
+        }
+
+        fn asked(&self) -> Vec<addict_core::translation::Request> {
+            self.0.asked()
+        }
+    }
+
+    impl addict_core::translation::Translator for SharedCanned {
+        fn translate(
+            &self,
+            request: addict_core::translation::Request,
+        ) -> addict_core::translation::Translating<'_> {
+            self.0.translate(request)
+        }
+    }
+
+    /// Handles the session's events until `done` holds, for at most 5 s.
+    fn pump_until(
+        session: &mut super::Session,
+        events: &mut futures_channel::mpsc::UnboundedReceiver<Event>,
+        done: impl Fn(&super::Session) -> bool,
+    ) {
+        use futures_util::{
+            StreamExt,
+            future::{Either, select},
+        };
+        let context = gtk::glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done(session) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the session did not settle"
+            );
+            let next = context.block_on(async {
+                match select(
+                    events.next(),
+                    gtk::glib::timeout_future(std::time::Duration::from_millis(100)),
+                )
+                .await
+                {
+                    Either::Left((event, _)) => event,
+                    Either::Right(_) => None,
+                }
+            });
+            if let Some(event) = next {
+                session.handle(event);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_gtk_edit_renders_the_controller_article_and_enter_waits_for_its_language() {
+        use super::*;
+        use addict_dictionary::{
+            format::{Contents, Headword, SenseRecord, encode},
+            import::{self, Source as IndexSource},
+        };
+
+        const DEFINITION: &str = "the ground alongside a river";
+        let data = KeyTestDir::new("addict-typed-lookup");
+        let index = encode(&Contents {
+            source: "oewn".to_owned(),
+            senses: vec![SenseRecord {
+                definition: DEFINITION.to_owned(),
+                members: vec!["bank".to_owned()],
+                ..Default::default()
+            }],
+            headwords: vec![Headword {
+                word: "bank".to_owned(),
+                senses: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(import::index_path(&data.0, IndexSource::Oewn), index).unwrap();
+        // A Spanish index with no entry for bank lets the lookup fall back to English.
+        let spanish = encode(&Contents {
+            source: "kaikki-es".to_owned(),
+            headwords: vec![Headword {
+                word: "otro".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(import::index_path(&data.0, IndexSource::KaikkiEs), spanish).unwrap();
+
+        gtk::init().expect("a display");
+        let (mut session, mut events, work) = test_session(
+            "io.github.doqhu.Addict.TypedLookupTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
+            },
+        );
+        drop(work);
+        let canned = SharedCanned::new("берег");
+        let _controller = attach_translator(&mut session, canned.clone());
+        // An earlier text in the history, submitted while the window was
+        // empty: nothing of it is asked online.
+        session.dispatch_controller(addict_controller::Event::FieldEdited {
+            text: "earlier text".to_owned(),
+            replaced: false,
+            source: None,
+        });
+        session.dispatch_controller(addict_controller::Event::FieldSubmitted);
+        session.dispatch_controller(addict_controller::Event::FieldEdited {
+            text: String::new(),
+            replaced: false,
+            source: None,
+        });
+        pump_until(&mut session, &mut events, |session| {
+            // Two new texts: the earlier one, then none.
+            session.view_state.text_number == 2
+        });
+        session.window.present();
+        let entry =
+            find::<gtk::Entry>(session.view.root().upcast_ref(), &|_| true).expect("lookup entry");
+
+        entry.insert_text("bank", &mut 0);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.answered == Some(Language::En)
+        });
+        assert!(
+            find::<gtk::Label>(session.view.root().upcast_ref(), &|label| {
+                label.text() == DEFINITION && label.is_visible()
+            })
+            .is_some()
+        );
+        assert!(canned.asked().is_empty(), "typing sends no online request");
+        // Typing keeps no history: back at the earlier text, Back has
+        // nowhere to go.
+        entry.set_text("earlier text");
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "earlier text" && !session.view_state.looking_up
+        });
+        assert!(!session.view_state.can_back, "typing keeps no history");
+
+        entry.delete_text(0, -1);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence.is_empty()
+        });
+        session.handle(Event::Setting(addict_controller::Event::ReadingChosen(
+            Language::Es,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.reading == Language::Es
+        });
+        entry.insert_text("bank", &mut 0);
+        entry.emit_activate();
+        pump_until(&mut session, &mut events, |session| {
+            !session.view_state.looking_up
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.line == "берег")
+        });
+        // Enter records the word: from the earlier text Back goes to it.
+        entry.set_text("earlier text");
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "earlier text" && !session.view_state.looking_up
+        });
+        assert!(session.view_state.can_back, "Enter records the word");
+        let requests = canned.asked();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].text, "bank");
+        assert_eq!(requests[0].source, Language::En);
+        assert_eq!(requests[0].target, Language::Ru);
+        session.window.destroy();
     }
 
     /// With Translate sentence at once on, a sentence read at a press is
@@ -4367,29 +3373,25 @@ mod tests {
     #[test]
     #[ignore = "needs a display; run alone"]
     fn a_copied_sentence_is_translated_at_once_only_while_the_switch_is_on() {
-        use std::sync::Arc;
-
-        use addict_core::translation::Canned;
-        use futures_util::StreamExt;
-        use gtk::glib;
-
-        use crate::view::{Online, Whole};
+        use crate::view::{OnlineKind, OnlineState};
         gtk::init().expect("a display");
-        let (mut session, mut events, _work) = test_session("io.github.doqhu.Addict.AtOnceTest");
-        let canned = Arc::new(Canned::new(Ok("Я сидел на берегу реки.")));
-        session.translator = canned.clone();
-        session.language = Language::En;
-        let context = glib::MainContext::default();
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.AtOnceTest", Dirs::default());
+        let canned = SharedCanned::new("Я сидел на берегу реки.");
+        let _controller = attach_translator(&mut session, canned.clone());
         let line = "I sat on the bank of the river.";
 
-        assert!(session.at_once);
-        let number = session.copying.begin();
-        session.handle(Event::Clipboard(number, Ok(line.to_owned())));
-        assert_eq!(session.manual.chosen(), None);
-        while session.translating_sentence.is_some() {
-            let event = context.block_on(events.next()).expect("an event");
-            session.handle(event);
-        }
+        let id = start_read(&mut session, &mut events);
+        session.handle(selected(id, line));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == line
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.state == OnlineState::Translated)
+        });
+        assert_eq!(session.view_state.chosen, None);
         let asked = canned.asked();
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].text, line);
@@ -4398,326 +3400,358 @@ mod tests {
             (asked[0].source, asked[0].target),
             (Language::En, Language::Ru)
         );
-        assert_eq!(
-            session.online.shown(None).sentence,
-            Some(&Whole::Asked(Online::Translated(
-                "Я сидел на берегу реки.".into()
-            )))
-        );
-        // A click on `bank` sends the word alone.
-        session.word_chosen(4);
-        while session.translating_word.is_some() || session.looking_up.job.is_some() {
-            let event = context.block_on(events.next()).expect("an event");
-            session.handle(event);
-        }
+        assert_eq!(session.view_state.online[0].line, "Я сидел на берегу реки.");
+        // A click on bank adds the word and uses the existing sentence.
+        session.word_chosen(session.view_state.text_number, 4);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.chosen == Some(4)
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.kind == OnlineKind::Word && row.state == OnlineState::Translated)
+        });
         let asked = canned.asked();
         assert_eq!(asked.len(), 2);
         assert_eq!(asked[1].text, "bank");
         assert_eq!(asked[1].context.as_deref(), Some(line));
 
-        // Off: a new press sends nothing, and the read of the file comes
-        // too late to change it.
-        session.handle(Event::AtOnceChosen(false));
-        session.handle(Event::AtOnceRead(true));
-        assert!(!session.at_once);
-        let number = session.copying.begin();
-        session.handle(Event::Clipboard(
-            number,
-            Ok("The bank was closed.".to_owned()),
-        ));
-        assert!(session.translating_sentence.is_none());
-        assert_eq!(session.online.shown(None), Default::default());
+        // Off affects the next read; a late startup read cannot undo it,
+        // because the controller ignores a read after a choice.
+        session.handle(Event::Setting(addict_controller::Event::AtOnceChosen(
+            false,
+        )));
+        // The controller applies the choice in event order; the next read
+        // carries the new snapshot.
+        let id = start_read(&mut session, &mut events);
+        session.handle(selected(id, "The bank was closed."));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "The bank was closed."
+        });
+        assert!(session.view_state.online.is_empty());
         assert_eq!(canned.asked().len(), 2);
     }
 
-    /// A saved Russian with English mine ends pressed whichever file is
-    /// read first, and a click on a gloss's English word with English mine
-    /// saves Spanish, and a later read neither undoes that choice nor drops
-    /// (and so cancels) its write. One session, put back to its start
-    /// between the two orders: a second one does not start in the same
-    /// process. Run alone:
-    /// GTK starts once per process, on one thread.
-    #[test]
-    #[ignore = "needs a display; run alone"]
-    fn the_reading_language_holds_in_either_read_order_and_on_a_gloss_click() {
-        use addict_core::translation::reading_languages;
-        gtk::init().expect("a display");
-        let (mut session, _events, _work) = test_session("io.github.doqhu.Addict.LanguageTest");
-        session.handle(Event::LanguageRead(Language::Ru));
-        assert_eq!(session.language, Language::En);
-        session.handle(Event::MyLanguageRead(Language::En));
-        assert_eq!(session.language, Language::Ru);
-        assert_eq!(session.saved_language, Language::Ru);
-
-        // Back to the start: nothing read, Russian mine.
-        session.saved_language = Language::default();
-        session.language = Language::default();
-        session.my_language = Language::Ru;
-        session
-            .view
-            .set_reading_languages(reading_languages(Language::Ru), Language::default());
-        session.handle(Event::MyLanguageRead(Language::En));
-        assert_eq!(session.language, Language::Es);
-        session.handle(Event::LanguageRead(Language::Ru));
-        assert_eq!(session.language, Language::Ru);
-        assert_eq!(session.saved_language, Language::Ru);
-
-        session.look_up_english("bank");
-        assert_eq!(session.saved_language, Language::Es);
-        assert_eq!(session.language, Language::Es);
-        // A read handled after the choice neither undoes it nor drops (and
-        // so cancels) its write.
-        session.handle(Event::LanguageRead(Language::Ru));
-        assert_eq!(session.saved_language, Language::Es);
-        assert!(session.language_job.is_some());
-        session.settings.window().destroy();
-        session.window.destroy();
+    /// Presses Read as the shortcut does, up to the controller's read effect
+    /// in the shell; gives the read's id. The window is not active, so
+    /// nothing is read from GTK.
+    fn start_read(
+        session: &mut super::Session,
+        events: &mut futures_channel::mpsc::UnboundedReceiver<Event>,
+    ) -> addict_controller::RequestId {
+        session.clear_for_read();
+        pump_until(session, events, |session| session.copying.read.is_some());
+        session.copying.read.as_ref().expect("a read").id
     }
 
-    /// British with English mine ends in the session's request as `EN-GB`
-    /// whichever file is read first; the English spelling row is shown only while English is
-    /// mine; a choice of the spelling or of my language is neither undone
-    /// by a later read nor loses its write; with Spanish mine the
-    /// spelling changes no request. One session, put back to its start
-    /// between the two orders. Run alone: GTK starts once per process, on
-    /// one thread.
-    #[test]
-    #[ignore = "needs a display; run alone"]
-    fn the_english_spelling_holds_in_either_read_order_and_shows_only_for_english() {
-        use addict_core::translation::{English, reading_languages};
-        use addict_deepl::client::sent;
-        use addict_engine::online::Subject;
-        gtk::init().expect("a display");
-        let (mut session, _events, _work) = test_session("io.github.doqhu.Addict.EnglishTest");
-        // A chosen word in the manual only: the field stays empty, so it is
-        // newer, and a change of language or spelling sends nothing.
-        let _ = session.manual.edit("Me gusta el color rojo.".to_owned());
-        let color = session
-            .manual
-            .words()
-            .iter()
-            .position(|word| &session.manual.sentence()[word.clone()] == "color")
-            .expect("color");
-        session.manual.choose(color).expect("a word");
-        // What the session sends for the word, as `start_translation` asks.
-        let target_lang = |session: &super::Session| {
-            let request = session
-                .online_request(Subject::Word(color), Language::Es)
-                .expect("a request");
-            sent(&request).target_lang
-        };
-        assert_eq!(session.settings.english_row(), (false, English::Us));
-        assert_eq!(target_lang(&session), "RU");
-
-        // The spelling read first, then English mine.
-        session.handle(Event::EnglishRead(English::Gb));
-        assert_eq!(session.english, English::Gb);
-        assert_eq!(session.settings.english_row(), (false, English::Gb));
-        assert_eq!(target_lang(&session), "RU");
-        session.handle(Event::MyLanguageRead(Language::En));
-        assert_eq!(session.settings.english_row(), (true, English::Gb));
-        assert_eq!(target_lang(&session), "EN-GB");
-
-        // Back to the start: nothing read, Russian mine, US.
-        session.my_language = Language::Ru;
-        session.english = English::Us;
-        session.shown = Default::default();
-        session.settings.render_english(English::Us);
-        session.settings.show_english(false);
-        session
-            .view
-            .set_reading_languages(reading_languages(Language::Ru), Language::default());
-        // English mine read first, then the spelling.
-        session.handle(Event::MyLanguageRead(Language::En));
-        assert_eq!(session.settings.english_row(), (true, English::Us));
-        assert_eq!(target_lang(&session), "EN-US");
-        session.handle(Event::EnglishRead(English::Gb));
-        assert_eq!(session.settings.english_row(), (true, English::Gb));
-        assert_eq!(target_lang(&session), "EN-GB");
-
-        // A choice holds against a later read.
-        session.handle(Event::EnglishChosen(English::Us));
-        session.handle(Event::EnglishRead(English::Gb));
-        assert_eq!(session.english, English::Us);
-        assert_eq!(target_lang(&session), "EN-US");
-        // Nor does the read drop (and so cancel) the write of the choice.
-        assert!(session.english_job.is_some());
-
-        // Spanish mine: the row is hidden and the spelling changes nothing.
-        session.handle(Event::MyLanguageChosen(Language::Es));
-        // A later read of my language neither undoes the choice nor drops
-        // its write.
-        session.handle(Event::MyLanguageRead(Language::Ru));
-        assert_eq!(session.my_language, Language::Es);
-        assert!(session.my_language_job.is_some());
-        assert!(!session.settings.english_row().0);
-        assert_eq!(target_lang(&session), "ES");
-        session.handle(Event::EnglishChosen(English::Gb));
-        assert_eq!(target_lang(&session), "ES");
-        // British, chosen while Spanish was mine, holds once English is.
-        session.handle(Event::MyLanguageChosen(Language::En));
-        assert!(session.settings.english_row().0);
-        assert_eq!(target_lang(&session), "EN-GB");
-        session.settings.window().destroy();
-        session.window.destroy();
+    /// The raw texts of a read whose selection is `line`.
+    fn selected(id: addict_controller::RequestId, line: &str) -> Event {
+        Event::SelectionRead(
+            id,
+            addict_controller::SelectionText {
+                selection: Some(line.to_owned()),
+                clipboard: None,
+            },
+        )
     }
 
-    /// With FreeDict missing, the line of the indexes names it while
-    /// Russian is mine, and goes once Spanish is: whether my language is
-    /// read after the indexes or chosen in Settings. The definition button
-    /// names my language. Run alone: GTK starts once per process, on one
-    /// thread.
-    #[test]
-    #[ignore = "needs a display; run alone"]
-    fn the_indexes_line_and_the_definition_button_follow_my_language() {
-        use addict_engine::dictionaries::{Indexes, State};
-        gtk::init().expect("a display");
-        let (mut session, _events, _work) = test_session("io.github.doqhu.Addict.MyTextsTest");
-        let indexes = Indexes {
-            definitions: State::Open,
-            spanish: State::Open,
-            catalan: State::Open,
-            ..Indexes::MISSING
-        };
-        session.handle(Event::Indexes {
-            generation: 0,
-            indexes,
-        });
-        let (visible, text) = session.view.indexes_line();
-        assert!(visible && text.contains("Russian translations"), "{text}");
-        session.render_shown();
-        assert_eq!(
-            session.view.definition_action_text(),
-            "Translate definition into Russian"
-        );
-
-        // My language read after the indexes, as at startup.
-        session.handle(Event::MyLanguageRead(Language::Es));
-        assert_eq!(session.view.indexes_line(), (false, String::new()));
-        assert_eq!(
-            session.view.definition_action_text(),
-            "Translate definition into Spanish"
-        );
-
-        // Back to Russian, then English chosen in Settings.
-        session.handle(Event::MyLanguageChosen(Language::Ru));
-        assert!(session.view.indexes_line().0);
-        assert_eq!(
-            session.view.definition_action_text(),
-            "Translate definition into Russian"
-        );
-        session.handle(Event::MyLanguageChosen(Language::En));
-        assert_eq!(session.view.indexes_line(), (false, String::new()));
-        assert_eq!(
-            session.view.definition_action_text(),
-            "Translate definition into English"
-        );
-        session.settings.window().destroy();
-        session.window.destroy();
-    }
-
-    #[test]
-    #[ignore = "needs a display; run alone"]
-    fn first_run_uses_the_saved_language_in_either_order() {
-        use super::*;
-        use addict_dictionary::{import::Source, release::Published};
-
-        gtk::init().expect("a display");
-        let (mut session, _events, work) = test_session("io.github.doqhu.Addict.FirstRunTest");
-        // Observe request IDs without contacting the release server.
-        session.work = Weak::new();
-        let pending = || work.run(language::FILE_LIMIT, std::future::pending::<()>(), |_| {});
-        let indexes = Indexes {
-            presence: Indexes::MISSING.presence.with(Source::WikdictRuEs),
-            ..Indexes::MISSING
-        };
-        for my in [Language::En, Language::Ru] {
-            for indexes_first in [false, true] {
-                session.first_run = FirstRun::Unasked;
-                session.download_run = 0;
-                session.my_language = Language::Ru;
-                session.my_language_job = Some(pending());
-                session.indexes = IndexCache::default();
-                session.check = Some(pending());
-                let indexes = Event::Indexes {
-                    generation: 0,
-                    indexes,
-                };
-                let language = Event::MyLanguageRead(my);
-                let [first, second] = if indexes_first {
-                    [indexes, language]
-                } else {
-                    [language, indexes]
-                };
-                session.handle(first);
-                assert!(matches!(session.first_run, FirstRun::Unasked));
-                assert_eq!(session.download_run, 0);
-                session.handle(second);
-                assert!(matches!(session.first_run, FirstRun::Done));
-                assert_eq!(session.download_run, u64::from(my == Language::En));
-            }
+    /// Puts `texts` into the field one after another as the user would
+    /// submit them, with a controller attached, and waits for them: Back
+    /// has somewhere to go.
+    fn submit_texts(
+        session: &mut super::Session,
+        events: &mut futures_channel::mpsc::UnboundedReceiver<Event>,
+        texts: &[&str],
+    ) {
+        use super::FieldEdit;
+        for text in texts {
+            session.view.set_field_text(text);
+            session.sentence_changed((*text).to_owned(), FieldEdit::Typed);
+            session.submitted();
         }
-
-        // A stale snapshot cannot dismiss a pending offer, and an unrelated
-        // file in the latest accepted snapshot keeps the offer due.
-        session.my_language = Language::En;
-        let manifest = Manifest {
-            format: addict_dictionary::format::VERSION,
-            indexes: vec![Published::of("oewn", b"xz")],
-        };
-        session.first_run = FirstRun::Pending(manifest.clone());
-        let current = session.indexes.begin_import();
-        session.handle(Event::Indexes {
-            generation: current - 1,
-            indexes: Indexes::OPEN,
+        let last = texts.last().copied().unwrap_or_default().to_owned();
+        pump_until(session, events, move |session| {
+            session.view_state.sentence == last
+                && session.view_state.can_back
+                && !session.view_state.looking_up
         });
-        assert!(matches!(session.first_run, FirstRun::Pending(_)));
-        let (ready, _) = oneshot::channel();
-        session.handle(Event::Imported(ImportCompletion {
-            generation: current,
-            indexes,
-            ready,
-        }));
-        assert!(matches!(session.first_run, FirstRun::Pending(_)));
+    }
 
-        // A manifest arriving while the main window is visible must wait
-        // for the current generation before the offer can open.
-        session.first_run = FirstRun::Asking { _job: pending() };
-        session.window.set_visible(true);
+    /// A line read after the field was cleared for the read reaches the
+    /// field through the controller's snapshot, and its words can be
+    /// clicked: the snapshot of the clear never overwrites it (AD-21). The
+    /// read starts with that snapshot's effects, so the line cannot come
+    /// before it. Run alone: GTK starts once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_read_line_handled_before_the_cleared_snapshot_keeps_the_line() {
+        gtk::init().expect("a display");
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.ClearedLineTest", Dirs::default());
+        let _controller = attach_controller(&mut session);
+        session.dispatch_controller(addict_controller::Event::AtOnceChosen(false));
+        let line = "I sat on the bank of the river.";
+
+        let id = start_read(&mut session, &mut events);
+        session.handle(selected(id, line));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == line && !session.view_state.looking_up
+        });
+        assert_eq!(session.view.field_text(), line);
+        assert_eq!(session.sent_text, line);
+        assert_eq!(session.view_state.field.text, line);
+
+        session.word_chosen(session.view_state.text_number, 4);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.chosen == Some(4) && !session.view_state.looking_up
+        });
+        assert_eq!(session.view.field_text(), line);
+    }
+
+    /// A key typed right after Back, before Back's snapshot comes, is kept:
+    /// the controller's text of Back does not overwrite it, and the shell
+    /// and the controller agree on the typed text after. Run alone.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_keystroke_after_back_before_its_snapshot_is_kept() {
+        use super::FieldEdit;
+        gtk::init().expect("a display");
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.BackKeystrokeTest", Dirs::default());
+        let _controller = attach_controller(&mut session);
+        submit_texts(&mut session, &mut events, &["river", "bank"]);
+        let revision = session.applied_field_revision;
+
+        session.back();
+        session.view.set_field_text("banks");
+        session.sentence_changed("banks".to_owned(), FieldEdit::Typed);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "banks" && !session.view_state.looking_up
+        });
+        assert_eq!(session.view.field_text(), "banks");
+        assert_eq!(session.sent_text, "banks");
+        assert_eq!(session.view_state.field.text, "banks");
+        assert!(
+            session.applied_field_revision > revision,
+            "Back's revision is applied, its text is not"
+        );
+        // The shell is in step: a word click of the typed text is taken.
+        assert!(!session.field_is_newer());
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_delayed_ocr_snapshot_respects_newer_edits_and_read_presentation() {
+        use super::{Effect, FieldEdit, ViewState};
+
+        gtk::init().expect("a display");
+        let (mut session, _, _work) = test_session(
+            "io.github.doqhu.Addict.CaptureSnapshotTest",
+            Dirs::default(),
+        );
+        let mut recognized = ViewState {
+            revision: 1,
+            ocr_field_revision: Some(1),
+            ..ViewState::default()
+        };
+        recognized.field.text = "recognized words".to_owned();
+        recognized.field.revision = 1;
+        session.capturing.edits_at_recognition = session.edits_sent;
+        session.view.set_field_text("new typing");
+        session.sentence_changed("new typing".to_owned(), FieldEdit::Typed);
+        session.render_controller(recognized.clone(), Vec::new());
+        assert_eq!(session.applied_field_revision, 1);
+        assert_eq!(session.view.field_text(), "new typing");
+
+        session.give_up_press();
+        session.clear_for_read();
+        recognized.revision += 1;
+        recognized.field.revision += 1;
+        recognized.ocr_field_revision = Some(recognized.field.revision);
+        session.render_controller(
+            recognized,
+            vec![Effect::PresentCapture {
+                read_sequence: 0,
+                retry: true,
+            }],
+        );
+        assert_eq!(session.applied_field_revision, 1);
+        assert!(session.view.field_text().is_empty());
+        assert!(!session.window.is_visible());
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_hidden_picker_waits_for_close_and_rechecks_read_before_starting() {
+        use super::*;
+
+        gtk::init().expect("a display");
+        let (send, renders) = std::sync::mpsc::channel();
+        let controller = controller::start(
+            Dirs::default(),
+            controller_platform(),
+            StartFacts {
+                release: String::new(),
+                key: Some(Err(KeyError::NoDirectory)),
+                recording: false,
+                ..super::linux_start_facts()
+            },
+            move |_, effects| send.send(effects).unwrap(),
+        )
+        .unwrap();
+        let press = || {
+            controller.dispatch(addict_controller::Event::CapturePressed {
+                activation_token: None,
+            })
+        };
+        assert!(press());
+        assert!(controller.dispatch(addict_controller::Event::ReadPressed { sequence: 1 }));
+        assert!(press());
+        let ids: Vec<_> = (0..4)
+            .flat_map(|_| renders.recv_timeout(Duration::from_secs(5)).unwrap())
+            .filter_map(|effect| match effect {
+                Effect::CaptureArea { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        let &[closing, next] = ids.as_slice() else {
+            panic!("two picker IDs: {ids:?}");
+        };
+
+        let (mut session, mut events, work) =
+            test_session("io.github.doqhu.Addict.CaptureCloseTest", Dirs::default());
+        // Any actual start uses the missing-runner path instead of a real picker.
+        session.work = std::sync::Weak::new();
+        for read_wins in [false, true] {
+            let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
+            let job = work.run(Duration::from_secs(5), std::future::pending::<()>(), |_| {});
+            session.capturing.pending.insert(
+                closing,
+                CaptureEffect::Picker {
+                    cancel: Some(cancel),
+                    _job: job,
+                },
+            );
+            session.cancel_capture_effect(closing);
+            assert_eq!(cancelled.try_recv(), Ok(()));
+            session.capturing.pending.insert(
+                next,
+                CaptureEffect::Settling {
+                    read_sequence: session.read_sequence,
+                    hidden: false,
+                },
+            );
+            session.handle(Event::Hidden(next));
+            assert!(matches!(
+                session.capturing.pending.get(&next),
+                Some(CaptureEffect::Settling { hidden: true, .. })
+            ));
+            if read_wins {
+                session.clear_for_read();
+            }
+            session.handle(Event::CaptureFinished(
+                closing,
+                addict_controller::Event::AreaCaptured {
+                    id: closing,
+                    result: Err(Ended::Shell(CaptureFailure::Cancelled)),
+                    capture_ms: None,
+                },
+            ));
+            assert!(!session.capturing.pending.contains_key(&next));
+            let mut started = false;
+            while let Ok(event) = events.try_recv() {
+                if matches!(event, Event::CaptureFinished(id, addict_controller::Event::AreaCaptured {
+                    result: Err(Ended::Unfinished), ..
+                }) if id == next)
+                {
+                    started = true;
+                }
+            }
+            assert_eq!(started, !read_wins);
+        }
+    }
+
+    /// Without a controller, a Read press does not wait forever: the window
+    /// shows at once with the field empty and says nothing is selected or
+    /// copied. Run alone.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn read_without_a_controller_ends_the_wait_and_says_nothing_is_selected() {
+        gtk::init().expect("a display");
+        let (mut session, _, _work) =
+            test_session("io.github.doqhu.Addict.ReadFallbackTest", Dirs::default());
+        assert!(session.controller.is_none());
+        session.activated(None, 0, None);
         assert!(session.window.is_visible());
-        let (ready, mut generation) = oneshot::channel();
-        session.handle(Event::ImportRefreshing(ready));
-        let current = generation.try_recv().unwrap().unwrap();
-        assert_eq!(session.indexes.known, Some(indexes));
-        session.handle(Event::FirstRunOffer(session.download_run, manifest));
-        assert!(matches!(session.first_run, FirstRun::Pending(_)));
-        let (ready, _) = oneshot::channel();
-        session.handle(Event::Imported(ImportCompletion {
-            generation: current,
-            indexes: Indexes::OPEN,
-            ready,
-        }));
-        assert!(matches!(session.first_run, FirstRun::Done));
-
-        // The initial decision also waits when there is a stale snapshot.
-        session.first_run = FirstRun::Unasked;
-        assert!(session.indexes.update(current, indexes));
-        let run = session.download_run;
-        let (ready, mut generation) = oneshot::channel();
-        session.handle(Event::ImportRefreshing(ready));
-        let current = generation.try_recv().unwrap().unwrap();
-        assert!(matches!(session.first_run, FirstRun::Unasked));
-        assert_eq!(session.download_run, run);
-        let (ready, _) = oneshot::channel();
-        session.handle(Event::Imported(ImportCompletion {
-            generation: current,
-            indexes: Indexes::OPEN,
-            ready,
-        }));
-        assert!(matches!(session.first_run, FirstRun::Done));
-        assert_eq!(session.download_run, run);
-        session.settings.window().destroy();
+        assert_eq!(session.view_state.reading_source, None);
+        assert_eq!(
+            session.view.source_failure_text().as_deref(),
+            Some(crate::view::NOTHING_SELECTED_TEXT)
+        );
         session.window.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn capture_without_a_controller_shows_retry_and_records_unfinished() {
+        use super::*;
+
+        gtk::init().expect("a display");
+        let data = std::env::temp_dir().join(format!(
+            "addict-capture-fallback-{}.jsonl",
+            std::process::id()
+        ));
+        let (mut session, _, _work) = test_session(
+            "io.github.doqhu.Addict.CaptureFallbackTest",
+            Dirs::default(),
+        );
+        let writer = evidence::Writer::open(&data, evidence::Origin::Local).unwrap();
+        let writer = Rc::new(RefCell::new(writer));
+        session.recording = Some(Recording::start(writer, &session.window));
+
+        session.capture(Some("test-startup-token"));
+        assert!(session.window.is_visible());
+        assert!(session.capturing.activation_token.is_none());
+        let focus = gtk::prelude::GtkWindowExt::focus(&session.window)
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+        assert_eq!(focus.label().as_deref(), Some(crate::view::CAPTURE_LABEL));
+        let recorded = std::fs::read_to_string(&data).unwrap();
+        let ocr = recorded
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| row["event"] == "ocr")
+            .expect("OCR evidence");
+        assert_eq!(ocr["details"]["outcome"], "unfinished");
+        session.window.destroy();
+        std::fs::remove_file(data).unwrap();
+    }
+
+    /// Back while the selection and the clipboard are being read gives the
+    /// read up, as a typed text does: the line it reports later does not
+    /// replace Back's text. Run alone.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn back_during_a_clipboard_read_gives_the_read_up() {
+        gtk::init().expect("a display");
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.BackReadTest", Dirs::default());
+        let _controller = attach_controller(&mut session);
+        submit_texts(&mut session, &mut events, &["river", "bank"]);
+
+        let id = start_read(&mut session, &mut events);
+        session.back();
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "river"
+                && !session.view_state.looking_up
+                && session.copying.read.is_none()
+        });
+        // The controller's `Cancel` ended the read: what it reports later
+        // is ignored.
+        session.handle(selected(id, "The bank was closed."));
+        assert_eq!(session.view.field_text(), "river");
+        assert_eq!(session.sent_text, "river");
     }
 
     /// On a fresh install the first-run offer, fed `manifest-3.json` by the
@@ -4732,7 +3766,11 @@ mod tests {
 
         use super::*;
         use crate::stub::{Route, Stub};
-        use addict_dictionary::{pairs, release, sources};
+        use addict_dictionary::{
+            pairs,
+            release::{self, Manifest, Published},
+            sources,
+        };
 
         struct Temp(std::path::PathBuf);
         impl Drop for Temp {
@@ -4744,31 +3782,11 @@ mod tests {
             std::env::temp_dir().join(format!("addict-first-run-language-{}", std::process::id())),
         );
         std::fs::create_dir(&temp.0).unwrap();
-        // Put back when the test ends, before `temp` is removed.
-        struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
-        impl Drop for Env {
-            fn drop(&mut self) {
-                for (key, value) in &self.0 {
-                    // SAFETY: as when they were set below.
-                    unsafe {
-                        match value {
-                            Some(value) => std::env::set_var(key, value),
-                            None => std::env::remove_var(key),
-                        }
-                    }
-                }
-            }
-        }
-        let _env = Env(["XDG_DATA_HOME", "XDG_CONFIG_HOME"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect());
-        // SAFETY: the display tests run one per process ("run alone"); no
-        // other thread of this test reads the environment meanwhile.
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", temp.0.join("data"));
-            std::env::set_var("XDG_CONFIG_HOME", temp.0.join("config"));
-        }
+        let dirs = Dirs {
+            config: Some(temp.0.join("config/addict")),
+            data: Some(temp.0.join("data/addict")),
+            cache: None,
+        };
 
         let manifest = Manifest {
             format: addict_dictionary::format::VERSION,
@@ -4786,19 +3804,10 @@ mod tests {
         .unwrap();
 
         gtk::init().expect("a display");
-        let (mut session, mut events, _work) =
-            test_session("io.github.doqhu.Addict.FirstRunLanguageTest");
-        session.release = stub.base_url();
-        let context = glib::MainContext::default();
-        // Handles the events of the runner until `done` holds.
-        let mut wait = |session: &mut Session, done: &dyn Fn(&Session) -> bool| {
-            while !done(session) {
-                let event = context.block_on(events.next()).expect("an event");
-                session.handle(event);
-            }
-        };
         let queued = |session: &Session| -> Vec<String> {
-            let FirstRun::Installing { queue, .. } = &session.first_run else {
+            let OfferPhase::Installing(queue) =
+                &session.view_state.downloads.offer.as_ref().unwrap().phase
+            else {
                 panic!("installing");
             };
             queue
@@ -4817,61 +3826,62 @@ mod tests {
         };
 
         for chosen in [None, Some(Language::En)] {
-            // A fresh start: nothing chosen yet.
-            session.my_language = Language::Ru;
-            session.my_language_chosen = false;
-            session.my_language_job = None;
-            session.first_run = FirstRun::Unasked;
-            session.indexes = IndexCache::default();
-            session.window.set_visible(true);
-            session.handle(Event::MyLanguageRead(Language::Ru));
-            session.handle(Event::Indexes {
-                generation: 0,
-                indexes: Indexes::MISSING,
-            });
-            assert!(matches!(session.first_run, FirstRun::Asking { .. }));
-            wait(&mut session, &|session| {
-                matches!(session.first_run, FirstRun::Shown { .. })
-            });
-            let FirstRun::Shown { offer, .. } = &session.first_run else {
-                unreachable!();
+            let app_id = if chosen.is_some() {
+                "io.github.doqhu.Addict.FirstRunEnglishTest"
+            } else {
+                "io.github.doqhu.Addict.FirstRunRussianTest"
             };
+            let (mut session, mut events, _work) = test_session(app_id, dirs.clone());
+            std::fs::create_dir_all(dirs.config.as_ref().unwrap()).unwrap();
+            std::fs::write(dirs.config.as_ref().unwrap().join("my-language"), "ru\n").unwrap();
+            let _controller = attach_controller_with_release(&mut session, stub.base_url());
+            session.window.set_visible(true);
+            pump_until(&mut session, &mut events, |session| {
+                session.download_offer.is_some()
+            });
+            let (_, offer) = session.download_offer.as_ref().unwrap();
             assert_eq!(offer.my_language().selected(), 3, "Russian at first");
             assert_eq!(sorted(offer.listed()), sorted(set(Language::Ru)));
             if chosen.is_none() {
                 // A choice in Settings while the offer waits: it shows it
                 // and lists its set, and back to Russian.
-                session.handle(Event::MyLanguageChosen(Language::Es));
-                let FirstRun::Shown { offer, .. } = &session.first_run else {
-                    panic!("the offer stays");
-                };
+                session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+                    Language::Es,
+                )));
+                pump_until(&mut session, &mut events, |session| {
+                    session.view_state.settings.my_language == Language::Es
+                });
+                let (_, offer) = session.download_offer.as_ref().expect("the offer stays");
                 assert_eq!(offer.my_language().selected(), 1);
                 assert_eq!(sorted(offer.listed()), sorted(set(Language::Es)));
-                session.handle(Event::MyLanguageChosen(Language::Ru));
-                let FirstRun::Shown { offer, .. } = &session.first_run else {
-                    panic!("the offer stays");
-                };
+                session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+                    Language::Ru,
+                )));
+                pump_until(&mut session, &mut events, |session| {
+                    session.view_state.settings.my_language == Language::Ru
+                });
+                let (_, offer) = session.download_offer.as_ref().expect("the offer stays");
                 assert_eq!(sorted(offer.listed()), sorted(set(Language::Ru)));
             }
-            let FirstRun::Shown { offer, .. } = &session.first_run else {
-                unreachable!();
-            };
+            let (_, offer) = session.download_offer.as_ref().expect("the offer stays");
             if let Some(language) = chosen {
                 let index = Language::ALL
                     .iter()
                     .position(|one| *one == language)
                     .unwrap();
                 offer.my_language().set_selected(index as u32);
-                wait(&mut session, &|session| session.my_language == language);
+                pump_until(&mut session, &mut events, |session| {
+                    session.view_state.settings.my_language == language
+                });
                 assert_eq!(session.settings.shown_my_language(), Some(language));
-                let FirstRun::Shown { offer, .. } = &session.first_run else {
-                    panic!("the offer stays");
-                };
+                let (_, offer) = session.download_offer.as_ref().expect("the offer stays");
                 assert_eq!(offer.my_language().selected(), index as u32);
                 assert_eq!(sorted(offer.listed()), sorted(set(language)));
             }
-            let run = session.download_run;
-            session.handle(Event::FirstRunDownload(run));
+            let run = session.download_offer.as_ref().unwrap().0;
+            let (release, _gate) = hold_controller_worker(&_controller);
+            session.handle(Event::Setting(controller::Event::OfferDownloadPressed(run)));
+            pump_until(&mut session, &mut events, is_installing);
             assert_eq!(
                 queued(&session),
                 set(chosen.unwrap_or(Language::Ru)),
@@ -4879,37 +3889,581 @@ mod tests {
             );
             // Once Download is pressed the choice is gone, and one in
             // Settings leaves the queue as it is.
-            let FirstRun::Installing { offer, .. } = &session.first_run else {
-                panic!("installing");
-            };
+            let (_, offer) = session.download_offer.as_ref().expect("installing");
             assert!(!offer.shows_my_language());
             let before = queued(&session);
-            session.handle(Event::MyLanguageChosen(Language::Ca));
+            session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+                Language::Ca,
+            )));
+            pump_until(&mut session, &mut events, |session| {
+                session.view_state.settings.my_language == Language::Ca
+            });
             assert_eq!(queued(&session), before);
-            session.handle(Event::FirstRunCancel(run, None));
+            session.handle(Event::Setting(controller::Event::OfferCancelPressed(
+                run, None,
+            )));
+            pump_until(&mut session, &mut events, is_ended);
+            drop(release);
             // At most the first of the set was asked for before the cancel.
             let allowed = set(chosen.unwrap_or(Language::Ru));
             for path in stub.seen() {
-                if let Some(asset) = path.rsplit('/').next()
+                if let Some(asset) = path
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|path| path.rsplit('/').next())
                     && let Some(name) = asset.strip_suffix(".index.xz")
                 {
                     assert!(allowed.iter().any(|one| one == name), "{path}");
                 }
             }
+            session.settings.window().destroy();
+            session.window.destroy();
         }
         assert_eq!(set(Language::Ru), release::LEGACY_PUBLISHED);
         assert_ne!(set(Language::En), set(Language::Ru));
+    }
+
+    /// The reading switch and the gloss's English link end with the same
+    /// reading language whichever file was read first. Run alone: GTK starts
+    /// once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_reading_language_holds_in_either_read_order_and_on_a_gloss_click() {
+        use addict_dictionary::{
+            format::{Contents, Headword, SenseRecord, encode},
+            import::{self, Source as IndexSource},
+        };
+        gtk::init().expect("a display");
+        let data = KeyTestDir::new("addict-gloss-reading");
+        for (index, source, definition) in [
+            (
+                IndexSource::KaikkiEs,
+                "kaikki-es",
+                "Empresa que ofrece servicios monetarios.",
+            ),
+            (IndexSource::KaikkiEnSpanish, "es-en", "bank"),
+        ] {
+            let index_bytes = encode(&Contents {
+                source: source.to_owned(),
+                senses: vec![SenseRecord {
+                    definition: definition.to_owned(),
+                    ..Default::default()
+                }],
+                headwords: vec![Headword {
+                    word: "banco".to_owned(),
+                    senses: vec![0],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            std::fs::write(import::index_path(&data.0, index), index_bytes).unwrap();
+        }
+        let config = data.0.join("config");
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.LanguageTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                config: Some(config.clone()),
+                ..Dirs::default()
+            },
+        );
+        let canned = SharedCanned::new("translated");
+        let controller = attach_translator(&mut session, canned.clone());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        let read = |item: addict_controller::SettingsRead| {
+            assert!(controller.dispatch_settings_read(item));
+        };
+        let reading = |session: &super::Session| session.view_state.settings.reading;
+        let saved_file = || std::fs::read_to_string(config.join("language")).unwrap_or_default();
+        let wait_saved = |expected: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::fs::read_to_string(config.join("language"))
+                .unwrap_or_default()
+                .trim()
+                != expected
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the write did not land"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+
+        read(addict_controller::SettingsRead::Reading(Language::Ru));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::En
+        });
+        read(addict_controller::SettingsRead::My(Language::En));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::Ru
+        });
+        assert_eq!(reading(&session), Language::Ru);
+
+        // Back to the start: nothing read, Russian mine.
+        read(addict_controller::SettingsRead::My(Language::Ru));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::Ru
+        });
+        read(addict_controller::SettingsRead::Reading(Language::default()));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::En
+        });
+        read(addict_controller::SettingsRead::My(Language::En));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::Es
+        });
+        read(addict_controller::SettingsRead::Reading(Language::Ru));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::Ru
+        });
+
+        assert!(session.view_state.downloads.indexes.is_some());
+        session.view.set_field_text("banco");
+        session.sentence_changed("banco".to_owned(), super::FieldEdit::Typed);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.answered == Some(Language::Es)
+        });
+        let article = session.view_state.article_id();
+        session.handle(Event::Gloss(article, 0));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.shown.choice() == Some(super::Choice::Gloss(0))
+        });
+        session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
+        session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "bank" && reading(session) == Language::Es
+        });
+        assert_eq!(reading(&session), Language::Es);
+        // A read handled after the choice, while its write may still run,
+        // neither undoes it nor drops (and so cancels) its write.
+        let before = session.view_state.revision;
+        read(addict_controller::SettingsRead::Reading(Language::Ru));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.revision > before
+        });
+        assert_eq!(reading(&session), Language::Es);
+        wait_saved("es");
+        assert_eq!(saved_file().trim(), "es");
+
+        // A switch press before the gloss snapshot is delivered wins, even
+        // when it names the language the shell already showed.
+        session.handle(Event::Setting(addict_controller::Event::ReadingChosen(
+            Language::Ru,
+        )));
+        session.view.set_field_text("banco");
+        session.sentence_changed("banco".to_owned(), super::FieldEdit::Typed);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "banco"
+                && session.view_state.answered == Some(Language::Es)
+        });
+        let article = session.view_state.article_id();
+        session.handle(Event::Gloss(article, 0));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.shown.choice() == Some(super::Choice::Gloss(0))
+        });
+        session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
+        session.handle(Event::Setting(addict_controller::Event::ReadingChosen(
+            Language::Ru,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "bank"
+                && session.view_state.shown.translating().pressed == Language::Ru
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.line == "translated")
+        });
+        wait_saved("ru");
+        assert_eq!(canned.asked().last().unwrap().source, Language::Ru);
+
+        // The controller sees the gloss choice before the target change,
+        // even while GTK still holds the previous saved reading language.
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::Ru,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::Ru
+        });
+        session.handle(Event::Setting(addict_controller::Event::ReadingChosen(
+            Language::Es,
+        )));
+        session.view.set_field_text("banco");
+        session.sentence_changed("banco".to_owned(), super::FieldEdit::Typed);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "banco"
+                && session.view_state.answered == Some(Language::Es)
+        });
+        let article = session.view_state.article_id();
+        session.handle(Event::Gloss(article, 0));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.shown.choice() == Some(super::Choice::Gloss(0))
+        });
+        let first = canned.asked().len();
+        session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::Ca,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::En
+                && session.view_state.shown.translating().my == Language::Ca
+                && session.view_state.sentence == "bank"
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.line == "translated")
+        });
+        let requests = canned.asked();
+        let mut for_catalan = requests[first..]
+            .iter()
+            .filter(|request| request.target == Language::Ca);
+        let request = for_catalan.next().expect("translation into Catalan");
+        assert_eq!(
+            (request.text.as_str(), request.source),
+            ("bank", Language::En)
+        );
+        assert!(for_catalan.next().is_none());
         session.settings.window().destroy();
         session.window.destroy();
     }
 
-    /// With Russian's set installed, a change of my language in Settings to
-    /// English opens the Settings offer for missing indexes listing exactly
-    /// the five indexes English lacks (four pairs and the Russian article),
-    /// and Download queues them; a waiting
-    /// offer follows a later change; back to Russian nothing is offered and
-    /// nothing is asked of the network. A change while the first-run offer
-    /// owns the decision starts nothing. No file is removed.
+    /// British English reaches the request as `EN-GB` with English mine,
+    /// whichever setting was chosen first, and the row is shown only then.
+    /// Run alone: GTK starts once per process, on one thread.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_english_spelling_holds_in_either_read_order_and_shows_only_for_english() {
+        use super::*;
+        use addict_core::translation::English;
+        use addict_deepl::client::sent;
+        gtk::init().expect("a display");
+        let temp = KeyTestDir::new("addict-english-reading");
+        let config = temp.0.join("config");
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.EnglishTest",
+            Dirs {
+                config: Some(config.clone()),
+                ..Dirs::default()
+            },
+        );
+        let canned = SharedCanned::new("translated");
+        let controller = attach_translator(&mut session, canned.clone());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        let read = |item: addict_controller::SettingsRead| {
+            assert!(controller.dispatch_settings_read(item));
+        };
+        let wait_saved = |expected: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::fs::read_to_string(config.join("english"))
+                .unwrap_or_default()
+                .trim()
+                != expected
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the write did not land"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let target_lang = |session: &mut super::Session, events: &mut _| {
+            let previous = canned.asked().len();
+            let text = format!("word{}", char::from(b'a' + previous as u8));
+            session.view.set_field_text(&text);
+            session.sentence_changed(text, super::FieldEdit::Typed);
+            session.submitted();
+            pump_until(session, events, |session| {
+                canned.asked().len() > previous
+                    && session
+                        .view_state
+                        .online
+                        .iter()
+                        .any(|row| row.line == "translated")
+            });
+            sent(canned.asked().last().unwrap()).target_lang
+        };
+
+        assert_eq!(session.settings.english_row(), (false, English::Us));
+        assert_eq!(target_lang(&mut session, &mut events), "RU");
+
+        // The spelling read first, then English mine.
+        read(addict_controller::SettingsRead::English(English::Gb));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.english == English::Gb
+        });
+        assert_eq!(session.settings.english_row(), (false, English::Gb));
+        assert_eq!(target_lang(&mut session, &mut events), "RU");
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::En,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::En
+        });
+        assert_eq!(session.settings.english_row(), (true, English::Gb));
+        assert_eq!(target_lang(&mut session, &mut events), "EN-GB");
+
+        // Back to the start: nothing read, Russian mine, US.
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::Ru,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::Ru
+        });
+        read(addict_controller::SettingsRead::English(English::Us));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.english == English::Us
+        });
+        // English mine read first, then the spelling.
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::En,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::En
+        });
+        assert_eq!(session.settings.english_row(), (true, English::Us));
+        assert_eq!(target_lang(&mut session, &mut events), "EN-US");
+        read(addict_controller::SettingsRead::English(English::Gb));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.english == English::Gb
+        });
+        assert_eq!(session.settings.english_row(), (true, English::Gb));
+        assert_eq!(target_lang(&mut session, &mut events), "EN-GB");
+
+        // A choice holds against a later read, and its write is not dropped.
+        session.handle(Event::Setting(addict_controller::Event::EnglishChosen(
+            English::Us,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.english == English::Us
+        });
+        wait_saved("us");
+        read(addict_controller::SettingsRead::English(English::Gb));
+        assert_eq!(session.view_state.settings.english, English::Us);
+        assert_eq!(target_lang(&mut session, &mut events), "EN-US");
+
+        // Spanish mine: the row is hidden and the spelling changes nothing.
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::Es,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::Es
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::fs::read_to_string(config.join("my-language"))
+            .unwrap_or_default()
+            .trim()
+            != "es"
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "my language was not kept"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        read(addict_controller::SettingsRead::My(Language::Ru));
+        assert_eq!(session.view_state.settings.my_language, Language::Es);
+        assert_eq!(
+            std::fs::read_to_string(config.join("my-language")).unwrap_or_default(),
+            "es\n"
+        );
+        assert!(!session.settings.english_row().0);
+        assert_eq!(target_lang(&mut session, &mut events), "ES");
+        session.handle(Event::Setting(addict_controller::Event::EnglishChosen(
+            English::Gb,
+        )));
+        wait_saved("gb");
+        assert_eq!(target_lang(&mut session, &mut events), "ES");
+        // British, chosen while Spanish was mine, holds once English is.
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::En,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::En
+        });
+        assert!(session.settings.english_row().0);
+        assert_eq!(target_lang(&mut session, &mut events), "EN-GB");
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// The indexes line and the definition button follow my language from
+    /// the controller's snapshot. Run alone: GTK starts once per process.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_indexes_line_and_the_definition_button_follow_my_language() {
+        use addict_dictionary::{import::Source, pairs};
+        gtk::init().expect("a display");
+        let data = KeyTestDir::new("addict-index-line");
+        for source in pairs::required_sources(Language::En)
+            .chain(pairs::required_sources(Language::Es))
+            .filter(|source| *source != Source::Freedict)
+        {
+            write_test_index(&data.0, source);
+        }
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.MyTextsTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
+            },
+        );
+        let controller = attach_controller(&mut session);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+                && session.view_state.downloads.indexes.is_some()
+        });
+        // The definition button names my language, which the controller's
+        // snapshot carries.
+        let mine = |session: &mut super::Session,
+                    events: &mut futures_channel::mpsc::UnboundedReceiver<Event>,
+                    language: Language| {
+            pump_until(session, events, |session| {
+                session.view_state.shown.translating().my == language
+            });
+        };
+        let (visible, text) = session.view.indexes_line();
+        assert!(visible && text.contains("Russian translations"), "{text}");
+        session.render_shown();
+        assert_eq!(
+            session.view.definition_action_text(),
+            "Translate definition into Russian"
+        );
+
+        // My language read after the indexes, as at startup.
+        assert!(
+            controller.dispatch_settings_read(addict_controller::SettingsRead::My(Language::Es))
+        );
+        mine(&mut session, &mut events, Language::Es);
+        assert_eq!(session.view.indexes_line(), (false, String::new()));
+        assert_eq!(
+            session.view.definition_action_text(),
+            "Translate definition into Spanish"
+        );
+
+        // Back to Russian, then English chosen in Settings.
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::Ru,
+        )));
+        mine(&mut session, &mut events, Language::Ru);
+        assert!(session.view.indexes_line().0);
+        assert_eq!(
+            session.view.definition_action_text(),
+            "Translate definition into Russian"
+        );
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::En,
+        )));
+        mine(&mut session, &mut events, Language::En);
+        assert_eq!(session.view.indexes_line(), (false, String::new()));
+        assert_eq!(
+            session.view.definition_action_text(),
+            "Translate definition into English"
+        );
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// The first-run offer waits for both the saved language and the index
+    /// snapshot, in either order. Run alone: GTK starts once per process.
+    /// A my-language choice made before the start read ended gets its
+    /// Settings offer once the read ends: the first-run decision is made
+    /// first, as `my_language_chosen` made it, and the offer follows.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_choice_of_my_language_before_the_read_offers_its_missing_set_after_it() {
+        use super::*;
+        use addict_dictionary::{import::Source, pairs, release::Published};
+
+        gtk::init().expect("a display");
+        let data = KeyTestDir::new("addict-early-language");
+        let required: Vec<_> = pairs::required_sources(Language::Es).collect();
+        assert!(required.len() > 1, "a set with something left to lack");
+        write_test_index(&data.0, required[0]);
+        write_test_index(&data.0, Source::Oewn);
+        let stub = download_stub(
+            vec![Published::of("wikdict-es-en", b"asset")],
+            HashMap::new(),
+        );
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.DeferredOfferTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
+            },
+        );
+        let _controller = attach_controller_with_release(&mut session, stub.base_url());
+        assert!(session.download_offer.is_none());
+        assert_eq!(session.settings.download_text(), "");
+        session.handle(Event::Setting(controller::Event::MyLanguageChosen(
+            Language::Es,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_some()
+        });
+        assert!(session.view_state.settings.languages_read);
+        assert!(
+            session
+                .view_state
+                .downloads
+                .offer
+                .as_ref()
+                .unwrap()
+                .recovery
+        );
+        assert_eq!(
+            session.settings.download_text(),
+            "The dictionary download dialog is open."
+        );
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_first_run_offer_waits_for_the_main_window() {
+        use super::*;
+        use addict_dictionary::release::Published;
+
+        gtk::init().expect("a display");
+        let data = KeyTestDir::new("addict-background-offer");
+        let stub = download_stub(vec![Published::of("oewn", b"asset")], HashMap::new());
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.BackgroundFirstRunTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
+            },
+        );
+        let _controller = attach_controller_with_release(&mut session, stub.base_url());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.downloads.offer.is_some()
+        });
+        assert!(!session.window.is_visible());
+        assert!(session.download_offer.is_none());
+        session.handle(Event::Window(WindowEvent::Reopened));
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_some()
+        });
+        assert!(session.window.is_visible());
+        let (_, offer) = session.download_offer.as_ref().unwrap();
+        assert!(offer.window().is_visible());
+        assert_eq!(
+            offer.window().transient_for().as_ref(),
+            Some(session.window.upcast_ref())
+        );
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// A change of my language in Settings offers just what the new set
+    /// lacks, and a waiting offer follows later changes. Run alone.
     #[test]
     #[ignore = "needs a display; run alone"]
     fn a_change_of_my_language_in_settings_offers_what_the_new_set_lacks() {
@@ -4917,7 +4471,12 @@ mod tests {
 
         use super::*;
         use crate::stub::{Route, Stub};
-        use addict_dictionary::{import, pairs, release, sources};
+        use addict_dictionary::{
+            import, pairs,
+            release::{self, Manifest, Published},
+            sources,
+        };
+        use addict_engine::{dictionaries::Indexes, view::first_run};
 
         struct Temp(std::path::PathBuf);
         impl Drop for Temp {
@@ -4929,34 +4488,14 @@ mod tests {
             std::env::temp_dir().join(format!("addict-language-change-{}", std::process::id())),
         );
         std::fs::create_dir(&temp.0).unwrap();
-        // Put back when the test ends, before `temp` is removed.
-        struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
-        impl Drop for Env {
-            fn drop(&mut self) {
-                for (key, value) in &self.0 {
-                    // SAFETY: as when they were set below.
-                    unsafe {
-                        match value {
-                            Some(value) => std::env::set_var(key, value),
-                            None => std::env::remove_var(key),
-                        }
-                    }
-                }
-            }
-        }
-        let _env = Env(["XDG_DATA_HOME", "XDG_CONFIG_HOME"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect());
-        // SAFETY: the display tests run one per process ("run alone"); no
-        // other thread of this test reads the environment meanwhile.
-        unsafe {
-            std::env::set_var("XDG_DATA_HOME", temp.0.join("data"));
-            std::env::set_var("XDG_CONFIG_HOME", temp.0.join("config"));
-        }
+        let dirs = Dirs {
+            config: Some(temp.0.join("config/addict")),
+            data: Some(temp.0.join("data/addict")),
+            cache: None,
+        };
 
         // Russian's set, readable on disk and present in the snapshot.
-        let dir = import::data_dir().unwrap();
+        let dir = dirs.data.clone().unwrap();
         std::fs::create_dir_all(&dir).unwrap();
         let index = addict_dictionary::format::encode(&addict_dictionary::format::Contents {
             source: "installed".to_owned(),
@@ -4995,30 +4534,45 @@ mod tests {
                 .collect(),
         };
         assert_eq!(manifest.indexes.len(), 20);
-        let stub = Stub::start(HashMap::from([(
+        let mut routes = HashMap::from([(
             format!("/{}/{}", release::tag(), release::MANIFEST_3),
             Route::File(manifest.to_json().into_bytes()),
-        )]))
-        .unwrap();
+        )]);
+        for published in &manifest.indexes {
+            routes.insert(
+                format!("/{}/{}", release::tag(), published.asset()),
+                Route::Stall(published.name.as_bytes().to_vec()),
+            );
+        }
+        let stub = Stub::start(routes).unwrap();
 
         gtk::init().expect("a display");
         let (mut session, mut events, _work) =
-            test_session("io.github.doqhu.Addict.LanguageChangeTest");
-        session.release = stub.base_url();
-        session.my_language = Language::Ru;
-        session.first_run = FirstRun::Done;
-        assert!(session.indexes.update(0, indexes));
-        let context = glib::MainContext::default();
-        let mut wait = |session: &mut Session, done: &dyn Fn(&Session) -> bool| {
-            while !done(session) {
-                let event = context.block_on(events.next()).expect("an event");
-                session.handle(event);
-            }
+            test_session("io.github.doqhu.Addict.LanguageChangeTest", dirs);
+        let controller = attach_controller_with_release(&mut session, stub.base_url());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+                && session.view_state.downloads.indexes.is_some()
+        });
+        assert!(
+            controller.dispatch_settings_read(addict_controller::SettingsRead::My(Language::Ru))
+        );
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::Ru
+        });
+        let choose = |session: &mut super::Session, events: &mut _, language| {
+            let before = session.view_state.settings.my_chosen;
+            session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+                language,
+            )));
+            pump_until(session, events, |session| {
+                session.view_state.settings.my_chosen > before
+            });
         };
         let lacks = |my: Language| -> Vec<String> {
-            first_run::missing(&indexes, my)
-                .into_iter()
-                .map(str::to_owned)
+            pairs::required_sources(my)
+                .filter(|source| !indexes.presence.contains(*source))
+                .map(|source| source.index_name().trim_end_matches(".index").to_owned())
                 .collect()
         };
         let sorted = |mut names: Vec<String>| -> Vec<String> {
@@ -5026,39 +4580,31 @@ mod tests {
             names
         };
         let shown = |session: &Session| -> Vec<String> {
-            let FirstRun::Shown {
-                offer,
-                recovery: true,
-                ..
-            } = &session.first_run
-            else {
-                panic!("the Settings offer");
-            };
+            assert!(
+                session
+                    .view_state
+                    .downloads
+                    .offer
+                    .as_ref()
+                    .unwrap()
+                    .recovery
+            );
+            let (_, offer) = session.download_offer.as_ref().expect("the Settings offer");
             offer.listed()
         };
 
         // The same language again, and Russian's set present: nothing.
-        session.handle(Event::MyLanguageChosen(Language::Ru));
-        assert!(matches!(session.first_run, FirstRun::Done));
-        // On a fresh install the first-run offer owns the decision while it
-        // is due (a `--background` start, the window not yet shown).
-        assert!(session.indexes.update(0, Indexes::MISSING));
-        session.first_run = FirstRun::Pending(manifest.clone());
-        session.handle(Event::MyLanguageChosen(Language::Es));
-        assert!(matches!(session.first_run, FirstRun::Pending(_)));
-        assert!(session.indexes.update(0, indexes));
-        session.first_run = FirstRun::Done;
-        session.handle(Event::MyLanguageChosen(Language::Ru));
-        assert!(matches!(session.first_run, FirstRun::Done));
+        choose(&mut session, &mut events, Language::Ru);
+        assert!(session.view_state.downloads.offer.is_none());
         assert!(stub.seen().is_empty(), "no request: {:?}", stub.seen());
 
         // Download dictionaries with Russian's set readable: only other
         // languages' indexes are missing, so no dialog opens.
-        session.handle(Event::SettingsDownload);
-        wait(&mut session, &|session| {
-            !matches!(session.first_run, FirstRun::Preparing { .. })
+        session.handle(Event::Setting(controller::Event::DownloadPressed));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.downloads.settings_line == first_run::nothing_text(Language::Ru)
         });
-        assert!(matches!(session.first_run, FirstRun::Done));
+        assert!(session.view_state.downloads.offer.is_none());
         assert_eq!(
             session.settings.download_text(),
             first_run::nothing_text(Language::Ru)
@@ -5076,50 +4622,49 @@ mod tests {
                 "wikdict-ca-en"
             ]
         );
-        session.handle(Event::MyLanguageChosen(Language::En));
-        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
+        let (resume, _gate) = hold_controller_worker(&controller);
+        choose(&mut session, &mut events, Language::En);
+        assert!(session.view_state.downloads.settings_busy);
         // A change while preparing keeps the preparation, which lists for
         // the language in use when it ends.
-        let run = session.download_run;
-        session.handle(Event::MyLanguageChosen(Language::Es));
-        session.handle(Event::MyLanguageChosen(Language::En));
-        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
-        assert_eq!(session.download_run, run);
-        wait(&mut session, &|session| {
-            matches!(session.first_run, FirstRun::Shown { .. })
+        let requests = stub.seen();
+        choose(&mut session, &mut events, Language::Es);
+        choose(&mut session, &mut events, Language::En);
+        assert!(session.view_state.downloads.settings_busy);
+        assert_eq!(stub.seen(), requests);
+        drop(resume);
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_some()
         });
         assert_eq!(sorted(shown(&session)), sorted(lacks(Language::En)));
         // The waiting offer follows a change to Catalan, and closes on
         // Russian, whose set is whole.
         // Closed (it hides), it is shown again by a change.
-        let FirstRun::Shown { offer, .. } = &session.first_run else {
-            unreachable!();
-        };
+        let (_, offer) = session.download_offer.as_ref().unwrap();
         let window = offer.window().clone();
         window.close();
         assert!(!window.is_visible());
-        session.handle(Event::MyLanguageChosen(Language::Ca));
+        choose(&mut session, &mut events, Language::Ca);
         assert_eq!(sorted(shown(&session)), sorted(lacks(Language::Ca)));
         assert!(window.is_visible(), "the waiting offer is shown again");
-        session.handle(Event::MyLanguageChosen(Language::Ru));
-        assert!(matches!(session.first_run, FirstRun::Done));
+        choose(&mut session, &mut events, Language::Ru);
+        assert!(session.view_state.downloads.offer.is_none());
         assert!(!window.is_visible(), "the empty offer closes");
 
         // English again, accepted: the queue is what English lacks, in
         // manifest order.
-        session.handle(Event::MyLanguageChosen(Language::En));
-        wait(&mut session, &|session| {
-            matches!(session.first_run, FirstRun::Shown { .. })
+        choose(&mut session, &mut events, Language::En);
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_some()
         });
-        let run = session.download_run;
-        session.handle(Event::FirstRunDownload(run));
-        let FirstRun::Installing {
-            queue, recovery, ..
-        } = &session.first_run
-        else {
-            panic!("installing");
+        let run = session.download_offer.as_ref().unwrap().0;
+        session.handle(Event::Setting(controller::Event::OfferDownloadPressed(run)));
+        pump_until(&mut session, &mut events, is_installing);
+        let offer = session.view_state.downloads.offer.as_ref().unwrap();
+        let OfferPhase::Installing(queue) = &offer.phase else {
+            unreachable!()
         };
-        assert!(*recovery);
+        assert!(offer.recovery);
         let queued: Vec<String> = queue
             .rows()
             .iter()
@@ -5127,42 +4672,57 @@ mod tests {
             .collect();
         assert_eq!(queued, lacks(Language::En));
         // A change while installing leaves the install as it is.
-        session.handle(Event::MyLanguageChosen(Language::Ca));
-        assert!(matches!(session.first_run, FirstRun::Installing { .. }));
-        session.handle(Event::FirstRunCancel(run, None));
+        choose(&mut session, &mut events, Language::Ca);
+        assert!(is_installing(&session));
+        session.handle(Event::Setting(controller::Event::OfferCancelPressed(
+            run, None,
+        )));
+        pump_until(&mut session, &mut events, is_ended);
         // English's set present too, back to Russian: nothing is offered.
-        let english = pairs::required_sources(Language::En)
-            .fold(indexes.presence, |presence, source| presence.with(source));
-        assert!(session.indexes.update(
-            0,
-            Indexes {
-                presence: english,
-                ..indexes
+        for source in pairs::required_sources(Language::En) {
+            let path = import::index_path(&dir, source);
+            if !path.exists() {
+                std::fs::write(path, &index).unwrap();
             }
-        ));
-        let run = session.download_run;
-        session.handle(Event::MyLanguageChosen(Language::Ru));
-        assert!(matches!(session.first_run, FirstRun::Ended { .. }));
-        assert_eq!(session.download_run, run);
-
-        // A first-run offer waiting under `--background` for Russian, with
-        // one index of English's set on disk: English ends it (entry 4),
-        // and the Settings offer takes over for the rest.
-        assert!(
-            session.indexes.update(
-                0,
-                Indexes {
-                    presence: Indexes::MISSING
-                        .presence
-                        .with(addict_dictionary::import::Source::WikdictEnEs),
-                    ..Indexes::MISSING
-                }
-            )
+        }
+        choose(&mut session, &mut events, Language::Ru);
+        assert!(is_ended(&session));
+        assert_eq!(session.download_offer.as_ref().unwrap().0, run);
+        // On a background launch the deferred Russian offer gives way to
+        // recovery if a choice makes a partially installed set current.
+        let background = KeyTestDir::new("addict-language-change-background");
+        let dir_before = background.0.join("data");
+        std::fs::create_dir(&dir_before).unwrap();
+        write_test_index(&dir_before, addict_dictionary::import::Source::WikdictEnEs);
+        let (mut hidden, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.BackgroundLanguageChangeTest",
+            Dirs {
+                data: Some(dir_before),
+                ..Dirs::default()
+            },
         );
-        session.first_run = FirstRun::Pending(manifest.clone());
-        session.handle(Event::MyLanguageChosen(Language::En));
-        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
-        session.first_run = FirstRun::Done;
+        let _background_controller = attach_controller_with_release(&mut hidden, stub.base_url());
+        pump_until(&mut hidden, &mut events, |session| {
+            session.view_state.downloads.offer.is_some()
+        });
+        assert!(hidden.download_offer.is_none());
+        assert!(!hidden.view_state.downloads.offer.as_ref().unwrap().recovery);
+        choose(&mut hidden, &mut events, Language::En);
+        assert!(
+            hidden
+                .view_state
+                .downloads
+                .offer
+                .as_ref()
+                .is_none_or(|offer| offer.recovery)
+        );
+        pump_until(&mut hidden, &mut events, |session| {
+            session.download_offer.is_some()
+        });
+        assert!(hidden.view_state.downloads.offer.as_ref().unwrap().recovery);
+        hidden.settings.window().destroy();
+        hidden.window.destroy();
+
         for source in &russian {
             assert!(
                 import::index_path(&dir, *source).exists(),
@@ -5177,9 +4737,37 @@ mod tests {
     #[ignore = "needs a display; run alone"]
     fn settings_download_uses_the_shared_dialog_and_ignores_old_runs() {
         use super::*;
+        use crate::stub::Route;
         use addict_dictionary::release::Published;
         gtk::init().expect("a display");
-        let (mut session, mut events, work) = test_session("io.github.doqhu.Addict.RecoveryTest");
+        use addict_engine::view::first_run;
+        let data = KeyTestDir::new("addict-recovery-dialog");
+        write_test_index(&data.0, addict_dictionary::import::Source::Freedict);
+        let published = Published::of("oewn", b"asset!");
+        let stub = download_stub(
+            vec![published.clone()],
+            HashMap::from([(
+                format!(
+                    "/{}/{}",
+                    addict_dictionary::release::tag(),
+                    published.asset()
+                ),
+                Route::Stall(b"asset!".to_vec()),
+            )]),
+        );
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.RecoveryTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                config: Some(data.0.join("config")),
+                ..Dirs::default()
+            },
+        );
+        let controller = attach_controller_with_release(&mut session, stub.base_url());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+                && session.view_state.downloads.indexes.is_some()
+        });
 
         fn button(widget: &gtk::Widget, text: &str) -> Option<gtk::Button> {
             if let Some(button) = widget.downcast_ref::<gtk::Button>()
@@ -5212,51 +4800,44 @@ mod tests {
             }
             false
         }
-        let pending = || {
-            work.run(
-                download::MANIFEST_LIMIT,
-                std::future::pending::<()>(),
-                |_| {},
-            )
-        };
-        session.download_run = 1;
-        session.first_run = FirstRun::Preparing { _job: pending() };
         let action = button(
             session.settings.window().upcast_ref(),
             "Download dictionaries",
         )
         .unwrap();
+        let (resume, _gate) = hold_controller_worker(&controller);
         action.emit_clicked();
+        let event = events.try_recv().unwrap();
         assert!(
-            matches!(events.try_recv().unwrap(), Event::SettingsDownload),
+            matches!(event, Event::Setting(controller::Event::DownloadPressed)),
             "actual Settings callback"
         );
-        session.handle(Event::SettingsDownload);
-        assert_eq!(session.download_run, 1, "repeat preserves preparation");
-        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
-        let manifest = Manifest {
-            format: addict_dictionary::format::VERSION,
-            indexes: vec![Published::of("oewn", b"asset")],
-        };
-        session.handle(Event::RecoveryPrepared(
-            0,
-            Outcome::Finished(Ok(manifest.clone())),
-        ));
+        session.handle(event);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.downloads.settings_busy
+        });
+        let requests = stub.seen();
+        session.handle(Event::Setting(controller::Event::DownloadPressed));
         assert!(
-            matches!(session.first_run, FirstRun::Preparing { .. }),
-            "stale preparation ignored"
+            session.view_state.downloads.settings_busy,
+            "repeat preserves preparation"
         );
-        session.handle(Event::RecoveryPrepared(
-            1,
-            Outcome::Finished(Ok(manifest.clone())),
-        ));
-        let FirstRun::Shown {
-            offer, recovery, ..
-        } = &session.first_run
-        else {
-            panic!("shared recovery offer");
-        };
-        assert!(*recovery);
+        assert_eq!(stub.seen(), requests);
+        drop(resume);
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_some()
+        });
+        let (old, offer) = session.download_offer.as_ref().unwrap();
+        let old = *old;
+        assert!(
+            session
+                .view_state
+                .downloads
+                .offer
+                .as_ref()
+                .unwrap()
+                .recovery
+        );
         assert_eq!(
             offer.window().transient_for().as_ref(),
             Some(session.settings.window())
@@ -5269,95 +4850,94 @@ mod tests {
         button(offer.window().upcast_ref(), first_run::CLOSE)
             .unwrap()
             .emit_clicked();
-        assert!(matches!(
-            events.try_recv().unwrap(),
-            Event::FirstRunNotNow(1)
-        ));
-        session.handle(Event::FirstRunNotNow(1));
-        assert!(matches!(session.first_run, FirstRun::Done));
+        let event = events.try_recv().unwrap();
         assert!(
-            session.first_run_choice.is_none(),
+            matches!(event, Event::Setting(controller::Event::OfferNotNowPressed(id)) if id == old)
+        );
+        session.handle(event);
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_none()
+        });
+        assert!(
+            !data.0.join("config/first-run-download").exists(),
             "recovery Close keeps the first-run choice"
         );
-        session.download_run = 2;
-        session.show_download_offer(manifest, true);
-        let FirstRun::Shown {
-            offer,
-            manifest,
-            recovery,
-        } = std::mem::replace(&mut session.first_run, FirstRun::Done)
-        else {
-            unreachable!()
-        };
-        let mut queue = first_run::Queue::new(manifest.indexes);
-        queue.next();
-        offer.installing();
-        session.first_run = FirstRun::Installing {
-            offer,
-            queue,
-            dir: std::env::temp_dir(),
-            running: Some(("oewn".to_owned(), pending())),
-            recovery,
-        };
-        session.handle(Event::FirstRunProgress(1, "oewn".to_owned(), 100));
-        session.handle(Event::FirstRunInstalled(
-            1,
-            "oewn".to_owned(),
-            Outcome::Finished(Ok(std::path::PathBuf::new())),
-        ));
-        session.handle(Event::SettingsDownload);
-        session.handle(Event::FirstRunDownload(2));
-        let FirstRun::Installing {
-            queue,
-            running,
-            offer,
-            ..
-        } = &session.first_run
-        else {
-            panic!("repeat must preserve installation");
-        };
-        assert!(running.is_some());
-        assert!(
-            offer.window().is_visible(),
-            "active progress stays reachable"
-        );
-        assert_eq!(
-            queue.state("oewn"),
-            Some(&first_run::RowState::Running { received: 0 })
-        );
-        session.handle(Event::FirstRunProgress(2, "oewn".to_owned(), 3));
-        let FirstRun::Installing { queue, .. } = &session.first_run else {
-            unreachable!()
+        action.emit_clicked();
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_some()
+        });
+        let (id, offer) = session.download_offer.as_ref().unwrap();
+        let id = *id;
+        assert_ne!(id, old);
+        let window = offer.window().clone();
+        let (resume, _gate) = hold_controller_worker(&controller);
+        session.handle(Event::Setting(controller::Event::OfferDownloadPressed(id)));
+        pump_until(&mut session, &mut events, is_installing);
+        window.close();
+        session.handle(Event::Setting(controller::Event::OfferDownloadPressed(old)));
+        session.handle(Event::Setting(controller::Event::OfferCancelPressed(
+            old, None,
+        )));
+        session.handle(Event::Setting(controller::Event::DownloadPressed));
+        let previous = session.view_state.downloads.present;
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.downloads.present > previous
+        });
+        assert!(is_installing(&session));
+        assert!(window.is_visible(), "active progress stays reachable");
+        let queue = |session: &Session| {
+            let OfferPhase::Installing(queue) =
+                &session.view_state.downloads.offer.as_ref().unwrap().phase
+            else {
+                panic!("installing")
+            };
+            queue
+                .rows()
+                .iter()
+                .find(|(entry, _)| entry.name == "oewn")
+                .map(|(_, state)| state.clone())
         };
         assert_eq!(
-            queue.state("oewn"),
-            Some(&first_run::RowState::Running { received: 3 })
+            queue(&session),
+            Some(first_run::RowState::Running { received: 0 })
         );
-        session.first_run = FirstRun::Done;
+        drop(resume);
+        pump_until(&mut session, &mut events, |session| {
+            queue(session) == Some(first_run::RowState::Running { received: 3 })
+        });
+        assert_eq!(
+            queue(&session),
+            Some(first_run::RowState::Running { received: 3 })
+        );
+        session.handle(Event::Setting(controller::Event::OfferCancelPressed(
+            id, None,
+        )));
+        pump_until(&mut session, &mut events, is_ended);
         session.settings.window().destroy();
         session.window.destroy();
     }
 
+    /// A spy that records the reports the shell sends to the controller. It
+    /// does not copy the controller's transitions: those are tested with a
+    /// real controller and a real window.
     #[derive(Default)]
     struct ObservedWindow {
-        binding: Option<crate::view::Binding>,
-        assignments: addict_platform::shortcut::Bindings,
+        reports: Vec<ShortcutState>,
         presentations: usize,
         settings: usize,
         clipboard: Vec<(Option<String>, u64, Option<u64>)>,
         captures: Vec<Option<String>>,
-        status: String,
-        rebinding: bool,
+    }
+
+    impl ObservedWindow {
+        fn last(&self) -> Option<&ShortcutState> {
+            self.reports.last()
+        }
     }
 
     impl WindowActions for ObservedWindow {
-        fn set_bindings(
-            &mut self,
-            binding: crate::view::Binding,
-            assignments: addict_platform::shortcut::Bindings,
-        ) {
-            self.binding = Some(binding);
-            self.assignments = assignments;
+        fn shortcut(&mut self, state: ShortcutState) {
+            self.reports.push(state);
         }
         fn present_main(&mut self) {
             self.presentations += 1;
@@ -5372,17 +4952,122 @@ mod tests {
         fn capture(&mut self, token: Option<&str>) {
             self.captures.push(token.map(str::to_owned));
         }
-        fn shortcut_status(&mut self, message: &str) {
-            self.status = message.to_owned();
-        }
-        fn set_rebinding(&mut self, rebinding: bool) {
-            self.rebinding = rebinding;
-        }
+    }
+
+    /// The shell's shortcut events, mapped by [`super::shortcut_state`] and
+    /// sent to a real controller, move Settings as 0.5.0 did. No display.
+    #[test]
+    fn a_rebind_shows_the_old_keys_and_holds_the_button_until_it_ends() {
+        use std::{sync::mpsc, time::Duration};
+
+        use addict_controller::{Bindings as Keys, SettingsView, StartFacts};
+        use addict_deepl::key::KeyError;
+        use addict_platform::shortcut::{Bindings, ShortcutEvent};
+
+        use crate::view::Binding;
+
+        let (views, rendered) = mpsc::channel::<SettingsView>();
+        let controller = addict_controller::start(
+            Dirs::default(),
+            super::controller_platform(),
+            StartFacts {
+                release: String::new(),
+                key: Some(Err(KeyError::Missing)),
+                recording: false,
+                ..super::linux_start_facts()
+            },
+            move |state: addict_controller::ViewState, _effects| {
+                let _ = views.send(state.settings);
+            },
+        )
+        .unwrap();
+        let dispatcher = controller.dispatcher();
+        // Sends `event` as the shell does and returns the settled snapshot.
+        let send = |event: ShortcutEvent, done: &dyn Fn(&SettingsView) -> bool| {
+            let state = super::shortcut_state(event).expect("a shortcut state");
+            assert!(dispatcher.dispatch(addict_controller::Event::ShortcutChanged(state)));
+            loop {
+                let view = rendered
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("a snapshot");
+                if done(&view) {
+                    return view;
+                }
+            }
+        };
+        let keys = |bindings: &Bindings| Keys {
+            clipboard: bindings.clipboard.clone(),
+            screenshot: bindings.screenshot.clone(),
+        };
+        let old = Bindings {
+            clipboard: Some("F8".to_owned()),
+            screenshot: None,
+        };
+        let new = Bindings {
+            clipboard: Some("F7".to_owned()),
+            screenshot: Some("F6".to_owned()),
+        };
+
+        let window = send(
+            ShortcutEvent::Rebinding {
+                bindings: old.clone(),
+            },
+            &|view| view.rebinding,
+        );
+        assert!(window.rebinding);
+        assert_eq!(window.bindings, keys(&old));
+        assert!(matches!(window.binding, Binding::Bound));
+        assert_eq!(window.status_line, crate::settings::REBINDING);
+
+        // Settings updates first; the button stays held until the end.
+        let window = send(
+            ShortcutEvent::Bound {
+                bindings: new.clone(),
+            },
+            &|view| view.bindings.clipboard.as_deref() == Some("F7"),
+        );
+        assert_eq!(window.bindings, keys(&new));
+        assert!(window.rebinding);
+        let window = send(ShortcutEvent::RebindEnded { message: None }, &|view| {
+            !view.rebinding
+        });
+        assert!(!window.rebinding);
+        assert_eq!(window.status_line, crate::settings::rebind_text(None));
+
+        // Each way a rebind ends without new keys says so.
+        send(
+            ShortcutEvent::Rebinding {
+                bindings: old.clone(),
+            },
+            &|view| view.rebinding,
+        );
+        let window = send(
+            ShortcutEvent::RebindEnded {
+                message: Some("The keys are unchanged.".to_owned()),
+            },
+            &|view| !view.rebinding,
+        );
+        assert!(!window.rebinding);
+        assert_eq!(window.status_line, "The keys are unchanged.");
+
+        // A second failure ends it too, and leaves Retry.
+        send(ShortcutEvent::Rebinding { bindings: new }, &|view| {
+            view.rebinding
+        });
+        let window = send(
+            ShortcutEvent::Failed {
+                message: "broke".to_owned(),
+            },
+            &|view| matches!(view.binding, Binding::NotBound { .. }),
+        );
+        assert!(!window.rebinding);
+        assert!(window.status_line.is_empty());
+        assert!(matches!(window.binding, Binding::NotBound { .. }));
     }
 
     #[test]
     fn a_failed_capture_focuses_capture_or_retry_when_offered() {
-        use crate::view::Binding;
+        use crate::view::{Binding, FailedEndFocus, failed_end_focus};
         assert_eq!(
             failed_end_focus(&Binding::Attempting),
             FailedEndFocus::Capture
@@ -5396,47 +5081,53 @@ mod tests {
         );
     }
 
-    /// A job that stands for the one of a capture.
-    fn capture_job(work: &addict_engine::work::Work) -> addict_engine::work::Job {
-        work.run(std::time::Duration::from_secs(5), async {}, |_| {})
-    }
-
     #[test]
-    fn a_press_while_a_picker_waits_starts_nothing() {
-        let work = addict_engine::work::Work::start().expect("runner");
-        let mut capturing = Capturing::default();
-        assert_eq!(capturing.press(false), CapturePress::Start);
-        capturing.hiding = true;
-        assert_eq!(capturing.press(false), CapturePress::Ignored);
-        capturing.hiding = false;
-        capturing.job = Some(capture_job(&work));
-        assert_eq!(capturing.press(false), CapturePress::Ignored);
-        assert_eq!(capturing.press(true), CapturePress::Restart);
-    }
-
-    #[test]
-    fn a_retry_has_a_new_number_and_an_old_job_is_ignored() {
-        let work = addict_engine::work::Work::start().expect("runner");
-        let mut capturing = Capturing::default();
-        let old = capturing.next_number();
-        capturing.job = Some(capture_job(&work));
-        assert!(capturing.is_running(old));
-        // The capture ended: even its own late event is ignored.
-        capturing.job = None;
-        assert!(!capturing.is_running(old));
-        assert_eq!(capturing.press(false), CapturePress::Start);
-        let new = capturing.next_number();
-        assert_ne!(new, old);
-        capturing.job = Some(capture_job(&work));
-        assert!(capturing.is_running(new));
-        assert!(!capturing.is_running(old));
+    #[ignore = "needs a display; run alone"]
+    fn a_failed_capture_focuses_retry_in_the_window_through_the_controller() {
+        use super::*;
+        gtk::init().expect("a display");
+        let (mut session, mut events, work) =
+            test_session("io.github.doqhu.Addict.FailedFocusTest", Dirs::default());
+        drop(work);
+        let _controller = attach_controller(&mut session);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        // A portal that could not bind leaves Retry offered; that is where a
+        // capture without text sends the focus.
+        session.handle(Event::Setting(addict_controller::Event::ShortcutChanged(
+            ShortcutState::Failed("portal unavailable".to_owned()),
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            matches!(
+                session.view_state.settings.binding,
+                Binding::NotBound { .. }
+            )
+        });
+        assert_eq!(
+            failed_end_focus(&session.view_state.settings.binding),
+            FailedEndFocus::Retry
+        );
+        // Once it is bound again, the capture button takes the focus.
+        session.handle(Event::Setting(addict_controller::Event::ShortcutChanged(
+            ShortcutState::Bound(Default::default()),
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.binding == Binding::Bound
+        });
+        assert_eq!(
+            failed_end_focus(&session.view_state.settings.binding),
+            FailedEndFocus::Capture
+        );
+        session.settings.window().destroy();
+        session.window.destroy();
     }
 
     #[test]
     fn failed_initialization_stays_silent_until_a_normal_launch_and_retains_the_error() {
         use addict_platform::shortcut::ShortcutEvent;
         let mut window = ObservedWindow::default();
-        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Background));
+        LaunchMode::Background.forward(|event| dispatch_window(&mut window, event));
         dispatch_window(
             &mut window,
             WindowEvent::Shortcut(
@@ -5447,25 +5138,38 @@ mod tests {
             ),
         );
         assert!(
-            matches!(&window.binding, Some(crate::view::Binding::NotBound { detail }) if detail == "portal unavailable")
+            matches!(window.last(), Some(ShortcutState::Failed(detail)) if detail == "portal unavailable")
         );
         assert_eq!(window.presentations, 0);
         assert_eq!(window.settings, 0);
         // A later login invocation must not accidentally reveal the retained failure either.
-        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Background));
+        LaunchMode::Background.forward(|event| dispatch_window(&mut window, event));
         assert_eq!(window.presentations, 0);
-        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Normal));
+        dispatch_window(&mut window, WindowEvent::Reopened);
         assert_eq!(window.presentations, 1);
-        assert!(matches!(
-            window.binding,
-            Some(crate::view::Binding::NotBound { .. })
-        ));
+        assert!(matches!(window.last(), Some(ShortcutState::Failed(_))));
     }
 
     #[test]
-    fn a_rebind_shows_the_old_keys_and_holds_the_button_until_it_ends() {
-        use crate::view::Binding;
+    #[ignore = "needs a display; run alone"]
+    fn a_rebind_holds_configure_and_the_binding_row_in_the_window() {
+        use super::*;
         use addict_platform::shortcut::{Bindings, ShortcutEvent};
+
+        /// The keycaps the Settings window shows on its two shortcut rows.
+        fn keycaps(root: &gtk::Widget, into: &mut Vec<String>) {
+            if let Some(label) = root.downcast_ref::<gtk::Label>()
+                && label.has_css_class("keycap")
+            {
+                into.push(label.label().into());
+            }
+            let mut child = root.first_child();
+            while let Some(widget) = child {
+                keycaps(&widget, into);
+                child = widget.next_sibling();
+            }
+        }
+
         let old = Bindings {
             clipboard: Some("F8".to_owned()),
             screenshot: None,
@@ -5474,63 +5178,105 @@ mod tests {
             clipboard: Some("F7".to_owned()),
             screenshot: Some("F6".to_owned()),
         };
-        let shortcut = |event| WindowEvent::Shortcut(event, None);
-        let mut window = ObservedWindow::default();
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::Rebinding {
-                bindings: old.clone(),
-            }),
+        gtk::init().expect("a display");
+        let (mut session, mut events, work) =
+            test_session("io.github.doqhu.Addict.RebindTest", Dirs::default());
+        drop(work);
+        let _controller = attach_controller(&mut session);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        let shortcut = |event| Event::Window(WindowEvent::Shortcut(event, None));
+        let bindings = |session: &super::Session| session.view_state.settings.bindings.clone();
+        let shown = |session: &super::Session| {
+            let mut caps = Vec::new();
+            keycaps(session.settings.window().upcast_ref(), &mut caps);
+            caps
+        };
+
+        session.handle(shortcut(ShortcutEvent::Rebinding {
+            bindings: old.clone(),
+        }));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.rebinding
+                && bindings(session).clipboard.as_deref() == Some("F8")
+        });
+        assert!(shown(&session).iter().any(|cap| cap == "F8"));
+        assert_eq!(session.view_state.settings.status_line, settings::REBINDING);
+        assert!(matches!(
+            session.view_state.settings.binding,
+            Binding::Bound
+        ));
+        assert!(
+            !session.settings.change_is_sensitive(),
+            "held while rebinding"
         );
-        assert!(window.rebinding);
-        assert_eq!(window.assignments, old);
-        assert!(matches!(window.binding, Some(Binding::Bound)));
-        assert_eq!(window.status, crate::settings::REBINDING);
+        assert!(
+            !session.view.binding_row().0,
+            "a bound shortcut shows no row"
+        );
 
         // Settings updates first; the button stays held until the end.
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::Bound {
-                bindings: new.clone(),
-            }),
-        );
-        assert_eq!(window.assignments, new);
-        assert!(window.rebinding);
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::RebindEnded { message: None }),
-        );
-        assert!(!window.rebinding);
-        assert_eq!(window.status, crate::settings::rebind_text(None));
+        session.handle(shortcut(ShortcutEvent::Bound {
+            bindings: new.clone(),
+        }));
+        pump_until(&mut session, &mut events, |session| {
+            bindings(session).clipboard.as_deref() == Some("F7")
+                && session.view_state.settings.rebinding
+        });
+        assert!(shown(&session).iter().any(|cap| cap == "F7"));
+        assert_eq!(session.view_state.settings.status_line, settings::REBINDING);
+        assert!(!session.settings.change_is_sensitive(), "still held");
 
-        // Each way a rebind ends without new keys says so.
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::Rebinding { bindings: old }),
+        session.handle(shortcut(ShortcutEvent::RebindEnded { message: None }));
+        pump_until(&mut session, &mut events, |session| {
+            !session.view_state.settings.rebinding
+        });
+        assert_eq!(
+            session.view_state.settings.status_line,
+            settings::rebind_text(None)
         );
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::RebindEnded {
-                message: Some("The keys are unchanged.".to_owned()),
-            }),
+        assert!(
+            session.settings.change_is_sensitive(),
+            "released at the end"
         );
-        assert!(!window.rebinding);
-        assert_eq!(window.status, "The keys are unchanged.");
 
-        // A second failure ends it too, and leaves Retry.
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::Rebinding { bindings: new }),
+        // Each way a rebind ends without new keys says so, and a failed bind
+        // leaves Retry offered.
+        session.handle(shortcut(ShortcutEvent::Rebinding { bindings: old }));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.rebinding
+        });
+        session.handle(shortcut(ShortcutEvent::RebindEnded {
+            message: Some("The keys are unchanged.".to_owned()),
+        }));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.status_line == "The keys are unchanged."
+        });
+        session.handle(shortcut(ShortcutEvent::Rebinding { bindings: new }));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.rebinding
+        });
+        session.handle(shortcut(ShortcutEvent::Failed {
+            message: "broke".to_owned(),
+        }));
+        pump_until(&mut session, &mut events, |session| {
+            matches!(
+                session.view_state.settings.binding,
+                Binding::NotBound { .. }
+            )
+        });
+        assert_eq!(session.view_state.settings.status_line, "");
+        assert!(!session.view_state.settings.rebinding);
+        // The main window shows the failure, with Retry offered.
+        let (visible, _, retry) = session.view.binding_row();
+        assert!(visible && retry, "the binding row offers Retry");
+        assert!(
+            !session.settings.change_is_sensitive(),
+            "no session to configure"
         );
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::Failed {
-                message: "broke".to_owned(),
-            }),
-        );
-        assert!(!window.rebinding);
-        assert!(window.status.is_empty());
-        assert!(matches!(window.binding, Some(Binding::NotBound { .. })));
+        session.settings.window().destroy();
+        session.window.destroy();
     }
 
     #[test]
@@ -5540,7 +5286,7 @@ mod tests {
         let (sender, mut events) = futures_channel::mpsc::unbounded();
         connect_settings_action(&actions, &sender);
         let mut window = ObservedWindow::default();
-        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Normal));
+        dispatch_window(&mut window, WindowEvent::Reopened);
         dispatch_window(
             &mut window,
             WindowEvent::Shortcut(
@@ -5746,78 +5492,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_line_that_is_an_offered_command_is_not_a_text() {
-        for language in addict_core::translation::reading_languages(Language::Ru) {
-            assert!(is_offered_command(&install_tesseract(language)));
-            assert!(is_offered_command(&install_language(language)));
-        }
-        assert!(!is_offered_command("bank"));
-        assert!(!is_offered_command(&format!(
-            "run {}",
-            install_tesseract(Language::En)
-        )));
-        assert!(!is_offered_command(
-            "Catalan OCR data is not installed. Install it with: \
-             sudo dnf install tesseract-langpack-cat"
-        ));
-    }
-
-    #[test]
-    fn only_the_last_clipboard_read_is_the_one_that_runs() {
-        let mut copying = Copying::default();
-        assert!(!copying.is_running(0));
-        assert!(copying.end().is_none());
-
-        let first = copying.begin();
-        assert!(copying.is_running(first));
-        let cancellable = gio::Cancellable::new();
-        copying.read.as_mut().expect("read").cancellable = Some(cancellable.clone());
-
-        // A new read, after a new press, cancels the one that reads.
-        let second = copying.begin();
-        assert!(cancellable.is_cancelled());
-        assert_ne!(first, second);
-        assert!(!copying.is_running(first));
-        assert!(copying.is_running(second));
-
-        // Ended by an edit or a capture: what it reports later is ignored.
-        assert!(copying.end().is_some());
-        assert!(!copying.is_running(second));
-        assert!(copying.end().is_none());
-    }
-
-    #[test]
-    fn a_read_that_waits_for_the_window_is_ended_without_a_cancellable() {
-        let mut copying = Copying::default();
-        let number = copying.begin();
-        // The window is not active yet: nothing is read, nothing to cancel.
-        let read = copying.end().expect("read");
-        assert!(read.cancellable.is_none());
-        assert!(!copying.is_running(number));
-    }
-
-    #[test]
-    fn a_too_long_selection_is_named_before_the_clipboard() {
-        let selection = Some((Held::Selection, 1200));
-        let clipboard = Some((Held::Clipboard, 54828));
-        let selected = too_long_text(Held::Selection, 1200, CLIPBOARD_MAX_CHARS);
-        let copied = too_long_text(Held::Clipboard, 54828, CLIPBOARD_MAX_CHARS);
-        assert_eq!(missed_line(selection, clipboard), selected);
-        // The clipboard ran out of time: the selection still says so.
-        assert_eq!(missed_line(selection, None), selected);
-        // The selection was blank.
-        assert_eq!(missed_line(None, clipboard), copied);
-        // Neither was too long: nothing is selected or copied.
-        assert_eq!(missed_line(None, None), NOTHING_SELECTED_TEXT);
-    }
-
-    #[test]
-    fn the_clipboard_limit_is_finite_and_short() {
-        assert!(!CLIPBOARD_LIMIT.is_zero());
-        assert!(CLIPBOARD_LIMIT.as_secs() <= 1);
-    }
-
     /// The switch's whole job against a mock Background portal, which alone
     /// touches the autostart file.
     mod startup_portal {
@@ -5839,7 +5513,7 @@ mod tests {
         };
 
         use super::super::request_startup_change;
-        use crate::settings::StartupEnd;
+        use addict_core::failure::login_item::StartupEnd;
 
         const TEST: &str =
             "resident::tests::startup_portal::the_switch_changes_startup_only_through_the_portal";
@@ -5961,12 +5635,12 @@ mod tests {
             started.recv().expect("the mock portal started");
         }
 
-        fn change(enable: bool) -> StartupEnd {
+        fn change(enable: bool, state_file: PathBuf) -> StartupEnd {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(request_startup_change(enable))
+                .block_on(request_startup_change(enable, Some(state_file)))
         }
 
         /// Runs this test again on a private bus with no service directory, so
@@ -6042,6 +5716,7 @@ mod tests {
             });
             start_mock(mock.clone());
             let asked = || mock.asked.lock().unwrap().clone();
+            let change = |enable| change(enable, state_file.clone());
 
             // No launcher: the portal would not register a host app.
             let StartupEnd::NotAsked(reason) = change(true) else {
@@ -6089,5 +5764,306 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&entry).unwrap(), foreign);
             assert_eq!(std::fs::read_to_string(&state_file).unwrap(), "disabled\n");
         }
+    }
+
+    /// A key the shell committed stays active even when the store's answer
+    /// is a timeout: 0.5.0 published the active key before reporting the end.
+    #[test]
+    fn a_committed_key_save_stays_active_when_the_runner_reports_a_timeout() {
+        use std::{future, sync::mpsc, time::Duration};
+
+        use addict_controller::StartFacts;
+        use addict_deepl::key::{self, KeyError, Secret};
+        use addict_engine::view::KeyState;
+        use addict_engine::work::{Outcome, Work};
+
+        let temp = KeyTestDir::new("addict-key-timeout");
+        let path = temp.0.join("deepl.key");
+        // A real controller, rendering into a channel: no display is needed.
+        let (views, rendered) = mpsc::channel();
+        let controller = addict_controller::start(
+            Dirs::default(),
+            super::controller_platform(),
+            StartFacts {
+                release: String::new(),
+                key: Some(Err(KeyError::Missing)),
+                recording: false,
+                ..super::linux_start_facts()
+            },
+            move |state: addict_controller::ViewState, _effects| {
+                let _ = views.send(state.settings.key);
+            },
+        )
+        .unwrap();
+        let key = Secret::new("synthetic-timed-out-deepl").unwrap();
+        let save = super::persist_key(path.clone(), key.clone(), controller.dispatcher());
+        assert_eq!(key::read(&path), Err(KeyError::Missing));
+
+        let work = Work::start().unwrap();
+        let (send, receive) = mpsc::channel();
+        let _job = work.run(
+            Duration::from_secs(1),
+            async move {
+                save.await?;
+                // Hold completion until the runner has to report a timeout.
+                future::pending().await
+            },
+            move |outcome: Outcome<Result<(), key::WriteError>>| send.send(outcome).unwrap(),
+        );
+        let outcome = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(outcome, Outcome::TimedOut);
+        assert_eq!(key::read(&path), Ok(key.clone()));
+        // The written key went active although its job timed out.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rendered.recv_timeout(left) {
+                Ok(KeyState::Free | KeyState::Pro) => break,
+                Ok(_) => {}
+                Err(error) => panic!("the committed key never went active: {error}"),
+            }
+        }
+    }
+
+    /// Saving a key in Settings writes the file and makes the key active for
+    /// the next request, with the stub server checking the authorization sent
+    /// on every request, including a superseded save.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn settings_saves_update_the_active_deepl_key() {
+        use super::*;
+        use addict_deepl::{
+            DeepL,
+            key::{self, KeySource, Secret},
+            stub::{Reply, Stub},
+        };
+        use std::fs;
+
+        const INITIAL: &str = "synthetic-startup-deepl:fx";
+        const SAVED: &str = "synthetic-settings-deepl";
+        const SUPERSEDED: &str = "synthetic-superseded-deepl:fx";
+        const FREE: &str = "A DeepL key of the Free plan is set.";
+        const PRO: &str = "A DeepL key of the Pro plan is set.";
+
+        gtk::init().expect("a display");
+        let temp = KeyTestDir::new("addict-key-session");
+        let path = temp.0.join("config/deepl.key");
+        let initial = key::write(&path, Secret::new(INITIAL).unwrap()).expect("startup key");
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.KeyTest",
+            Dirs {
+                config: Some(temp.0.join("config")),
+                cache: Some(temp.0.join("cache")),
+                ..Dirs::default()
+            },
+        );
+        let stub = Stub::start(Reply::translation("translated")).expect("stub");
+        let source = KeySource::pending();
+        let deepl = DeepL::with_base_url(source.clone(), stub.base_url());
+        let controller = attach_translator_with_source(&mut session, deepl, source.clone());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        let request = |text: &str| addict_core::translation::Request {
+            text: text.to_owned(),
+            context: None,
+            source: Language::En,
+            target: Language::Ru,
+            english: addict_core::translation::English::Us,
+        };
+        controller.cache().put(
+            &addict_engine::cache::key_of(&request("cached")),
+            "from cache",
+        );
+        let assert_authorization = |index: usize, expected: &str| {
+            let seen = stub.seen();
+            assert_eq!(seen.len(), index + 1);
+            assert!(
+                seen[index].header("authorization")
+                    == Some(format!("DeepL-Auth-Key {expected}").as_str()),
+                "unexpected authorization"
+            );
+        };
+        let submit = |session: &mut super::Session, events: &mut _, text: &str| {
+            session.view.set_field_text(text);
+            session.sentence_changed(text.to_owned(), super::FieldEdit::Typed);
+            pump_until(session, events, |session| {
+                session.view_state.sentence == text
+            });
+            session.submitted();
+        };
+        let translate =
+            |session: &mut super::Session, events: &mut _, text: &str, expected: &str| {
+                let count = stub.seen().len();
+                submit(session, events, text);
+                pump_until(session, events, |session| {
+                    stub.seen().len() > count
+                        && session
+                            .view_state
+                            .online
+                            .iter()
+                            .any(|row| row.line == "translated")
+                });
+                assert_authorization(count, expected);
+            };
+
+        session.show_settings();
+        let window = session.settings.window().clone();
+        let root = window.upcast_ref::<gtk::Widget>();
+        let entry = find::<gtk::PasswordEntry>(root, &|_| true).unwrap();
+        let save = find::<gtk::Button>(root, &|button| {
+            button.label().as_deref() == Some("Save key")
+        })
+        .unwrap();
+        let state = find::<gtk::Label>(root, &|label| label.has_css_class("key-state")).unwrap();
+        let error_shown = || {
+            find::<gtk::Label>(root, &|label| {
+                label.is_visible() && label.label().starts_with("The key was not saved:")
+            })
+            .is_some()
+        };
+
+        assert_eq!(state.label(), "Checking…");
+        assert!(!entry.is_sensitive());
+        // While the startup key is still loading, a cached answer is shown
+        // and an uncached request waits: nothing goes to DeepL yet.
+        submit(&mut session, &mut events, "cached");
+        pump_until(&mut session, &mut events, |session| {
+            session
+                .view_state
+                .online
+                .iter()
+                .any(|row| row.line == "from cache")
+        });
+        submit(&mut session, &mut events, "uncached");
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "uncached"
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.state == crate::view::OnlineState::Pending)
+        });
+        assert!(stub.seen().is_empty());
+
+        // The shell's real key load publishes the startup key, and the
+        // waiting request goes out with it.
+        super::start_key_load(session.key_file.clone(), &session.sender);
+        pump_until(&mut session, &mut events, |session| {
+            source.snapshot() == Some(Ok(initial.clone()))
+                && session.view_state.settings.key == crate::view::KeyState::Free
+        });
+        assert_eq!(state.label(), FREE);
+        assert!(entry.is_sensitive());
+        pump_until(&mut session, &mut events, |session| {
+            session
+                .view_state
+                .online
+                .iter()
+                .any(|row| row.line == "translated")
+        });
+        assert_authorization(0, INITIAL);
+
+        fs::remove_file(&path).expect("external removal");
+        translate(&mut session, &mut events, "removed", INITIAL);
+        key::write(&path, Secret::new("external-file-edit").unwrap()).expect("external edit");
+        translate(&mut session, &mut events, "replaced", INITIAL);
+        assert_eq!(source.snapshot(), Some(Ok(initial.clone())));
+
+        let press = |session: &mut super::Session, events: &mut _, input: &str| {
+            let before = session.view_state.settings.key_entry_clears;
+            entry.set_text(input);
+            assert!(save.is_sensitive());
+            save.emit_clicked();
+            pump_until(session, events, |session| {
+                session.view_state.settings.key_entry_clears > before
+                    || session
+                        .view_state
+                        .settings
+                        .key_line
+                        .starts_with("The key was not saved:")
+            });
+            session.view_state.settings.key_line.clone()
+        };
+
+        assert_eq!(state.label(), FREE);
+        let line = press(&mut session, &mut events, &format!("  {SAVED}  "));
+        assert!(line.is_empty(), "{line}");
+        pump_until(&mut session, &mut events, |_| {
+            source.snapshot() == Some(Ok(Secret::new(SAVED).unwrap()))
+        });
+        translate(&mut session, &mut events, "saved", SAVED);
+        pump_until(&mut session, &mut events, |session| {
+            session.settings.window().is_visible() && state.label() == PRO
+        });
+        assert!(entry.text().is_empty());
+        assert!(!error_shown());
+
+        let line = press(&mut session, &mut events, SUPERSEDED);
+        assert!(line.is_empty(), "{line}");
+        pump_until(&mut session, &mut events, |_| {
+            source.snapshot() == Some(Ok(Secret::new(SUPERSEDED).unwrap()))
+        });
+        let line = press(&mut session, &mut events, "invalid input");
+        assert!(line.starts_with("The key was not saved:"), "{line}");
+        // A refused key stays in the field, and the active one is the
+        // superseding save's.
+        assert_eq!(entry.text(), "invalid input");
+        assert!(error_shown());
+        assert_eq!(state.label(), FREE);
+        assert_eq!(
+            source.snapshot(),
+            Some(Ok(Secret::new(SUPERSEDED).unwrap()))
+        );
+        let persisted = fs::read_to_string(&path).expect("persisted file");
+        assert_eq!(
+            persisted,
+            format!("{SUPERSEDED}\n"),
+            "unexpected persisted key"
+        );
+        translate(&mut session, &mut events, "superseded", SUPERSEDED);
+
+        let backup = path.with_extension("old");
+        fs::rename(&path, &backup).expect("save old file");
+        fs::create_dir(&path).expect("block atomic replacement");
+        let line = press(&mut session, &mut events, "synthetic-unwritten-deepl");
+        assert!(line.starts_with("The key was not saved:"), "{line}");
+        assert!(error_shown());
+        assert_eq!(state.label(), FREE);
+        assert!(path.is_dir());
+        assert_eq!(fs::read_to_string(backup).unwrap(), persisted);
+        translate(&mut session, &mut events, "unwritten", SUPERSEDED);
+        window.destroy();
+        session.window.destroy();
+    }
+
+    /// Without a controller there is no runner to read or change the login
+    /// item: Settings says so and leaves the switch alone.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn settings_without_a_controller_say_the_runner_is_missing() {
+        use super::*;
+
+        gtk::init().expect("a display");
+        let (mut session, mut events, work) =
+            test_session("io.github.doqhu.Addict.NoRunnerTest", Dirs::default());
+        drop(work);
+        session.show_settings();
+        pump_until(&mut session, &mut events, |session| {
+            session.settings.window().is_visible()
+        });
+        let root = session.settings.window().upcast_ref::<gtk::Widget>();
+        let hint = find::<gtk::Label>(root, &|label| {
+            label.has_css_class("hint")
+                && label
+                    .label()
+                    .contains(addict_engine::view::STARTUP_NO_RUNNER)
+        })
+        .expect("the runner's message");
+        assert!(hint.is_visible());
+        // The Start at login switch itself, not the first switch of the window.
+        assert!(!session.settings.startup_is_sensitive());
+        session.settings.window().destroy();
+        session.window.destroy();
     }
 }

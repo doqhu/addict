@@ -5,9 +5,9 @@
 //! to change them; on Hyprland, whose configuration binds the keys, each row
 //! names what to bind and the button copies the lines for that configuration.
 //! Then the DeepL key, with a masked field to enter one, the
-//! file it is saved in and the state that file is in. The window writes the
-//! key, on the runner, and never reads it back: the field starts empty and
-//! is cleared once the key is saved. In the General section, a line says how
+//! file it is saved in and the state of the active key source. The key goes
+//! to the runner for saving. The field starts empty and is cleared once the
+//! key is saved. In the General section, a line says how
 //! much the on-disk cache of the answers holds, with a button that clears it;
 //! the cache is read and cleared on the runner. The Start at login switch asks the
 //! Background portal, on the runner, and shows only what the portal last
@@ -15,87 +15,40 @@
 //! showing the window calls no portal. The texts are plain functions of the
 //! state, so that they can be tested without a display.
 
-use std::{cell::Cell, future::Future, path::Path, rc::Rc, time::Duration};
+use std::{cell::Cell, future::Future, path::Path, rc::Rc};
 
-use addict_core::APP_ID;
-use addict_core::failure::login_item::StartupFailure;
-use addict_core::translation::{English, Source};
-use addict_deepl::key::{self, KeyError};
-use addict_engine::{view::failure_reason, work::Outcome};
+use addict_controller::SettingsView;
+use addict_core::{
+    APP_ID,
+    failure::login_item::{LoginItemShown, StartupEnd, StartupFailure},
+    translation::{English, Source},
+};
+use addict_deepl::key::{Secret, WriteError};
 use addict_platform::{
     desktop::LoginEntry,
     shortcut::{Bindings, KeyOwner, SCREENSHOT_ID, SHORTCUT_ID},
 };
 use gtk::{glib, prelude::*};
 
-use crate::{cache::Footprint, file_import, view::Binding};
+// The controller produces every text and state of Settings; the window only
+// puts them on screen and reports what the user does.
+pub use addict_engine::view::settings::*;
 
-/// How long reading the state of the key file may take.
-pub const KEY_CHECK_LIMIT: Duration = Duration::from_secs(2);
+use crate::{
+    file_import,
+    view::{Binding, settings::my_language_names},
+};
 
-/// How long reading the size of the cache, or clearing it, may take.
-pub const CACHE_LIMIT: Duration = Duration::from_secs(5);
-
-/// How long reading the saved startup state may take.
-pub const STARTUP_READ_LIMIT: Duration = Duration::from_secs(2);
-
-/// What the Startup section shows when the window opens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StartupShown {
-    /// Whether the switch is on.
-    pub on: bool,
-    /// Whether an older build's login entry is what makes it on.
-    pub legacy: bool,
-}
-
-/// What to show for the `saved` state and the login entry: the saved state
-/// when there is one. With none, only a legacy entry makes the switch on: it is
-/// active, and nothing changes until the user acts. `None` for `entry` means it
-/// could not be read, as in a sandbox or for a foreign file.
-pub fn startup_shown(saved: Option<bool>, entry: Option<LoginEntry>) -> StartupShown {
+/// The shell's login entry becomes the controller's state: the saved value
+/// wins, and with none only a legacy entry makes the switch on.
+pub fn startup_shown(saved: Option<bool>, entry: Option<LoginEntry>) -> LoginItemShown {
     match saved {
-        Some(on) => StartupShown { on, legacy: false },
+        Some(on) => LoginItemShown { on, legacy: false },
         None => {
             let legacy = entry == Some(LoginEntry::Legacy);
-            StartupShown { on: legacy, legacy }
+            LoginItemShown { on: legacy, legacy }
         }
     }
-}
-
-/// The line under a switch that a legacy entry keeps on.
-pub const STARTUP_LEGACY: &str = "An older login entry is active and may open the window at \
-     login. Turn this off and on again to replace it.";
-
-/// The line when a change passed its limit, which covers the whole job: the
-/// portal may have acted already, or may still.
-pub const STARTUP_TIMED_OUT: &str = "The Background portal did not answer in time, and the \
-     change may still take effect. Turn this off and on again to repair it.";
-
-/// The line when the state could not be read in time.
-pub const STARTUP_UNREAD: &str = "The saved startup state could not be read.";
-
-/// The line when the runner of the startup jobs is gone.
-pub const STARTUP_NO_RUNNER: &str = "Startup cannot be changed: the runner is not available.";
-
-/// How a change of the switch ended. It says what the switch then shows; a
-/// state saved or not is part of it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StartupEnd {
-    /// The portal confirmed it and it is saved.
-    Done(bool),
-    /// The portal was not asked: why, naming a path if there is one.
-    NotAsked(String),
-    /// The portal did not do it; nothing is saved.
-    Failed(StartupFailure),
-    /// Enabled, the save failed, and the portal took it back.
-    Revoked { save: String },
-    /// Enabled, the save failed, and the portal did not take it back.
-    NotRevoked {
-        save: String,
-        revoke: StartupFailure,
-    },
-    /// Disabled, but the save failed.
-    DisabledUnsaved { save: String },
 }
 
 /// One change of the switch, on the runner. `check` runs first, and `ask` and
@@ -126,226 +79,6 @@ where
         },
     }
 }
-
-/// The line for a failure of the portal.
-fn startup_failure_text(failure: &StartupFailure) -> String {
-    format!("Startup was not changed: {}.", failure_reason(failure))
-}
-
-/// What the switch shows, and the line under it, after a change that started
-/// from the confirmed state `last`. Never on without a confirmation.
-pub fn startup_end_text(end: &StartupEnd, last: bool) -> (bool, String) {
-    match end {
-        StartupEnd::Done(on) => (*on, String::new()),
-        StartupEnd::NotAsked(reason) => (last, format!("Startup was not changed: {reason}.")),
-        StartupEnd::Failed(failure) => (last, startup_failure_text(failure)),
-        StartupEnd::Revoked { save } => (
-            false,
-            format!("Startup was turned back off, as its state could not be saved: {save}."),
-        ),
-        StartupEnd::NotRevoked { save, revoke } => (
-            false,
-            format!(
-                "Startup could not be saved ({save}) and could not be turned back off ({}): \
-                 addict may still start at login. Turn this on and off again to repair it.",
-                failure_reason(revoke)
-            ),
-        ),
-        StartupEnd::DisabledUnsaved { save } => (
-            false,
-            format!(
-                "Startup is off, but this could not be saved: {save}. This switch may show on \
-                 next time."
-            ),
-        ),
-    }
-}
-
-/// [`startup_end_text`] for a job's outcome. `None` for a job given up, which
-/// says nothing. A limit that passed is no confirmation either way.
-pub fn startup_outcome(outcome: &Outcome<StartupEnd>, last: bool) -> Option<(bool, String)> {
-    match outcome {
-        Outcome::Finished(end) => Some(startup_end_text(end, last)),
-        Outcome::TimedOut => Some((last, STARTUP_TIMED_OUT.to_owned())),
-        Outcome::Panicked => Some((
-            last,
-            "Startup was not changed: the request did not run.".to_owned(),
-        )),
-        Outcome::Cancelled => None,
-    }
-}
-
-/// Where the size of the cache stands, as the window says it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheState {
-    /// The size is being read.
-    Checking,
-    /// The cache holds this.
-    Read(Footprint),
-    /// The size could not be read: no runner, a timeout or a panic.
-    Unknown,
-}
-
-/// The line of the size of the cache. No wildcard arm: a new state does not
-/// compile until it is given its line.
-pub fn cache_text(state: CacheState) -> String {
-    match state {
-        CacheState::Checking => "Checking the cache…".to_owned(),
-        CacheState::Read(footprint) if footprint.rows == 0 => "The cache is empty.".to_owned(),
-        CacheState::Read(footprint) => format!("The cache holds {}.", size_text(footprint.bytes)),
-        CacheState::Unknown => "The size of the cache could not be read.".to_owned(),
-    }
-}
-
-/// `bytes` in decimal units, one decimal from a kilobyte up: `1.2 MB`.
-pub fn size_text(bytes: u64) -> String {
-    const KB: u64 = 1_000;
-    const MB: u64 = 1_000_000;
-    // Integer arithmetic: tenths, rounded half up.
-    let tenths = |unit: u64| (bytes * 10 + unit / 2) / unit;
-    if bytes < KB {
-        format!("{bytes} bytes")
-    } else if tenths(KB) < 10_000 {
-        let tenths = tenths(KB);
-        format!("{}.{} kB", tenths / 10, tenths % 10)
-    } else {
-        let tenths = tenths(MB);
-        format!("{}.{} MB", tenths / 10, tenths % 10)
-    }
-}
-
-/// The line after a clear of the cache: nothing on success, else why the
-/// cache was not cleared.
-pub fn clear_text(result: Result<(), &str>) -> String {
-    match result {
-        Ok(()) => String::new(),
-        Err(reason) => format!("The cache was not cleared: {reason}"),
-    }
-}
-
-/// Where the DeepL key stands, as the window says it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeyState {
-    /// There is no directory to look in: no absolute `XDG_CONFIG_HOME` and no
-    /// `HOME`.
-    NoDirectory,
-    /// The file holds a key of the Free plan.
-    Free,
-    /// The file holds a key of the Pro plan.
-    Pro,
-    /// The file gave no key.
-    Refused(KeyError),
-    /// The state could not be read in time.
-    Unknown,
-}
-
-impl KeyState {
-    /// Reads the state of the file at `path`. This opens the file, so it runs
-    /// on the runner. The key is dropped here: only its plan is kept.
-    pub fn of(path: Option<&Path>) -> Self {
-        let Some(path) = path else {
-            return Self::NoDirectory;
-        };
-        match key::read(path) {
-            Ok(key) if key.is_free() => Self::Free,
-            Ok(_) => Self::Pro,
-            Err(error) => Self::Refused(error),
-        }
-    }
-}
-
-/// The line of a key state. No wildcard arm: a new state does not compile
-/// until it is given its line.
-pub fn key_text(state: Option<KeyState>) -> &'static str {
-    match state {
-        None => "Checking…",
-        Some(KeyState::NoDirectory) => {
-            "No place for the key file: set an absolute XDG_CONFIG_HOME or HOME."
-        }
-        Some(KeyState::Free) => "A DeepL key of the Free plan is set.",
-        Some(KeyState::Pro) => "A DeepL key of the Pro plan is set.",
-        Some(KeyState::Refused(KeyError::Missing)) => "There is no key file.",
-        Some(KeyState::Refused(KeyError::Unreadable)) => "The key file cannot be read.",
-        Some(KeyState::Refused(KeyError::TooOpen)) => {
-            "The key file must have permissions 0600; it was not read."
-        }
-        Some(KeyState::Refused(KeyError::Empty)) => "The key file holds no key.",
-        Some(KeyState::Unknown) => "The key file was not checked in time.",
-    }
-}
-
-/// What the window says about the shortcut: the trigger the portal bound, or
-/// where the attempt stands.
-pub fn trigger_text(binding: &Binding, trigger: Option<&str>) -> String {
-    match (binding, trigger) {
-        (Binding::Bound, Some(trigger)) if !trigger.trim().is_empty() => trigger.to_owned(),
-        (Binding::Bound, _) => "Unassigned. Choose a key in Configure shortcuts…".to_owned(),
-        (Binding::Attempting, _) => "Binding the shortcut…".to_owned(),
-        (Binding::NotBound { detail }, _) => format!("Not bound: {detail}"),
-    }
-}
-
-/// The line after the portal answered the request for its dialog.
-pub fn change_text(answer: Option<&str>) -> String {
-    match answer {
-        None => {
-            "The system's dialog configures both shortcuts. Assignments update here immediately."
-                .to_owned()
-        }
-        Some(message) => format!("The shortcut cannot be changed from here: {message}"),
-    }
-}
-
-/// Configure shortcuts needs a session, and no new binding running.
-fn change_sensitive(bound: bool, rebinding: bool) -> bool {
-    bound && !rebinding
-}
-
-/// The line while a new binding has the system's dialog open.
-pub const REBINDING: &str = "Choose the keys in the system's dialog.";
-
-/// The line when the window is shown again: empty, unless a new binding is
-/// running, which is why the button is off.
-fn reopened_status(rebinding: bool) -> &'static str {
-    if rebinding { REBINDING } else { "" }
-}
-
-/// The line after a new binding ended: what the worker said, or that the keys
-/// that were chosen are in place.
-pub fn rebind_text(message: Option<&str>) -> String {
-    message.map_or_else(|| "The new keys are set.".to_owned(), str::to_owned)
-}
-
-/// The line after a save of the key: nothing on success, else why the key
-/// was not saved. The reason never holds the key.
-pub fn save_text(result: Result<(), &str>) -> String {
-    match result {
-        Ok(()) => String::new(),
-        Err(reason) => format!("The key was not saved: {reason}."),
-    }
-}
-
-/// Why a key is not saved when the environment names no configuration
-/// directory.
-pub const NO_KEY_PLACE: &str =
-    "there is no place for the key file: set an absolute XDG_CONFIG_HOME or HOME";
-
-/// The key's line when the write of the key file did not answer in time:
-/// it may still have been written, so nothing is claimed.
-pub const SAVE_UNANSWERED: &str =
-    "The save did not answer in time; the line above shows what the key file holds.";
-
-/// The hint line that names where the key is saved.
-pub fn saved_in_text(key_file: Option<&Path>) -> String {
-    key_file.map_or_else(
-        || "There is no place to save the key.".to_owned(),
-        |path| format!("Saved in {}", path.display()),
-    )
-}
-
-/// The line for a request made before a usable session exists.
-pub const CHANGE_UNBOUND: &str =
-    "Shortcut configuration needs a portal session. Retry the connection first.";
 
 /// The line beside Configure shortcuts.
 const CONFIGURE_HINT: &str = "The desktop\u{2019}s dialog sets both.";
@@ -463,24 +196,6 @@ pub fn badge(binding: &Binding, trigger: Option<&str>) -> (&'static str, &'stati
     }
 }
 
-/// The class of the block of a key state: good when a key is set, pending
-/// while it is checked, bad otherwise. No wildcard arm, as in `key_text`.
-pub fn key_tone(state: Option<KeyState>) -> &'static str {
-    match state {
-        None => "pending",
-        Some(KeyState::Free | KeyState::Pro) => "good",
-        Some(KeyState::NoDirectory | KeyState::Refused(_) | KeyState::Unknown) => "bad",
-    }
-}
-
-/// What the empty key field asks for: a set key is replaced, not entered.
-pub fn key_placeholder(state: Option<KeyState>) -> &'static str {
-    match key_tone(state) {
-        "good" => "Paste a new key to replace it",
-        _ => "Paste a DeepL key",
-    }
-}
-
 /// The classes a tone replaces on a widget.
 const TONES: [&str; 3] = ["good", "pending", "bad"];
 
@@ -588,6 +303,7 @@ pub struct Settings {
     key_block: gtk::Box,
     key_icon: gtk::Image,
     key_state: gtk::Label,
+    key_row: gtk::Box,
     key_entry: gtk::PasswordEntry,
     change: gtk::Button,
     /// Who sets the keys: on Hyprland the button copies lines and is always on.
@@ -609,6 +325,8 @@ pub struct Settings {
     rebinding: Cell<bool>,
     /// The line of the startup state.
     startup_status: gtk::Label,
+    /// How often the controller asked for the key field to be emptied.
+    key_entry_clears: Cell<u64>,
     /// The Translate sentence at once switch.
     at_once: gtk::Switch,
     /// Set while the code, not the user, moves the switch.
@@ -625,22 +343,7 @@ pub struct Settings {
     english_rendering: Rc<Cell<bool>>,
     download: gtk::Button,
     download_status: gtk::Label,
-}
-
-/// The name of a language in the my-language row. No wildcard arm: a new
-/// language does not compile until it is named.
-pub fn my_language_name(language: Source) -> &'static str {
-    match language {
-        Source::En => "English",
-        Source::Es => "Spanish",
-        Source::Ca => "Catalan",
-        Source::Ru => "Russian",
-    }
-}
-
-/// The names of the my-language row, in the order of its choices.
-pub fn my_language_names() -> Vec<&'static str> {
-    Source::ALL.into_iter().map(my_language_name).collect()
+    import_file: file_import::Row,
 }
 
 /// The name of a spelling of English in the English spelling row. No
@@ -741,20 +444,20 @@ impl Settings {
     /// `on_english` with the spelling the user chooses in English spelling;
     /// `on_at_once` with the state the user moves Translate sentence at once
     /// to.
-    /// `on_imported` refreshes resident dictionary states before success is shown.
+    /// `on_import` and `on_download` send the dictionary actions.
     #[allow(clippy::too_many_arguments)]
-    pub fn new<F: Future<Output = Result<(), String>> + 'static>(
+    pub fn new(
         parent: &impl IsA<gtk::Window>,
         key_file: Option<&Path>,
         owner: KeyOwner,
         on_change: impl Fn() + 'static,
-        on_save: impl Fn(String) + 'static,
+        on_save: impl Fn(Result<Secret, WriteError>) + 'static,
         on_clear: impl Fn() + 'static,
         on_startup: impl Fn(bool) + 'static,
         on_my_language: impl Fn(Source) + 'static,
         on_english: impl Fn(English) + 'static,
         on_at_once: impl Fn(bool) + 'static,
-        on_imported: impl Fn() -> F + 'static,
+        on_import: impl Fn() + 'static,
         on_download: impl Fn() + 'static,
     ) -> Self {
         let clipboard = ShortcutRow::new("Selection or clipboard", SHORTCUT_ID, owner);
@@ -795,7 +498,7 @@ impl Settings {
         }
 
         let key_icon = gtk::Image::builder().valign(gtk::Align::Center).build();
-        let key_state = label(key_text(None), &["key-state"]);
+        let key_state = label(key_text(KeyState::Checking), &["key-state"]);
         key_state.set_hexpand(true);
         key_state.set_valign(gtk::Align::Center);
         let key_block = gtk::Box::builder()
@@ -807,7 +510,6 @@ impl Settings {
         key_block.append(&key_state);
         let key_entry = gtk::PasswordEntry::builder()
             .show_peek_icon(true)
-            .placeholder_text(key_placeholder(None))
             .hexpand(true)
             .css_classes(["key"])
             .build();
@@ -832,7 +534,7 @@ impl Settings {
             let text = entry.text();
             let text = text.trim();
             if !text.is_empty() {
-                on_save(text.to_owned());
+                on_save(Secret::new(text));
             }
         });
         let pressed = on_save.clone();
@@ -1066,7 +768,7 @@ impl Settings {
             .child(&scroll)
             .css_classes(["addict", "settings"])
             .build();
-        import_file.connect(&window, on_imported);
+        import_file.connect(on_import);
         let escape = gtk::EventControllerKey::new();
         let esc = window.downgrade();
         escape.connect_key_pressed(move |_, key, _, _| {
@@ -1087,6 +789,7 @@ impl Settings {
             key_block,
             key_icon,
             key_state,
+            key_row,
             key_entry,
             change,
             owner,
@@ -1099,6 +802,7 @@ impl Settings {
             bound: Cell::new(false),
             rebinding: Cell::new(false),
             startup_status,
+            key_entry_clears: Cell::new(0),
             at_once,
             at_once_rendering,
             my_language,
@@ -1108,9 +812,9 @@ impl Settings {
             english_rendering,
             download,
             download_status,
+            import_file,
         };
         settings.render_binding(&Binding::Attempting, &Bindings::default());
-        settings.render_key(None);
         settings
     }
 
@@ -1122,6 +826,37 @@ impl Settings {
     pub fn render_download(&self, busy: bool, text: &str) {
         self.download.set_sensitive(!busy);
         say_in(&self.download_status, text);
+    }
+
+    pub fn render_import(&self, state: &addict_engine::view::file_choice::ImportState) {
+        self.import_file.render(state);
+    }
+
+    /// Puts the controller's Settings snapshot on screen. The widgets never
+    /// decide a setting: they only show what the controller last said.
+    pub fn render(&self, view: &SettingsView) {
+        let bindings = Bindings {
+            clipboard: view.bindings.clipboard.clone(),
+            screenshot: view.bindings.screenshot.clone(),
+        };
+        self.render_binding(&view.binding, &bindings);
+        self.set_rebinding(view.rebinding);
+        self.say(&view.status_line);
+        self.render_key(view.key);
+        self.say_key(&view.key_line);
+        if self.key_entry_clears.get() != view.key_entry_clears {
+            self.key_entry_clears.set(view.key_entry_clears);
+            self.clear_key_entry();
+        }
+        self.render_cache(view.cache);
+        self.say_cache(&view.cache_line);
+        self.render_startup_state(view.login_on, view.login_confirmed);
+        self.set_startup_sensitive(view.login_sensitive);
+        self.say_startup(&view.login_line);
+        self.render_my_language(view.my_language);
+        self.render_english(view.english);
+        self.show_english(view.english_shown);
+        self.render_at_once(view.at_once);
     }
 
     pub fn present(&self) {
@@ -1151,8 +886,9 @@ impl Settings {
         );
     }
 
-    pub fn render_key(&self, state: Option<KeyState>) {
+    pub fn render_key(&self, state: KeyState) {
         self.key_state.set_label(key_text(state));
+        self.key_row.set_sensitive(state != KeyState::Checking);
         self.key_entry
             .set_property("placeholder-text", key_placeholder(state));
         let tone = key_tone(state);
@@ -1168,11 +904,6 @@ impl Settings {
     /// window is shown again.
     pub fn clear_key_entry(&self) {
         self.key_entry.set_text("");
-    }
-
-    /// Clears the line when the window is shown again, keeping what still holds.
-    pub fn reset_status(&self) {
-        self.say(reopened_status(self.rebinding.get()));
     }
 
     pub fn say(&self, text: &str) {
@@ -1194,17 +925,32 @@ impl Settings {
         say_in(&self.cache_status, text);
     }
 
-    /// Moves the switch to `on`, as confirmed, without asking anything.
-    pub fn render_startup(&self, on: bool) {
+    /// Moves the knob to `active` and shows `confirmed` as the switch's
+    /// state: while a change runs only the knob follows the user, and the
+    /// state stays at what the portal last confirmed, as 0.5.0's stopped
+    /// `state-set` kept it.
+    pub fn render_startup_state(&self, active: bool, confirmed: bool) {
         self.startup_rendering.set(true);
-        self.startup.set_active(on);
-        self.startup.set_state(on);
+        self.startup.set_active(active);
+        self.startup.set_state(confirmed);
         self.startup_rendering.set(false);
     }
 
     /// Whether the switch can be moved: not while a request or a read runs.
     pub fn set_startup_sensitive(&self, sensitive: bool) {
         self.startup.set_sensitive(sensitive);
+    }
+
+    /// Whether the Start at login switch can be moved; for the tests.
+    #[cfg(test)]
+    pub(crate) fn startup_is_sensitive(&self) -> bool {
+        self.startup.is_sensitive()
+    }
+
+    /// Whether Configure shortcuts can be pressed; for the tests.
+    #[cfg(test)]
+    pub(crate) fn change_is_sensitive(&self) -> bool {
+        self.change.is_sensitive()
     }
 
     /// The line under Download dictionaries.
@@ -1275,16 +1021,15 @@ impl Settings {
 mod tests {
     use std::{cell::RefCell, future::ready};
 
-    use addict_core::failure::login_item::StartupFailure;
-    use addict_deepl::key::KeyError;
-    use addict_engine::work::Outcome;
+    use addict_core::failure::login_item::{LoginItemShown, StartupEnd, StartupFailure};
+    use addict_deepl::key::{self, KeyError, KeySource};
     use addict_platform::desktop::LoginEntry;
 
     use super::{
-        CacheState, KeyState, NO_KEY_PLACE, REBINDING, StartupEnd, StartupShown, badge, cache_text,
+        CacheState, KeyState, NO_KEY_PLACE, REBINDING, STARTUP_TIMED_OUT, badge, cache_text,
         change_sensitive, change_startup, change_text, clear_text, key_placeholder, key_text,
         key_tone, rebind_text, reopened_status, save_text, saved_in_text, size_text,
-        startup_end_text, startup_outcome, startup_shown, trigger_keys, trigger_text,
+        startup_end_text, startup_shown, startup_unfinished_text, trigger_keys, trigger_text,
     };
     use crate::{cache::Footprint, view::Binding};
 
@@ -1343,7 +1088,7 @@ mod tests {
             |_| {},
             |_| {},
             |_| {},
-            || async { Ok(()) },
+            || {},
             move || pressed.set(pressed.get() + 1),
         );
         settings.present();
@@ -1353,13 +1098,18 @@ mod tests {
         );
         settings.download.emit_clicked();
         assert_eq!(presses.get(), 1);
-        settings.render_download(true, crate::first_run::FETCHING);
+        settings.render_download(true, addict_engine::view::first_run::FETCHING);
         assert!(!settings.download.is_sensitive());
         assert!(settings.download_status.is_visible());
-        assert_eq!(settings.download_status.label(), crate::first_run::FETCHING);
+        assert_eq!(
+            settings.download_status.label(),
+            addict_engine::view::first_run::FETCHING
+        );
         for status in [
-            crate::first_run::nothing_text(super::Source::Ru),
-            crate::first_run::recovery_failed_text("cannot read the index manifest: malformed"),
+            addict_engine::view::first_run::nothing_text(super::Source::Ru),
+            addict_engine::view::first_run::recovery_failed_text(
+                "cannot read the index manifest: malformed",
+            ),
         ] {
             settings.render_download(false, &status);
             assert!(settings.download.is_sensitive());
@@ -1410,7 +1160,7 @@ mod tests {
             move |chosen| told.borrow_mut().push(chosen),
             |_| {},
             |_| {},
-            || async { Ok(()) },
+            || {},
             || {},
         );
         assert_eq!(settings.my_language.selected(), 3, "Russian at first");
@@ -1446,7 +1196,7 @@ mod tests {
             |_| {},
             move |chosen| told.borrow_mut().push(chosen),
             |_| {},
-            || async { Ok(()) },
+            || {},
             || {},
         );
         assert_eq!(settings.english.selected(), 0, "US at first");
@@ -1490,7 +1240,7 @@ mod tests {
             |_| {},
             |_| {},
             |_| {},
-            || async { Ok(()) },
+            || {},
             || {},
         );
         assert!(!settings.startup.is_sensitive());
@@ -1501,12 +1251,12 @@ mod tests {
         assert!(!settings.startup.state(), "not on before a confirmation");
 
         // A refusal: back off, and the code asks nothing.
-        settings.render_startup(false);
+        settings.render_startup_state(false, false);
         assert_eq!(*asked.borrow(), [true]);
         assert!(!settings.startup.is_active() && !settings.startup.state());
 
         // A confirmation, and the state of a window that opens.
-        settings.render_startup(true);
+        settings.render_startup_state(true, true);
         assert_eq!(*asked.borrow(), [true]);
         assert!(settings.startup.is_active() && settings.startup.state());
 
@@ -1532,7 +1282,7 @@ mod tests {
             |_| {},
             |_| {},
             |_| {},
-            || async { Ok(()) },
+            || {},
             || {},
         );
         let scroll = settings
@@ -1709,29 +1459,29 @@ mod tests {
     }
 
     #[test]
-    fn only_a_finished_confirmation_moves_the_switch() {
-        for outcome in [Outcome::TimedOut, Outcome::Panicked] {
-            for last in [false, true] {
-                let (on, line) = startup_outcome(&outcome, last).expect("shown");
-                assert_eq!(on, last);
-                assert!(!line.is_empty());
-            }
+    fn the_startup_texts_keep_the_confirmed_state_and_name_each_end() {
+        // A change that did not finish leaves the switch where it was: every
+        // end is computed from the confirmed state, not the asked one.
+        for last in [false, true] {
+            let (on, line) = startup_end_text(&StartupEnd::Failed(StartupFailure::Refused), last);
+            assert_eq!(on, last);
+            assert!(!line.is_empty());
+            assert!(line.contains("not changed"), "{line}");
         }
-        let (_, line) = startup_outcome(&Outcome::TimedOut, false).expect("shown");
-        assert!(!line.contains("not changed"), "{line}");
-        assert!(line.contains("did not answer in time"), "{line}");
-        assert!(line.contains("may still take effect"), "{line}");
-        assert!(line.contains("off and on"), "{line}");
-        assert_eq!(startup_outcome(&Outcome::Cancelled, true), None);
+        assert!(STARTUP_TIMED_OUT.contains("did not answer in time"));
+        assert!(STARTUP_TIMED_OUT.contains("may still take effect"));
+        assert!(STARTUP_TIMED_OUT.contains("off and on"));
+        let line = startup_unfinished_text();
+        assert!(line.contains("did not run"), "{line}");
         assert_eq!(
-            startup_outcome(&Outcome::Finished(StartupEnd::Done(true)), false),
-            Some((true, String::new()))
+            startup_end_text(&StartupEnd::Done(true), false),
+            (true, String::new())
         );
     }
 
     #[test]
     fn the_saved_state_wins_and_only_a_legacy_entry_shows_on_without_one() {
-        let shown = |on, legacy| StartupShown { on, legacy };
+        let shown = |on, legacy| LoginItemShown { on, legacy };
         assert_eq!(startup_shown(Some(true), None), shown(true, false));
         assert_eq!(
             startup_shown(Some(false), Some(LoginEntry::Legacy)),
@@ -1801,15 +1551,14 @@ mod tests {
     #[test]
     fn every_key_state_has_a_distinct_line() {
         let states = [
-            None,
-            Some(KeyState::NoDirectory),
-            Some(KeyState::Free),
-            Some(KeyState::Pro),
-            Some(KeyState::Refused(KeyError::Missing)),
-            Some(KeyState::Refused(KeyError::Unreadable)),
-            Some(KeyState::Refused(KeyError::TooOpen)),
-            Some(KeyState::Refused(KeyError::Empty)),
-            Some(KeyState::Unknown),
+            KeyState::Checking,
+            KeyState::Free,
+            KeyState::Pro,
+            KeyState::Refused(KeyError::NoDirectory),
+            KeyState::Refused(KeyError::Missing),
+            KeyState::Refused(KeyError::Unreadable),
+            KeyState::Refused(KeyError::TooOpen),
+            KeyState::Refused(KeyError::Empty),
         ];
         let lines: std::collections::HashSet<_> = states.into_iter().map(key_text).collect();
         assert_eq!(lines.len(), states.len());
@@ -1817,23 +1566,26 @@ mod tests {
 
     #[test]
     fn the_field_asks_to_replace_only_a_key_that_is_set() {
-        assert!(key_placeholder(Some(KeyState::Pro)).contains("replace"));
-        assert!(key_placeholder(Some(KeyState::Free)).contains("replace"));
-        assert!(!key_placeholder(None).contains("replace"));
-        assert!(!key_placeholder(Some(KeyState::Refused(KeyError::Missing))).contains("replace"));
+        assert!(key_placeholder(KeyState::Pro).contains("replace"));
+        assert!(key_placeholder(KeyState::Free).contains("replace"));
+        assert!(!key_placeholder(KeyState::Refused(KeyError::NoDirectory)).contains("replace"));
+        assert!(!key_placeholder(KeyState::Refused(KeyError::Missing)).contains("replace"));
     }
 
     #[test]
     fn the_unsafe_mode_names_0600() {
-        assert!(key_text(Some(KeyState::Refused(KeyError::TooOpen))).contains("0600"));
+        assert!(key_text(KeyState::Refused(KeyError::TooOpen)).contains("0600"));
     }
 
     #[test]
     fn a_state_of_a_missing_path_or_file() {
-        assert_eq!(KeyState::of(None), KeyState::NoDirectory);
+        assert_eq!(
+            KeyState::of(&KeySource::new(Err(KeyError::NoDirectory))),
+            KeyState::Refused(KeyError::NoDirectory)
+        );
         let path = std::path::Path::new("/nonexistent/addict/deepl.key");
         assert_eq!(
-            KeyState::of(Some(path)),
+            KeyState::of(&KeySource::new(key::read(path))),
             KeyState::Refused(KeyError::Missing)
         );
     }
@@ -1847,7 +1599,7 @@ mod tests {
         let path = dir.join("deepl.key");
         std::fs::write(&path, content).expect("write");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
-        let state = KeyState::of(Some(&path));
+        let state = KeyState::of(&KeySource::new(key::read(&path)));
         std::fs::remove_dir_all(&dir).expect("cleanup");
         state
     }
@@ -1857,7 +1609,7 @@ mod tests {
         let state = state_of("free", "secret-key:fx\n", 0o600);
         assert_eq!(state, KeyState::Free);
         assert!(!format!("{state:?}").contains("secret"));
-        assert!(!key_text(Some(state)).contains("secret"));
+        assert!(!key_text(state).contains("secret"));
     }
 
     #[test]
@@ -1870,6 +1622,15 @@ mod tests {
         assert_eq!(
             state_of("empty", " \n", 0o600),
             KeyState::Refused(KeyError::Empty)
+        );
+        assert_eq!(
+            state_of("invalid", "two words\n", 0o600),
+            KeyState::Refused(KeyError::Empty)
+        );
+        let directory = std::env::temp_dir();
+        assert_eq!(
+            KeyState::of(&KeySource::new(key::read(&directory))),
+            KeyState::Refused(KeyError::Unreadable)
         );
     }
 
@@ -2024,8 +1785,8 @@ mod tests {
             detail: "x".to_owned(),
         };
         assert_eq!(badge(&not_bound, None), ("Not bound", "bad"));
-        assert_eq!(key_tone(None), "pending");
-        assert_eq!(key_tone(Some(KeyState::Pro)), "good");
-        assert_eq!(key_tone(Some(KeyState::Refused(KeyError::TooOpen))), "bad");
+        assert_eq!(key_tone(KeyState::Pro), "good");
+        assert_eq!(key_tone(KeyState::Free), "good");
+        assert_eq!(key_tone(KeyState::Refused(KeyError::TooOpen)), "bad");
     }
 }

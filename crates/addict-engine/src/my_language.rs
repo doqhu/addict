@@ -1,6 +1,5 @@
 //! My language kept across restarts: one line, `en`, `es`, `ca` or `ru`,
-//! in the file `my-language` of the product's configuration directory,
-//! [`addict_deepl::key::config_dir`], the directory of the DeepL key.
+//! in the file `my-language` of the product's configuration directory.
 //!
 //! The file is read once, on the runner, after the start, and written on the
 //! runner each time the My language row of Settings changes; never on the UI thread
@@ -23,10 +22,10 @@ const LANGUAGE_FILE: &str = "my-language";
 /// How many bytes of the file are read. A code and its line break are three.
 const LANGUAGE_LIMIT: u64 = 64;
 
-/// The my-language file of the product, or `None` when the environment names no
-/// configuration directory. Nothing is read here.
-pub fn path() -> Option<PathBuf> {
-    Some(addict_deepl::key::config_dir()?.join(LANGUAGE_FILE))
+/// The my-language file of the product, or `None` when no configuration directory
+/// was supplied. Nothing is read here.
+pub fn path(config: Option<&Path>) -> Option<PathBuf> {
+    Some(config?.join(LANGUAGE_FILE))
 }
 
 /// The language the file at `path` holds; Russian for no path, a missing or

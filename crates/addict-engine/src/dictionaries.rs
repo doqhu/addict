@@ -420,11 +420,6 @@ pub struct Dictionaries {
 }
 
 impl Dictionaries {
-    /// The indexes of the product's data directory. Nothing is opened yet.
-    pub fn in_data_dir() -> Self {
-        Self::new(import::data_dir())
-    }
-
     /// The indexes of the data directory `dir`. Nothing is opened yet.
     pub fn new(dir: Option<PathBuf>) -> Self {
         Self {
@@ -2747,7 +2742,7 @@ pub mod tests {
             &lookup,
             None,
             None,
-            None,
+            crate::view::KeyLocation::Hint("Locate the key."),
             None,
             Translating {
                 my: Language::En,
@@ -2950,7 +2945,7 @@ pub mod tests {
                 &lookup,
                 None,
                 None,
-                None,
+                crate::view::KeyLocation::Hint("Locate the key."),
                 Some((pressed, language)),
                 Translating { my, pressed },
             );
@@ -3003,7 +2998,7 @@ pub mod tests {
             shown.lookup().unwrap(),
             shown.choice(),
             None,
-            None,
+            crate::view::KeyLocation::Hint("Locate the key."),
             None,
             shown.translating(),
         );
@@ -3021,7 +3016,7 @@ pub mod tests {
             shown.lookup().unwrap(),
             shown.choice(),
             None,
-            None,
+            crate::view::KeyLocation::Hint("Locate the key."),
             None,
             shown.translating(),
         );
@@ -3039,7 +3034,7 @@ pub mod tests {
                 &result,
                 None,
                 None,
-                None,
+                crate::view::KeyLocation::Hint("Locate the key."),
                 None,
                 Translating {
                     my: target,
@@ -3059,7 +3054,7 @@ pub mod tests {
             &result,
             None,
             None,
-            None,
+            crate::view::KeyLocation::Hint("Locate the key."),
             None,
             Translating {
                 my: Es,
@@ -3084,7 +3079,7 @@ pub mod tests {
                 shown.lookup().unwrap(),
                 shown.choice(),
                 None,
-                None,
+                crate::view::KeyLocation::Hint("Locate the key."),
                 None,
                 shown.translating(),
             )

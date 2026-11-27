@@ -24,43 +24,53 @@
 //! that way, is put into the field without being reported as an edit of it,
 //! and is not submitted. Back and Forward only report their press; the text
 //! they lead to is put into the field as a paste puts it, by
-//! [`View::put_into_field`], and neither button takes the focus from the
+//! [`put_into_field`], and neither button takes the focus from the
 //! field.
 
 use std::{
     cell::{Cell, RefCell},
-    fs::File,
     ops::Range,
-    os::fd::AsRawFd,
+    path::Path,
     rc::Rc,
 };
 
+use addict_controller::{Dispatcher, Event, FatalView, PlaybackState, PlaybackView};
 use addict_core::{
+    failure::playback::PlaybackFailure,
     input::{Source, WindowState},
     sentence,
     translation::{Source as Language, reading_languages},
 };
-use addict_engine::recording::{AudioFailure, CommonsFile, Credit};
-use addict_engine::work::Job;
+use addict_engine::recording::CommonsFile;
 use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     dictionaries::Indexes,
     view::{
         ADD_KEY_LABEL, ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, AnalysisGroup, Answer,
-        AnswerLine, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COMMONS_FILE_LABEL, COPIED_LABEL,
-        COPY_LABEL, ChosenGloss, Explained, FIELD_PLACEHOLDER, FORM_TAG, FORWARD_TOOLTIP, FormRow,
-        GLOSS_NO_KEY, GlossRow, GlossTexts, LANGUAGE_TOOLTIP, LONE_WORD_TIP, LOOK_UP_ENGLISH,
-        Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE, OnlineRow,
-        OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
-        PronunciationText, RECORDING_NEEDS_NETWORK, RETRY_LABEL, ResultTexts, SENSES_LABEL,
-        SHOW_LESS, SYNONYM_PREVIEW, SenseText, Shown, SynonymTexts, WHOLE_WORD_LABEL, answer_texts,
-        binding_texts, choice_texts, command_in, definition_action_label, indexes_text,
-        language_label, online_rows, recording_credit_text, sentence_markup, show_more,
-        synonym_class, synonym_description, texts,
+        AnswerLine, Binding, Block, CAPTURE_LABEL, COMMONS_FILE_LABEL, COPIED_LABEL, COPY_LABEL,
+        ChosenGloss, Explained, FIELD_PLACEHOLDER, FORM_TAG, FormRow, GLOSS_NO_KEY, GlossRow,
+        GlossTexts, KeyLocation, LANGUAGE_TOOLTIP, LONE_WORD_TIP, LOOK_UP_ENGLISH, Listed,
+        MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE, OnlineRow, OnlineState,
+        PLAY_TOOLTIP, PRONUNCIATION_PREVIEW, PronunciationText, RETRY_LABEL, ResultTexts,
+        SENSES_LABEL, SHOW_LESS, SYNONYM_PREVIEW, SenseText, Shown, SynonymTexts, WHOLE_WORD_LABEL,
+        answer_texts, binding_texts, choice_texts, definition_action_label, indexes_text,
+        language_label, sentence_markup, show_more, synonym_class, synonym_description, texts,
     },
     wrap::Wrap,
 };
+
+#[derive(Clone, Default)]
+pub(crate) struct ControllerEvents(Rc<RefCell<Option<Dispatcher>>>);
+
+impl ControllerEvents {
+    pub(crate) fn dispatch(&self, event: Event) -> bool {
+        self.0
+            .borrow()
+            .as_ref()
+            .is_some_and(|controller| controller.dispatch(event))
+    }
+}
 
 /// How wide the wrapping texts ask to be, in characters.
 const TEXT_WIDTH_CHARS: i32 = 56;
@@ -82,7 +92,7 @@ const RESULT_MIN_HEIGHT: i32 = 72;
 /// the field stays editable, and a read that ends after the field was edited
 /// is dropped. A clipboard that is empty, blank, not text or cannot be read
 /// changes nothing and says nothing.
-fn replace_on_paste(field: &gtk::Entry) {
+fn replace_on_paste(field: &Field) {
     let Some(text) = field
         .delegate()
         .and_then(|delegate| delegate.downcast::<gtk::Text>().ok())
@@ -124,14 +134,76 @@ fn replace_on_paste(field: &gtk::Entry) {
 
 /// Puts `text` into `field` as a paste does: it replaces the text, and the
 /// field is submitted, so a lone word is also asked for online.
-fn put_into_field(field: &gtk::Entry, text: &str) {
+fn put_into_field(field: &Field, text: &str) {
     // Fires `changed` twice, for the removal of the old text and for the new
     // one, also when the two are the same text.
+    let was_replacing = field.replacing.replace(true);
     field.set_text(text);
     field.set_position(-1);
+    field.replacing.set(was_replacing);
     // After the text is in the field: whoever hears of the submit has heard
     // of the new text first.
     field.emit_activate();
+}
+
+/// A synonym-pill callback.
+type SynonymChosen = Rc<RefCell<Option<Rc<dyn Fn(String)>>>>;
+
+/// How a change reached the editable field.
+#[derive(Clone, Copy)]
+pub enum FieldEdit {
+    Typed,
+    Replaced,
+}
+
+/// The entry and the origin of its synchronous `changed` signal.
+struct Field {
+    entry: gtk::Entry,
+    replacing: Rc<Cell<bool>>,
+    synonym_chosen: SynonymChosen,
+}
+
+impl Field {
+    fn new(entry: gtk::Entry) -> Self {
+        Self {
+            entry,
+            replacing: Rc::new(Cell::new(false)),
+            synonym_chosen: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    fn downgrade(&self) -> WeakField {
+        WeakField {
+            entry: self.entry.downgrade(),
+            replacing: self.replacing.clone(),
+            synonym_chosen: self.synonym_chosen.clone(),
+        }
+    }
+}
+
+impl std::ops::Deref for Field {
+    type Target = gtk::Entry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entry
+    }
+}
+
+#[derive(Clone)]
+struct WeakField {
+    entry: glib::WeakRef<gtk::Entry>,
+    replacing: Rc<Cell<bool>>,
+    synonym_chosen: SynonymChosen,
+}
+
+impl WeakField {
+    fn upgrade(&self) -> Option<Field> {
+        Some(Field {
+            entry: self.entry.upgrade()?,
+            replacing: self.replacing.clone(),
+            synonym_chosen: self.synonym_chosen.clone(),
+        })
+    }
 }
 
 /// Makes the label that `label` builds wrap at [`TEXT_WIDTH_CHARS`], with
@@ -239,13 +311,11 @@ fn language_switch() -> (gtk::Box, LanguageSlots, Vec<gtk::ToggleButton>) {
 /// the handlers of the buttons, so a change needs no new handler.
 type LanguageSlots = Rc<Cell<[Language; 3]>>;
 
-/// A button of the history left of the field, showing `icon`, with
-/// `tooltip`: it never takes the focus from the field, and it cannot be
-/// pressed until there is somewhere to go.
-fn history_button(icon: &str, tooltip: &str) -> gtk::Button {
+/// A button of the history left of the field. It never takes the focus
+/// from the field and cannot be pressed until there is somewhere to go.
+fn history_button(icon: &str) -> gtk::Button {
     gtk::Button::builder()
         .icon_name(icon)
-        .tooltip_text(tooltip)
         .focus_on_click(false)
         .can_focus(false)
         .sensitive(false)
@@ -256,7 +326,7 @@ fn history_button(icon: &str, tooltip: &str) -> gtk::Button {
 /// The parts of the row of the field.
 struct FieldRow {
     row: gtk::Box,
-    field: gtk::Entry,
+    field: Field,
     back: gtk::Button,
     forward: gtk::Button,
     languages: LanguageSlots,
@@ -268,18 +338,19 @@ struct FieldRow {
 /// Forward left of it and the switch of the reading language and the
 /// Capture button beside it.
 fn field_row() -> FieldRow {
-    let field = gtk::Entry::builder()
+    let entry = gtk::Entry::builder()
         .placeholder_text(FIELD_PLACEHOLDER)
         .css_classes(["lookup"])
         .build();
+    let field = Field::new(entry);
     replace_on_paste(&field);
     field.set_hexpand(true);
     let capture = gtk::Button::builder()
         .label(CAPTURE_LABEL)
         .css_classes(["capture"])
         .build();
-    let back = history_button("go-previous-symbolic", BACK_TOOLTIP);
-    let forward = history_button("go-next-symbolic", FORWARD_TOOLTIP);
+    let back = history_button("go-previous-symbolic");
+    let forward = history_button("go-next-symbolic");
     let history = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .css_classes(["linked", "history"])
@@ -290,7 +361,7 @@ fn field_row() -> FieldRow {
     let (switch, languages, language_buttons) = language_switch();
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.append(&history);
-    row.append(&field);
+    row.append(&field.entry);
     row.append(&switch);
     row.append(&capture);
     FieldRow {
@@ -348,7 +419,7 @@ struct SourceFailure {
 /// The source line, hidden until it has something to say. Neither the line
 /// nor Copy takes the focus from the field: the line is not selectable and
 /// the button is never focused.
-fn source_failure() -> SourceFailure {
+fn source_failure(controller: ControllerEvents) -> SourceFailure {
     let line = wrapping(gtk::Label::builder()).hexpand(true).build();
     let copy = gtk::Button::builder()
         .label(COPY_LABEL)
@@ -370,7 +441,9 @@ fn source_failure() -> SourceFailure {
     let held = command.clone();
     copy.connect_clicked(move |button| {
         if let Some(command) = held.borrow().as_deref() {
-            button.clipboard().set_text(command);
+            if !controller.dispatch(Event::CopyPressed) {
+                button.clipboard().set_text(command);
+            }
             button.set_label(COPIED_LABEL);
         }
     });
@@ -400,7 +473,7 @@ fn fill_listed(
     container: &gtk::Box,
     listed: Option<&Listed<'_>>,
     pill_classes: &[&str],
-    field: Option<&gtk::Entry>,
+    field: Option<&Field>,
     preview: usize,
 ) {
     clear(container);
@@ -426,7 +499,7 @@ fn fill_listed(
 fn pills(
     items: &[String],
     classes: &[&str],
-    field: Option<&gtk::Entry>,
+    field: Option<&Field>,
     preview: usize,
     tooltip: &str,
 ) -> Wrap {
@@ -449,7 +522,7 @@ fn pills(
 }
 
 /// Shared pill behavior for flat translations and independent synonym meanings.
-fn synonym_pill(item: &str, classes: &[&str], field: Option<&gtk::Entry>) -> gtk::Widget {
+fn synonym_pill(item: &str, classes: &[&str], field: Option<&Field>) -> gtk::Widget {
     let pill = gtk::Label::builder()
         .label(item)
         .css_classes(classes)
@@ -463,14 +536,22 @@ fn synonym_pill(item: &str, classes: &[&str], field: Option<&gtk::Entry>) -> gtk
         .focus_on_click(false)
         .build();
     link.set_cursor_from_name(Some("pointer"));
+    connect_replacement_link(&link, item, field);
+    link.upcast()
+}
+
+fn connect_replacement_link(link: &gtk::Button, word: &str, field: &Field) {
     let field = field.downgrade();
-    let word = item.to_owned();
+    let word = word.to_owned();
     link.connect_clicked(move |_| {
-        if let Some(field) = field.upgrade() {
+        // In the resident the controller guards the action and submits.
+        let handler = field.synonym_chosen.borrow().clone();
+        if let Some(handler) = handler {
+            handler(word.clone());
+        } else if let Some(field) = field.upgrade() {
             put_into_field(&field, &word);
         }
     });
-    link.upcast()
 }
 
 /// Puts the synonym meanings `texts` into `container`: behind a disclosure
@@ -479,7 +560,7 @@ fn synonym_pill(item: &str, classes: &[&str], field: Option<&gtk::Entry>) -> gtk
 fn fill_synonym_groups(
     container: &gtk::Box,
     texts: Option<&SynonymTexts<'_>>,
-    field: &gtk::Entry,
+    field: &Field,
     open: &Rc<Cell<bool>>,
 ) {
     clear(container);
@@ -559,7 +640,7 @@ fn disclosure(
 /// what the source says it is, with how many synonyms it has at the end;
 /// under them its synonyms as links, the first [`SYNONYM_PREVIEW`] shown.
 /// The source's whole label is the tooltip of the head.
-fn meaning_card(group: &addict_dictionary::index::SynonymGroup, field: &gtk::Entry) -> gtk::Box {
+fn meaning_card(group: &addict_dictionary::index::SynonymGroup, field: &Field) -> gtk::Box {
     let card = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
@@ -650,70 +731,134 @@ fn show_more_toggle(
     toggle
 }
 
-pub type CreditReady = Box<dyn FnOnce(Credit)>;
-type FetchCredit = dyn Fn(CommonsFile, CreditReady) -> Option<Job>;
-pub type AudioReady = Box<dyn FnOnce(Result<PlaybackMedia, AudioFailure>)>;
-type FetchAudio = dyn Fn(String, AudioReady) -> Option<Job>;
-
-pub struct PlaybackMedia {
-    stream: gtk::MediaFile,
-    // Keep the anonymous file open until GTK has stopped using its URI.
-    _recording: Option<File>,
-}
-
-impl PlaybackMedia {
-    pub fn from_recording(recording: File) -> Self {
-        let filename = format!("/proc/self/fd/{}", recording.as_raw_fd());
-        Self {
-            stream: gtk::MediaFile::for_filename(filename),
-            _recording: Some(recording),
-        }
-    }
-
-    fn from_stream(stream: gtk::MediaFile) -> Self {
-        Self {
-            stream,
-            _recording: None,
-        }
-    }
-}
-
-/// One stream and its credit request, if any.
-struct Player {
-    current: RefCell<Option<Rc<Playback>>>,
-    fetch_audio: RefCell<Option<Rc<FetchAudio>>>,
-    fetch_credit: RefCell<Option<Rc<FetchCredit>>>,
-    network_available: Box<dyn Fn() -> bool>,
-}
+type PlayPressed = Rc<dyn Fn(String)>;
 
 #[derive(Default)]
-struct Playback {
-    stream: RefCell<Option<PlaybackMedia>>,
-    failed: Cell<bool>,
-    job: RefCell<Option<Job>>,
+struct PlaybackControls {
+    controller: ControllerEvents,
+    pressed: Rc<RefCell<Option<PlayPressed>>>,
+    rows: RefCell<Vec<RecordingRow>>,
 }
 
-impl Player {
-    fn new() -> Self {
-        Self {
-            current: RefCell::new(None),
-            fetch_audio: RefCell::new(None),
-            fetch_credit: RefCell::new(None),
-            network_available: Box::new(|| gio::NetworkMonitor::default().is_network_available()),
-        }
-    }
+struct RecordingRow {
+    url: String,
+    button: gtk::Button,
+    commons: Option<gtk::LinkButton>,
+}
 
-    fn stop(&self) {
-        if let Some(attempt) = self.current.take() {
-            let stream = attempt.stream.take();
-            // Invalidate callbacks and cancel the pending job before notifying GTK.
-            drop(attempt);
-            if let Some(media) = stream {
-                media.stream.pause();
-                media.stream.clear();
+impl PlaybackControls {
+    fn render(&self, playback: Option<&PlaybackView>) {
+        for row in self.rows.borrow().iter() {
+            let state = playback
+                .filter(|playback| playback.url == row.url)
+                .map(|playback| &playback.state);
+            let detail = match state {
+                Some(PlaybackState::Ended { credit }) => credit.as_deref(),
+                Some(PlaybackState::Failed(text)) => Some(text.as_str()),
+                _ => None,
+            };
+            row.button
+                .set_tooltip_text(Some(detail.unwrap_or(PLAY_TOOLTIP)));
+            if let Some(detail) = detail {
+                row.button
+                    .update_property(&[gtk::accessible::Property::Description(detail)]);
+            } else {
+                row.button
+                    .reset_property(gtk::AccessibleProperty::Description);
+            }
+            if matches!(state, Some(PlaybackState::Failed(_))) {
+                row.button.add_css_class("failed");
+            } else {
+                row.button.remove_css_class("failed");
+            }
+            if let Some(link) = &row.commons {
+                link.set_visible(matches!(state, Some(PlaybackState::Ended { .. })));
             }
         }
     }
+}
+
+/// The GTK stream for one Play effect. Both signal handlers and Cancel
+/// share the same completion flag so the effect answers exactly once.
+pub(crate) struct MediaPlayback {
+    stream: gtk::MediaFile,
+    completed: Rc<Cell<bool>>,
+}
+
+impl MediaPlayback {
+    pub(crate) fn start(
+        path: &Path,
+        answered: impl Fn(Result<(), PlaybackFailure>) + 'static,
+    ) -> Self {
+        let stream = gtk::MediaFile::for_filename(path);
+        let completed = Rc::new(Cell::new(false));
+        let answered = {
+            let completed = completed.clone();
+            Rc::new(move |result| {
+                if !completed.replace(true) {
+                    answered(result);
+                }
+            })
+        };
+        let failed = {
+            let answered = answered.clone();
+            move |stream: &gtk::MediaFile| {
+                if let Some(error) = stream.error() {
+                    let failure = if network_error(&error) {
+                        PlaybackFailure::Network
+                    } else {
+                        PlaybackFailure::Failed(error.to_string())
+                    };
+                    answered(Err(failure));
+                }
+            }
+        };
+        stream.connect_error_notify(failed.clone());
+        stream.connect_ended_notify(move |stream| {
+            if stream.is_ended() {
+                answered(Ok(()));
+            }
+        });
+        failed(&stream);
+        if !completed.get() {
+            stream.play();
+        }
+        Self { stream, completed }
+    }
+
+    /// Stops the stream, and says whether it still needs a result.
+    pub(crate) fn stop(self) -> bool {
+        let pending = !self.completed.replace(true);
+        self.stream.pause();
+        self.stream.clear();
+        pending
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stream(&self) -> &gtk::MediaFile {
+        &self.stream
+    }
+}
+
+pub(crate) fn fatal_page(view: &FatalView, restart: impl Fn() + 'static) -> gtk::Box {
+    let page = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .margin_start(20)
+        .margin_end(20)
+        .build();
+    let heading = gtk::Label::new(Some(&view.heading));
+    heading.add_css_class("title-1");
+    page.append(&heading);
+    page.append(&gtk::Label::new(Some(&view.text)));
+    let button = gtk::Button::with_label(&view.restart);
+    button.set_halign(gtk::Align::Center);
+    button.add_css_class("suggested-action");
+    button.connect_clicked(move |_| restart());
+    page.append(&button);
+    page
 }
 
 /// Puts `pronunciations` in rows: a play button when it has a recording,
@@ -726,13 +871,14 @@ fn fill_pronunciations(
     rest: &gtk::Box,
     pronunciations: &[PronunciationText<'_>],
     word: &str,
-    player: &Rc<Player>,
+    playback: &PlaybackControls,
 ) {
+    playback.rows.borrow_mut().clear();
     clear(lead);
     clear(rest);
     rest.set_visible(false);
     for (index, pronunciation) in pronunciations.iter().enumerate() {
-        let row = pronunciation_row(pronunciation, word, player);
+        let row = pronunciation_row(pronunciation, word, playback);
         if index < PRONUNCIATION_PREVIEW {
             lead.append(&row);
         } else {
@@ -756,7 +902,7 @@ fn fill_pronunciations(
 fn pronunciation_row(
     pronunciation: &PronunciationText<'_>,
     word: &str,
-    player: &Rc<Player>,
+    playback: &PlaybackControls,
 ) -> gtk::Box {
     let row = gtk::Box::builder()
         .spacing(8)
@@ -776,12 +922,29 @@ fn pronunciation_row(
                 .focusable(true)
                 .visible(false)
                 .build();
-            (file, link)
+            let controller = playback.controller.clone();
+            link.connect_activate_link(move |link| {
+                if controller.dispatch(Event::OpenPressed {
+                    url: link.uri().into(),
+                }) {
+                    link.set_visited(true);
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
+            link
         });
-        row.append(&play_button(url, player, commons.as_ref()));
-        if let Some((_, link)) = commons {
-            row.append(&link);
+        let button = play_button(url, &playback.pressed);
+        row.append(&button);
+        if let Some(link) = &commons {
+            row.append(link);
         }
+        playback.rows.borrow_mut().push(RecordingRow {
+            url: url.to_owned(),
+            button,
+            commons,
+        });
     }
     if let Some(headword) = pronunciation.prefix(word) {
         row.append(&part(headword, "pronunciation-headword"));
@@ -798,14 +961,7 @@ fn pronunciation_row(
     row
 }
 
-/// The button that plays the recording at `url` through `player`: the
-/// stream that played before stops. A failed playback says why in the
-/// button's tooltip.
-fn play_button(
-    url: &str,
-    player: &Rc<Player>,
-    commons: Option<&(CommonsFile, gtk::LinkButton)>,
-) -> gtk::Button {
+fn play_button(url: &str, pressed: &Rc<RefCell<Option<PlayPressed>>>) -> gtk::Button {
     let button = gtk::Button::builder()
         .icon_name("media-playback-start-symbolic")
         .tooltip_text(PLAY_TOOLTIP)
@@ -814,151 +970,13 @@ fn play_button(
         .css_classes(["play"])
         .build();
     button.update_property(&[gtk::accessible::Property::Label(PLAY_TOOLTIP)]);
-    let (url, player) = (url.to_owned(), player.clone());
-    let commons = commons.map(|(file, link)| (file.clone(), link.downgrade()));
-    button.connect_clicked(move |button| {
-        player.stop();
-        button.set_tooltip_text(Some(PLAY_TOOLTIP));
-        button.reset_property(gtk::AccessibleProperty::Description);
-        button.remove_css_class("failed");
-        let link = commons.as_ref().and_then(|(_, link)| link.upgrade());
-        if let Some(link) = &link {
-            link.set_visible(false);
-        }
-        let remote = glib::Uri::peek_scheme(&url)
-            .as_deref()
-            .is_some_and(|scheme| {
-                scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http")
-            });
-        if remote && !(player.network_available)() {
-            playback_failed(button, RECORDING_NEEDS_NETWORK);
-            return;
-        }
-        let attempt = Rc::new(Playback::default());
-        player.current.replace(Some(attempt.clone()));
-        let opened = {
-            let button = button.downgrade();
-            let player = Rc::downgrade(&player);
-            let attempt = Rc::downgrade(&attempt);
-            let commons = commons.clone();
-            move |result| {
-                let (Some(button), Some(player), Some(attempt)) =
-                    (button.upgrade(), player.upgrade(), attempt.upgrade())
-                else {
-                    return;
-                };
-                attempt.job.take();
-                match result {
-                    Ok(media) => play_stream(media, &player, &attempt, &button, commons, remote),
-                    Err(failure) => {
-                        let text =
-                            if !(player.network_available)() || failure == AudioFailure::Network {
-                                RECORDING_NEEDS_NETWORK
-                            } else {
-                                PLAYBACK_FAILED
-                            };
-                        playback_failed(&button, text);
-                    }
-                }
-            }
-        };
-        if remote {
-            if let Some(fetch) = player.fetch_audio.borrow().clone() {
-                let job = fetch(url.clone(), Box::new(opened));
-                attempt.job.replace(job);
-            } else {
-                opened(Err(AudioFailure::Failed));
-            }
-        } else {
-            opened(Ok(PlaybackMedia::from_stream(gtk::MediaFile::for_file(
-                &gio::File::for_uri(&url),
-            ))));
+    let (url, pressed) = (url.to_owned(), pressed.clone());
+    button.connect_clicked(move |_| {
+        if let Some(pressed) = pressed.borrow().as_ref() {
+            pressed(url.clone());
         }
     });
     button
-}
-
-type CommonsLink = (CommonsFile, glib::WeakRef<gtk::LinkButton>);
-
-fn play_stream(
-    media: PlaybackMedia,
-    player: &Rc<Player>,
-    attempt: &Rc<Playback>,
-    button: &gtk::Button,
-    commons: Option<CommonsLink>,
-    remote: bool,
-) {
-    let stream = media.stream.clone();
-    attempt.stream.replace(Some(media));
-    let link = commons.as_ref().map(|(_, link)| link.clone());
-    let failed = {
-        let button = button.downgrade();
-        let attempt = Rc::downgrade(attempt);
-        move |stream: &gtk::MediaFile| {
-            let (Some(button), Some(attempt), Some(error)) =
-                (button.upgrade(), attempt.upgrade(), stream.error())
-            else {
-                return;
-            };
-            attempt.failed.set(true);
-            attempt.job.take();
-            if let Some(link) = link.as_ref().and_then(glib::WeakRef::upgrade) {
-                link.set_visible(false);
-            }
-            let text = if remote && network_error(&error) {
-                RECORDING_NEEDS_NETWORK
-            } else {
-                PLAYBACK_FAILED
-            };
-            playback_failed(&button, text);
-        }
-    };
-    failed(&stream);
-    stream.connect_error_notify(failed);
-    if let Some((file, link)) = commons {
-        let button = button.downgrade();
-        let attempt = Rc::downgrade(attempt);
-        let fetch_credit = player.fetch_credit.borrow().clone();
-        stream.connect_ended_notify(move |stream| {
-            let Some(current) = attempt.upgrade() else {
-                return;
-            };
-            if !stream.is_ended() || current.failed.get() {
-                return;
-            }
-            if let Some(link) = link.upgrade() {
-                link.set_visible(true);
-            }
-            if let Some(fetch) = &fetch_credit {
-                let (button, attempt) = (button.clone(), attempt.clone());
-                let job = fetch(
-                    file.clone(),
-                    Box::new(move |credit| {
-                        let (Some(button), Some(attempt)) = (button.upgrade(), attempt.upgrade())
-                        else {
-                            return;
-                        };
-                        attempt.job.take();
-                        if !attempt.failed.get()
-                            && let Some(text) = recording_credit_text(&credit)
-                        {
-                            button.set_tooltip_text(Some(&text));
-                            button
-                                .update_property(&[gtk::accessible::Property::Description(&text)]);
-                        }
-                    }),
-                );
-                current.job.replace(job);
-            }
-        });
-    }
-    stream.play();
-}
-
-fn playback_failed(button: &gtk::Button, text: &str) {
-    button.set_tooltip_text(Some(text));
-    button.update_property(&[gtk::accessible::Property::Description(text)]);
-    button.add_css_class("failed");
 }
 
 fn network_error(error: &glib::Error) -> bool {
@@ -982,7 +1000,7 @@ fn network_error(error: &glib::Error) -> bool {
 /// as a paste does, then a dash and the groups, each its persons as a tag,
 /// its tense and its mood, dimmer, with a dot between two; then the note,
 /// dim, on a line of its own.
-fn fill_analysis(container: &gtk::Box, analysis: &Analysis, field: &gtk::Entry) {
+fn fill_analysis(container: &gtk::Box, analysis: &Analysis, field: &Field) {
     clear(container);
     for line in &analysis.lines {
         let row = Wrap::new();
@@ -1012,20 +1030,14 @@ fn analysis_part(text: &str, class: &str) -> gtk::Label {
 
 /// The lemma as a serif link in the accent that puts it into `field` as a
 /// paste does.
-fn lemma_link(lemma: &str, field: &gtk::Entry) -> gtk::Button {
+fn lemma_link(lemma: &str, field: &Field) -> gtk::Button {
     let link = gtk::Button::builder()
         .child(&analysis_part(lemma, "lemma"))
         .css_classes(["lemma-link"])
         .focus_on_click(false)
         .build();
     link.set_cursor_from_name(Some("pointer"));
-    let held = field.downgrade();
-    let word = lemma.to_owned();
-    link.connect_clicked(move |_| {
-        if let Some(field) = held.upgrade() {
-            put_into_field(&field, &word);
-        }
-    });
+    connect_replacement_link(&link, lemma, field);
     link
 }
 
@@ -1068,7 +1080,8 @@ fn fill_glosses(
     chosen: Option<&ChosenGloss<'_>>,
     clicked: &SenseChosen,
     look_up: &LookUp,
-    field: &gtk::Entry,
+    field: &Field,
+    definition: &RefCell<Option<gtk::Box>>,
 ) {
     clear(container);
     let glosses = match texts {
@@ -1110,7 +1123,9 @@ fn fill_glosses(
                 continue;
             };
             button.add_css_class("chosen");
-            rows.append(&gloss_explained(chosen, row.lookup, look_up));
+            let online = definition_area(chosen.definition.as_ref(), chosen.no_key);
+            rows.append(&gloss_explained(row.lookup, look_up, &online));
+            definition.replace(Some(online));
         }
         container.append(&gloss_group(group.pos, &rows));
     }
@@ -1188,15 +1203,8 @@ fn gloss_row(row: &GlossRow<'_>) -> gtk::Button {
 /// What stands under the chosen gloss: its online translation, or the line
 /// that a key is needed for it, and its English word as a pill that
 /// `look_up` looks up.
-fn gloss_explained(chosen: &ChosenGloss<'_>, lookup: Option<&str>, look_up: &LookUp) -> gtk::Box {
-    let below = explained_tail(None, chosen.definition.as_ref());
-    if chosen.no_key {
-        below.append(
-            &wrapping(gtk::Label::builder().label(GLOSS_NO_KEY))
-                .css_classes(["hint"])
-                .build(),
-        );
-    }
+fn gloss_explained(lookup: Option<&str>, look_up: &LookUp, definition: &gtk::Box) -> gtk::Box {
+    let below = explained_tail(None, definition);
     if let Some(word) = lookup {
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         line.append(
@@ -1227,7 +1235,7 @@ fn gloss_explained(chosen: &ChosenGloss<'_>, lookup: Option<&str>, look_up: &Loo
 /// The row of a gloss that names a form: its number, the description, dim,
 /// the lemma as a link into `field`, then the analysis of the word for it
 /// or what the source adds, dim.
-fn form_row(form: &FormRow<'_>, field: &gtk::Entry) -> Wrap {
+fn form_row(form: &FormRow<'_>, field: &Field) -> Wrap {
     let row = Wrap::new();
     row.add_css_class("analysis-line");
     let number = analysis_part(&form.number.to_string(), "number");
@@ -1321,9 +1329,10 @@ fn sense_row(sense: &SenseText<'_>, chosen: &SenseChosen) -> gtk::Button {
 fn explained_box(
     explained: &Explained<'_>,
     action: Option<&gtk::Button>,
-    field: &gtk::Entry,
+    field: &Field,
+    definition: &gtk::Box,
 ) -> gtk::Box {
-    let below = explained_tail(action, explained.definition.as_ref());
+    let below = explained_tail(action, definition);
     let synonyms = gtk::Box::new(gtk::Orientation::Vertical, 6);
     fill_listed(
         &synonyms,
@@ -1339,7 +1348,7 @@ fn explained_box(
 /// What stands under a chosen sense or gloss without its synonyms: the
 /// button that translates it when `action` is shown, and the online
 /// translation `definition` once asked for.
-fn explained_tail(action: Option<&gtk::Button>, definition: Option<&Block<'_>>) -> gtk::Box {
+fn explained_tail(action: Option<&gtk::Button>, definition: &gtk::Box) -> gtk::Box {
     let below = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
@@ -1348,10 +1357,29 @@ fn explained_tail(action: Option<&gtk::Button>, definition: Option<&Block<'_>>) 
     if let Some(action) = action {
         below.append(action);
     }
-    if let Some(block) = definition {
-        below.append(&definition_block(block));
-    }
+    below.append(definition);
     below
+}
+
+fn definition_area(block: Option<&Block<'_>>, no_key: bool) -> gtk::Box {
+    let area = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    fill_definition(&area, block, no_key);
+    area
+}
+
+fn fill_definition(area: &gtk::Box, block: Option<&Block<'_>>, no_key: bool) {
+    clear(area);
+    if let Some(block) = block {
+        area.append(&definition_block(block));
+    }
+    if no_key {
+        area.append(
+            &wrapping(gtk::Label::builder().label(GLOSS_NO_KEY))
+                .css_classes(["hint"])
+                .build(),
+        );
+    }
+    area.set_visible(block.is_some() || no_key);
 }
 
 /// The online translation of a definition or a gloss: its label and, under
@@ -1710,8 +1738,26 @@ fn result_area() -> ResultArea {
 /// Puts `answer` into the answer of `result`, the note without a key and
 /// the row of the word as a whole; hides them for `None`. Each translation
 /// is a link that puts it into `field`.
-fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &gtk::Entry) {
+fn fill_answer(
+    result: &ResultArea,
+    answer: Option<&Answer<'_>>,
+    previous: Option<&Answer<'_>>,
+    field: &Field,
+) {
     let widgets = &result.answer;
+    let comparison = answer.zip(previous);
+    let keep_pills = comparison.is_some_and(|(new, old)| new.pills == old.pills);
+    let keep_whole = comparison.is_some_and(|(new, old)| new.whole == old.whole);
+    let focus = field.root().and_then(|root| root.focus());
+    if focus.is_some_and(|focus| {
+        focus.is_ancestor(&result.no_key)
+            || (focus.is_ancestor(&widgets.root)
+                && !(keep_pills && focus.is_ancestor(&widgets.pills)))
+            || (focus.is_ancestor(&result.whole)
+                && !(keep_whole && focus.is_ancestor(&result.whole_pills)))
+    }) {
+        field.grab_focus_without_selecting();
+    }
     let shown = answer.is_some_and(|answer| {
         answer.word.is_some() || answer.sentence.is_some() || answer.missing.is_some()
     });
@@ -1719,8 +1765,12 @@ fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &gtk::En
     result
         .no_key
         .set_visible(answer.is_some_and(|answer| answer.no_key));
-    clear(&widgets.pills);
-    clear(&result.whole_pills);
+    if !keep_pills {
+        clear(&widgets.pills);
+    }
+    if !keep_whole {
+        clear(&result.whole_pills);
+    }
     let Some(answer) = answer else {
         result.whole.set_visible(false);
         return;
@@ -1732,7 +1782,7 @@ fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &gtk::En
         &widgets.sentence_spinner,
         answer.sentence.as_ref(),
     );
-    if !answer.pills.is_empty() {
+    if !keep_pills && !answer.pills.is_empty() {
         widgets.pills.append(&pills(
             answer.pills,
             &["pill", "small"],
@@ -1752,6 +1802,9 @@ fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &gtk::En
         } else {
             "web-browser-symbolic"
         }));
+    if keep_whole {
+        return;
+    }
     match &answer.whole {
         Some(Listed::Items { items, .. }) => {
             result.whole_pills.append(&pills(
@@ -1792,13 +1845,14 @@ pub struct View {
     /// by both: they never run together. Hidden until one gave nothing, and
     /// again once something new happens in the window.
     source_failure: SourceFailure,
+    controller: ControllerEvents,
     binding: gtk::Box,
     binding_text: gtk::Label,
     binding_detail: gtk::Label,
     retry: gtk::Button,
     /// What is said about the dictionary indexes; hidden when both are open.
     indexes: gtk::Label,
-    field: gtk::Entry,
+    field: Field,
     /// Left of the field: puts the text before into it.
     back: gtk::Button,
     /// Left of the field, after Back: puts the text after into it.
@@ -1819,6 +1873,8 @@ pub struct View {
     capture: gtk::Button,
     sentence: gtk::Label,
     result: ResultArea,
+    /// The online row under the chosen sense or gloss, when there is one.
+    definition: RefCell<Option<gtk::Box>>,
     /// Runs with the index of a sense when its row is clicked; the rows are
     /// built anew for each result and each choice.
     sense_chosen: Rc<RefCell<Option<SenseChosen>>>,
@@ -1827,8 +1883,7 @@ pub struct View {
     /// Runs with the English word of the chosen gloss when its pill is
     /// clicked.
     look_up_english: Rc<RefCell<Option<LookUp>>>,
-    /// The recording that plays now; a new result stops it.
-    player: Rc<Player>,
+    playback: PlaybackControls,
     /// The [`Shown::generation`] of the result whose pronunciations are
     /// shown: a choice in the same result leaves them, and their playback,
     /// as they are.
@@ -1842,9 +1897,6 @@ pub struct View {
     /// translations do not: the shown result's
     /// [`Translating::answer_language`](crate::view::Translating::answer_language).
     answer_language: Cell<Language>,
-    /// My language for the shown result: the online rows are sent into it,
-    /// and a refusal about the language names it.
-    my_language: Cell<Language>,
     /// Whether the synonyms of the word that no sense took are shown; a new
     /// result closes them, a choice in the same one keeps them.
     synonyms_open: Rc<Cell<bool>>,
@@ -1868,7 +1920,12 @@ impl View {
 
         // Wraps, so an install command fits. Not selectable, like the line
         // of the indexes: it must not take the focus from the field.
-        let source_failure = source_failure();
+        let controller = ControllerEvents::default();
+        let source_failure = source_failure(controller.clone());
+        let playback = PlaybackControls {
+            controller: controller.clone(),
+            ..PlaybackControls::default()
+        };
         root.append(&source_failure.row);
 
         let binding_row = binding_row();
@@ -1902,6 +1959,7 @@ impl View {
             source,
             status,
             source_failure,
+            controller,
             binding: binding_row.row,
             binding_text: binding_row.text,
             binding_detail: binding_row.detail,
@@ -1917,15 +1975,15 @@ impl View {
             capture,
             sentence,
             result,
+            definition: RefCell::new(None),
             sense_chosen: Rc::new(RefCell::new(None)),
             gloss_chosen: Rc::new(RefCell::new(None)),
             look_up_english: Rc::new(RefCell::new(None)),
-            player: Rc::new(Player::new()),
+            playback,
             pronounced: Cell::new(None),
             translations: RefCell::new(None),
             online: RefCell::new(Vec::new()),
             answer_language: Cell::new(Language::Ru),
-            my_language: Cell::new(Language::Ru),
             synonyms_open: Rc::new(Cell::new(false)),
             lone_word: Cell::new(false),
         };
@@ -1981,6 +2039,18 @@ impl View {
         (self.indexes.get_visible(), self.indexes.text().to_string())
     }
 
+    /// The main window's binding row as shown: whether it is visible, its
+    /// line, and whether Retry can be pressed; for the tests.
+    #[cfg(test)]
+    pub fn binding_row(&self) -> (bool, String, bool) {
+        (
+            // Its own flag: the main window may be hidden in a test.
+            self.binding.get_visible(),
+            self.binding_text.text().to_string(),
+            self.retry.is_sensitive(),
+        )
+    }
+
     /// What the definition button says; for the tests.
     #[cfg(test)]
     pub fn definition_action_text(&self) -> String {
@@ -1996,38 +2066,61 @@ impl View {
         self.retry.connect_clicked(move |_| retry());
     }
 
+    pub(crate) fn controller_events(&self) -> ControllerEvents {
+        self.controller.clone()
+    }
+
+    pub(crate) fn set_controller(&self, controller: Option<Dispatcher>) {
+        self.controller.0.replace(controller);
+    }
+
     /// Shows `line`, why a capture or a read of the selection and the
     /// clipboard gave no text, under the source and the status. [`View::render`] leaves it;
     /// [`View::clear_source_failure`] hides it.
     /// A line that names a runnable command shows Copy beside it.
-    pub fn render_source_failure(&self, line: &str) {
-        self.set_source_failure(line);
+    pub fn render_source_failure(&self, line: &str, command: Option<&str>) {
+        self.set_source_failure(line, command);
         self.source_failure.row.set_visible(true);
+    }
+
+    /// The source line while it is shown.
+    #[cfg(test)]
+    pub fn source_failure_text(&self) -> Option<String> {
+        let failure = &self.source_failure;
+        failure
+            .row
+            .is_visible()
+            .then(|| failure.line.text().to_string())
     }
 
     /// Hides the source line.
     pub fn clear_source_failure(&self) {
         self.source_failure.row.set_visible(false);
-        self.set_source_failure("");
+        self.set_source_failure("", None);
     }
 
     /// Puts `line` into the source line and gives Copy the command it
     /// names, if any, with Copy's label back to its own.
-    fn set_source_failure(&self, line: &str) {
+    fn set_source_failure(&self, line: &str, command: Option<&str>) {
         let failure = &self.source_failure;
         failure.line.set_text(line);
-        let command = command_in(line);
         failure.copy.set_visible(command.is_some());
         failure.copy.set_label(COPY_LABEL);
-        failure.command.replace(command);
+        failure.command.replace(command.map(str::to_owned));
     }
 
-    /// Runs `changed` with the text of the field each time the user changes
-    /// it; [`View::set_field_text`] does not run it. Called once.
-    pub fn connect_sentence_changed(&self, changed: impl Fn(&str) + 'static) {
-        let handler = self
-            .field
-            .connect_changed(move |field| changed(field.text().as_str()));
+    /// Reports the text and origin of each editable field change.
+    /// [`View::set_field_text`] blocks this handler. Called once.
+    pub fn connect_sentence_changed(&self, changed: impl Fn(&str, FieldEdit) + 'static) {
+        let replacing = self.field.replacing.clone();
+        let handler = self.field.connect_changed(move |field| {
+            let origin = if replacing.get() {
+                FieldEdit::Replaced
+            } else {
+                FieldEdit::Typed
+            };
+            changed(field.text().as_str(), origin);
+        });
         self.sentence_handler.replace(Some(handler));
     }
 
@@ -2113,6 +2206,12 @@ impl View {
         self.forward.connect_clicked(move |_| forward());
     }
 
+    /// Sets the tooltips for Back and Forward.
+    pub fn set_history_tooltips(&self, back: &str, forward: &str) {
+        self.back.set_tooltip_text(Some(back));
+        self.forward.set_tooltip_text(Some(forward));
+    }
+
     /// Whether Back and Forward can be pressed.
     pub fn set_history(&self, can_back: bool, can_forward: bool) {
         self.back.set_sensitive(can_back);
@@ -2154,6 +2253,7 @@ impl View {
     /// Puts `text` into the field as a paste does: it replaces the text,
     /// the handler of [`View::connect_sentence_changed`] runs, and then the
     /// field is submitted.
+    #[cfg(test)]
     pub fn put_into_field(&self, text: &str) {
         put_into_field(&self.field, text);
     }
@@ -2180,6 +2280,11 @@ impl View {
         self.gloss_chosen.replace(Some(Rc::new(chosen)));
     }
 
+    /// Runs `chosen` with a synonym word each time its pill is clicked.
+    pub fn connect_synonym_chosen(&self, chosen: impl Fn(String) + 'static) {
+        self.field.synonym_chosen.replace(Some(Rc::new(chosen)));
+    }
+
     /// Runs `look_up` with the English word of the chosen gloss each time
     /// its pill is clicked.
     pub fn connect_look_up_english(&self, look_up: impl Fn(&str) + 'static) {
@@ -2199,20 +2304,12 @@ impl View {
         self.result.add_key.connect_clicked(move |_| add());
     }
 
-    /// Opens an HTTP(S) recording off the GTK thread.
-    pub fn connect_recording_audio(
-        &self,
-        fetch: impl Fn(String, AudioReady) -> Option<Job> + 'static,
-    ) {
-        self.player.fetch_audio.replace(Some(Rc::new(fetch)));
+    pub fn connect_play_pressed(&self, pressed: impl Fn(String) + 'static) {
+        self.playback.pressed.replace(Some(Rc::new(pressed)));
     }
 
-    /// Requests the credit of a Commons recording after it finishes playing.
-    pub fn connect_recording_credit(
-        &self,
-        fetch: impl Fn(CommonsFile, CreditReady) -> Option<Job> + 'static,
-    ) {
-        self.player.fetch_credit.replace(Some(Rc::new(fetch)));
+    pub fn render_playback(&self, playback: Option<&PlaybackView>) {
+        self.playback.render(playback);
     }
 
     /// The text the field holds now.
@@ -2253,7 +2350,7 @@ impl View {
     /// Shows the result of `shown` with the sense chosen in it, or hides it
     /// when there is none. With no sense chosen the area is put at its top:
     /// that is how a result arrives. A choice leaves it where it is.
-    pub fn render_result(&self, shown: &Shown, key_file: Option<&std::path::Path>) {
+    pub fn render_result(&self, shown: &Shown, key_location: KeyLocation<'_>) {
         self.release_focus();
         let result = &self.result;
         let (visible, sensitive) = shown.definition_action();
@@ -2261,12 +2358,12 @@ impl View {
         result
             .definition_action
             .set_label(definition_action_label(shown.translating().my));
-        self.my_language.set(shown.translating().my);
         // Out of the old rows before they go: it is put under the chosen
         // one again below.
         if let Some(parent) = result.definition_action.parent().and_downcast::<gtk::Box>() {
             parent.remove(&result.definition_action);
         }
+        self.definition.replace(None);
         clear(&result.rows);
         self.answer_language
             .set(shown.translating().answer_language(shown.lookup()));
@@ -2278,7 +2375,7 @@ impl View {
             lookup,
             shown.choice(),
             shown.definition(),
-            key_file,
+            key_location,
             shown.elsewhere(),
             shown.translating(),
         );
@@ -2289,14 +2386,13 @@ impl View {
         result.line.set_text(line.unwrap_or_default());
         result.line.set_visible(line.is_some());
         if self.pronounced.replace(Some(shown.generation())) != Some(shown.generation()) {
-            self.player.stop();
             self.synonyms_open.set(false);
             fill_pronunciations(
                 &result.lead,
                 &result.pronunciations,
                 &texts.pronunciations,
                 &result.headword.text(),
-                &self.player,
+                &self.playback,
             );
         }
         fill_analysis(&result.analysis, &texts.analysis, &self.field);
@@ -2335,12 +2431,13 @@ impl View {
                 }) as LookUp
             },
             &self.field,
+            &self.definition,
         );
         result.glosses.set_visible(texts.glosses.is_some());
         if shown.choice().is_none() {
             result.area.vadjustment().set_value(0.0);
         }
-        self.show_area();
+        self.show_area(None);
     }
 
     /// Hides what [`render_result`](Self::render_result) shows when there
@@ -2348,7 +2445,7 @@ impl View {
     /// the glosses.
     fn hide_result(&self) {
         let result = &self.result;
-        self.player.stop();
+        self.playback.rows.borrow_mut().clear();
         self.pronounced.set(None);
         clear(&result.lead);
         clear(&result.pronunciations);
@@ -2362,7 +2459,7 @@ impl View {
         result.word_synonyms.set_visible(false);
         clear(&result.glosses);
         result.glosses.set_visible(false);
-        self.show_area();
+        self.show_area(None);
     }
 
     /// Shows the senses of `texts`: their caption, the hint, and a row per
@@ -2378,9 +2475,11 @@ impl View {
             result.rows.append(&sense_row(sense, &chosen));
             if let Some(explained) = &sense.explained {
                 let action = visible.then_some(&result.definition_action);
+                let online = definition_area(explained.definition.as_ref(), false);
                 result
                     .rows
-                    .append(&explained_box(explained, action, &self.field));
+                    .append(&explained_box(explained, action, &self.field, &online));
+                self.definition.replace(Some(online));
             }
         }
         result
@@ -2388,30 +2487,66 @@ impl View {
             .set_visible(!texts.senses.is_empty() || texts.hint.is_some());
     }
 
-    /// Shows the online texts `online` in the answer, with the
-    /// dictionary's translations of the shown result.
-    pub fn render_online(&self, online: &OnlineTexts<'_>, key_file: Option<&std::path::Path>) {
-        self.release_focus();
-        self.online.replace(
-            online_rows(online, key_file, self.my_language.get())
-                .into_iter()
-                .map(OnlineRow::into_owned)
-                .collect(),
+    /// Updates the definition row of the existing choice without replacing its links.
+    pub fn render_definition(&self, shown: &Shown, key_location: KeyLocation<'_>) {
+        let definition = self.definition.borrow();
+        let (Some(area), Some(lookup)) = (definition.as_ref(), shown.lookup()) else {
+            return;
+        };
+        let texts = choice_texts(
+            lookup,
+            shown.choice(),
+            shown.definition(),
+            key_location,
+            shown.elsewhere(),
+            shown.translating(),
         );
-        self.show_area();
+        let (block, no_key) = if let Some(gloss) = &texts.gloss {
+            (gloss.definition.as_ref(), gloss.no_key)
+        } else {
+            (
+                texts
+                    .senses
+                    .iter()
+                    .find_map(|sense| sense.explained.as_ref()?.definition.as_ref()),
+                false,
+            )
+        };
+        self.release_focus_in(&[area]);
+        fill_definition(area, block, no_key);
+        self.result
+            .definition_action
+            .set_sensitive(shown.definition_action().1);
+    }
+
+    /// Updates the answer while leaving the article's links and focus in place.
+    pub fn render_online_rows(&self, rows: &[OnlineRow<'static>]) {
+        let previous = self.online.replace(rows.to_vec());
+        self.show_area(Some(&previous));
+    }
+
+    fn release_focus_in(&self, sections: &[&gtk::Box]) {
+        let focus = self.root.root().and_then(|root| root.focus());
+        if focus.is_some_and(|focus| sections.iter().any(|section| focus.is_ancestor(*section))) {
+            self.focus_field();
+        }
     }
 
     /// Fills the answer from what is kept of the result and the online
     /// texts, then shows the card and the result area while they have
     /// something in them.
-    fn show_area(&self) {
+    fn show_area(&self, previous_rows: Option<&[OnlineRow<'static>]>) {
         let result = &self.result;
         {
             let translations = self.translations.borrow();
             let online = self.online.borrow();
+            let language = self.answer_language.get();
+            let previous =
+                previous_rows.and_then(|rows| answer_texts(translations.as_ref(), rows, language));
             fill_answer(
                 result,
-                answer_texts(translations.as_ref(), &online, self.answer_language.get()).as_ref(),
+                answer_texts(translations.as_ref(), &online, language).as_ref(),
+                previous.as_ref(),
                 &self.field,
             );
         }
@@ -2461,6 +2596,8 @@ mod tests {
         rc::Rc,
     };
 
+    use addict_controller::{Effect, Event, PlaybackState, PlaybackView, RequestId, ViewState};
+    use addict_core::dirs::Dirs;
     use addict_core::{
         dictionary::{
             Article, Audio, Dictionary, EntryIdentity, LexicalEntry, PartOfSpeech, Pronunciation,
@@ -2470,17 +2607,17 @@ mod tests {
         sentence::words,
         translation::{Source as Language, reading_languages},
     };
-    use addict_engine::recording::{AudioFailure, CommonsFile, Credit};
+    use addict_engine::view::playback::playback_text;
     use gtk::{gio, glib, prelude::*};
 
-    use super::{CreditReady, PlaybackMedia, View, fill_listed};
+    use super::{Field, KeyLocation, MediaPlayback, View, fill_listed};
     use crate::view::{
-        BACK_TOOLTIP, COPIED_LABEL, COPY_LABEL, FORWARD_TOOLTIP, Listed, PLAY_TOOLTIP,
-        PLAYBACK_FAILED, RECORDING_NEEDS_NETWORK, SHOW_LESS,
+        COPIED_LABEL, COPY_LABEL, Listed, PLAY_TOOLTIP, PLAYBACK_FAILED, RECORDING_NEEDS_NETWORK,
+        SHOW_LESS,
     };
     use crate::{
         style,
-        view::{Binding, Lookup, Online, OnlineTexts, Shown},
+        view::{Binding, Lookup, Online, OnlineTexts, Shown, online_rows},
     };
 
     /// Draws the window with the sample article of "bank" in a sentence,
@@ -2517,17 +2654,24 @@ mod tests {
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(pronounced_bank())));
         shown.choose(0);
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         let word = Online::Translated("берег".to_owned());
         let whole =
             crate::view::Whole::Asked(Online::Translated("Я сидел на берегу реки.".to_owned()));
-        view.render_online(
+        let rows = online_rows(
             &OnlineTexts {
                 word: Some(&word),
                 sentence: Some(&whole),
                 lone: None,
             },
-            None,
+            test_key_location(),
+            Language::Ru,
+        );
+        view.render_online_rows(
+            &rows
+                .into_iter()
+                .map(super::OnlineRow::into_owned)
+                .collect::<Vec<_>>(),
         );
         let window = gtk::Window::builder()
             .title("Addict")
@@ -2643,18 +2787,44 @@ mod tests {
         children
     }
 
+    fn test_key_location() -> KeyLocation<'static> {
+        KeyLocation::Hint(crate::resident::KEY_LOCATION_HINT)
+    }
+
+    fn request_id() -> RequestId {
+        let (send, effects) = std::sync::mpsc::channel();
+        let controller = addict_controller::start(
+            Dirs::default(),
+            crate::resident::controller_platform(),
+            crate::resident::linux_start_facts(),
+            move |_: ViewState, batch: Vec<Effect>| {
+                for effect in batch {
+                    if let Effect::ReadSelection { id, .. } = effect {
+                        let _ = send.send(id);
+                    }
+                }
+            },
+        )
+        .unwrap();
+        assert!(controller.dispatch(Event::ReadPressed { sequence: 1 }));
+        effects
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+    }
+
     /// A pronunciation with a recording has a play button and one without
-    /// has none; a new result stops what plays and takes the rows away,
+    /// has none; a new result takes the rows away,
     /// a choice in the same result keeps them. Run alone: GTK starts once
     /// per process, on one thread.
     #[test]
     #[ignore = "needs a display; run alone"]
     fn only_a_recording_has_a_play_button() {
         gtk::init().expect("a display");
-        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let view = Rc::new(View::new(WindowState::Empty, &Binding::Bound));
+        let current = Rc::new(RefCell::new(None));
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(pronounced_bank())));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         // The first stands beside the headword, the second under it, behind
         // the toggle.
         let lead = view.result.lead.clone().upcast::<gtk::Widget>();
@@ -2680,13 +2850,32 @@ mod tests {
         // tooltip, never in a dialog.
         let missing = std::env::temp_dir().join("addict-no-such-recording.ogg");
         let mut article = pronounced_bank();
-        article.entries[0].pronunciations[0].audio[0].url =
-            gtk::gio::File::for_path(&missing).uri().into();
+        let url = gio::File::for_path(&missing).uri().to_string();
+        article.entries[0].pronunciations[0].audio[0].url = url.clone();
+        let id = request_id();
+        view.connect_play_pressed({
+            let view = Rc::downgrade(&view);
+            let current = current.clone();
+            move |pressed| {
+                assert_eq!(pressed, url);
+                let view = view.clone();
+                current.replace(Some(MediaPlayback::start(&missing, move |result| {
+                    let failure = result.expect_err("missing recording");
+                    let view = view.upgrade().unwrap();
+                    let playback = PlaybackView {
+                        id,
+                        url: pressed.clone(),
+                        state: PlaybackState::Failed(playback_text(&failure).unwrap().to_owned()),
+                    };
+                    view.render_playback(Some(&playback));
+                })));
+            }
+        });
         shown.show(Some(Lookup::Article(article)));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         let play = buttons(&lead, "play").remove(0);
         play.emit_clicked();
-        assert!(view.player.current.borrow().is_some());
+        assert!(current.borrow().is_some());
         let context = glib::MainContext::default();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !play.has_css_class("failed") && std::time::Instant::now() < until {
@@ -2694,16 +2883,14 @@ mod tests {
         }
         assert!(play.has_css_class("failed"));
         assert_eq!(play.tooltip_text().as_deref(), Some(PLAYBACK_FAILED));
-        // A choice keeps the rows and the stream; a new result stops it.
+        // A choice keeps the rows.
         shown.choose(0);
-        view.render_result(&shown, None);
-        assert!(view.player.current.borrow().is_some());
+        view.render_result(&shown, test_key_location());
         assert!(play.parent().is_some());
         shown.show(Some(Lookup::Article(
             Sample.lookup("bank").expect("the sample article"),
         )));
-        view.render_result(&shown, None);
-        assert!(view.player.current.borrow().is_none());
+        view.render_result(&shown, test_key_location());
         assert!(lead.first_child().is_none());
         assert!(rest.first_child().is_none());
         assert!(!rest.is_visible());
@@ -2716,7 +2903,7 @@ mod tests {
             })
             .collect();
         shown.show(Some(Lookup::Article(article)));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         let leading = children(&lead);
         assert_eq!(leading.len(), 2);
         assert_eq!(children(&rest).len(), 4);
@@ -2733,44 +2920,133 @@ mod tests {
 
     #[test]
     #[ignore = "needs a display; run alone"]
-    fn recording_keeps_the_article_and_credits_only_the_current_playback() {
+    fn online_rows_and_definition_leave_the_article_focus_and_scroll_in_place() {
         gtk::init().expect("a display");
-        let mut view = View::new(WindowState::Empty, &Binding::Bound);
-        let online = Rc::new(Cell::new(false));
-        let player = Rc::get_mut(&mut view.player).expect("no playback controls yet");
-        player.network_available = Box::new({
-            let online = online.clone();
-            move || online.get()
-        });
-        // Exercise the real media stream signals without making any requests.
-        let fetch_error = Rc::new(Cell::new(None));
-        view.connect_recording_audio({
-            let (online, fetch_error) = (online.clone(), fetch_error.clone());
-            move |_, ready| {
-                if let Some(failure) = fetch_error.take() {
-                    online.set(false);
-                    ready(Err(failure));
-                } else {
-                    ready(Ok(PlaybackMedia::from_stream(gtk::MediaFile::new())));
-                }
-                None
-            }
-        });
-        let requested = Rc::new(RefCell::new(Vec::<(CommonsFile, CreditReady)>::new()));
-        view.connect_recording_credit({
-            let requested = requested.clone();
-            move |file, ready| {
-                requested.borrow_mut().push((file, ready));
-                None
-            }
-        });
-
+        let view = View::new(WindowState::Empty, &Binding::Bound);
         let mut article = pronounced_bank();
-        article.entries[0].pronunciations[0].audio[0].url =
-            "https://commons.wikimedia.org/wiki/Special:FilePath/Ru-собака.ogg".into();
+        article.senses = article.senses.iter().cloned().cycle().take(36).collect();
+        article.translations = vec!["берег".into(), "набережная".into()];
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(article)));
-        view.render_result(&shown, None);
+        shown.choose(0);
+        view.render_result(&shown, test_key_location());
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(400)
+            .child(view.root())
+            .build();
+        window.present();
+        let context = glib::MainContext::default();
+        let draw = || context.block_on(glib::timeout_future(std::time::Duration::from_millis(100)));
+        draw();
+        let sense = buttons(view.result.rows.upcast_ref(), "sense").remove(0);
+        assert!(sense.grab_focus());
+        let scroll = view.result.area.vadjustment();
+        scroll.set_value(25.0);
+        assert_eq!(scroll.value(), 25.0);
+
+        let answer = Online::Translated("берег".to_owned());
+        let render = |texts: OnlineTexts<'_>| {
+            let rows: Vec<_> = online_rows(&texts, test_key_location(), Language::Ru)
+                .into_iter()
+                .map(super::OnlineRow::into_owned)
+                .collect();
+            view.render_online_rows(&rows);
+        };
+        render(OnlineTexts {
+            lone: Some(&answer),
+            ..OnlineTexts::default()
+        });
+        let (number, _) = shown.request_definition().expect("definition action");
+        view.render_definition(&shown, test_key_location());
+        shown.answer_definition(number, answer.clone());
+        view.render_definition(&shown, test_key_location());
+        draw();
+
+        assert_eq!(
+            gtk::prelude::RootExt::focus(&window).as_ref(),
+            Some(sense.upcast_ref())
+        );
+        assert_eq!(scroll.value(), 25.0);
+
+        // In the answer and in the word-as-a-whole section, a dictionary
+        // pill survives the corresponding online row settling.
+        let pending = Online::Pending;
+        let pending_sentence = crate::view::Whole::Asked(pending.clone());
+        let answered_sentence = crate::view::Whole::Asked(answer.clone());
+        for (before, after, container) in [
+            (
+                OnlineTexts {
+                    sentence: Some(&pending_sentence),
+                    ..OnlineTexts::default()
+                },
+                OnlineTexts {
+                    sentence: Some(&answered_sentence),
+                    ..OnlineTexts::default()
+                },
+                &view.result.answer.pills,
+            ),
+            (
+                OnlineTexts {
+                    word: Some(&pending),
+                    ..OnlineTexts::default()
+                },
+                OnlineTexts {
+                    word: Some(&answer),
+                    ..OnlineTexts::default()
+                },
+                &view.result.whole_pills,
+            ),
+        ] {
+            render(before);
+            draw();
+            let pill = buttons(container.upcast_ref(), "pill-link").remove(0);
+            assert!(pill.grab_focus());
+            render(after);
+            draw();
+            assert_eq!(
+                gtk::prelude::RootExt::focus(&window).as_ref(),
+                Some(pill.upcast_ref())
+            );
+            assert_eq!(buttons(container.upcast_ref(), "pill-link")[0], pill);
+        }
+        window.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_lemma_link_uses_the_guarded_replacement_callback() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let lemma = super::lemma_link("walk", &view.field);
+        lemma.emit_clicked();
+        assert_eq!(view.field_text(), "walk");
+
+        view.set_field_text("walked");
+        let submitted = Rc::new(RefCell::new(None));
+        view.connect_synonym_chosen({
+            let submitted = submitted.clone();
+            move |word| {
+                submitted.replace(Some(word));
+            }
+        });
+        lemma.emit_clicked();
+        assert_eq!(submitted.borrow().as_deref(), Some("walk"));
+        assert_eq!(view.field_text(), "walked");
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn recording_keeps_the_article_and_credits_only_the_current_playback() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let id = request_id();
+        let url = "https://commons.wikimedia.org/wiki/Special:FilePath/Ru-собака.ogg";
+        let mut article = pronounced_bank();
+        article.entries[0].pronunciations[0].audio[0].url = url.into();
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(article)));
+        view.render_result(&shown, test_key_location());
         let row = view.result.lead.first_child().expect("pronunciation row");
         let play = buttons(&row, "play").remove(0);
         let link = children(&row)
@@ -2795,88 +3071,67 @@ mod tests {
             assert!(play.parent().is_some());
             assert!(play.is_sensitive());
         };
-        let stream = || {
-            view.player
-                .current
-                .borrow()
-                .as_ref()
-                .expect("active stream")
-                .stream
-                .borrow()
-                .as_ref()
-                .expect("opened stream")
-                .stream
-                .clone()
+        let render = |state| {
+            let snapshot = ViewState {
+                playback: Some(PlaybackView {
+                    id,
+                    url: url.into(),
+                    state,
+                }),
+                ..ViewState::default()
+            };
+            view.render_playback(snapshot.playback.as_ref());
         };
         let finish = || {
-            let stream = stream();
-            stream.stream_prepared(true, false, false, 1_000_000);
-            stream.stream_ended();
+            render(PlaybackState::Ended { credit: None });
             assert!(link.is_visible());
             assert!(link.is_focusable());
             assert_eq!(
                 link.uri(),
                 "https://commons.wikimedia.org/wiki/File:Ru-%D1%81%D0%BE%D0%B1%D0%B0%D0%BA%D0%B0.ogg"
             );
-            assert_eq!(requested.borrow().len(), 1);
-            requested.borrow_mut().pop().expect("credit lookup").1
-        };
-        let credit = || Credit {
-            author: Some("The Shtooka Project".into()),
-            license: Some("CC BY 2.0 FR".into()),
         };
 
-        play.emit_clicked();
-        assert!(view.player.current.borrow().is_none());
+        render(PlaybackState::Failed(RECORDING_NEEDS_NETWORK.to_owned()));
         assert_failure(RECORDING_NEEDS_NETWORK);
-        online.set(true);
-        play.emit_clicked();
+        render(PlaybackState::Playing);
         assert_eq!(play.tooltip_text().as_deref(), Some(PLAY_TOOLTIP));
-        stream().set_error(glib::Error::new(
-            gio::IOErrorEnum::NetworkUnreachable,
-            "injected",
-        ));
+        render(PlaybackState::Failed(RECORDING_NEEDS_NETWORK.to_owned()));
         assert_failure(RECORDING_NEEDS_NETWORK);
-        assert!(requested.borrow().is_empty());
-        fetch_error.set(Some(AudioFailure::Failed));
-        play.emit_clicked();
+        render(PlaybackState::Fetching);
+        render(PlaybackState::Failed(RECORDING_NEEDS_NETWORK.to_owned()));
         assert_failure(RECORDING_NEEDS_NETWORK);
-        assert!(requested.borrow().is_empty());
 
-        online.set(true);
-        play.emit_clicked();
-        assert!(requested.borrow().is_empty());
+        render(PlaybackState::Playing);
         assert!(!link.is_visible());
-        let superseded_by_retry = finish();
-        play.emit_clicked();
-        online.set(false);
-        stream().set_error(glib::Error::new(gio::IOErrorEnum::InvalidData, "injected"));
-        assert!(requested.borrow().is_empty());
-        superseded_by_retry(credit());
+        finish();
+        render(PlaybackState::Fetching);
+        render(PlaybackState::Failed(PLAYBACK_FAILED.to_owned()));
         assert_failure(PLAYBACK_FAILED);
 
-        online.set(true);
-        play.emit_clicked();
-        finish()(credit());
+        render(PlaybackState::Playing);
+        finish();
+        render(PlaybackState::Ended {
+            credit: Some("The Shtooka Project · CC BY 2.0 FR".into()),
+        });
         assert_eq!(
             play.tooltip_text().as_deref(),
             Some("The Shtooka Project · CC BY 2.0 FR")
         );
-        play.emit_clicked();
-        finish()(Credit {
-            author: None,
-            license: Some("CC BY 2.0 FR".into()),
+        render(PlaybackState::Playing);
+        finish();
+        render(PlaybackState::Ended {
+            credit: Some("CC BY 2.0 FR".into()),
         });
         assert_eq!(play.tooltip_text().as_deref(), Some("CC BY 2.0 FR"));
 
-        play.emit_clicked();
-        let superseded_by_article = finish();
+        render(PlaybackState::Playing);
+        finish();
         shown.show(Some(Lookup::Article(
             Sample.lookup("bank").expect("a different article"),
         )));
-        view.render_result(&shown, None);
-        superseded_by_article(credit());
-        assert!(view.player.current.borrow().is_none());
+        view.render_result(&shown, test_key_location());
+        view.render_playback(None);
         assert_eq!(play.tooltip_text().as_deref(), Some(PLAY_TOOLTIP));
         assert!(view.result.lead.first_child().is_none());
     }
@@ -2918,7 +3173,7 @@ mod tests {
                 })
                 .collect();
             shown.show(Some(Lookup::Article(article)));
-            view.render_result(shown, None);
+            view.render_result(shown, test_key_location());
         };
         let mut shown = Shown::default();
         settle();
@@ -2953,7 +3208,7 @@ mod tests {
         use crate::view::SynonymTexts;
         use addict_dictionary::{format::SenseMetadata, index::SynonymGroup};
         gtk::init().expect("a display");
-        let field = gtk::Entry::new();
+        let field = Field::new(gtk::Entry::new());
         let submitted = Rc::new(Cell::new(false));
         let heard = submitted.clone();
         field.connect_activate(move |_| heard.set(true));
@@ -3032,7 +3287,7 @@ mod tests {
     #[ignore = "needs a display; run alone"]
     fn a_synonym_click_puts_it_into_the_field() {
         gtk::init().expect("a display");
-        let field = gtk::Entry::new();
+        let field = Field::new(gtk::Entry::new());
         field.set_text("I sat on the bank of the river.");
         let submitted = std::rc::Rc::new(std::cell::Cell::new(false));
         let heard = submitted.clone();
@@ -3082,7 +3337,7 @@ mod tests {
         shown.show(Some(Lookup::Article(
             Sample.lookup("bank").expect("the sample article"),
         )));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         // Offline, the first translation is the answer and the others are
         // pills under it.
         let pills = view.result.answer.pills.first_child().expect("the pills");
@@ -3110,6 +3365,16 @@ mod tests {
     fn the_history_buttons_follow_the_history() {
         gtk::init().expect("a display");
         let view = View::new(WindowState::Empty, &Binding::Bound);
+        const BACK_TOOLTIP: &str = "Back (Alt+Left)";
+        const FORWARD_TOOLTIP: &str = "Forward (Alt+Right)";
+        view.set_history_tooltips(
+            &crate::view::back_tooltip(&crate::resident::controller_platform().shortcut_names.back),
+            &crate::view::forward_tooltip(
+                &crate::resident::controller_platform()
+                    .shortcut_names
+                    .forward,
+            ),
+        );
         for (button, tooltip) in [(&view.back, BACK_TOOLTIP), (&view.forward, FORWARD_TOOLTIP)] {
             assert!(!button.can_focus());
             assert!(!button.gets_focus_on_click());
@@ -3180,7 +3445,7 @@ mod tests {
         window.present();
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(pronounced_bank())));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         let play = buttons(&view.result.lead.clone().upcast(), "play").remove(0);
         assert!(play.grab_focus());
         assert_eq!(
@@ -3190,11 +3455,12 @@ mod tests {
         shown.show(Some(Lookup::Article(
             Sample.lookup("bank").expect("the sample article"),
         )));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         assert!(play.parent().is_none());
         let focus = gtk::prelude::GtkWindowExt::focus(&window).expect("a focus");
         assert!(
-            focus == view.field.clone().upcast::<gtk::Widget>() || focus.is_ancestor(&view.field)
+            focus == view.field.entry.clone().upcast::<gtk::Widget>()
+                || focus.is_ancestor(&view.field.entry)
         );
         window.destroy();
     }
@@ -3212,7 +3478,7 @@ mod tests {
         assert!(!copy.gets_focus_on_click());
         let missing = "Catalan OCR data is not installed. Install it with: \
                        sudo dnf install tesseract-langpack-cat";
-        view.render_source_failure(missing);
+        view.render_source_failure(missing, Some("sudo dnf install tesseract-langpack-cat"));
         assert!(copy.is_visible());
         assert_eq!(
             view.source_failure.command.borrow().as_deref(),
@@ -3221,11 +3487,11 @@ mod tests {
         copy.emit_clicked();
         assert_eq!(copy.label().as_deref(), Some(COPIED_LABEL));
 
-        view.render_source_failure("The capture was cancelled.");
+        view.render_source_failure("The capture was cancelled.", None);
         assert!(!copy.is_visible());
         assert_eq!(view.source_failure.command.borrow().as_deref(), None);
 
-        view.render_source_failure(missing);
+        view.render_source_failure(missing, Some("sudo dnf install tesseract-langpack-cat"));
         assert_eq!(copy.label().as_deref(), Some(COPY_LABEL));
         view.clear_source_failure();
         assert!(!view.source_failure.row.is_visible());

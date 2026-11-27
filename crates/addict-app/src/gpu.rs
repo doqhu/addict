@@ -3,8 +3,7 @@
 //! discrete GPU.
 //!
 //! A `VK_LOADER_DRIVERS_SELECT` already in the environment is kept as it is.
-//! Otherwise the file `vulkan-drivers` of the configuration directory,
-//! [`addict_deepl::key::config_dir`], decides: `all` lets the loader list
+//! Otherwise the file `vulkan-drivers` of the configuration directory decides: `all` lets the loader list
 //! every driver, another nonblank line is set as the variable, trimmed and
 //! verbatim, and a file that is missing, cannot be read, is not a regular
 //! file or holds no nonblank line leaves the choice to
@@ -59,10 +58,10 @@ impl Choice {
 
 /// Sets `VK_LOADER_DRIVERS_SELECT` for the resident, unless it is set or the
 /// rules choose no restriction. It runs in `main`, before GTK starts.
-pub fn select_vulkan_drivers() {
+pub fn select_vulkan_drivers(config: Option<&Path>) {
     let Some(drivers) = selection(
         std::env::var_os(VARIABLE).is_some(),
-        || path().and_then(|path| read(&path).ok()),
+        || path(config).and_then(|path| read(&path).ok()),
         || addict_platform::gpu::display_drivers(Path::new(DRM)).map(str::to_owned),
     ) else {
         return;
@@ -91,10 +90,10 @@ fn selection(
     }
 }
 
-/// The drivers file of the product, or `None` when the environment names no
-/// configuration directory. Nothing is read here.
-fn path() -> Option<PathBuf> {
-    Some(addict_deepl::key::config_dir()?.join(DRIVERS_FILE))
+/// The drivers file of the product, or `None` when no configuration directory
+/// was supplied. Nothing is read here.
+pub(super) fn path(config: Option<&Path>) -> Option<PathBuf> {
+    Some(config?.join(DRIVERS_FILE))
 }
 
 /// The first bytes of the regular file at `path`, as text.

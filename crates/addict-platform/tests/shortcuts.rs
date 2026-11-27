@@ -52,6 +52,11 @@ enum Shot {
     Uri(String),
     /// The call itself fails.
     Refused,
+    /// Waits for Request.Close on the same bus connection.
+    Hold {
+        late_reply: bool,
+        ready_uri: Option<String>,
+    },
 }
 
 /// How the person answers the dialog of GNOME's backend, opened by a bind.
@@ -106,6 +111,9 @@ struct State {
     shots: Mutex<VecDeque<Shot>>,
     /// The `interactive` option of each Screenshot call.
     interactive: Mutex<Vec<Option<bool>>>,
+    picker_opened: tokio::sync::Notify,
+    picker_reply: tokio::sync::Notify,
+    picker_closed: AtomicUsize,
     definitions: Mutex<Vec<Definition>>,
     session: Mutex<Option<OwnedObjectPath>>,
     configured: Mutex<Vec<OwnedObjectPath>>,
@@ -181,6 +189,42 @@ impl Screenshot {
             Some(Shot::Refused) => {
                 return Err(zbus::fdo::Error::Failed("screenshot refused".to_owned()));
             }
+            Some(Shot::Hold {
+                late_reply,
+                ready_uri,
+            }) => {
+                let request = if late_reply {
+                    self.0.picker_opened.notify_one();
+                    self.0.picker_reply.notified().await;
+                    "/org/freedesktop/portal/desktop/request/legacy/capture"
+                        .try_into()
+                        .unwrap()
+                } else {
+                    request
+                };
+                connection
+                    .object_server()
+                    .at(
+                        &request,
+                        Picker {
+                            state: self.0.clone(),
+                            sender: header.sender().unwrap().to_string(),
+                        },
+                    )
+                    .await?;
+                if let Some(uri) = ready_uri {
+                    response(
+                        connection,
+                        &request,
+                        HashMap::from([("uri".to_owned(), OwnedValue::from(Str::from(uri)))]),
+                    )
+                    .await?;
+                }
+                if !late_reply {
+                    self.0.picker_opened.notify_one();
+                }
+                return Ok(request);
+            }
             Some(Shot::Uri(uri)) => uri,
             None => format!("file://{}", shot_path().display()),
         };
@@ -191,6 +235,24 @@ impl Screenshot {
         )
         .await?;
         Ok(request)
+    }
+}
+
+struct Picker {
+    state: Arc<State>,
+    sender: String,
+}
+
+#[zbus::interface(name = "org.freedesktop.portal.Request")]
+impl Picker {
+    fn close(&self, #[zbus(header)] header: Header<'_>) -> zbus::fdo::Result<()> {
+        if header.sender().map(|sender| sender.as_str()) != Some(&self.sender) {
+            return Err(zbus::fdo::Error::AccessDenied(
+                "wrong picker connection".to_owned(),
+            ));
+        }
+        self.state.picker_closed.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -1889,4 +1951,49 @@ fn every_failed_capture_can_be_retried_with_a_new_interactive_request() {
         vec![Some(true); requests]
     );
     std::fs::remove_file(&shot).unwrap();
+}
+
+#[test]
+fn cancelling_a_picker_closes_its_portal_request_on_the_original_connection() {
+    if !private("cancelling_a_picker_closes_its_portal_request_on_the_original_connection") {
+        return;
+    }
+    for (late_reply, ready) in [(false, false), (true, false), (true, true)] {
+        let portal = Mock::without_worker(vec![], 2, false);
+        let shot = shot_path();
+        let ready_uri = ready.then(|| {
+            std::fs::write(&shot, b"image").unwrap();
+            format!("file://{}", shot.display())
+        });
+        portal.state.shots.lock().unwrap().push_back(Shot::Hold {
+            late_reply,
+            ready_uri,
+        });
+        portal.runtime.block_on(async {
+            let (send, cancelled) = tokio::sync::oneshot::channel();
+            let mut picker = tokio::spawn(screenshot::capture_until(APP_ID, async {
+                let _ = cancelled.await;
+            }));
+            tokio::time::timeout(WAIT, portal.state.picker_opened.notified())
+                .await
+                .unwrap();
+            send.send(()).unwrap();
+            if late_reply {
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), &mut picker)
+                        .await
+                        .is_err()
+                );
+                portal.state.picker_reply.notify_one();
+            }
+            let result = tokio::time::timeout(WAIT, picker).await.unwrap().unwrap();
+            if ready {
+                assert_eq!(result, Ok(shot.clone()));
+                std::fs::remove_file(shot).unwrap();
+            } else {
+                assert_eq!(result, Err(CaptureFailure::Cancelled));
+            }
+        });
+        assert_eq!(portal.state.picker_closed.load(Ordering::SeqCst), 1);
+    }
 }
