@@ -798,6 +798,17 @@ window.addict label.credit-name {
   font-weight: 600;
 }
 
+window.addict label.credit-line > link,
+window.addict label.credit-line > link:link,
+window.addict label.credit-line > link:visited {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+window.addict label.credit-line > link:hover {
+  text-decoration: underline;
+}
+
 /* The repository: a link in the accent, not the theme's blue. */
 window.addict button.repository,
 window.addict button.repository:link,
