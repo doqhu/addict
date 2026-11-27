@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0](https://github.com/doqhu/addict/compare/v0.5.0...v0.6.0) (2026-11-27)
+
+
+### Features
+
+* make about credit URLs clickable and fix main menu item contrast ([#38](https://github.com/doqhu/addict/issues/38)) ([3fc3f61](https://github.com/doqhu/addict/commit/3fc3f61744361e38f332dee13dd369d6c70519ee))
+* ship the shared controller on Linux ([#37](https://github.com/doqhu/addict/issues/37)) ([448b4ba](https://github.com/doqhu/addict/commit/448b4baaebd764b47e86c1f678e9bcc79759febe))
+* translate a sentence read by the shortcut at once ([#34](https://github.com/doqhu/addict/issues/34)) ([9679098](https://github.com/doqhu/addict/commit/967909883b3ff2d4fee01ddae4eeb1f38a714c7e))
+
 ## [0.5.0](https://github.com/doqhu/addict/compare/v0.4.1...v0.5.0) (2026-11-20)
 
 
