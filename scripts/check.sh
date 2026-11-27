@@ -323,8 +323,10 @@ for crate in ("addict-core", "addict-dictionary", "addict-deepl", "addict-engine
                 failed = True
     crate_roots = {
         root / "build.rs", root / "src/lib.rs", root / "src/main.rs",
-        *root.glob("src/bin/*.rs"), *root.glob("examples/*.rs"), *root.glob("tests/*.rs"),
+        *root.glob("src/bin/*.rs"), *root.glob("examples/*.rs"),
     }
+    if crate == "addict-controller":
+        crate_roots.update(root.glob("tests/*.rs"))
     reports, links, test_modules, seen = {}, {}, set(), set()
     pending = [
         (path, path.parent if path in crate_roots or path.name == "mod.rs" else path.with_suffix(""))
@@ -344,9 +346,8 @@ for crate in ("addict-core", "addict-dictionary", "addict-deepl", "addict-engine
                 for line in platforms:
                     print(f"{path}:{line}: inject platform facts instead of using a platform cfg", file=sys.stderr)
                     failed = True
-        if crate == "addict-controller":
-            pending.extend(dependencies)
-            pending.extend(test_targets)
+        pending.extend(dependencies)
+        pending.extend(test_targets)
         links.setdefault(resolved, set()).update(target for target, _ in dependencies)
         test_modules.update(target for target, _ in test_targets)
 
