@@ -2093,6 +2093,18 @@ impl View {
         (self.indexes.get_visible(), self.indexes.text().to_string())
     }
 
+    /// The main window's binding row as shown: whether it is visible, its
+    /// line, and whether Retry can be pressed; for the tests.
+    #[cfg(test)]
+    pub fn binding_row(&self) -> (bool, String, bool) {
+        (
+            // Its own flag: the main window may be hidden in a test.
+            self.binding.get_visible(),
+            self.binding_text.text().to_string(),
+            self.retry.is_sensitive(),
+        )
+    }
+
     /// What the definition button says; for the tests.
     #[cfg(test)]
     pub fn definition_action_text(&self) -> String {

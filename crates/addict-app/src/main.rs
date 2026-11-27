@@ -265,9 +265,11 @@ mod wrap;
 #[path = "../../addict-engine/src/download/stub.rs"]
 mod stub;
 
-use addict_engine::{
-    at_once, cache, dictionaries, download, english, evidence, language, manual, my_language, view,
-};
+// The settings modules moved to the controller; these engine modules remain
+// in scope for the shell's tests, which still use the same paths.
+#[cfg(test)]
+pub(crate) use addict_engine::cache;
+pub(crate) use addict_engine::{dictionaries, download, evidence, manual, view};
 
 use std::{
     cell::RefCell,

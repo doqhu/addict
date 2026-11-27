@@ -98,12 +98,12 @@ impl Desk {
     }
 
     fn switch(&mut self, reading: Language) {
-        self.step(Event::SetReading(reading));
+        self.step(Event::ReadingChosen(reading));
     }
 
     fn configure(&mut self, language: Language, reading: Language) {
         self.switch(reading);
-        self.step(Event::SetMyLanguage(language));
+        self.step(Event::MyLanguageChosen(language));
     }
 
     fn asked(&self) -> Vec<Request> {
@@ -940,7 +940,7 @@ fn definition_worker_sends_only_explicit_actions_and_allows_guarded_recovery() {
     shell.next();
     let answer = next_request(&asked, &request);
     // Spelling only changes English-target requests, so Russian mine keeps this job.
-    shell.dispatch(Event::SetEnglish(English::Gb));
+    shell.dispatch(Event::EnglishChosen(English::Gb));
     let (pending, _) = shell.next();
     assert_eq!(pending.shown.definition(), Some(&Online::Pending));
     answer.send(Ok("берег".into())).unwrap();
@@ -1026,7 +1026,7 @@ fn an_english_gloss_link_submits_its_replacement_without_sending_the_old_word_ag
         generation: 0,
         indexes: Some(SPANISH),
     });
-    shell.dispatch(Event::SetReading(Language::Es));
+    shell.dispatch(Event::ReadingChosen(Language::Es));
     shell.next();
     shell.edit("banco");
     let (shown, _) = shell.settled();
@@ -1049,20 +1049,16 @@ fn an_english_gloss_link_submits_its_replacement_without_sending_the_old_word_ag
         article,
         index: 0,
         word: "bank".into(),
-        language_choice: 1,
     });
-    shell.dispatch(Event::SetMyLanguage(Language::Ca));
+    shell.dispatch(Event::MyLanguageChosen(Language::Ca));
     let (replacement, effects) = shell.next();
     assert_eq!(replacement.field.text, "bank");
     assert!(replacement.can_back);
     assert!(pending(&replacement, OnlineKind::Lone));
     assert!(replacement.shown.definition().is_none());
-    assert_eq!(
-        effects,
-        [Effect::SaveReading {
-            language: Language::En,
-            language_choice: 1
-        }]
+    assert!(
+        effects.is_empty(),
+        "the reading choice is written on the runner"
     );
     let (reconfigured, _) = shell.next();
     assert_eq!(reconfigured.shown.translating().my, Language::Ca);
@@ -1095,7 +1091,7 @@ fn an_english_gloss_link_submits_its_replacement_without_sending_the_old_word_ag
 #[test]
 fn changing_applicable_spelling_replaces_the_pending_request_for_the_same_text() {
     let (mut shell, asked) = FakeShell::scripted(None, false);
-    shell.dispatch(Event::SetMyLanguage(Language::En));
+    shell.dispatch(Event::MyLanguageChosen(Language::En));
     shell.next();
     shell.edit("banco");
     shell.settled();
@@ -1108,7 +1104,7 @@ fn changing_applicable_spelling_replaces_the_pending_request_for_the_same_text()
     };
     let old = next_request(&asked, &request);
 
-    shell.dispatch(Event::SetEnglish(English::Gb));
+    shell.dispatch(Event::EnglishChosen(English::Gb));
     let (gb, _) = shell.next();
     assert_eq!(us.field, gb.field);
     assert_eq!(us.text_number, gb.text_number);
@@ -1134,11 +1130,13 @@ fn sentence_at_once_changes_the_next_eligible_read_only() {
         replaced: true,
         source: Some(source),
     };
-    shell.quiet(Event::SetAtOnce(false));
+    shell.dispatch(Event::AtOnceChosen(false));
+    shell.next();
     shell.dispatch(read(RIVER, Source::Clipboard));
     let (shown, _) = shell.next();
     assert!(shown.online.is_empty());
-    shell.quiet(Event::SetAtOnce(true));
+    shell.dispatch(Event::AtOnceChosen(true));
+    shell.next();
     assert!(asked.try_recv().is_err());
 
     // Capture and one word never ask for a whole sentence.
@@ -1165,7 +1163,8 @@ fn sentence_at_once_changes_the_next_eligible_read_only() {
     let (whole, _) = shell.next();
     assert_eq!(whole.chosen, None);
     let sentence = next_request(&asked, &sentence_request());
-    shell.quiet(Event::SetAtOnce(false));
+    shell.dispatch(Event::AtOnceChosen(false));
+    shell.next();
     sentence.send(Ok("whole".into())).unwrap();
     let (answered, _) = shell.next();
     assert_eq!(answered.online[0].line, "whole");

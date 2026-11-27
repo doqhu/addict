@@ -133,7 +133,7 @@ impl Model {
         let id = self.next_request();
         self.capture.active = Some(Active {
             id,
-            language: self.reading,
+            language: self.settings.reading(),
             stage: Stage::Picker,
             _deadline: self.capture_timer(id, self.capture.picker_limit),
         });
@@ -150,7 +150,7 @@ impl Model {
             && active.id == id
             && matches!(active.stage, Stage::Picker)
         {
-            active.language = self.reading;
+            active.language = self.settings.reading();
         }
     }
 

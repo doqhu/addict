@@ -206,7 +206,8 @@ impl Model {
             return;
         };
         let input = self.manual.input();
-        if input.is_some_and(|input| !translate::is_sent(input, subject, self.my_language)) {
+        if input.is_some_and(|input| !translate::is_sent(input, subject, self.settings.my_language))
+        {
             self.online.kept.withdraw(subject);
             return;
         }
@@ -215,15 +216,18 @@ impl Model {
             return;
         }
         let russian = is_russian(input.map_or(self.manual.sentence(), |input| input.word()));
-        let source = translate::source_of(subject, self.reading, self.answered, russian);
+        let source = translate::source_of(subject, self.settings.reading(), self.answered, russian);
         let english = self.online.english;
         let request = match (input, subject) {
             (Some(input), _) => {
-                translate::request(input, subject, source, self.my_language, english)
+                translate::request(input, subject, source, self.settings.my_language, english)
             }
-            (None, Subject::Sentence(_)) => {
-                translate::whole_request(self.manual.sentence(), source, self.my_language, english)
-            }
+            (None, Subject::Sentence(_)) => translate::whole_request(
+                self.manual.sentence(),
+                source,
+                self.settings.my_language,
+                english,
+            ),
             (None, Subject::Word(_) | Subject::Lone) => None,
         };
         let target = Target::Text {
@@ -262,7 +266,7 @@ impl Model {
         let probe = Probe::start(self.online.recording);
         let unstarted_source = request
             .as_ref()
-            .map_or(self.reading, |request| request.source);
+            .map_or(self.settings.reading(), |request| request.source);
         let started: Result<Job, Online> = translate::translate(
             Some(&self.work),
             deadlines::TRANSLATE_LIMIT,

@@ -2,6 +2,7 @@
 //! platform adapters return them and `addict-engine::view` words them.
 
 pub mod capture;
+pub mod key_store;
 pub mod login_item;
 pub mod recognize;
 pub mod selection;

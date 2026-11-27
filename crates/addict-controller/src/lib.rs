@@ -12,6 +12,9 @@ pub mod deadlines;
 pub use capture::ImageRef;
 mod online;
 mod selection;
+mod settings;
+
+pub use settings::{Bindings, SettingsRead, SettingsView, ShortcutState};
 
 use std::{
     io,
@@ -28,7 +31,7 @@ use addict_core::{
 };
 use addict_deepl::{
     DeepL,
-    key::{self, KeySource},
+    key::{self, KeySource, Secret},
 };
 use addict_engine::{
     cache,
@@ -53,9 +56,10 @@ pub struct Platform {
     pub read_before_show: bool,
 }
 
-/// The existing key source may still be loading when the controller starts.
+/// The key may still be loading when the controller starts: `None` means the
+/// shell has not read it yet. The controller creates the key source from it.
 pub struct StartFacts {
-    pub key_source: KeySource,
+    pub key: Option<Result<Secret, addict_deepl::key::KeyError>>,
     pub recording: bool,
 }
 
@@ -90,7 +94,7 @@ pub struct SelectionText {
     pub clipboard: Option<String>,
 }
 
-/// Facts sent to the controller by the shell.
+/// Facts sent to the controller by the shell or made by the user in Settings.
 #[derive(Debug)]
 pub enum Event {
     /// The field holds `text`, which the shell put there itself. `replaced`
@@ -147,24 +151,60 @@ pub enum Event {
         article: ArticleId,
         index: usize,
         word: String,
-        language_choice: u64,
     },
     /// Back was pressed.
     Back,
     /// Forward was pressed.
     Forward,
-    /// The saved reading language changed, before applying the target fallback.
-    SetReading(Language),
-    /// My language changed. The latest saved reading language may fall back.
-    SetMyLanguage(Language),
+    /// The saved reading language was chosen, in the window or by a gloss.
+    ReadingChosen(Language),
+    /// My language, chosen in Settings or in a first-run offer.
+    MyLanguageChosen(Language),
     /// The reading language pressed in the switch changed (rendering only).
     SetPressed(Language),
     /// A source is being read now (capture, clipboard), or no longer.
     SetReadingSource(Option<Source>),
-    /// The spelling of English changed.
-    SetEnglish(English),
+    /// The spelling of English was chosen in Settings.
+    EnglishChosen(English),
     /// Translate eligible sentences read from the clipboard from now on.
-    SetAtOnce(bool),
+    AtOnceChosen(bool),
+    /// Settings was opened: read the login item and the cache again.
+    SettingsOpened,
+    /// Clear cache was pressed.
+    ClearCachePressed,
+    /// The user entered a key, or the shell refused it as invalid.
+    SaveKey(Result<Secret, addict_deepl::key::WriteError>),
+    /// The shell published the key now in use, after a load or a store.
+    KeyChanged(Result<Secret, addict_deepl::key::KeyError>),
+    /// The store of the key ended for this request.
+    KeyStored {
+        id: RequestId,
+        result: Result<(), Ended<addict_core::failure::key_store::KeyStoreFailure>>,
+    },
+    /// The user moved the Start at login switch.
+    LoginItemToggled(bool),
+    /// The shell's answer about the login item. `runner_missing` says the
+    /// shell had no runner to do the work with (AD-22).
+    LoginItemSet {
+        id: RequestId,
+        result: Result<
+            addict_core::failure::login_item::StartupEnd,
+            Ended<addict_core::failure::login_item::StartupFailure>,
+        >,
+        runner_missing: bool,
+    },
+    /// The shell read the login item when Settings opened, or says it could
+    /// not because its runner was gone.
+    LoginItemRead {
+        shown: Option<addict_core::failure::login_item::LoginItemShown>,
+        runner_missing: bool,
+    },
+    /// Retry was pressed under a shortcut that is not bound.
+    RetryPressed,
+    /// Configure shortcuts was pressed in Settings.
+    ConfigurePressed,
+    /// The shell reported a change of the bindings or of the dialog.
+    ShortcutChanged(ShortcutState),
     /// The shell's `IndexCache` stands at `generation`, knowing `indexes`.
     KnownIndexes {
         generation: u64,
@@ -220,11 +260,19 @@ pub enum Effect {
     RecordLookup(Answered),
     /// An online attempt ended and the shell records its evidence.
     RecordOnline(evidence::Record),
-    /// An English gloss link chose a reading language and submitted its word.
-    SaveReading {
-        language: Language,
-        language_choice: u64,
-    },
+    /// Store this key in the shell's key store; one
+    /// [`Event::KeyChanged`] and one [`Event::KeyStored`] follow, in that
+    /// order when the store commits.
+    StoreKey { id: RequestId, key: Secret },
+    /// Ask the shell to turn the login item on or off; one
+    /// [`Event::LoginItemSet`] follows.
+    SetLoginItem { id: RequestId, on: bool },
+    /// Read the login item's live state; one [`Event::LoginItemRead`] follows.
+    ReadLoginItem,
+    /// Make the first attempt to bind the shortcuts again.
+    BindShortcuts,
+    /// Open the desktop's dialog for the shortcuts.
+    ConfigureShortcuts,
 }
 
 /// The entire controller-owned view state at one revision.
@@ -264,6 +312,8 @@ pub struct ViewState {
     /// The language that gave the result of the last lookup, once it
     /// finished with one; `None` before and for one that did not finish.
     pub answered: Option<Language>,
+    /// Settings and the OS state beside them, as last known by the controller.
+    pub settings: SettingsView,
 }
 
 impl Default for ViewState {
@@ -291,6 +341,29 @@ impl Default for ViewState {
             context: None,
             looking_up: false,
             answered: None,
+            settings: SettingsView {
+                my_language: Language::Ru,
+                reading: Language::En,
+                english: English::Us,
+                english_shown: false,
+                at_once: addict_engine::at_once::DEFAULT,
+                languages_read: false,
+                my_chosen: 0,
+                key: addict_engine::view::KeyState::Checking,
+                key_line: String::new(),
+                key_entry_clears: 0,
+                cache: addict_engine::view::CacheState::Checking,
+                cache_line: String::new(),
+                login_on: false,
+                login_confirmed: false,
+                login_sensitive: false,
+                login_line: String::new(),
+                runner_missing: false,
+                binding: addict_engine::view::Binding::Attempting,
+                bindings: Bindings::default(),
+                rebinding: false,
+                status_line: String::new(),
+            },
         }
     }
 }
@@ -346,6 +419,14 @@ impl Controller {
         self.dispatch.clone()
     }
 
+    /// Injects the outcome of a start read of a settings file. Shells report
+    /// these through their own files; a test can use this seam to deliver a
+    /// read in a chosen order, while a real read is still running.
+    #[doc(hidden)]
+    pub fn dispatch_settings_read(&self, read: SettingsRead) -> bool {
+        self.dispatch.0.send(Message::SettingsRead(read)).is_ok()
+    }
+
     /// The one runner instance; the shell's own jobs run on it too.
     pub fn work(&self) -> Weak<Work> {
         self.work.clone()
@@ -379,16 +460,29 @@ pub fn start(
     start_facts: StartFacts,
     renderer: impl Renderer,
 ) -> io::Result<Controller> {
-    let translator = DeepL::new(start_facts.key_source);
-    start_with_translator(dirs, platform, translator, start_facts.recording, renderer)
+    let source = match start_facts.key {
+        Some(result) => KeySource::new(result),
+        None => KeySource::pending(),
+    };
+    let translator = DeepL::new(source.clone());
+    start_with_translator(
+        dirs,
+        platform,
+        translator,
+        start_facts.recording,
+        source,
+        renderer,
+    )
 }
 
-/// Starts the same controller with an alternate translation provider.
+/// Starts the same controller with an alternate translation provider and the
+/// key source the shell loaded at start.
 pub fn start_with_translator(
     dirs: Dirs,
     platform: Platform,
     translator: impl Translator + 'static,
     recording: bool,
+    source: KeySource,
     renderer: impl Renderer,
 ) -> io::Result<Controller> {
     start_with_capture(
@@ -396,28 +490,37 @@ pub fn start_with_translator(
         platform,
         translator,
         recording,
+        source,
+        crate::settings::Limits::default(),
         capture::Capture::default(),
         selection::Selection::default(),
+        None,
         renderer,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_with_capture(
     dirs: Dirs,
     platform: Platform,
     translator: impl Translator + 'static,
     recording: bool,
+    source: KeySource,
+    settings_limits: crate::settings::Limits,
     capture: capture::Capture,
     selection: selection::Selection,
+    read_gate: Option<Arc<settings::ReadGate>>,
     renderer: impl Renderer,
 ) -> io::Result<Controller> {
     let work = Arc::new(Work::start()?);
     let worker = Arc::downgrade(&work);
+    let mut settings = settings::Settings::with_limits(&dirs, source, settings_limits);
+    settings.set_read_gate(read_gate);
     let dictionaries = Arc::new(Dictionaries::new(dirs.data.clone()));
     let translator = cache::Cached::new(translator, dirs.cache);
     let cache = translator.store();
     let (send, receive) = mpsc::channel();
-    let model = Model {
+    let mut model = Model {
         online: online::Translations::new(
             Arc::new(translator),
             key::key_path(dirs.config.as_deref()),
@@ -425,6 +528,7 @@ fn start_with_capture(
             recording,
         ),
         work,
+        cache: cache.clone(),
         dictionaries: dictionaries.clone(),
         send: send.clone(),
         request: 0,
@@ -440,14 +544,13 @@ fn start_with_capture(
         history: History::default(),
         shown: Shown::default(),
         choice_revision: 0,
-        saved_reading: Language::En,
-        reading: Language::En,
-        my_language: Language::Ru,
+        settings,
         known: None,
         index_generation: 0,
         lookup: None,
         answered: None,
     };
+    model.start_settings_read();
     let thread = thread::Builder::new()
         .name("addict-controller".to_owned())
         .spawn(move || model.serve(receive, renderer))?;
@@ -466,6 +569,11 @@ enum Message {
     Translated(online::Translated),
     CaptureDeadline(RequestId),
     SelectionDeadline(RequestId),
+    SettingsRead(settings::SettingsRead),
+    CacheFootprint(Option<cache::Footprint>),
+    CacheCleared(Option<String>),
+    KeySaveDeadline(RequestId),
+    LoginDeadline(RequestId),
     Stop,
 }
 
@@ -488,6 +596,8 @@ struct Active {
 struct Model {
     online: online::Translations,
     work: Arc<Work>,
+    /// The cache whose footprint and rows Settings reads and clears.
+    cache: Arc<cache::Store>,
     dictionaries: Arc<Dictionaries>,
     send: mpsc::Sender<Message>,
     request: u64,
@@ -505,9 +615,7 @@ struct Model {
     history: History,
     shown: Shown,
     choice_revision: u64,
-    saved_reading: Language,
-    reading: Language,
-    my_language: Language,
+    settings: settings::Settings,
     /// What the shell's `IndexCache` knows of the indexes, and its
     /// generation.
     known: Option<Indexes>,
@@ -530,6 +638,11 @@ impl Model {
                 Message::Translated(translated) => self.translated(translated, &mut effects),
                 Message::CaptureDeadline(id) => self.capture_deadline(id, &mut effects),
                 Message::SelectionDeadline(id) => self.selection_deadline(id, &mut effects),
+                Message::SettingsRead(read) => self.settings_read(read, &mut effects),
+                Message::CacheFootprint(found) => self.cache_read(found),
+                Message::CacheCleared(reason) => self.cache_cleared(reason),
+                Message::KeySaveDeadline(id) => self.key_save_deadline(id, &mut effects),
+                Message::LoginDeadline(id) => self.login_deadline(id, &mut effects),
                 Message::Stop => {
                     self.cancel_read(&mut effects);
                     self.cancel_capture(&mut effects);
@@ -565,7 +678,7 @@ impl Model {
                 .or_else(|| self.selection.source_failure.clone()),
             shown: self.shown.clone(),
             choice_revision: self.choice_revision,
-            online: self.online.rows(manual.chosen(), self.my_language),
+            online: self.online.rows(manual.chosen(), self.settings.my_language),
             window_state: manual.state(),
             source: manual.source(),
             sentence: manual.sentence().to_owned(),
@@ -579,6 +692,7 @@ impl Model {
             context: manual.chosen().and_then(|index| manual.sentence_of(index)),
             looking_up: self.lookup.is_some(),
             answered: self.answered,
+            settings: self.settings.view(),
         }
     }
 
@@ -643,21 +757,19 @@ impl Model {
                 article,
                 index,
                 word,
-                language_choice,
             } => {
                 if article != self.article_id() || self.shown.choice() != Some(Choice::Gloss(index))
                 {
                     return false;
                 }
                 // Apply the choice and put the replacement together, so
-                // changing the language cannot send the previous input.
-                let reading = language::reading(Language::En, self.my_language);
-                self.saved_reading = reading;
+                // changing the language cannot send the previous input. The
+                // choice is written by the controller, not by the shell.
+                let reading = language::reading(Language::En, self.settings.my_language);
+                self.settings.saved_reading = reading;
+                self.settings.reading_chosen = true;
                 self.update_reading();
-                effects.push(Effect::SaveReading {
-                    language: reading,
-                    language_choice,
-                });
+                self.write_reading();
                 self.clear_capture_source(effects);
                 let changed = self.clear_read_source(effects);
                 self.put(word, effects) || changed
@@ -672,8 +784,8 @@ impl Model {
                 let changed = self.clear_read_source(effects) || changed;
                 self.forward(effects) || changed
             }
-            Event::SetReading(language) => self.set_reading(language, effects),
-            Event::SetMyLanguage(language) => self.set_my_language(language, effects),
+            Event::ReadingChosen(language) => self.choose_reading(language, effects),
+            Event::MyLanguageChosen(language) => self.choose_my_language(language, effects),
             Event::SetPressed(language) => {
                 self.shown.set_pressed(language);
                 true
@@ -685,20 +797,29 @@ impl Model {
                 self.manual.set_reading(source);
                 true
             }
-            Event::SetEnglish(english) => {
+            Event::EnglishChosen(english) => {
                 self.shown.set_english(english);
-                let changed = english != self.online.english;
-                self.online.english = english;
-                if changed && self.my_language == Language::En {
-                    self.cancel_definition();
-                    return self.ask_again(effects);
-                }
-                true
+                self.choose_english(english, effects)
             }
-            Event::SetAtOnce(at_once) => {
-                self.online.at_once = at_once;
-                false
-            }
+            Event::AtOnceChosen(at_once) => self.choose_at_once(at_once),
+            Event::SettingsOpened => self.settings_opened(effects),
+            Event::ClearCachePressed => self.clear_cache_pressed(),
+            Event::SaveKey(key) => self.save_key(key, effects),
+            Event::KeyChanged(result) => self.key_changed(result),
+            Event::KeyStored { id, result } => self.key_stored(id, result),
+            Event::LoginItemToggled(on) => self.login_toggled(on, effects),
+            Event::LoginItemSet {
+                id,
+                result,
+                runner_missing,
+            } => self.login_set(id, result, runner_missing),
+            Event::LoginItemRead {
+                shown,
+                runner_missing,
+            } => self.login_read(shown, runner_missing),
+            Event::RetryPressed => self.retry_pressed(effects),
+            Event::ConfigurePressed => self.configure_pressed(effects),
+            Event::ShortcutChanged(state) => self.shortcut_changed(state),
             Event::KnownIndexes {
                 generation,
                 indexes,
@@ -863,30 +984,6 @@ impl Model {
         self.ocr_field_revision = None;
     }
 
-    fn set_reading(&mut self, language: Language, effects: &mut Vec<Effect>) -> bool {
-        let previous = self.reading;
-        self.saved_reading = language;
-        self.update_reading();
-        if self.reading == previous {
-            return true;
-        }
-        self.ask_again(effects)
-    }
-
-    fn set_my_language(&mut self, language: Language, effects: &mut Vec<Effect>) -> bool {
-        self.my_language = language;
-        self.shown.set_my_language(language);
-        // Rendered for the new pair: a result looked up for the language
-        // before shows none of its translations.
-        self.update_reading();
-        self.ask_again(effects)
-    }
-
-    fn update_reading(&mut self) {
-        self.reading = language::reading(self.saved_reading, self.my_language);
-        self.shown.set_pressed(self.reading);
-    }
-
     /// Redoes the offline result of the shown word and its online texts.
     fn ask_again(&mut self, effects: &mut Vec<Effect>) -> bool {
         if let Some(run) = self.manual.again() {
@@ -912,7 +1009,7 @@ impl Model {
         };
         let id = self.next_request();
         let send = self.send.clone();
-        let language = self.reading;
+        let language = self.settings.reading();
         let generation = self.index_generation;
         let started = manual::offline(
             Some(&self.work),
@@ -920,7 +1017,7 @@ impl Model {
             self.dictionaries.clone(),
             word,
             language,
-            self.my_language,
+            self.settings.my_language,
             self.known,
             move |language, outcome| {
                 // On the worker: only the queue is touched.
@@ -982,7 +1079,7 @@ impl Model {
         let finished = matches!(outcome.as_ref(), Outcome::Finished(_));
         if let Some(lookup) = manual::result_in(*outcome, &word, language) {
             self.shown
-                .show_elsewhere(Some(lookup), self.reading, language);
+                .show_elsewhere(Some(lookup), self.settings.reading(), language);
         }
         // A lookup that did not finish names no language: the chosen one.
         self.answered = finished.then_some(language);
@@ -995,6 +1092,7 @@ impl Model {
 mod tests {
     mod online;
     mod selection;
+    mod settings;
 
     use std::{
         fs,
@@ -1209,13 +1307,42 @@ mod tests {
             selection: crate::selection::Selection,
             read_before_show: bool,
         ) -> Self {
-            let caller = thread::current().id();
-            let (send, renders) = mpsc::channel();
-            let controller = start_with_capture(
+            Self::with_settings(
                 Dirs {
                     data,
                     ..Dirs::default()
                 },
+                translator,
+                recording,
+                KeySource::pending(),
+                crate::settings::Limits::default(),
+                capture,
+                selection,
+                read_before_show,
+                None,
+            )
+        }
+
+        /// A scripted shell with its own directories, key and deadlines, for
+        /// the settings tests.
+        /// Builds a shell without waiting for the start reads. A test that
+        /// uses a read gate calls this so it can act while files are pending.
+        #[allow(clippy::too_many_arguments)]
+        fn with_unread_settings(
+            dirs: Dirs,
+            translator: impl Translator + 'static,
+            recording: bool,
+            source: KeySource,
+            limits: crate::settings::Limits,
+            capture: capture::Capture,
+            selection: crate::selection::Selection,
+            read_before_show: bool,
+            read_gate: Option<Arc<crate::settings::ReadGate>>,
+        ) -> Self {
+            let caller = thread::current().id();
+            let (send, renders) = mpsc::channel();
+            let controller = start_with_capture(
+                dirs,
                 Platform {
                     name: "test".to_owned(),
                     key_location_hint: "No key directory.",
@@ -1223,22 +1350,58 @@ mod tests {
                 },
                 translator,
                 recording,
+                source,
+                limits,
                 capture,
                 selection,
+                read_gate,
                 move |view, effects| {
                     assert_ne!(thread::current().id(), caller);
                     send.send((view, effects)).unwrap();
                 },
             )
             .unwrap();
-            let mut shell = Self {
+            Self {
                 controller,
                 renders,
                 revision: 0,
-            };
-            let (view, effects) = shell.next();
-            assert_eq!(view.field, Field::default());
-            assert!(effects.is_empty());
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn with_settings(
+            dirs: Dirs,
+            translator: impl Translator + 'static,
+            recording: bool,
+            source: KeySource,
+            limits: crate::settings::Limits,
+            capture: capture::Capture,
+            selection: crate::selection::Selection,
+            read_before_show: bool,
+            read_gate: Option<Arc<crate::settings::ReadGate>>,
+        ) -> Self {
+            let mut shell = Self::with_unread_settings(
+                dirs,
+                translator,
+                recording,
+                source,
+                limits,
+                capture,
+                selection,
+                read_before_show,
+                read_gate,
+            );
+            // The controller reads the four files at start. Let that
+            // snapshot arrive before the script begins, so a test's first
+            // `next` is the one caused by its own event.
+            loop {
+                let (view, effects) = shell.next();
+                assert_eq!(view.field, Field::default());
+                assert!(effects.is_empty());
+                if view.settings.languages_read {
+                    break;
+                }
+            }
             shell
         }
 
@@ -1423,15 +1586,15 @@ mod tests {
     fn capture_restores_the_window_and_records_normalized_ocr_in_history() {
         let (mut shell, asked) = FakeShell::scripted(None, true);
         shell.submit("previous sentence");
-        shell.dispatch(Event::SetReading(Language::Es));
+        shell.dispatch(Event::ReadingChosen(Language::Es));
         shell.next();
         let picker = press_capture(&mut shell);
         // A change while the window is hiding counts, a change after the
         // picker starts does not.
-        shell.dispatch(Event::SetReading(Language::Ca));
+        shell.dispatch(Event::ReadingChosen(Language::Ca));
         shell.next();
         shell.dispatch(Event::PickerStarted { id: picker });
-        shell.dispatch(Event::SetReading(Language::En));
+        shell.dispatch(Event::ReadingChosen(Language::En));
         shell.next();
         let recognized = deliver_image(&mut shell, picker, Language::Ca);
         finish_recognition(&shell, recognized, "  Recognized words\n on two lines.  ");
@@ -1756,7 +1919,7 @@ mod tests {
             generation: 7,
             indexes: Some(Indexes::MISSING),
         });
-        shell.dispatch(Event::SetReading(Language::Es));
+        shell.dispatch(Event::ReadingChosen(Language::Es));
         let (refused, effects) = shell.next();
         assert_eq!(
             refused.shown.lookup(),
@@ -1949,7 +2112,7 @@ mod tests {
             generation: 0,
             indexes: Some(SPANISH),
         });
-        shell.dispatch(Event::SetReading(Language::Es));
+        shell.dispatch(Event::ReadingChosen(Language::Es));
         shell.next();
         shell.edit("banco");
         let (before, _) = shell.settled();
@@ -2125,7 +2288,7 @@ mod tests {
         shell.edit("banco");
         let (english, _) = shell.settled();
         assert_eq!(english.answered, Some(Language::Es), "found elsewhere");
-        shell.dispatch(Event::SetReading(Language::Es));
+        shell.dispatch(Event::ReadingChosen(Language::Es));
         let (view, _) = shell.next();
         assert!(view.looking_up);
         assert!(
@@ -2142,7 +2305,7 @@ mod tests {
         ));
         assert_eq!(view.field, english.field);
 
-        shell.dispatch(Event::SetMyLanguage(Language::En));
+        shell.dispatch(Event::MyLanguageChosen(Language::En));
         let (view, _) = shell.next();
         assert_eq!(view.shown.translating().my, Language::En);
         assert!(view.online.is_empty());

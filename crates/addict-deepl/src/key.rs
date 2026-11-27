@@ -138,6 +138,12 @@ impl KeySource {
     pub fn replace(&self, key: Secret) {
         self.0.send_replace(Some(Ok(key)));
     }
+
+    /// Publishes the outcome of a key change. The result holds no key text
+    /// when it is an error.
+    pub fn replace_result(&self, result: Result<Secret, KeyError>) {
+        self.0.send_replace(Some(result));
+    }
 }
 
 /// Reads the key from the file at `path`. The mode is checked on the opened

@@ -156,29 +156,35 @@ use std::{
 };
 
 use addict_controller::{
-    self as controller, ArticleId, Controller, Dispatcher, Effect, Platform, RequestId, StartFacts,
-    ViewState,
+    self as controller, ArticleId, Bindings as ControllerBindings, Controller, Dispatcher, Effect,
+    Platform, RequestId, ShortcutState, StartFacts, ViewState,
     deadlines::{
-        AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CACHE_LIMIT, CREDIT_LIMIT,
-        DOWNLOAD_LIMIT, FIRST_RUN_FILE_LIMIT, KEY_SAVE_LIMIT, LANGUAGE_FILE_LIMIT, LOOKUP_LIMIT,
-        MANIFEST_LIMIT, STARTUP_LIMIT, STARTUP_READ_LIMIT,
+        AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CREDIT_LIMIT, DOWNLOAD_LIMIT,
+        FIRST_RUN_FILE_LIMIT, KEY_SAVE_LIMIT, LOOKUP_LIMIT, MANIFEST_LIMIT, STARTUP_LIMIT,
+        STARTUP_READ_LIMIT,
     },
 };
 use addict_core::{
     APP_ID,
     dirs::Dirs,
-    failure::{Ended, capture::CaptureFailure, recognize::OcrFailure, selection::SelectionFailure},
+    failure::{
+        Ended,
+        capture::CaptureFailure,
+        login_item::{LoginItemShown, StartupEnd},
+        recognize::OcrFailure,
+        selection::SelectionFailure,
+    },
     input::{Source, window_state},
-    translation::{English, Source as Language, reading_languages},
+    translation::{Source as Language, reading_languages},
 };
-use addict_deepl::key::{self, KeyError, KeySource, Secret, WriteError};
+use addict_deepl::key::{self, KeyError, Secret, WriteError};
 use addict_dictionary::release::{Manifest, Published};
 use addict_engine::{
     recording::{AudioFailure, fetch_audio},
     work::{Job, Outcome, Work},
 };
 use addict_platform::{
-    shortcut::{self, Action, Bindings, KeyOwner, ShortcutEvent, ShortcutHandle},
+    shortcut::{self, Action, KeyOwner, ShortcutEvent, ShortcutHandle},
     startup,
     tray::{self, TrayEvent, TrayHandle},
 };
@@ -191,16 +197,16 @@ use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     about::About,
-    at_once, cache, capture,
+    capture,
     dictionaries::{Articles, Dictionaries, Indexes},
     download::{self, Downloader},
-    english, entries, evidence,
+    entries, evidence,
     first_run::{self, Offer},
-    language, manual, my_language,
+    manual,
     recording::Recording,
-    settings::{self, CacheState, KeyState, Settings, StartupEnd, StartupShown},
+    settings::{self, Settings},
     style,
-    view::{Binding, Choice, Held},
+    view::{Binding, Choice, FailedEndFocus, Held, failed_end_focus},
     widgets::{FieldEdit, KEY_LOCATION_HINT, PlaybackMedia, View},
 };
 
@@ -240,8 +246,6 @@ struct ViewActions {
 enum Event {
     /// Presentation and input actions shared by the main window and launchers.
     Window(WindowEvent),
-    /// Retry was pressed.
-    Retry,
     /// The text of the field changed; this is the new text.
     Sentence(String, FieldEdit),
     /// The word with this index in the shown sentence was clicked.
@@ -264,26 +268,9 @@ enum Event {
     LookUpEnglish(ArticleId, usize, String),
     /// The shared controller's complete snapshot and effects.
     Controller(Box<ViewState>, Vec<Effect>),
-    /// The language file, read on the runner after the start, holds this
-    /// reading language.
-    LanguageRead(Language),
-    /// The user pressed the button of this language in the switch.
-    LanguageChosen(Language),
-    /// The my-language file, read on the runner after the start, holds this
-    /// language.
-    MyLanguageRead(Language),
-    /// The user chose this language in the My language row of Settings.
-    MyLanguageChosen(Language),
-    /// The English-spelling file, read on the runner after the start, holds
-    /// this spelling.
-    EnglishRead(English),
-    /// The user chose this spelling in the English spelling row of Settings.
-    EnglishChosen(English),
-    /// The file of Translate sentence at once, read on the runner after the
-    /// start, holds this state.
-    AtOnceRead(bool),
-    /// The user moved the Translate sentence at once switch to this state.
-    AtOnceChosen(bool),
+    /// A setting was changed in the window, or an OS effect answered: the
+    /// controller decides everything that follows.
+    Setting(controller::Event),
     /// The check at the start says where the dictionary indexes stand.
     Indexes {
         generation: u64,
@@ -320,28 +307,6 @@ enum Event {
     Active,
     /// A choice of the tray's menu, or its end.
     Tray(TrayEvent),
-    /// Configure shortcuts was pressed in the Settings window.
-    ChangeShortcut,
-    /// The startup key read ended and its result is in the source.
-    KeyLoaded,
-    /// Save key, or Enter in the key field, was pressed in the Settings
-    /// window with a new key or an input validation error.
-    SaveKey(Result<Secret, WriteError>),
-    /// The write of the key file ended for this save generation.
-    KeySaved(u64, Outcome<Result<(), WriteError>>),
-    /// The size of the cache, as the runner read it for the Settings window.
-    CacheSize(CacheState),
-    /// Clear cache was pressed in the Settings window.
-    ClearCache,
-    /// The clear of the cache on the runner ended: why it failed, in one
-    /// line.
-    CacheCleared(Outcome<Result<(), String>>),
-    /// The saved startup state, as the runner read it for the Settings window.
-    StartupRead(Outcome<StartupShown>),
-    /// The user moved the Start at login switch to this state.
-    ToggleStartup(bool),
-    /// The change of the startup state on the runner ended.
-    StartupChanged(Outcome<StartupEnd>),
     /// The selection read with this id ended: the raw texts of the primary
     /// selection and the clipboard. The controller applies its rule.
     SelectionRead(RequestId, controller::SelectionText),
@@ -464,27 +429,9 @@ fn build_window(application: &gtk::Application, view: &View) -> gtk::Application
     window
 }
 
-/// What takes the keyboard focus when a capture ended without text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FailedEndFocus {
-    Capture,
-    Retry,
-}
-
-/// The focus after a capture without text under `binding`: Capture, for the
-/// retry, or Retry when it is offered. No wildcard arm: a new state does not
-/// compile until it is given its focus.
-fn failed_end_focus(binding: &Binding) -> FailedEndFocus {
-    match binding {
-        Binding::NotBound { .. } => FailedEndFocus::Retry,
-        Binding::Attempting | Binding::Bound => FailedEndFocus::Capture,
-    }
-}
-
 /// The state the event loop keeps between events, on the UI thread.
 struct Session {
     dirs: Dirs,
-    binding: Binding,
     view: View,
     window: gtk::ApplicationWindow,
     /// Present only with `--evidence`.
@@ -517,31 +464,20 @@ struct Session {
     work: WorkRef<Work>,
     controller: Option<Dispatcher>,
     articles: Arc<dyn Articles>,
+    /// Where the Linux key file is, for the `StoreKey` effect.
     key_file: Option<PathBuf>,
-    key_source: KeySource,
-    /// The on-disk cache of the translator, for its size and its clear.
-    cache: Arc<cache::Store>,
-    /// The read of the size of the cache; dropping it gives it up.
-    cache_job: Option<Job>,
-    /// The clear of the cache; a newer clear replaces it.
-    clear_job: Option<Job>,
+    /// The jobs of the settings effects; each is kept until its one result
+    /// arrives, since dropping a `Job` cancels it.
+    store_job: Option<Job>,
+    startup_job: Option<Job>,
+    startup_read_job: Option<Job>,
+    /// A user choice of my language made before the files were read; its
+    /// side effects run when they are, and only for that choice.
+    my_choice_pending: Option<(Language, u64)>,
     /// The Settings window, reached from the main window or tray.
     settings: Settings,
     /// The About window, which the tray shows.
     about: About,
-    /// Independent assignments reported by the portal for this session.
-    bindings: Bindings,
-    /// The state the portal last confirmed, as the switch shows it.
-    startup_on: bool,
-    /// The read of the saved startup state; dropping it gives it up.
-    startup_read_job: Option<Job>,
-    /// The request to the portal, from the switch to its end: while it is
-    /// there the switch stays as it is.
-    startup_job: Option<Job>,
-    /// Identifies the save whose completion Settings is waiting for.
-    save_generation: u64,
-    /// The write of the key file; a newer save replaces it.
-    save_job: Option<Job>,
     /// The check of the indexes at the start, or the last one a Spanish or
     /// Catalan word without its indexes asked for, which replaces any still running;
     /// dropping it cancels the check.
@@ -553,54 +489,6 @@ struct Session {
     capturing: Capturing,
     /// Where the read of the selection and the clipboard of a press stands.
     copying: Copying,
-    /// The language the user reads: the sentence requests are sent from
-    /// it, and its indexes are looked up first. Always
-    /// [`language::reading`] of `saved_language` and `my_language`.
-    language: Language,
-    /// The reading language of the language file or of the user's last
-    /// choice, kept apart from `language`: it falls back while it is my
-    /// language and comes back when it no longer is, and only it is
-    /// written.
-    saved_language: Language,
-    /// Where the reading language is kept across restarts; `None` when the
-    /// environment names no configuration directory.
-    language_file: Option<std::path::PathBuf>,
-    /// Whether the user chose the language in this session: the read of the
-    /// file, should it come later, changes nothing then.
-    language_chosen: bool,
-    /// Counts explicit switch presses. They override older gloss acknowledgements.
-    language_choice: u64,
-    /// The read or the write of the language file on the runner.
-    language_job: Option<Job>,
-    /// The language the online translations are made into.
-    my_language: Language,
-    /// Where my language is kept across restarts; `None` when the
-    /// environment names no configuration directory.
-    my_language_file: Option<std::path::PathBuf>,
-    /// Whether the user chose my language in this session: the read of the
-    /// file, should it come later, changes nothing then.
-    my_language_chosen: bool,
-    /// The pending startup read, or the write after `my_language_chosen`.
-    my_language_job: Option<Job>,
-    /// The spelling of English: an English target is spelled so, and any
-    /// other target ignores it.
-    english: English,
-    /// Where the spelling of English is kept across restarts; `None` when
-    /// the environment names no configuration directory.
-    english_file: Option<std::path::PathBuf>,
-    /// Whether the user chose the spelling in this session: the read of the
-    /// file, should it come later, changes nothing then.
-    english_chosen: bool,
-    /// The read or the write of the English-spelling file on the runner.
-    english_job: Option<Job>,
-    /// Where that choice is kept across restarts; `None` when the
-    /// environment names no configuration directory.
-    at_once_file: Option<std::path::PathBuf>,
-    /// Whether the user moved the switch in this session: the read of the
-    /// file, should it come later, changes nothing then.
-    at_once_chosen: bool,
-    /// The read or the write of that file on the runner.
-    at_once_job: Option<Job>,
     /// Where the first-run offer to download a dictionary stands.
     first_run: FirstRun,
     download_run: u64,
@@ -743,84 +631,41 @@ impl Session {
         match event {
             Event::Window(event) => dispatch_window(self, event),
             Event::Tray(event) => self.tray(event),
-            Event::ChangeShortcut => self.change_shortcut(),
-            Event::KeyLoaded => self.settings.render_key(KeyState::of(&self.key_source)),
-            Event::SaveKey(key) => self.save_key(key),
-            Event::KeySaved(generation, outcome) => self.key_saved(generation, outcome),
-            Event::CacheSize(state) => self.settings.render_cache(state),
-            Event::ClearCache => self.clear_cache(),
-            Event::CacheCleared(outcome) => self.cache_cleared(outcome),
-            Event::StartupRead(outcome) => self.startup_read(outcome),
-            Event::ToggleStartup(enable) => self.toggle_startup(enable),
-            Event::StartupChanged(outcome) => self.startup_changed(outcome),
-            Event::Retry => self.retry(),
+            Event::Setting(event) => self.dispatch_controller(event),
             Event::Sentence(text, origin) => self.sentence_changed(text, origin),
             Event::Word(text, index) => self.word_chosen(text, index),
             Event::Synonym(article, word) => self.synonym_chosen(article, word),
             Event::Sense(article, index) => {
-                self.article_action(article, controller::Event::SenseChosen { article, index });
+                self.article_action(
+                    article,
+                    addict_controller::Event::SenseChosen { article, index },
+                );
             }
             Event::Gloss(article, index) => {
-                self.article_action(article, controller::Event::GlossChosen { article, index });
+                self.article_action(
+                    article,
+                    addict_controller::Event::GlossChosen { article, index },
+                );
             }
             Event::Submitted => self.submitted(),
             Event::Back => self.back(),
             Event::Forward => self.forward(),
             Event::DefinitionAction(article, choice) => self.article_action(
                 article,
-                controller::Event::DefinitionAction { article, choice },
+                addict_controller::Event::DefinitionAction { article, choice },
             ),
             Event::LookUpEnglish(article, index, word) => {
                 self.look_up_english(article, index, word)
             }
             Event::Controller(state, effects) => self.render_controller(*state, effects),
-            Event::LanguageRead(language) => {
-                // After a choice the job is its write, which must not be
-                // dropped (and so cancelled) by the read.
-                if !self.language_chosen {
-                    self.language_job = None;
-                    self.saved_language = language;
-                    self.apply_reading_language();
-                }
-            }
-            Event::LanguageChosen(language) => self.language_chosen(language),
-            Event::MyLanguageRead(language) => {
-                // After a choice the job is its write, which must not be
-                // dropped (and so cancelled) by the read.
-                if !self.my_language_chosen {
-                    self.my_language_job = None;
-                    self.settings.render_my_language(language);
-                    self.apply_my_language(language);
-                }
-            }
-            Event::MyLanguageChosen(language) => self.my_language_chosen(language),
-            Event::EnglishRead(english) => {
-                // After a choice the job is its write, which must not be
-                // dropped (and so cancelled) by the read.
-                if !self.english_chosen {
-                    self.english_job = None;
-                    self.settings.render_english(english);
-                    self.apply_english(english);
-                }
-            }
-            Event::EnglishChosen(english) => self.english_chosen(english),
-            Event::AtOnceRead(at_once) => {
-                // After a choice the job is its write, which must not be
-                // dropped (and so cancelled) by the read.
-                if !self.at_once_chosen {
-                    self.at_once_job = None;
-                    self.dispatch_controller(controller::Event::SetAtOnce(at_once));
-                    self.settings.render_at_once(at_once);
-                }
-            }
-            Event::AtOnceChosen(at_once) => self.at_once_chosen(at_once),
             Event::Indexes {
                 generation,
                 indexes,
             } => {
                 if self.indexes.update(generation, indexes) {
                     self.check = None;
-                    self.view.render_indexes(indexes, self.my_language);
+                    self.view
+                        .render_indexes(indexes, self.view_state.settings.my_language);
                     self.relist_first_run();
                     self.report_indexes();
                 }
@@ -833,7 +678,8 @@ impl Session {
             Event::Imported(completed) => completed.apply(|generation, indexes| {
                 if self.indexes.update(generation, indexes) {
                     self.check = None;
-                    self.view.render_indexes(indexes, self.my_language);
+                    self.view
+                        .render_indexes(indexes, self.view_state.settings.my_language);
                     self.relist_first_run();
                     self.report_indexes();
                 }
@@ -886,14 +732,14 @@ impl Session {
         if !matches!(
             self.first_run,
             FirstRun::Unasked | FirstRun::Asking { .. } | FirstRun::Pending(_)
-        ) || (!self.my_language_chosen && self.my_language_job.is_some())
+        ) || !self.view_state.settings.languages_read
         {
             return;
         }
         let Some(indexes) = self.indexes.current() else {
             return;
         };
-        let my = self.my_language;
+        let my = self.view_state.settings.my_language;
         let due = first_run::should_offer(&indexes, my, false);
         match self.first_run {
             FirstRun::Unasked if self.check.is_some() => {}
@@ -960,7 +806,10 @@ impl Session {
         let (listed, my) = if recovery {
             (self.recovery_indexes(&manifest), None)
         } else {
-            (self.first_run_indexes(&manifest), Some(self.my_language))
+            (
+                self.first_run_indexes(&manifest),
+                Some(self.view_state.settings.my_language),
+            )
         };
         let parent: &gtk::Window = if recovery {
             self.settings.window()
@@ -973,7 +822,9 @@ impl Session {
             recovery,
             my,
             move |language| {
-                let _ = chosen.unbounded_send(Event::MyLanguageChosen(language));
+                let _ = chosen.unbounded_send(Event::Setting(
+                    addict_controller::Event::MyLanguageChosen(language),
+                ));
             },
             move || {
                 let _ = download.unbounded_send(Event::FirstRunDownload(run));
@@ -1003,9 +854,11 @@ impl Session {
     /// so they agree.
     fn first_run_indexes(&self, manifest: &Manifest) -> Vec<Published> {
         let indexes = self.indexes.known;
-        first_run::offered(&manifest.indexes, self.my_language, |name| {
-            indexes.is_some_and(|indexes| first_run::is_present(&indexes, name))
-        })
+        first_run::offered(
+            &manifest.indexes,
+            self.view_state.settings.my_language,
+            |name| indexes.is_some_and(|indexes| first_run::is_present(&indexes, name)),
+        )
     }
 
     /// The indexes of a recovery manifest that the Settings offer lists
@@ -1013,7 +866,11 @@ impl Session {
     /// what is missing or unreadable, so no presence is asked; indexes of
     /// other languages stay out, and none is removed.
     fn recovery_indexes(&self, manifest: &Manifest) -> Vec<Published> {
-        first_run::offered(&manifest.indexes, self.my_language, |_| false)
+        first_run::offered(
+            &manifest.indexes,
+            self.view_state.settings.my_language,
+            |_| false,
+        )
     }
 
     /// An offer that waits for a press lists anew what my language needs,
@@ -1026,7 +883,7 @@ impl Session {
                 manifest,
                 recovery: false,
             } => {
-                offer.render_my_language(self.my_language);
+                offer.render_my_language(self.view_state.settings.my_language);
                 offer.list(&self.first_run_indexes(manifest));
             }
             FirstRun::Shown {
@@ -1038,8 +895,10 @@ impl Session {
                 if listed.is_empty() {
                     offer.close();
                     self.first_run = FirstRun::Done;
-                    self.settings
-                        .render_download(false, &first_run::nothing_text(self.my_language));
+                    self.settings.render_download(
+                        false,
+                        &first_run::nothing_text(self.view_state.settings.my_language),
+                    );
                 } else {
                     offer.list(&listed);
                 }
@@ -1068,10 +927,9 @@ impl Session {
         if !matches!(self.first_run, FirstRun::Done | FirstRun::Ended { .. }) {
             return;
         }
-        let lacks = self
-            .indexes
-            .known
-            .is_some_and(|indexes| !first_run::missing(&indexes, self.my_language).is_empty());
+        let lacks = self.indexes.known.is_some_and(|indexes| {
+            !first_run::missing(&indexes, self.view_state.settings.my_language).is_empty()
+        });
         if lacks {
             self.settings_download();
         }
@@ -1126,8 +984,10 @@ impl Session {
         self.first_run = FirstRun::Done;
         match outcome {
             Outcome::Finished(Ok(manifest)) if self.recovery_indexes(&manifest).is_empty() => {
-                self.settings
-                    .render_download(false, &first_run::nothing_text(self.my_language));
+                self.settings.render_download(
+                    false,
+                    &first_run::nothing_text(self.view_state.settings.my_language),
+                );
             }
             Outcome::Finished(Ok(manifest)) => self.show_download_offer(manifest, true),
             outcome => {
@@ -1403,7 +1263,7 @@ impl Session {
             self.record_capture(evidence::Read::capture_failed(&failure), Default::default());
             return;
         }
-        self.dispatch_controller(controller::Event::CapturePressed {
+        self.dispatch_controller(addict_controller::Event::CapturePressed {
             activation_token: activation_token.map(str::to_owned),
         });
     }
@@ -1470,7 +1330,7 @@ impl Session {
             return;
         }
         self.capturing.pending.remove(&id);
-        self.dispatch_controller(controller::Event::PickerStarted { id });
+        self.dispatch_controller(addict_controller::Event::PickerStarted { id });
         let (cancel, cancelled) = tokio::sync::oneshot::channel();
         let sender = self.sender.clone();
         let work = self.work.upgrade();
@@ -1482,7 +1342,7 @@ impl Session {
             move |result, capture_ms| {
                 let _ = sender.unbounded_send(Event::CaptureFinished(
                     id,
-                    controller::Event::AreaCaptured {
+                    addict_controller::Event::AreaCaptured {
                         id,
                         result,
                         capture_ms,
@@ -1501,7 +1361,7 @@ impl Session {
     }
 
     fn picker_cancelled(&self, id: RequestId) {
-        self.dispatch_controller(controller::Event::AreaCaptured {
+        self.dispatch_controller(addict_controller::Event::AreaCaptured {
             id,
             result: Err(Ended::Shell(CaptureFailure::Cancelled)),
             capture_ms: None,
@@ -1517,7 +1377,7 @@ impl Session {
     ) {
         if read_sequence != self.read_sequence {
             drop(image);
-            self.dispatch_controller(controller::Event::TextRecognized {
+            self.dispatch_controller(addict_controller::Event::TextRecognized {
                 id,
                 result: Err(Ended::Shell(OcrFailure::Cancelled)),
                 timing: Default::default(),
@@ -1535,7 +1395,7 @@ impl Session {
             move |result, timing| {
                 let _ = sender.unbounded_send(Event::CaptureFinished(
                     id,
-                    controller::Event::TextRecognized { id, result, timing },
+                    addict_controller::Event::TextRecognized { id, result, timing },
                 ));
             },
         ) {
@@ -1570,7 +1430,7 @@ impl Session {
         }
         self.reveal();
         if retry {
-            match failed_end_focus(&self.binding) {
+            match failed_end_focus(&self.view_state.settings.binding) {
                 FailedEndFocus::Capture => self.view.focus_capture(),
                 FailedEndFocus::Retry => self.view.focus_retry(),
             }
@@ -1605,7 +1465,7 @@ impl Session {
         // window shows it cleared at once, before its snapshot comes, and
         // the snapshots queued before it are not rendered.
         self.read_sequence += 1;
-        self.dispatch_setting_field(controller::Event::ReadPressed {
+        self.dispatch_setting_field(addict_controller::Event::ReadPressed {
             sequence: self.read_sequence,
         });
         self.view.set_field_text("");
@@ -1749,7 +1609,7 @@ impl Session {
         id: RequestId,
         result: Result<controller::SelectionText, Ended<SelectionFailure>>,
     ) {
-        self.dispatch_controller(controller::Event::SelectionRead { id, result });
+        self.dispatch_controller(addict_controller::Event::SelectionRead { id, result });
     }
 
     /// Shows the window with the state as it is now, the field focused, with
@@ -1768,7 +1628,7 @@ impl Session {
     /// The field takes the keyboard focus, unless Retry is offered: then the
     /// focus is Retry's.
     fn focus(&self) {
-        if !matches!(self.binding, Binding::NotBound { .. }) {
+        if !matches!(self.view_state.settings.binding, Binding::NotBound { .. }) {
             self.view.focus_field();
         }
     }
@@ -1800,7 +1660,7 @@ impl Session {
     fn send_edit(&mut self, text: String, replaced: bool, source: Option<Source>) {
         self.sent_text.clone_from(&text);
         self.edits_sent += 1;
-        self.dispatch_controller(controller::Event::FieldEdited {
+        self.dispatch_controller(addict_controller::Event::FieldEdited {
             text,
             replaced,
             source,
@@ -1818,14 +1678,14 @@ impl Session {
     /// field by the controller, looked up and submitted again.
     fn back(&mut self) {
         self.give_up_for_new_text();
-        self.dispatch_setting_field(controller::Event::Back);
+        self.dispatch_setting_field(addict_controller::Event::Back);
     }
 
     /// Forward or Alt+Right: the text after in the history is put into the
     /// field as Back puts one.
     fn forward(&mut self) {
         self.give_up_for_new_text();
-        self.dispatch_setting_field(controller::Event::Forward);
+        self.dispatch_setting_field(addict_controller::Event::Forward);
     }
 
     /// Whether Back and Forward can be pressed, for the field's text now.
@@ -1839,13 +1699,13 @@ impl Session {
         if self.field_is_newer() || self.snapshot_is_old() || text != self.view_state.text_number {
             return;
         }
-        self.dispatch_controller(controller::Event::WordChosen { text, index });
+        self.dispatch_controller(addict_controller::Event::WordChosen { text, index });
     }
 
     /// Records and submits the current text.
     fn submitted(&mut self) {
         if !self.field_is_newer() {
-            self.dispatch_controller(controller::Event::FieldSubmitted);
+            self.dispatch_controller(addict_controller::Event::FieldSubmitted);
         }
     }
 
@@ -1926,6 +1786,57 @@ impl Session {
         if previous.online != current.online {
             self.render_online();
         }
+        let my = current.settings.my_language;
+        let reading = current.settings.reading;
+        let languages_read = current.settings.languages_read;
+        if previous.settings.my_language != my || previous.settings.reading != reading {
+            self.view
+                .set_reading_languages(reading_languages(my), reading);
+            self.view.set_language(reading);
+            // The definition button names my language, so it follows a
+            // choice made in Settings too. The indexes line does as well.
+            self.render_shown();
+            if let Some(indexes) = self.indexes.known {
+                self.view.render_indexes(indexes, my);
+            }
+        }
+        self.settings.render(&current.settings);
+        // The main window's binding row follows both the binding state and
+        // its assignments: a `Changed` report can keep `Bound` and still
+        // change what the row says.
+        if previous.settings.binding != current.settings.binding
+            || previous.settings.bindings != current.settings.bindings
+        {
+            self.view.render_binding(&current.settings.binding);
+        }
+        // My-language side effects belong to a user choice, not to the read
+        // of the file at start. The controller's counter tells the two apart.
+        let chosen = (my, current.settings.my_chosen);
+        if previous.settings.my_chosen != current.settings.my_chosen
+            && previous.settings.my_language != my
+        {
+            self.my_choice_pending = Some(chosen);
+        }
+        if let Some(pending) = self.my_choice_pending {
+            if languages_read {
+                self.my_choice_pending = None;
+                if let Some(indexes) = self.indexes.known {
+                    self.view.render_indexes(indexes, pending.0);
+                }
+                self.relist_first_run();
+                // The first-run decision for the new language first: an
+                // offer it ends leaves the set to the Settings offer.
+                self.first_indexes();
+                self.offer_missing_for_my_language();
+            }
+        } else if !previous.settings.languages_read && languages_read {
+            // The start read ended: only the indexes line and the first-run
+            // decision follow. No Settings offer opens on its own here.
+            if let Some(indexes) = self.indexes.known {
+                self.view.render_indexes(indexes, my);
+            }
+            self.first_indexes();
+        }
     }
 
     /// Runs a controller effect.
@@ -1975,18 +1886,11 @@ impl Session {
                     recording.translated_online(&record);
                 }
             }
-            Effect::SaveReading {
-                language,
-                language_choice,
-            } => {
-                if language_choice == self.language_choice {
-                    self.language_chosen = true;
-                    self.saved_language = language;
-                    self.language = language::reading(language, self.my_language);
-                    self.view.set_language(self.language);
-                    self.save_language();
-                }
-            }
+            Effect::StoreKey { id, key } => self.store_key(id, key),
+            Effect::SetLoginItem { id, on } => self.set_login_item(id, on),
+            Effect::ReadLoginItem => self.read_login_item(),
+            Effect::BindShortcuts => self.bind_shortcuts(),
+            Effect::ConfigureShortcuts => self.configure_shortcuts(),
         }
     }
 
@@ -2007,7 +1911,8 @@ impl Session {
 
     fn observe_lookup_indexes(&mut self, generation: u64, indexes: Indexes) {
         if self.indexes.update(generation, indexes) {
-            self.view.render_indexes(indexes, self.my_language);
+            self.view
+                .render_indexes(indexes, self.view_state.settings.my_language);
             self.report_indexes();
         }
     }
@@ -2015,7 +1920,7 @@ impl Session {
     /// Tells the controller where the `IndexCache` stands now: its lookups
     /// start from what it knows, and carry its generation.
     fn report_indexes(&self) {
-        self.dispatch_controller(controller::Event::KnownIndexes {
+        self.dispatch_controller(addict_controller::Event::KnownIndexes {
             generation: self.indexes.generation,
             indexes: self.indexes.known,
         });
@@ -2046,230 +1951,22 @@ impl Session {
     fn synonym_chosen(&mut self, article: ArticleId, word: String) {
         if self.accepts_article(article) {
             self.give_up_for_new_text();
-            self.dispatch_setting_field(controller::Event::SynonymChosen { article, word });
+            self.dispatch_setting_field(addict_controller::Event::SynonymChosen { article, word });
         }
     }
 
-    /// The English link submits the gloss's word and chooses its reading
-    /// language in the same controller event.
+    /// The English link submits the gloss's word; the controller owns the
+    /// reading language it chooses on the way.
     fn look_up_english(&mut self, article: ArticleId, index: usize, word: String) {
         if !self.accepts_article(article) {
             return;
         }
         self.give_up_for_new_text();
-        self.language_chosen = true;
-        self.dispatch_setting_field(controller::Event::LookUpEnglish {
+        self.dispatch_setting_field(addict_controller::Event::LookUpEnglish {
             article,
             index,
             word,
-            language_choice: self.language_choice,
         });
-    }
-
-    /// The user chose `language`, by a press in the switch or a click on a
-    /// gloss's English word: it is the saved reading language from now on,
-    /// kept in the language file by a write on the runner at each such
-    /// choice, and what the window shows of the current word is asked anew
-    /// in it. A change of the switch caused by my language writes nothing.
-    fn language_chosen(&mut self, language: Language) {
-        self.language_chosen = true;
-        self.language_choice += 1;
-        self.saved_language = language;
-        self.apply_reading_language();
-        // Saved even when it equals the one in use: the file may still hold
-        // another, its read not having come yet.
-        self.save_language();
-    }
-
-    /// Makes [`language::reading`] of the saved language and my language
-    /// the reading language and the switch shows it. When it changed, the
-    /// word shown, if there is one, has its offline result redone and its
-    /// online texts forgotten and asked again, as its click or its submit
-    /// asked them: a word of a sentence with its sentence, a lone word only
-    /// when it was submitted. Without a word nothing is sent.
-    fn apply_reading_language(&mut self) {
-        let language = language::reading(self.saved_language, self.my_language);
-        self.view.set_language(language);
-        self.language = language;
-        self.dispatch_controller(controller::Event::SetReading(self.saved_language));
-    }
-
-    /// The user chose `language` in Settings or in the first-run offer: my
-    /// language from now on, kept in the my-language file by a write on the
-    /// runner, and what the window shows of the current word is asked anew
-    /// into it. Settings and a first-run offer that waits for a press show
-    /// it, and the offer lists what it needs.
-    fn my_language_chosen(&mut self, language: Language) {
-        let changed = language != self.my_language;
-        self.my_language_chosen = true;
-        // Saved even when it equals the one in use: the file may still hold
-        // another, its read not having come yet.
-        self.apply_my_language(language);
-        self.save_my_language();
-        // The choice may come from Settings or from the first-run offer:
-        // both show it, and the offer lists what it needs.
-        self.settings.render_my_language(language);
-        self.relist_first_run();
-        if changed {
-            // The first-run decision for the new language first: an offer
-            // it ends leaves the set to the Settings offer.
-            self.first_indexes();
-            self.offer_missing_for_my_language();
-        }
-    }
-
-    /// Makes `language` the language of the online translations: the switch
-    /// shows its reading languages, with [`language::reading`] of the saved
-    /// language pressed, and the shown word is asked again once, into it and
-    /// from the reading language that results; a chosen definition is
-    /// translated into it from now on, and the line of the indexes names
-    /// what it lacks. Nothing is written of a reading language that falls
-    /// back.
-    fn apply_my_language(&mut self, language: Language) {
-        // The English spelling row is offered only while English is mine.
-        self.settings.show_english(language == Language::En);
-        if language == self.my_language {
-            return;
-        }
-        self.my_language = language;
-        // The line of the indexes was said for the language before: the
-        // index of the Russian translations is asked by Russian mine only.
-        if let Some(indexes) = self.indexes.known {
-            self.view.render_indexes(indexes, language);
-        }
-        let reading = language::reading(self.saved_language, language);
-        // Rendered for the new pair: a result looked up for the language
-        // before shows none of its translations. The controller redoes the
-        // offline result and asks the online texts again.
-        self.dispatch_controller(controller::Event::SetMyLanguage(language));
-        self.view
-            .set_reading_languages(reading_languages(language), reading);
-        self.language = reading;
-    }
-
-    /// The user chose `english` in Settings: the spelling of English from
-    /// now on, kept in the English-spelling file by a write on the runner.
-    fn english_chosen(&mut self, english: English) {
-        self.english_chosen = true;
-        // Saved even when it equals the one in use: the file may still hold
-        // another, its read not having come yet.
-        self.apply_english(english);
-        self.save_english();
-    }
-
-    /// Applies the spelling for English targets in controller event order.
-    fn apply_english(&mut self, english: English) {
-        self.english = english;
-        self.dispatch_controller(controller::Event::SetEnglish(english));
-    }
-
-    /// Writes the reading language to its file on the runner. A write that
-    /// fails is written to stderr and nothing else: the choice holds until
-    /// the application ends.
-    fn save_language(&mut self) {
-        let path = self.language_file.clone();
-        let language = self.saved_language;
-        self.language_job = self.work.upgrade().map(|work| {
-            work.run(
-                LANGUAGE_FILE_LIMIT,
-                async move { language::write(path.as_deref(), language) },
-                |outcome| match outcome {
-                    // Replaced by a newer choice, which is written instead.
-                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                    Outcome::Finished(Err(e)) => {
-                        eprintln!("addict: the reading language was not kept: {e}");
-                    }
-                    Outcome::TimedOut | Outcome::Panicked => {
-                        eprintln!("addict: the reading language was not kept");
-                    }
-                },
-            )
-        });
-        if self.language_job.is_none() {
-            eprintln!("addict: the reading language was not kept: no runner");
-        }
-    }
-
-    /// Writes my language to its file on the runner. A write that fails is
-    /// written to stderr and nothing else: the choice holds until the
-    /// application ends.
-    fn save_my_language(&mut self) {
-        let path = self.my_language_file.clone();
-        let language = self.my_language;
-        self.my_language_job = self.work.upgrade().map(|work| {
-            work.run(
-                LANGUAGE_FILE_LIMIT,
-                async move { my_language::write(path.as_deref(), language) },
-                |outcome| match outcome {
-                    // Replaced by a newer choice, which is written instead.
-                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                    Outcome::Finished(Err(e)) => {
-                        eprintln!("addict: my language was not kept: {e}");
-                    }
-                    Outcome::TimedOut | Outcome::Panicked => {
-                        eprintln!("addict: my language was not kept");
-                    }
-                },
-            )
-        });
-        if self.my_language_job.is_none() {
-            eprintln!("addict: my language was not kept: no runner");
-        }
-    }
-
-    /// Writes the spelling of English to its file on the runner. A write
-    /// that fails is written to stderr and nothing else: the choice holds
-    /// until the application ends.
-    fn save_english(&mut self) {
-        let path = self.english_file.clone();
-        let chosen = self.english;
-        self.english_job = self.work.upgrade().map(|work| {
-            work.run(
-                LANGUAGE_FILE_LIMIT,
-                async move { english::write(path.as_deref(), chosen) },
-                |outcome| match outcome {
-                    // Replaced by a newer choice, which is written instead.
-                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                    Outcome::Finished(Err(e)) => {
-                        eprintln!("addict: the English spelling was not kept: {e}");
-                    }
-                    Outcome::TimedOut | Outcome::Panicked => {
-                        eprintln!("addict: the English spelling was not kept");
-                    }
-                },
-            )
-        });
-        if self.english_job.is_none() {
-            eprintln!("addict: the English spelling was not kept: no runner");
-        }
-    }
-
-    /// The user moved Translate sentence at once to `at_once`: from the next
-    /// press on, kept in its file by a write on the runner. The text the
-    /// field holds is not asked for again.
-    fn at_once_chosen(&mut self, at_once: bool) {
-        self.at_once_chosen = true;
-        self.dispatch_controller(controller::Event::SetAtOnce(at_once));
-        let path = self.at_once_file.clone();
-        self.at_once_job = self.work.upgrade().map(|work| {
-            work.run(
-                LANGUAGE_FILE_LIMIT,
-                async move { at_once::write(path.as_deref(), at_once) },
-                |outcome| match outcome {
-                    // Replaced by a newer choice, which is written instead.
-                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                    Outcome::Finished(Err(e)) => {
-                        eprintln!("addict: Translate sentence at once was not kept: {e}");
-                    }
-                    Outcome::TimedOut | Outcome::Panicked => {
-                        eprintln!("addict: Translate sentence at once was not kept");
-                    }
-                },
-            )
-        });
-        if self.at_once_job.is_none() {
-            eprintln!("addict: Translate sentence at once was not kept: no runner");
-        }
     }
 
     /// Shows the state, the sentence and the chosen word as they are now.
@@ -2291,7 +1988,7 @@ impl Session {
     /// A source is being read now, or none is: the controller is told, and
     /// the window shows its state at once, before the snapshot comes.
     fn set_reading_source(&mut self, source: Option<Source>) {
-        self.dispatch_controller(controller::Event::SetReadingSource(source));
+        self.dispatch_controller(addict_controller::Event::SetReadingSource(source));
         let view = &mut self.view_state;
         view.reading_source = source;
         view.window_state = window_state(source, view.input.as_ref());
@@ -2378,32 +2075,123 @@ impl Session {
         }
     }
 
+    /// Settings opened: the controller clears the lines and asks for what it
+    /// wants to read; this shell only presents the window.
     fn show_settings(&mut self) {
-        self.settings.render_binding(&self.binding, &self.bindings);
-        self.settings.reset_status();
-        self.settings.clear_key_entry();
-        self.settings.say_key("");
-        self.settings.say_cache("");
-        self.settings.render_key(KeyState::of(&self.key_source));
-        self.check_cache();
-        self.check_startup();
+        if self.controller.is_some() {
+            self.dispatch_controller(addict_controller::Event::SettingsOpened);
+        } else {
+            // Without a controller no read or change can run (`check_startup`
+            // and `toggle_startup` in 0.5.0).
+            self.settings
+                .say_startup(addict_engine::view::STARTUP_NO_RUNNER);
+            self.settings.set_startup_sensitive(false);
+        }
         self.settings.present();
     }
 
-    /// Reads the saved startup state on the runner, for the Settings window,
-    /// and recognises an older login entry. No portal is called, and nothing
-    /// is touched while a change runs: its end shows the state.
-    fn check_startup(&mut self) {
-        if self.startup_job.is_some() {
-            return;
-        }
-        self.settings.say_startup("");
-        self.settings.set_startup_sensitive(false);
-        let Some(work) = self.work.upgrade() else {
-            self.settings.say_startup(settings::STARTUP_NO_RUNNER);
+    /// Writes the key with the shell's file format, then tells the controller
+    /// both the new active key and the end of the store, in that order when
+    /// the write commits. The key never goes into a snapshot.
+    fn store_key(&mut self, id: RequestId, key: Secret) {
+        use addict_core::failure::key_store::KeyStoreFailure as Failure;
+
+        let Some(path) = self.key_file.clone() else {
+            self.dispatch_controller(addict_controller::Event::KeyStored {
+                id,
+                result: Err(Ended::Shell(Failure::NoPlace)),
+            });
             return;
         };
-        let sender = self.sender.clone();
+        let Some(dispatcher) = self.controller.clone() else {
+            self.dispatch_controller(addict_controller::Event::KeyStored {
+                id,
+                result: Err(Ended::Shell(Failure::Unavailable)),
+            });
+            return;
+        };
+        let Some(work) = self.work.upgrade() else {
+            dispatcher.dispatch(addict_controller::Event::KeyStored {
+                id,
+                result: Err(Ended::Shell(Failure::Unavailable)),
+            });
+            return;
+        };
+        let answered = dispatcher.clone();
+        self.store_job = Some(work.run(
+            KEY_SAVE_LIMIT,
+            persist_key(path, key, dispatcher),
+            move |outcome| {
+                let result = match outcome {
+                    Outcome::Finished(Ok(())) => Ok(()),
+                    Outcome::Finished(Err(WriteError::Invalid)) => {
+                        Err(Ended::Shell(Failure::Invalid))
+                    }
+                    Outcome::Finished(Err(error)) => {
+                        Err(Ended::Shell(Failure::Failed(error.to_string())))
+                    }
+                    Outcome::Cancelled => Err(Ended::Shell(Failure::Cancelled)),
+                    Outcome::TimedOut => Err(Ended::DeadlinePassed),
+                    Outcome::Panicked => Err(Ended::Unfinished),
+                };
+                answered.dispatch(addict_controller::Event::KeyStored { id, result });
+            },
+        ));
+    }
+
+    /// Asks the Background portal through the shell's adapter.
+    fn set_login_item(&mut self, id: RequestId, on: bool) {
+        let Some(dispatcher) = self.controller.clone() else {
+            self.dispatch_controller(addict_controller::Event::LoginItemSet {
+                id,
+                result: Err(Ended::Unfinished),
+                runner_missing: true,
+            });
+            return;
+        };
+        let Some(work) = self.work.upgrade() else {
+            dispatcher.dispatch(addict_controller::Event::LoginItemSet {
+                id,
+                result: Err(Ended::Unfinished),
+                runner_missing: true,
+            });
+            return;
+        };
+        // A read queued before the toggle is given up; its answer would be
+        // about the state before the change (`toggle_startup` in 0.5.0).
+        self.startup_read_job = None;
+        let answered = dispatcher.clone();
+        self.startup_job = Some(work.run(
+            STARTUP_LIMIT,
+            request_startup_change(on, entries::startup_file(self.dirs.config.as_deref())),
+            move |outcome| {
+                let result = match outcome {
+                    Outcome::Finished(end) => Ok(end),
+                    Outcome::Cancelled => Err(Ended::Unfinished),
+                    Outcome::TimedOut => Err(Ended::DeadlinePassed),
+                    Outcome::Panicked => Err(Ended::Unfinished),
+                };
+                answered.dispatch(addict_controller::Event::LoginItemSet {
+                    id,
+                    result,
+                    runner_missing: false,
+                });
+            },
+        ));
+    }
+
+    /// Reads the live login item, without asking the portal to change it.
+    fn read_login_item(&mut self) {
+        let Some(dispatcher) = self.controller.clone() else {
+            return;
+        };
+        let Some(work) = self.work.upgrade() else {
+            dispatcher.dispatch(addict_controller::Event::LoginItemRead {
+                shown: None,
+                runner_missing: true,
+            });
+            return;
+        };
         let state = entries::startup_file(self.dirs.config.as_deref());
         self.startup_read_job = Some(work.run(
             STARTUP_READ_LIMIT,
@@ -2413,199 +2201,27 @@ impl Session {
                 let entry = (!startup::is_sandboxed())
                     .then(entries::login_entry)
                     .and_then(Result::ok);
-                settings::startup_shown(saved, entry)
+                login_item_shown(saved, entry)
             },
             move |outcome| {
-                let _ = sender.unbounded_send(Event::StartupRead(outcome));
-            },
-        ));
-    }
-
-    /// The saved state was read: the switch shows it and can be moved.
-    fn startup_read(&mut self, outcome: Outcome<StartupShown>) {
-        // Queued before a change started: the change's end shows the state.
-        if self.startup_job.is_some() {
-            return;
-        }
-        match outcome {
-            Outcome::Finished(shown) => {
-                self.startup_on = shown.on;
-                self.settings.render_startup(shown.on);
-                self.settings.say_startup(if shown.legacy {
-                    settings::STARTUP_LEGACY
-                } else {
-                    ""
+                // A read replaced by a newer opening says nothing
+                // (`startup_read` returned on `Cancelled` in 0.5.0).
+                let shown = match outcome {
+                    Outcome::Finished(shown) => Some(shown),
+                    Outcome::Cancelled => return,
+                    Outcome::TimedOut | Outcome::Panicked => None,
+                };
+                dispatcher.dispatch(addict_controller::Event::LoginItemRead {
+                    shown,
+                    runner_missing: false,
                 });
-            }
-            Outcome::TimedOut | Outcome::Panicked => {
-                self.settings.render_startup(self.startup_on);
-                self.settings.say_startup(settings::STARTUP_UNREAD);
-            }
-            // Replaced by the next press of Settings.
-            Outcome::Cancelled => return,
-        }
-        self.settings.set_startup_sensitive(true);
-    }
-
-    /// The user moved the switch: the portal is asked on the runner, the state
-    /// saved when it confirms, and the switch waits for the end.
-    fn toggle_startup(&mut self, enable: bool) {
-        if self.startup_job.is_some() {
-            return;
-        }
-        let Some(work) = self.work.upgrade() else {
-            self.settings.render_startup(self.startup_on);
-            self.settings.say_startup(settings::STARTUP_NO_RUNNER);
-            return;
-        };
-        self.startup_read_job = None;
-        self.settings.set_startup_sensitive(false);
-        self.settings.say_startup("Asking the desktop…");
-        let sender = self.sender.clone();
-        self.startup_job = Some(work.run(
-            STARTUP_LIMIT,
-            request_startup_change(enable, entries::startup_file(self.dirs.config.as_deref())),
-            move |outcome| {
-                let _ = sender.unbounded_send(Event::StartupChanged(outcome));
             },
         ));
     }
 
-    /// The change ended: the switch shows what is confirmed and the line why.
-    fn startup_changed(&mut self, outcome: Outcome<StartupEnd>) {
-        let Some((on, line)) = settings::startup_outcome(&outcome, self.startup_on) else {
-            return;
-        };
-        self.startup_job = None;
-        self.startup_on = on;
-        self.settings.render_startup(on);
-        self.settings.say_startup(&line);
-        self.settings.set_startup_sensitive(true);
-    }
-
-    /// Reads the size of the cache on the runner, for the Settings window; a
-    /// read still running is given up.
-    fn check_cache(&mut self) {
-        self.settings.render_cache(CacheState::Checking);
-        let sender = self.sender.clone();
-        let cache = self.cache.clone();
-        self.cache_job = self.work.upgrade().map(|work| {
-            work.run(
-                CACHE_LIMIT,
-                async move { cache.footprint() },
-                move |outcome| {
-                    let state = match outcome {
-                        Outcome::Finished(footprint) => CacheState::Read(footprint),
-                        Outcome::TimedOut | Outcome::Panicked => CacheState::Unknown,
-                        // Replaced by the next press of Settings or clear.
-                        Outcome::Cancelled => return,
-                    };
-                    let _ = sender.unbounded_send(Event::CacheSize(state));
-                },
-            )
-        });
-        if self.cache_job.is_none() {
-            self.settings.render_cache(CacheState::Unknown);
-        }
-    }
-
-    /// Clear cache was pressed: every row is deleted on the runner. A clear
-    /// still running is replaced.
-    fn clear_cache(&mut self) {
-        let Some(work) = self.work.upgrade() else {
-            self.settings
-                .say_cache(&settings::clear_text(Err("the runner is not available")));
-            return;
-        };
-        self.settings.say_cache("");
-        self.settings.render_cache(CacheState::Checking);
-        let sender = self.sender.clone();
-        let cache = self.cache.clone();
-        self.clear_job =
-            Some(
-                work.run(CACHE_LIMIT, async move { cache.clear() }, move |outcome| {
-                    let _ = sender.unbounded_send(Event::CacheCleared(outcome));
-                }),
-            );
-    }
-
-    /// The clear of the cache ended: the line says why when it failed, and
-    /// the size is read again either way. The job slot is left alone, as for
-    /// a save of the key.
-    fn cache_cleared(&mut self, outcome: Outcome<Result<(), String>>) {
-        let result = match outcome {
-            Outcome::Finished(result) => result,
-            Outcome::TimedOut => Err("the clear did not answer in time".to_owned()),
-            Outcome::Panicked => Err("the clear did not run".to_owned()),
-            // Replaced by a newer clear, whose end is awaited.
-            Outcome::Cancelled => return,
-        };
-        self.settings.say_cache(&settings::clear_text(
-            result.as_ref().map(|_| ()).map_err(String::as_str),
-        ));
-        self.check_cache();
-    }
-
-    /// Writes the key on the runner and publishes it to the shared source.
-    fn save_key(&mut self, key: Result<Secret, WriteError>) {
-        let Some(path) = self.key_file.clone() else {
-            self.settings
-                .say_key(&settings::save_text(Err(settings::NO_KEY_PLACE)));
-            return;
-        };
-        let Some(work) = self.work.upgrade() else {
-            self.settings
-                .say_key(&settings::save_text(Err("the runner is not available")));
-            return;
-        };
-        self.settings.say_key("Saving the key…");
-        let sender = self.sender.clone();
-        let source = self.key_source.clone();
-        self.save_generation += 1;
-        let generation = self.save_generation;
-        self.save_job.take();
-        self.save_job = Some(work.run(
-            KEY_SAVE_LIMIT,
-            persist_key(source, path, key),
-            move |outcome| {
-                let _ = sender.unbounded_send(Event::KeySaved(generation, outcome));
-            },
-        ));
-    }
-
-    /// Renders the active key and the latest save outcome.
-    fn key_saved(&mut self, generation: u64, outcome: Outcome<Result<(), WriteError>>) {
-        self.settings.render_key(KeyState::of(&self.key_source));
-        if generation != self.save_generation {
-            return;
-        }
-        self.save_job.take();
-        let result = match outcome {
-            Outcome::Finished(result) => result.map_err(|error| error.to_string()),
-            // The write cannot be stopped, so it may have happened.
-            Outcome::TimedOut => {
-                self.settings.say_key(settings::SAVE_UNANSWERED);
-                return;
-            }
-            Outcome::Panicked => Err("the write did not run".to_owned()),
-            // Replaced by a newer save, whose end is awaited.
-            Outcome::Cancelled => return,
-        };
-        if result.is_ok() {
-            self.settings.clear_key_entry();
-        }
-        self.settings.say_key(&settings::save_text(
-            result.as_ref().map(|_| ()).map_err(String::as_str),
-        ));
-    }
-
-    /// Configure shortcuts was pressed: the portal is asked for its dialog
-    /// through the worker that holds the session.
-    fn change_shortcut(&mut self) {
-        if !matches!(self.binding, Binding::Bound) {
-            self.settings.say(settings::CHANGE_UNBOUND);
-            return;
-        }
+    /// Configure shortcuts: the portal's dialog belongs to the session's
+    /// worker. The controller only says when the action is available.
+    fn configure_shortcuts(&self) {
         if let Some(current) = self.current.upgrade()
             && let Some(handle) = current.borrow().as_ref()
         {
@@ -2613,21 +2229,14 @@ impl Session {
         }
     }
 
-    fn retry(&mut self) {
-        // One attempt at a time: a press that was queued
-        // behind another one starts nothing.
-        if !matches!(self.binding, Binding::NotBound { .. }) {
-            return;
-        }
+    /// One attempt at a time: a press queued behind another starts nothing.
+    /// The controller changes the binding state before this effect arrives.
+    fn bind_shortcuts(&self) {
         let Some(current) = self.current.upgrade() else {
             return;
         };
-        self.binding = Binding::Attempting;
-        self.view.render_binding(&self.binding);
-        self.settings.render_binding(&self.binding, &self.bindings);
-        // `Failed` is the last act of the old worker, sent
-        // after its session was closed: joining it does not
-        // wait.
+        // `Failed` is the last act of the old worker, sent after its session
+        // was closed: joining it does not wait.
         current.borrow_mut().take();
         *current.borrow_mut() = Some(start_shortcut(
             &self.sender,
@@ -2671,7 +2280,7 @@ fn read_text(
 fn connect_view(view: &View, sender: &UnboundedSender<Event>, actions: &Rc<Cell<ViewActions>>) {
     let retry = sender.clone();
     view.connect_retry(move || {
-        let _ = retry.unbounded_send(Event::Retry);
+        let _ = retry.unbounded_send(Event::Setting(addict_controller::Event::RetryPressed));
     });
     let changed = sender.clone();
     view.connect_sentence_changed(move |text, origin| {
@@ -2739,7 +2348,9 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>, actions: &Rc<Cell<
     });
     let language = sender.clone();
     view.connect_language_chosen(move |chosen| {
-        let _ = language.unbounded_send(Event::LanguageChosen(chosen));
+        let _ = language.unbounded_send(Event::Setting(addict_controller::Event::ReadingChosen(
+            chosen,
+        )));
     });
 }
 
@@ -2766,6 +2377,16 @@ fn build_ui(
         }
     });
     (view, window, actions)
+}
+
+/// What the switch shows from the saved state and the login entry. The saved
+/// state wins; with none, only a legacy entry makes it on. `None` for `entry`
+/// means it could not be read.
+fn login_item_shown(
+    saved: Option<bool>,
+    entry: Option<addict_platform::desktop::LoginEntry>,
+) -> LoginItemShown {
+    settings::startup_shown(saved, entry)
 }
 
 /// One change of the switch: the checks before the portal, then the flow of
@@ -2842,25 +2463,35 @@ fn start_settings(
         data_dir,
         owner,
         move || {
-            let _ = change.unbounded_send(Event::ChangeShortcut);
+            let _ =
+                change.unbounded_send(Event::Setting(addict_controller::Event::ConfigurePressed));
         },
-        move |text| {
-            let _ = save.unbounded_send(Event::SaveKey(text));
+        move |key| {
+            let _ = save.unbounded_send(Event::Setting(addict_controller::Event::SaveKey(key)));
         },
         move || {
-            let _ = clear.unbounded_send(Event::ClearCache);
+            let _ =
+                clear.unbounded_send(Event::Setting(addict_controller::Event::ClearCachePressed));
         },
-        move |enable| {
-            let _ = startup.unbounded_send(Event::ToggleStartup(enable));
-        },
-        move |chosen| {
-            let _ = my_language.unbounded_send(Event::MyLanguageChosen(chosen));
-        },
-        move |chosen| {
-            let _ = english.unbounded_send(Event::EnglishChosen(chosen));
+        move |on| {
+            let _ = startup.unbounded_send(Event::Setting(
+                addict_controller::Event::LoginItemToggled(on),
+            ));
         },
         move |chosen| {
-            let _ = at_once.unbounded_send(Event::AtOnceChosen(chosen));
+            let _ = my_language.unbounded_send(Event::Setting(
+                addict_controller::Event::MyLanguageChosen(chosen),
+            ));
+        },
+        move |chosen| {
+            let _ = english.unbounded_send(Event::Setting(
+                addict_controller::Event::EnglishChosen(chosen),
+            ));
+        },
+        move |chosen| {
+            let _ = at_once.unbounded_send(Event::Setting(addict_controller::Event::AtOnceChosen(
+                chosen,
+            )));
         },
         move || refresh_import(articles.clone(), imported.clone()),
         move || {
@@ -2950,17 +2581,14 @@ fn start_tray(sender: &UnboundedSender<Event>) -> TrayHandle {
 /// FIFO order on the GTK main context.
 fn start_controller(
     dirs: &Dirs,
-    key_source: &KeySource,
+    key: Option<Result<Secret, KeyError>>,
     recording: bool,
     sender: &UnboundedSender<Event>,
 ) -> io::Result<Controller> {
     controller::start(
         dirs.clone(),
         controller_platform(),
-        StartFacts {
-            key_source: key_source.clone(),
-            recording,
-        },
+        StartFacts { key, recording },
         controller_renderer(sender),
     )
 }
@@ -3063,96 +2691,6 @@ fn start_check(
     })
 }
 
-/// Starts the one read of the language file at `path` on `work`; the
-/// language it holds, English for anything else, comes to `sender` as an
-/// event. Without a runner nothing is read, and English stays.
-fn start_language(
-    work: Option<&Work>,
-    path: Option<std::path::PathBuf>,
-    sender: &UnboundedSender<Event>,
-) -> Option<Job> {
-    let read = sender.clone();
-    let job = work?.run(
-        LANGUAGE_FILE_LIMIT,
-        async move { language::read(path.as_deref()) },
-        move |outcome| {
-            if let Outcome::Finished(language) = outcome {
-                // On the worker: the UI thread wakes for the event.
-                let _ = read.unbounded_send(Event::LanguageRead(language));
-            }
-        },
-    );
-    Some(job)
-}
-
-/// Starts the one read of the my-language file at `path` on `work`; the
-/// language it holds, Russian for anything else, comes to `sender` as an
-/// event. Without a runner nothing is read, and Russian stays.
-fn start_my_language(
-    work: Option<&Work>,
-    path: Option<std::path::PathBuf>,
-    sender: &UnboundedSender<Event>,
-) -> Option<Job> {
-    let read = sender.clone();
-    let job = work?.run(
-        LANGUAGE_FILE_LIMIT,
-        async move { my_language::read(path.as_deref()) },
-        move |outcome| {
-            let language = match outcome {
-                Outcome::Finished(language) => language,
-                _ => Language::Ru,
-            };
-            // On the worker: the UI thread wakes for the event.
-            let _ = read.unbounded_send(Event::MyLanguageRead(language));
-        },
-    );
-    Some(job)
-}
-
-/// Starts the one read of the file of Translate sentence at once at `path`
-/// on `work`; the state it holds comes to `sender` as an event. Without a
-/// runner nothing is read, and the default stays.
-fn start_at_once(
-    work: Option<&Work>,
-    path: Option<std::path::PathBuf>,
-    sender: &UnboundedSender<Event>,
-) -> Option<Job> {
-    let read = sender.clone();
-    let job = work?.run(
-        LANGUAGE_FILE_LIMIT,
-        async move { at_once::read(path.as_deref()) },
-        move |outcome| {
-            if let Outcome::Finished(at_once) = outcome {
-                // On the worker: the UI thread wakes for the event.
-                let _ = read.unbounded_send(Event::AtOnceRead(at_once));
-            }
-        },
-    );
-    Some(job)
-}
-
-/// Starts the one read of the English-spelling file at `path` on `work`;
-/// the spelling it holds, US for anything else, comes to `sender` as an
-/// event. Without a runner nothing is read, and US stays.
-fn start_english(
-    work: Option<&Work>,
-    path: Option<std::path::PathBuf>,
-    sender: &UnboundedSender<Event>,
-) -> Option<Job> {
-    let read = sender.clone();
-    let job = work?.run(
-        LANGUAGE_FILE_LIMIT,
-        async move { english::read(path.as_deref()) },
-        move |outcome| {
-            if let Outcome::Finished(english) = outcome {
-                // On the worker: the UI thread wakes for the event.
-                let _ = read.unbounded_send(Event::EnglishRead(english));
-            }
-        },
-    );
-    Some(job)
-}
-
 /// Starts the decision of the first-run offer on `work`, for the `indexes`
 /// of the first check: the choice file is read and, when the offer is due,
 /// the manifest is fetched by `downloader` and comes to `sender` as an
@@ -3193,38 +2731,35 @@ fn start_first_run(
     )
 }
 
-/// Loads the configured key once without blocking GTK or the translation runner.
-fn start_key_load(path: Option<PathBuf>, source: &KeySource, sender: &UnboundedSender<Event>) {
-    let Some(path) = path else {
-        source.initialize(Err(KeyError::NoDirectory));
-        return;
-    };
-    let loading = source.clone();
+/// Loads the configured key once without blocking GTK or the translation
+/// runner. The result reaches the controller as its first `KeyChanged`.
+fn start_key_load(path: Option<PathBuf>, sender: &UnboundedSender<Event>) {
     let loaded = sender.clone();
-    if let Err(error) = std::thread::Builder::new()
+    let read = move || {
+        let result = path
+            .as_deref()
+            .map_or(Err(KeyError::NoDirectory), key::read);
+        let _ = loaded.unbounded_send(Event::Setting(addict_controller::Event::KeyChanged(result)));
+    };
+    if std::thread::Builder::new()
         .name("addict-key-load".to_owned())
-        .spawn(move || {
-            loading.initialize(key::read(&path));
-            let _ = loaded.unbounded_send(Event::KeyLoaded);
-        })
+        .spawn(read)
+        .is_err()
     {
-        eprintln!("addict: could not start the key reader: {error}");
-        source.initialize(Err(KeyError::Unreadable));
-        let _ = sender.unbounded_send(Event::KeyLoaded);
+        eprintln!("addict: could not start the key reader");
+        let _ = sender.unbounded_send(Event::Setting(addict_controller::Event::KeyChanged(Err(
+            KeyError::Unreadable,
+        ))));
     }
 }
 
-async fn persist_key(
-    source: KeySource,
-    path: PathBuf,
-    key: Result<Secret, WriteError>,
-) -> Result<(), WriteError> {
-    let key = key?;
-    let _ = source.ready().await;
+/// Writes the key file and publishes the written key to the controller
+/// before the job yields again: a committed write is active even if the
+/// runner then reports a timeout or a cancel for its job, as 0.5.0's
+/// `persist_key` made it.
+async fn persist_key(path: PathBuf, key: Secret, controller: Dispatcher) -> Result<(), WriteError> {
     let persisted = key::write(&path, key)?;
-    // Publish before yielding, even if the runner later reports cancellation
-    // or a timeout for the job whose write has committed.
-    source.replace(persisted);
+    controller.dispatch(addict_controller::Event::KeyChanged(Ok(persisted)));
     Ok(())
 }
 
@@ -3248,8 +2783,6 @@ fn start(
     // The worker threads push; the main context wakes only for an event.
     let (sender, receiver) = futures_channel::mpsc::unbounded();
     let key_file = key::key_path(dirs.config.as_deref());
-    let key_source = KeySource::pending();
-    start_key_load(key_file.clone(), &key_source, &sender);
 
     // The first attempt starts below, with the window still hidden.
     let binding = Binding::Attempting;
@@ -3265,13 +2798,16 @@ fn start(
     let config = dirs.config.as_deref();
     let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed, config))));
     let events = sender.clone();
-    let controller = match start_controller(dirs, &key_source, timed, &sender) {
+    let controller = match start_controller(dirs, None, timed, &sender) {
         Ok(controller) => Some(controller),
         Err(e) => {
             eprintln!("addict: lookups cannot run: {e}");
             None
         }
     };
+    // The key is read off GTK's thread; the controller publishes its result
+    // as the first `KeyChanged` once this event is dispatched.
+    start_key_load(key_file.clone(), &sender);
     let work = controller
         .as_ref()
         .map_or_else(WorkRef::new, Controller::work);
@@ -3328,20 +2864,6 @@ fn start(
     );
     let runner = work.upgrade();
     let check = start_check(runner.as_deref(), articles.clone(), &sender, 0);
-    // After the check: the runner takes its jobs in this order. Only the
-    // path is made here; the file is the runner's.
-    let language_file = language::path(config);
-    let language_job = start_language(runner.as_deref(), language_file.clone(), &sender);
-    let my_language_file = my_language::path(config);
-    let my_language_job = start_my_language(runner.as_deref(), my_language_file.clone(), &sender);
-    let english_file = english::path(config);
-    let english_job = start_english(runner.as_deref(), english_file.clone(), &sender);
-    let at_once_file = at_once::path(config);
-    let at_once_job = start_at_once(runner.as_deref(), at_once_file.clone(), &sender);
-    let cache = controller.as_ref().map_or_else(
-        || Arc::new(cache::Store::new(dirs.cache.clone())),
-        Controller::cache,
-    );
     let settings = start_settings(
         &window,
         key_file.as_deref(),
@@ -3353,7 +2875,6 @@ fn start(
     let about = About::new(&window);
     let session = Session {
         dirs: dirs.clone(),
-        binding,
         view,
         window,
         recording,
@@ -3371,39 +2892,16 @@ fn start(
         controller: controller.as_ref().map(Controller::dispatcher),
         articles,
         key_file,
-        key_source,
-        cache,
-        cache_job: None,
-        clear_job: None,
+        store_job: None,
+        startup_job: None,
+        startup_read_job: None,
+        my_choice_pending: None,
         settings,
         about,
-        bindings: Bindings::default(),
-        startup_on: false,
-        startup_read_job: None,
-        startup_job: None,
-        save_generation: 0,
-        save_job: None,
         check,
         indexes: IndexCache::default(),
         capturing: Capturing::default(),
         copying: Copying::default(),
-        language: Language::default(),
-        saved_language: Language::default(),
-        language_file,
-        language_chosen: false,
-        language_choice: 0,
-        language_job,
-        my_language: Language::Ru,
-        my_language_file,
-        my_language_chosen: false,
-        my_language_job,
-        english: English::Us,
-        english_file,
-        english_chosen: false,
-        english_job,
-        at_once_file,
-        at_once_chosen: false,
-        at_once_job,
         first_run: FirstRun::Unasked,
         download_run: 0,
         release: download::BASE_URL.to_owned(),
@@ -3447,13 +2945,31 @@ enum WindowEvent {
 }
 
 trait WindowActions {
-    fn set_bindings(&mut self, binding: Binding, assignments: Bindings);
+    fn shortcut(&mut self, state: ShortcutState);
     fn present_main(&mut self);
     fn present_settings(&mut self);
     fn clipboard(&mut self, token: Option<&str>, timestamp: u64, receipt: Option<u64>);
     fn capture(&mut self, token: Option<&str>);
-    fn shortcut_status(&mut self, message: &str);
-    fn set_rebinding(&mut self, rebinding: bool);
+}
+
+/// The shell's binding report becomes one controller event; activation stays
+/// local because it starts a Read or a Capture, not a settings change.
+fn shortcut_state(event: ShortcutEvent) -> Option<ShortcutState> {
+    let convert = |bindings: addict_platform::shortcut::Bindings| ControllerBindings {
+        clipboard: bindings.clipboard,
+        screenshot: bindings.screenshot,
+    };
+    match event {
+        ShortcutEvent::Bound { bindings } => Some(ShortcutState::Bound(convert(bindings))),
+        ShortcutEvent::Changed { bindings } => Some(ShortcutState::Changed(convert(bindings))),
+        ShortcutEvent::Failed { message } => Some(ShortcutState::Failed(message)),
+        ShortcutEvent::ConfigureEnded { message } => {
+            Some(ShortcutState::ConfigureAnswered(message))
+        }
+        ShortcutEvent::Rebinding { bindings } => Some(ShortcutState::Rebinding(convert(bindings))),
+        ShortcutEvent::RebindEnded { message } => Some(ShortcutState::RebindEnded(message)),
+        ShortcutEvent::Activated { .. } => None,
+    }
 }
 
 fn dispatch_window(ui: &mut impl WindowActions, event: WindowEvent) {
@@ -3461,50 +2977,35 @@ fn dispatch_window(ui: &mut impl WindowActions, event: WindowEvent) {
         WindowEvent::Launched(LaunchMode::Normal) => ui.present_main(),
         WindowEvent::Launched(LaunchMode::Background) => {}
         WindowEvent::Settings => ui.present_settings(),
-        WindowEvent::Shortcut(
-            ShortcutEvent::Bound { bindings } | ShortcutEvent::Changed { bindings },
-            _,
-        ) => ui.set_bindings(Binding::Bound, bindings),
-        WindowEvent::Shortcut(ShortcutEvent::Failed { message }, _) => {
-            eprintln!("addict: shortcut unavailable: {message}");
-            // A rebind that failed twice ends here, and Retry starts over; the
-            // rows now say why, so no line about the dialog stays beside them.
-            ui.set_rebinding(false);
-            ui.shortcut_status("");
-            ui.set_bindings(Binding::NotBound { detail: message }, Bindings::default());
-        }
-        WindowEvent::Shortcut(
+        WindowEvent::Shortcut(event, receipt) => match event {
             ShortcutEvent::Activated {
                 action,
                 activation_token,
                 timestamp_ms,
+            } => match action {
+                Action::Clipboard => {
+                    ui.clipboard(activation_token.as_deref(), timestamp_ms, receipt)
+                }
+                Action::Screenshot => ui.capture(activation_token.as_deref()),
             },
-            receipt,
-        ) => match action {
-            Action::Clipboard => ui.clipboard(activation_token.as_deref(), timestamp_ms, receipt),
-            Action::Screenshot => ui.capture(activation_token.as_deref()),
+            ShortcutEvent::Failed { message } => {
+                // 0.5.0 still printed why the portal is unavailable; the
+                // controller's line says the same in the window.
+                eprintln!("addict: shortcut unavailable: {message}");
+                ui.shortcut(ShortcutState::Failed(message));
+            }
+            event => {
+                if let Some(state) = shortcut_state(event) {
+                    ui.shortcut(state);
+                }
+            }
         },
-        WindowEvent::Shortcut(ShortcutEvent::ConfigureEnded { message }, _) => {
-            ui.shortcut_status(&settings::change_text(message.as_deref()))
-        }
-        WindowEvent::Shortcut(ShortcutEvent::Rebinding { bindings }, _) => {
-            ui.set_bindings(Binding::Bound, bindings);
-            ui.set_rebinding(true);
-            ui.shortcut_status(settings::REBINDING);
-        }
-        WindowEvent::Shortcut(ShortcutEvent::RebindEnded { message }, _) => {
-            ui.set_rebinding(false);
-            ui.shortcut_status(&settings::rebind_text(message.as_deref()));
-        }
     }
 }
 
 impl WindowActions for Session {
-    fn set_bindings(&mut self, binding: Binding, assignments: Bindings) {
-        self.binding = binding;
-        self.bindings = assignments;
-        self.view.render_binding(&self.binding);
-        self.settings.render_binding(&self.binding, &self.bindings);
+    fn shortcut(&mut self, state: ShortcutState) {
+        self.dispatch_controller(addict_controller::Event::ShortcutChanged(state));
     }
 
     fn present_main(&mut self) {
@@ -3518,12 +3019,6 @@ impl WindowActions for Session {
     }
     fn capture(&mut self, token: Option<&str>) {
         Session::capture(self, token);
-    }
-    fn shortcut_status(&mut self, message: &str) {
-        self.settings.say(message);
-    }
-    fn set_rebinding(&mut self, rebinding: bool) {
-        self.settings.set_rebinding(rebinding);
     }
 }
 
@@ -3660,10 +3155,10 @@ mod tests {
     use gtk::{gio, prelude::*};
 
     use super::{
-        Event, FailedEndFocus, LOOKUP_LIMIT, LaunchMode, WindowActions, WindowEvent,
-        connect_launches, connect_menu_actions, connect_settings_action, dispatch_window,
-        failed_end_focus,
+        Event, LOOKUP_LIMIT, LaunchMode, WindowActions, WindowEvent, connect_launches,
+        connect_menu_actions, connect_settings_action, dispatch_window,
     };
+    use addict_controller::ShortcutState;
     use addict_core::{dirs::Dirs, translation::Source as Language};
 
     #[test]
@@ -3965,19 +3460,12 @@ mod tests {
         futures_channel::mpsc::UnboundedReceiver<Event>,
         std::sync::Arc<addict_engine::work::Work>,
     ) {
-        use addict_deepl::key::{self, KeyError, KeySource};
-
-        let path = key::key_path(dirs.config.as_deref());
-        let loaded = path
-            .as_deref()
-            .map_or(Err(KeyError::NoDirectory), key::read);
-        test_session_with_source(id, dirs, KeySource::new(loaded))
+        test_session_with_dirs(id, dirs)
     }
 
-    fn test_session_with_source(
+    fn test_session_with_dirs(
         id: &str,
         dirs: Dirs,
-        key_source: addict_deepl::key::KeySource,
     ) -> (
         super::Session,
         futures_channel::mpsc::UnboundedReceiver<Event>,
@@ -3995,7 +3483,6 @@ mod tests {
         let work = Arc::new(Work::start().unwrap());
         let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(dirs.data.clone()));
         let key_file = key::key_path(dirs.config.as_deref());
-        let cache = Arc::new(cache::Store::new(dirs.cache.clone()));
         // Not the desktop the tests run on: the portal's dialog, as on GNOME.
         let settings = start_settings(
             &window,
@@ -4008,7 +3495,6 @@ mod tests {
         let about = About::new(&window);
         let session = Session {
             dirs,
-            binding,
             view,
             window,
             recording: None,
@@ -4026,39 +3512,16 @@ mod tests {
             controller: None,
             articles: articles.clone(),
             key_file,
-            key_source,
-            cache,
-            cache_job: None,
-            clear_job: None,
+            store_job: None,
+            startup_job: None,
+            startup_read_job: None,
+            my_choice_pending: None,
             settings,
             about,
-            bindings: Bindings::default(),
-            startup_on: false,
-            startup_read_job: None,
-            startup_job: None,
-            save_generation: 0,
-            save_job: None,
             check: None,
             indexes: IndexCache::default(),
             capturing: Capturing::default(),
             copying: Copying::default(),
-            language: Language::default(),
-            saved_language: Language::default(),
-            language_file: None,
-            language_chosen: false,
-            language_choice: 0,
-            language_job: None,
-            my_language: Language::Ru,
-            my_language_file: None,
-            my_language_chosen: false,
-            my_language_job: None,
-            english: English::Us,
-            english_file: None,
-            english_chosen: false,
-            english_job: None,
-            at_once_file: None,
-            at_once_chosen: false,
-            at_once_job: None,
             first_run: FirstRun::Done,
             download_run: 0,
             release: download::BASE_URL.to_owned(),
@@ -4102,12 +3565,24 @@ mod tests {
         None
     }
 
+    /// The key the real start would hand to the controller, read from the
+    /// session's configuration directory.
+    fn controller_key_source(session: &super::Session) -> addict_deepl::key::KeySource {
+        use addict_deepl::key::{self, KeyError, KeySource};
+
+        let path = key::key_path(session.dirs.config.as_deref());
+        let loaded = path
+            .as_deref()
+            .map_or(Err(KeyError::NoDirectory), key::read);
+        KeySource::new(loaded)
+    }
+
     /// Gives `session` a running controller, as `start` does; the session
     /// lives as long as the returned owner.
     fn attach_controller(session: &mut super::Session) -> super::Controller {
+        let key = controller_key_source(session).snapshot();
         let controller =
-            super::start_controller(&session.dirs, &session.key_source, false, &session.sender)
-                .unwrap();
+            super::start_controller(&session.dirs, key, false, &session.sender).unwrap();
         connect_controller(session, &controller);
         controller
     }
@@ -4116,11 +3591,33 @@ mod tests {
         session: &mut super::Session,
         translator: impl addict_core::translation::Translator + 'static,
     ) -> super::Controller {
+        let source = controller_key_source(session);
         let controller = addict_controller::start_with_translator(
             session.dirs.clone(),
             super::controller_platform(),
             translator,
             false,
+            source,
+            super::controller_renderer(&session.sender),
+        )
+        .unwrap();
+        connect_controller(session, &controller);
+        controller
+    }
+
+    /// Attaches a controller whose translation provider and key source are
+    /// supplied by the test, as the stub-server key tests need.
+    fn attach_translator_with_source(
+        session: &mut super::Session,
+        translator: impl addict_core::translation::Translator + 'static,
+        source: addict_deepl::key::KeySource,
+    ) -> super::Controller {
+        let controller = addict_controller::start_with_translator(
+            session.dirs.clone(),
+            super::controller_platform(),
+            translator,
+            false,
+            source,
             super::controller_renderer(&session.sender),
         )
         .unwrap();
@@ -4132,7 +3629,6 @@ mod tests {
         session.work = controller.work();
         session.controller = Some(controller.dispatcher());
         session.articles = controller.dictionaries();
-        session.cache = controller.cache();
     }
 
     #[derive(Clone)]
@@ -4245,13 +3741,13 @@ mod tests {
         let _controller = attach_translator(&mut session, canned.clone());
         // An earlier text in the history, submitted while the window was
         // empty: nothing of it is asked online.
-        session.dispatch_controller(controller::Event::FieldEdited {
+        session.dispatch_controller(addict_controller::Event::FieldEdited {
             text: "earlier text".to_owned(),
             replaced: false,
             source: None,
         });
-        session.dispatch_controller(controller::Event::FieldSubmitted);
-        session.dispatch_controller(controller::Event::FieldEdited {
+        session.dispatch_controller(addict_controller::Event::FieldSubmitted);
+        session.dispatch_controller(addict_controller::Event::FieldEdited {
             text: String::new(),
             replaced: false,
             source: None,
@@ -4287,8 +3783,12 @@ mod tests {
         pump_until(&mut session, &mut events, |session| {
             session.view_state.sentence.is_empty()
         });
-        session.handle(Event::LanguageChosen(Language::Es));
-        assert_eq!(session.language, Language::Es);
+        session.handle(Event::Setting(addict_controller::Event::ReadingChosen(
+            Language::Es,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.reading == Language::Es
+        });
         entry.insert_text("bank", &mut 0);
         entry.emit_activate();
         pump_until(&mut session, &mut events, |session| {
@@ -4329,9 +3829,8 @@ mod tests {
         // The snapshot of the settled lookup of `word`, read in `language`,
         // with its effects, not yet handled.
         let mut completed = |session: &mut Session, word: &str, language: Language| {
-            if language != session.language {
-                session.language = language;
-                session.dispatch_controller(controller::Event::SetReading(language));
+            if session.view_state.settings.reading != language {
+                session.dispatch_controller(addict_controller::Event::ReadingChosen(language));
             }
             session.view.set_field_text(word);
             session.sentence_changed(word.to_owned(), FieldEdit::Typed);
@@ -4401,266 +3900,6 @@ mod tests {
         session.window.destroy();
     }
 
-    #[test]
-    fn a_committed_key_save_stays_active_when_the_runner_reports_a_timeout() {
-        use std::{future, sync::mpsc, time::Duration};
-
-        use addict_deepl::key::{self, KeyError, KeySource, Secret};
-        use addict_engine::work::{Outcome, Work};
-        use futures_util::FutureExt;
-
-        let temp = KeyTestDir::new("addict-key-timeout");
-        let path = temp.0.join("deepl.key");
-        let source = KeySource::pending();
-        let key = Secret::new("synthetic-timed-out-deepl").unwrap();
-        let mut save = Box::pin(super::persist_key(
-            source.clone(),
-            path.clone(),
-            Ok(key.clone()),
-        ));
-        assert!(save.as_mut().now_or_never().is_none());
-        assert_eq!(key::read(&path), Err(KeyError::Missing));
-        source.initialize(Err(KeyError::Missing));
-
-        let work = Work::start().unwrap();
-        let (send, receive) = mpsc::channel();
-        let _job = work.run(
-            Duration::from_secs(1),
-            async move {
-                save.await?;
-                // Hold completion until the runner has to report a timeout.
-                future::pending().await
-            },
-            move |outcome: Outcome<Result<(), key::WriteError>>| send.send(outcome).unwrap(),
-        );
-        let outcome = receive.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(outcome, Outcome::TimedOut);
-        assert_eq!(key::read(&path), Ok(key.clone()));
-        assert_eq!(source.snapshot(), Some(Ok(key)));
-    }
-
-    #[test]
-    #[ignore = "needs a display; run alone"]
-    fn settings_saves_update_the_active_deepl_key() {
-        use addict_core::translation::{English, Request};
-        use addict_deepl::{
-            DeepL,
-            key::{self, KeySource, Secret, WriteError},
-            stub::{Reply, Stub},
-        };
-        use addict_engine::work::Outcome;
-        use futures_util::StreamExt;
-        use gtk::glib;
-        use std::fs;
-
-        const INITIAL: &str = "synthetic-startup-deepl:fx";
-        const SAVED: &str = "synthetic-settings-deepl";
-        const SUPERSEDED: &str = "synthetic-superseded-deepl:fx";
-        const FREE: &str = "A DeepL key of the Free plan is set.";
-        const PRO: &str = "A DeepL key of the Pro plan is set.";
-
-        gtk::init().expect("a display");
-        let temp = KeyTestDir::new("addict-key-session");
-        let path = temp.0.join("config/deepl.key");
-        let initial = key::write(&path, Secret::new(INITIAL).unwrap()).expect("startup key");
-        let (mut session, mut events, _work) = test_session_with_source(
-            "io.github.doqhu.Addict.KeyTest",
-            Dirs {
-                config: Some(temp.0.join("config")),
-                cache: Some(temp.0.join("cache")),
-                ..Dirs::default()
-            },
-            KeySource::pending(),
-        );
-        let stub = Stub::start(Reply::translation("translated")).expect("stub");
-        let deepl = DeepL::with_base_url(session.key_source.clone(), stub.base_url());
-        let _controller = attach_translator(&mut session, deepl);
-        let request = |text: &str| Request {
-            text: text.to_owned(),
-            context: None,
-            source: Language::En,
-            target: Language::Ru,
-            english: English::Us,
-        };
-        let assert_authorization = |index: usize, expected: &str| {
-            let seen = stub.seen();
-            assert_eq!(seen.len(), index + 1);
-            assert!(
-                seen[index].header("authorization")
-                    == Some(format!("DeepL-Auth-Key {expected}").as_str()),
-                "unexpected authorization"
-            );
-        };
-        let submit = |session: &mut super::Session, text: &str| {
-            session.view.set_field_text(text);
-            session.sentence_changed(text.to_owned(), super::FieldEdit::Typed);
-            session.submitted();
-        };
-        let translate =
-            |session: &mut super::Session, events: &mut _, text: &str, expected: &str| {
-                let count = stub.seen().len();
-                submit(session, text);
-                pump_until(session, events, |session| {
-                    session.view_state.sentence == text
-                        && session
-                            .view_state
-                            .online
-                            .iter()
-                            .any(|row| row.line == "translated")
-                });
-                assert_authorization(count, expected);
-            };
-
-        session.show_settings();
-        let window = session.settings.window().clone();
-        let root = window.upcast_ref::<gtk::Widget>();
-        let entry = find::<gtk::PasswordEntry>(root, &|_| true).unwrap();
-        let save = find::<gtk::Button>(root, &|button| {
-            button.label().as_deref() == Some("Save key")
-        })
-        .unwrap();
-        let state = find::<gtk::Label>(root, &|label| label.has_css_class("key-state")).unwrap();
-        let error_shown = || {
-            find::<gtk::Label>(root, &|label| {
-                label.is_visible() && label.label().starts_with("The key was not saved:")
-            })
-            .is_some()
-        };
-        let context = glib::MainContext::default();
-
-        assert_eq!(state.label(), "Checking…");
-        assert!(!entry.is_sensitive());
-        session
-            .cache
-            .put(&super::cache::key_of(&request("cached")), "from cache");
-        submit(&mut session, "cached");
-        pump_until(&mut session, &mut events, |session| {
-            session
-                .view_state
-                .online
-                .iter()
-                .any(|row| row.line == "from cache")
-        });
-        submit(&mut session, "uncached");
-        pump_until(&mut session, &mut events, |session| {
-            session.view_state.sentence == "uncached"
-                && session
-                    .view_state
-                    .online
-                    .iter()
-                    .any(|row| row.state == crate::view::OnlineState::Pending)
-        });
-        assert!(stub.seen().is_empty());
-
-        super::start_key_load(
-            session.key_file.clone(),
-            &session.key_source,
-            &session.sender,
-        );
-        loop {
-            let event = context.block_on(events.next()).expect("startup key result");
-            let loaded = matches!(event, Event::KeyLoaded);
-            session.handle(event);
-            if loaded {
-                break;
-            }
-        }
-        assert_eq!(state.label(), FREE);
-        assert!(entry.is_sensitive());
-        pump_until(&mut session, &mut events, |session| {
-            session
-                .view_state
-                .online
-                .iter()
-                .any(|row| row.line == "translated")
-        });
-        assert_authorization(0, INITIAL);
-
-        fs::remove_file(&path).expect("external removal");
-        translate(&mut session, &mut events, "removed", INITIAL);
-        key::write(&path, Secret::new("external-file-edit").unwrap())
-            .expect("external replacement");
-        translate(&mut session, &mut events, "replaced", INITIAL);
-        assert_eq!(session.key_source.snapshot(), Some(Ok(initial)));
-
-        let press = |session: &mut super::Session,
-                     events: &mut futures_channel::mpsc::UnboundedReceiver<Event>,
-                     input: &str| {
-            entry.set_text(input);
-            assert!(save.is_sensitive());
-            save.emit_clicked();
-            loop {
-                let event = context.block_on(events.next()).expect("save request");
-                let requested = matches!(event, Event::SaveKey(_));
-                session.handle(event);
-                if requested {
-                    break;
-                }
-            }
-            loop {
-                let event = context.block_on(events.next()).expect("save outcome");
-                if matches!(event, Event::KeySaved(..)) {
-                    return event;
-                }
-                session.handle(event);
-            }
-        };
-
-        assert_eq!(state.label(), FREE);
-        let finished = press(&mut session, &mut events, &format!("  {SAVED}  "));
-        assert!(matches!(
-            finished,
-            Event::KeySaved(_, Outcome::Finished(Ok(())))
-        ));
-        translate(&mut session, &mut events, "saved", SAVED);
-        session.handle(finished);
-        assert!(entry.text().is_empty());
-        assert_eq!(state.label(), PRO);
-        assert!(!error_shown());
-
-        let superseded = press(&mut session, &mut events, SUPERSEDED);
-        assert!(matches!(
-            superseded,
-            Event::KeySaved(_, Outcome::Finished(Ok(())))
-        ));
-        let failed = press(&mut session, &mut events, "invalid input");
-        assert!(matches!(
-            failed,
-            Event::KeySaved(_, Outcome::Finished(Err(WriteError::Invalid)))
-        ));
-        session.handle(superseded);
-        assert_eq!(entry.text(), "invalid input");
-        session.handle(failed);
-        assert!(error_shown());
-        assert_eq!(state.label(), FREE);
-        let persisted = fs::read_to_string(&path).expect("persisted file");
-        assert!(
-            persisted == format!("{SUPERSEDED}\n"),
-            "unexpected persisted key"
-        );
-        translate(&mut session, &mut events, "superseded", SUPERSEDED);
-
-        let backup = path.with_extension("old");
-        fs::rename(&path, &backup).expect("save old file");
-        fs::create_dir(&path).expect("block atomic replacement");
-        let failed = press(&mut session, &mut events, "synthetic-unwritten-deepl");
-        assert!(matches!(
-            failed,
-            Event::KeySaved(_, Outcome::Finished(Err(WriteError::Io(_))))
-        ));
-        session.handle(failed);
-        assert!(error_shown());
-        assert_eq!(state.label(), FREE);
-        assert!(path.is_dir());
-        assert!(
-            fs::read_to_string(backup).unwrap() == persisted,
-            "old key changed"
-        );
-        translate(&mut session, &mut events, "unwritten", SUPERSEDED);
-        window.destroy();
-        session.window.destroy();
-    }
-
     /// With Translate sentence at once on, a sentence read at a press is
     /// sent at once, alone, and shown with no word chosen; a click on a word
     /// then sends the word only. With it off nothing is sent until a click,
@@ -4712,9 +3951,13 @@ mod tests {
         assert_eq!(asked[1].text, "bank");
         assert_eq!(asked[1].context.as_deref(), Some(line));
 
-        // Off affects the next read. A late startup read cannot undo it.
-        session.handle(Event::AtOnceChosen(false));
-        session.handle(Event::AtOnceRead(true));
+        // Off affects the next read; a late startup read cannot undo it,
+        // because the controller ignores a read after a choice.
+        session.handle(Event::Setting(addict_controller::Event::AtOnceChosen(
+            false,
+        )));
+        // The controller applies the choice in event order; the next read
+        // carries the new snapshot.
         let id = start_read(&mut session, &mut events);
         session.handle(selected(id, "The bank was closed."));
         pump_until(&mut session, &mut events, |session| {
@@ -4781,7 +4024,7 @@ mod tests {
         let (mut session, mut events, _work) =
             test_session("io.github.doqhu.Addict.ClearedLineTest", Dirs::default());
         let _controller = attach_controller(&mut session);
-        session.dispatch_controller(addict_controller::Event::SetAtOnce(false));
+        session.dispatch_controller(addict_controller::Event::AtOnceChosen(false));
         let line = "I sat on the bank of the river.";
 
         let id = start_read(&mut session, &mut events);
@@ -4883,19 +4126,19 @@ mod tests {
             Dirs::default(),
             controller_platform(),
             StartFacts {
-                key_source: KeySource::new(Err(KeyError::NoDirectory)),
+                key: Some(Err(KeyError::NoDirectory)),
                 recording: false,
             },
             move |_, effects| send.send(effects).unwrap(),
         )
         .unwrap();
         let press = || {
-            controller.dispatch(controller::Event::CapturePressed {
+            controller.dispatch(addict_controller::Event::CapturePressed {
                 activation_token: None,
             })
         };
         assert!(press());
-        assert!(controller.dispatch(controller::Event::ReadPressed { sequence: 1 }));
+        assert!(controller.dispatch(addict_controller::Event::ReadPressed { sequence: 1 }));
         assert!(press());
         let ids: Vec<_> = (0..4)
             .flat_map(|_| renders.recv_timeout(Duration::from_secs(5)).unwrap())
@@ -4941,7 +4184,7 @@ mod tests {
             }
             session.handle(Event::CaptureFinished(
                 closing,
-                controller::Event::AreaCaptured {
+                addict_controller::Event::AreaCaptured {
                     id: closing,
                     result: Err(Ended::Shell(CaptureFailure::Cancelled)),
                     capture_ms: None,
@@ -4950,7 +4193,7 @@ mod tests {
             assert!(!session.capturing.pending.contains_key(&next));
             let mut started = false;
             while let Ok(event) = events.try_recv() {
-                if matches!(event, Event::CaptureFinished(id, controller::Event::AreaCaptured {
+                if matches!(event, Event::CaptureFinished(id, addict_controller::Event::AreaCaptured {
                     result: Err(Ended::Unfinished), ..
                 }) if id == next)
                 {
@@ -5044,13 +4287,186 @@ mod tests {
         assert_eq!(session.sent_text, "river");
     }
 
-    /// A saved Russian with English mine ends pressed whichever file is
-    /// read first, and a click on a gloss's English word with English mine
-    /// saves Spanish, and a later read neither undoes that choice nor drops
-    /// (and so cancels) its write. One session, put back to its start
-    /// between the two orders: a second one does not start in the same
-    /// process. Run alone:
-    /// GTK starts once per process, on one thread.
+    /// On a fresh install the first-run offer, fed `manifest-3.json` by the
+    /// download stub, queues Russian's set when no choice is made, and
+    /// exactly English's when English is chosen in the dialog, which makes
+    /// it my language and shows it in Settings. Nothing is installed: the
+    /// stub has no asset, and the installs are cancelled.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn first_run_queues_the_set_of_the_language_chosen_in_the_offer() {
+        use std::collections::HashMap;
+
+        use super::*;
+        use crate::stub::{Route, Stub};
+        use addict_dictionary::{pairs, release, sources};
+
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = Temp(
+            std::env::temp_dir().join(format!("addict-first-run-language-{}", std::process::id())),
+        );
+        std::fs::create_dir(&temp.0).unwrap();
+        let dirs = Dirs {
+            config: Some(temp.0.join("config/addict")),
+            data: Some(temp.0.join("data/addict")),
+            cache: None,
+        };
+
+        let manifest = Manifest {
+            format: addict_dictionary::format::VERSION,
+            indexes: sources::ROWS
+                .iter()
+                .filter(|row| addict_dictionary::release::MANIFEST_3_PUBLISHED.contains(&row.index))
+                .map(|row| Published::of(row.index, row.index.as_bytes()))
+                .collect(),
+        };
+        assert_eq!(manifest.indexes.len(), 20);
+        let stub = Stub::start(HashMap::from([(
+            format!("/{}/{}", release::tag(), release::MANIFEST_3),
+            Route::File(manifest.to_json().into_bytes()),
+        )]))
+        .unwrap();
+
+        gtk::init().expect("a display");
+        let (mut session, mut events, _work) =
+            test_session("io.github.doqhu.Addict.FirstRunLanguageTest", dirs);
+        // My language lives in the controller: its choices need one.
+        let _controller = attach_controller(&mut session);
+        session.release = stub.base_url();
+        let queued = |session: &Session| -> Vec<String> {
+            let FirstRun::Installing { queue, .. } = &session.first_run else {
+                panic!("installing");
+            };
+            queue
+                .rows()
+                .iter()
+                .map(|(published, _)| published.name.clone())
+                .collect()
+        };
+        let set = |my: Language| -> Vec<String> {
+            pairs::required_index_names(my).map(str::to_owned).collect()
+        };
+        // The rows are grouped by language, so they are compared as a set.
+        let sorted = |mut names: Vec<String>| -> Vec<String> {
+            names.sort();
+            names
+        };
+
+        for chosen in [None, Some(Language::En)] {
+            // A fresh start: nothing chosen yet.
+            session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+                Language::Ru,
+            )));
+            pump_until(&mut session, &mut events, |session| {
+                session.view_state.settings.languages_read
+                    && session.view_state.settings.my_language == Language::Ru
+            });
+            session.first_run = FirstRun::Unasked;
+            session.indexes = IndexCache::default();
+            session.window.set_visible(true);
+            session.handle(Event::Indexes {
+                generation: 0,
+                indexes: Indexes::MISSING,
+            });
+            assert!(matches!(session.first_run, FirstRun::Asking { .. }));
+            pump_until(&mut session, &mut events, |session| {
+                matches!(session.first_run, FirstRun::Shown { .. })
+            });
+            let FirstRun::Shown { offer, .. } = &session.first_run else {
+                unreachable!();
+            };
+            assert_eq!(offer.my_language().selected(), 3, "Russian at first");
+            assert_eq!(sorted(offer.listed()), sorted(set(Language::Ru)));
+            if chosen.is_none() {
+                // A choice in Settings while the offer waits: it shows it
+                // and lists its set, and back to Russian.
+                session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+                    Language::Es,
+                )));
+                pump_until(&mut session, &mut events, |session| {
+                    session.view_state.settings.my_language == Language::Es
+                });
+                let FirstRun::Shown { offer, .. } = &session.first_run else {
+                    panic!("the offer stays");
+                };
+                assert_eq!(offer.my_language().selected(), 1);
+                assert_eq!(sorted(offer.listed()), sorted(set(Language::Es)));
+                session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+                    Language::Ru,
+                )));
+                pump_until(&mut session, &mut events, |session| {
+                    session.view_state.settings.my_language == Language::Ru
+                });
+                let FirstRun::Shown { offer, .. } = &session.first_run else {
+                    panic!("the offer stays");
+                };
+                assert_eq!(sorted(offer.listed()), sorted(set(Language::Ru)));
+            }
+            let FirstRun::Shown { offer, .. } = &session.first_run else {
+                unreachable!();
+            };
+            if let Some(language) = chosen {
+                let index = Language::ALL
+                    .iter()
+                    .position(|one| *one == language)
+                    .unwrap();
+                offer.my_language().set_selected(index as u32);
+                pump_until(&mut session, &mut events, |session| {
+                    session.view_state.settings.my_language == language
+                });
+                assert_eq!(session.settings.shown_my_language(), Some(language));
+                let FirstRun::Shown { offer, .. } = &session.first_run else {
+                    panic!("the offer stays");
+                };
+                assert_eq!(offer.my_language().selected(), index as u32);
+                assert_eq!(sorted(offer.listed()), sorted(set(language)));
+            }
+            let run = session.download_run;
+            session.handle(Event::FirstRunDownload(run));
+            assert_eq!(
+                queued(&session),
+                set(chosen.unwrap_or(Language::Ru)),
+                "{chosen:?}"
+            );
+            // Once Download is pressed the choice is gone, and one in
+            // Settings leaves the queue as it is.
+            let FirstRun::Installing { offer, .. } = &session.first_run else {
+                panic!("installing");
+            };
+            assert!(!offer.shows_my_language());
+            let before = queued(&session);
+            session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+                Language::Ca,
+            )));
+            pump_until(&mut session, &mut events, |session| {
+                session.view_state.settings.my_language == Language::Ca
+            });
+            assert_eq!(queued(&session), before);
+            session.handle(Event::FirstRunCancel(run, None));
+            // At most the first of the set was asked for before the cancel.
+            let allowed = set(chosen.unwrap_or(Language::Ru));
+            for path in stub.seen() {
+                if let Some(asset) = path.rsplit('/').next()
+                    && let Some(name) = asset.strip_suffix(".index.xz")
+                {
+                    assert!(allowed.iter().any(|one| one == name), "{path}");
+                }
+            }
+        }
+        assert_eq!(set(Language::Ru), release::LEGACY_PUBLISHED);
+        assert_ne!(set(Language::En), set(Language::Ru));
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// The reading switch and the gloss's English link end with the same
+    /// reading language whichever file was read first. Run alone: GTK starts
+    /// once per process, on one thread.
     #[test]
     #[ignore = "needs a display; run alone"]
     fn the_reading_language_holds_in_either_read_order_and_on_a_gloss_click() {
@@ -5085,29 +4501,67 @@ mod tests {
             .unwrap();
             std::fs::write(import::index_path(&data.0, index), index_bytes).unwrap();
         }
+        let config = data.0.join("config");
         let (mut session, mut events, _work) = test_session(
             "io.github.doqhu.Addict.LanguageTest",
             Dirs {
                 data: Some(data.0.clone()),
+                config: Some(config.clone()),
                 ..Dirs::default()
             },
         );
         let canned = SharedCanned::new("translated");
-        let _controller = attach_translator(&mut session, canned.clone());
-        session.handle(Event::LanguageRead(Language::Ru));
-        assert_eq!(session.language, Language::En);
-        session.handle(Event::MyLanguageRead(Language::En));
-        assert_eq!(session.language, Language::Ru);
-        assert_eq!(session.saved_language, Language::Ru);
+        let controller = attach_translator(&mut session, canned.clone());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        let read = |item: addict_controller::SettingsRead| {
+            assert!(controller.dispatch_settings_read(item));
+        };
+        let reading = |session: &super::Session| session.view_state.settings.reading;
+        let saved_file = || std::fs::read_to_string(config.join("language")).unwrap_or_default();
+        let wait_saved = |expected: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::fs::read_to_string(config.join("language"))
+                .unwrap_or_default()
+                .trim()
+                != expected
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the write did not land"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+
+        read(addict_controller::SettingsRead::Reading(Language::Ru));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::En
+        });
+        read(addict_controller::SettingsRead::My(Language::En));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::Ru
+        });
+        assert_eq!(reading(&session), Language::Ru);
 
         // Back to the start: nothing read, Russian mine.
-        session.handle(Event::MyLanguageRead(Language::Ru));
-        session.handle(Event::LanguageRead(Language::default()));
-        session.handle(Event::MyLanguageRead(Language::En));
-        assert_eq!(session.language, Language::Es);
-        session.handle(Event::LanguageRead(Language::Ru));
-        assert_eq!(session.language, Language::Ru);
-        assert_eq!(session.saved_language, Language::Ru);
+        read(addict_controller::SettingsRead::My(Language::Ru));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::Ru
+        });
+        read(addict_controller::SettingsRead::Reading(Language::default()));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::En
+        });
+        read(addict_controller::SettingsRead::My(Language::En));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::Es
+        });
+        read(addict_controller::SettingsRead::Reading(Language::Ru));
+        pump_until(&mut session, &mut events, |session| {
+            reading(session) == Language::Ru
+        });
 
         session.handle(Event::Indexes {
             generation: 0,
@@ -5129,19 +4583,25 @@ mod tests {
         session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
         session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
         pump_until(&mut session, &mut events, |session| {
-            session.view_state.sentence == "bank" && session.language == Language::Es
+            session.view_state.sentence == "bank" && reading(session) == Language::Es
         });
-        assert_eq!(session.saved_language, Language::Es);
-        assert_eq!(session.language, Language::Es);
-        // A read handled after the choice neither undoes it nor drops (and
-        // so cancels) its write.
-        session.handle(Event::LanguageRead(Language::Ru));
-        assert_eq!(session.saved_language, Language::Es);
-        assert!(session.language_job.is_some());
+        assert_eq!(reading(&session), Language::Es);
+        // A read handled after the choice, while its write may still run,
+        // neither undoes it nor drops (and so cancels) its write.
+        let before = session.view_state.revision;
+        read(addict_controller::SettingsRead::Reading(Language::Ru));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.revision > before
+        });
+        assert_eq!(reading(&session), Language::Es);
+        wait_saved("es");
+        assert_eq!(saved_file().trim(), "es");
 
         // A switch press before the gloss snapshot is delivered wins, even
         // when it names the language the shell already showed.
-        session.handle(Event::LanguageChosen(Language::Ru));
+        session.handle(Event::Setting(addict_controller::Event::ReadingChosen(
+            Language::Ru,
+        )));
         session.view.set_field_text("banco");
         session.sentence_changed("banco".to_owned(), super::FieldEdit::Typed);
         pump_until(&mut session, &mut events, |session| {
@@ -5154,7 +4614,9 @@ mod tests {
             session.view_state.shown.choice() == Some(super::Choice::Gloss(0))
         });
         session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
-        session.handle(Event::LanguageChosen(Language::Ru));
+        session.handle(Event::Setting(addict_controller::Event::ReadingChosen(
+            Language::Ru,
+        )));
         pump_until(&mut session, &mut events, |session| {
             session.view_state.sentence == "bank"
                 && session.view_state.shown.translating().pressed == Language::Ru
@@ -5164,13 +4626,20 @@ mod tests {
                     .iter()
                     .any(|row| row.line == "translated")
         });
-        assert_eq!(session.saved_language, Language::Ru);
+        wait_saved("ru");
         assert_eq!(canned.asked().last().unwrap().source, Language::Ru);
 
         // The controller sees the gloss choice before the target change,
         // even while GTK still holds the previous saved reading language.
-        session.handle(Event::MyLanguageChosen(Language::Ru));
-        session.handle(Event::LanguageChosen(Language::Es));
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::Ru,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::Ru
+        });
+        session.handle(Event::Setting(addict_controller::Event::ReadingChosen(
+            Language::Es,
+        )));
         session.view.set_field_text("banco");
         session.sentence_changed("banco".to_owned(), super::FieldEdit::Typed);
         pump_until(&mut session, &mut events, |session| {
@@ -5184,9 +4653,11 @@ mod tests {
         });
         let first = canned.asked().len();
         session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
-        session.handle(Event::MyLanguageChosen(Language::Ca));
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::Ca,
+        )));
         pump_until(&mut session, &mut events, |session| {
-            session.saved_language == Language::En
+            reading(session) == Language::En
                 && session.view_state.shown.translating().my == Language::Ca
                 && session.view_state.sentence == "bank"
                 && session
@@ -5209,31 +4680,55 @@ mod tests {
         session.window.destroy();
     }
 
-    /// British with English mine ends in the session's request as `EN-GB`
-    /// whichever file is read first; the English spelling row is shown only while English is
-    /// mine; a choice of the spelling or of my language is neither undone
-    /// by a later read nor loses its write; with Spanish mine the
-    /// spelling changes no request. One session, put back to its start
-    /// between the two orders. Run alone: GTK starts once per process, on
-    /// one thread.
+    /// British English reaches the request as `EN-GB` with English mine,
+    /// whichever setting was chosen first, and the row is shown only then.
+    /// Run alone: GTK starts once per process, on one thread.
     #[test]
     #[ignore = "needs a display; run alone"]
     fn the_english_spelling_holds_in_either_read_order_and_shows_only_for_english() {
+        use super::*;
         use addict_core::translation::English;
         use addict_deepl::client::sent;
         gtk::init().expect("a display");
-        let (mut session, mut events, _work) =
-            test_session("io.github.doqhu.Addict.EnglishTest", Dirs::default());
+        let temp = KeyTestDir::new("addict-english-reading");
+        let config = temp.0.join("config");
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.EnglishTest",
+            Dirs {
+                config: Some(config.clone()),
+                ..Dirs::default()
+            },
+        );
         let canned = SharedCanned::new("translated");
-        let _controller = attach_translator(&mut session, canned.clone());
+        let controller = attach_translator(&mut session, canned.clone());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        let read = |item: addict_controller::SettingsRead| {
+            assert!(controller.dispatch_settings_read(item));
+        };
+        let wait_saved = |expected: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::fs::read_to_string(config.join("english"))
+                .unwrap_or_default()
+                .trim()
+                != expected
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the write did not land"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
         let target_lang = |session: &mut super::Session, events: &mut _| {
             let previous = canned.asked().len();
             let text = format!("word{}", char::from(b'a' + previous as u8));
             session.view.set_field_text(&text);
-            session.sentence_changed(text.clone(), super::FieldEdit::Typed);
+            session.sentence_changed(text, super::FieldEdit::Typed);
             session.submitted();
             pump_until(session, events, |session| {
-                session.view_state.sentence == text
+                canned.asked().len() > previous
                     && session
                         .view_state
                         .online
@@ -5242,61 +4737,112 @@ mod tests {
             });
             sent(canned.asked().last().unwrap()).target_lang
         };
+
         assert_eq!(session.settings.english_row(), (false, English::Us));
         assert_eq!(target_lang(&mut session, &mut events), "RU");
 
         // The spelling read first, then English mine.
-        session.handle(Event::EnglishRead(English::Gb));
-        assert_eq!(session.english, English::Gb);
+        read(addict_controller::SettingsRead::English(English::Gb));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.english == English::Gb
+        });
         assert_eq!(session.settings.english_row(), (false, English::Gb));
         assert_eq!(target_lang(&mut session, &mut events), "RU");
-        session.handle(Event::MyLanguageRead(Language::En));
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::En,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::En
+        });
         assert_eq!(session.settings.english_row(), (true, English::Gb));
         assert_eq!(target_lang(&mut session, &mut events), "EN-GB");
 
         // Back to the start: nothing read, Russian mine, US.
-        session.handle(Event::MyLanguageRead(Language::Ru));
-        session.handle(Event::EnglishRead(English::Us));
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::Ru,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::Ru
+        });
+        read(addict_controller::SettingsRead::English(English::Us));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.english == English::Us
+        });
         // English mine read first, then the spelling.
-        session.handle(Event::MyLanguageRead(Language::En));
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::En,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::En
+        });
         assert_eq!(session.settings.english_row(), (true, English::Us));
         assert_eq!(target_lang(&mut session, &mut events), "EN-US");
-        session.handle(Event::EnglishRead(English::Gb));
+        read(addict_controller::SettingsRead::English(English::Gb));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.english == English::Gb
+        });
         assert_eq!(session.settings.english_row(), (true, English::Gb));
         assert_eq!(target_lang(&mut session, &mut events), "EN-GB");
 
-        // A choice holds against a later read.
-        session.handle(Event::EnglishChosen(English::Us));
-        session.handle(Event::EnglishRead(English::Gb));
-        assert_eq!(session.english, English::Us);
+        // A choice holds against a later read, and its write is not dropped.
+        session.handle(Event::Setting(addict_controller::Event::EnglishChosen(
+            English::Us,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.english == English::Us
+        });
+        wait_saved("us");
+        read(addict_controller::SettingsRead::English(English::Gb));
+        assert_eq!(session.view_state.settings.english, English::Us);
         assert_eq!(target_lang(&mut session, &mut events), "EN-US");
-        // Nor does the read drop (and so cancel) the write of the choice.
-        assert!(session.english_job.is_some());
 
         // Spanish mine: the row is hidden and the spelling changes nothing.
-        session.handle(Event::MyLanguageChosen(Language::Es));
-        // A later read of my language neither undoes the choice nor drops
-        // its write.
-        session.handle(Event::MyLanguageRead(Language::Ru));
-        assert_eq!(session.my_language, Language::Es);
-        assert!(session.my_language_job.is_some());
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::Es,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::Es
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::fs::read_to_string(config.join("my-language"))
+            .unwrap_or_default()
+            .trim()
+            != "es"
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "my language was not kept"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        read(addict_controller::SettingsRead::My(Language::Ru));
+        assert_eq!(session.view_state.settings.my_language, Language::Es);
+        assert_eq!(
+            std::fs::read_to_string(config.join("my-language")).unwrap_or_default(),
+            "es\n"
+        );
         assert!(!session.settings.english_row().0);
         assert_eq!(target_lang(&mut session, &mut events), "ES");
-        session.handle(Event::EnglishChosen(English::Gb));
+        session.handle(Event::Setting(addict_controller::Event::EnglishChosen(
+            English::Gb,
+        )));
+        wait_saved("gb");
         assert_eq!(target_lang(&mut session, &mut events), "ES");
         // British, chosen while Spanish was mine, holds once English is.
-        session.handle(Event::MyLanguageChosen(Language::En));
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::En,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::En
+        });
         assert!(session.settings.english_row().0);
         assert_eq!(target_lang(&mut session, &mut events), "EN-GB");
         session.settings.window().destroy();
         session.window.destroy();
     }
 
-    /// With FreeDict missing, the line of the indexes names it while
-    /// Russian is mine, and goes once Spanish is: whether my language is
-    /// read after the indexes or chosen in Settings. The definition button
-    /// names my language. Run alone: GTK starts once per process, on one
-    /// thread.
+    /// The indexes line and the definition button follow my language from
+    /// the controller's snapshot. Run alone: GTK starts once per process.
     #[test]
     #[ignore = "needs a display; run alone"]
     fn the_indexes_line_and_the_definition_button_follow_my_language() {
@@ -5304,7 +4850,10 @@ mod tests {
         gtk::init().expect("a display");
         let (mut session, mut events, _work) =
             test_session("io.github.doqhu.Addict.MyTextsTest", Dirs::default());
-        let _controller = attach_controller(&mut session);
+        let controller = attach_controller(&mut session);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
         // The definition button names my language, which the controller's
         // snapshot carries.
         let mine = |session: &mut super::Session,
@@ -5333,7 +4882,9 @@ mod tests {
         );
 
         // My language read after the indexes, as at startup.
-        session.handle(Event::MyLanguageRead(Language::Es));
+        assert!(
+            controller.dispatch_settings_read(addict_controller::SettingsRead::My(Language::Es))
+        );
         mine(&mut session, &mut events, Language::Es);
         assert_eq!(session.view.indexes_line(), (false, String::new()));
         assert_eq!(
@@ -5342,19 +4893,78 @@ mod tests {
         );
 
         // Back to Russian, then English chosen in Settings.
-        session.handle(Event::MyLanguageChosen(Language::Ru));
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::Ru,
+        )));
         mine(&mut session, &mut events, Language::Ru);
         assert!(session.view.indexes_line().0);
         assert_eq!(
             session.view.definition_action_text(),
             "Translate definition into Russian"
         );
-        session.handle(Event::MyLanguageChosen(Language::En));
+        session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+            Language::En,
+        )));
         mine(&mut session, &mut events, Language::En);
         assert_eq!(session.view.indexes_line(), (false, String::new()));
         assert_eq!(
             session.view.definition_action_text(),
             "Translate definition into English"
+        );
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// The first-run offer waits for both the saved language and the index
+    /// snapshot, in either order. Run alone: GTK starts once per process.
+    /// A my-language choice made before the start read ended gets its
+    /// Settings offer once the read ends: the first-run decision is made
+    /// first, as `my_language_chosen` made it, and the offer follows.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_choice_of_my_language_before_the_read_offers_its_missing_set_after_it() {
+        use super::*;
+        use addict_dictionary::pairs;
+
+        gtk::init().expect("a display");
+        let (mut session, _events, _work) =
+            test_session("io.github.doqhu.Addict.DeferredOfferTest", Dirs::default());
+        session.work = WorkRef::new();
+        // A launch: the first run is not decided yet.
+        session.first_run = FirstRun::Unasked;
+        let required: Vec<_> = pairs::required_sources(Language::Es).collect();
+        assert!(required.len() > 1, "a set with something left to lack");
+        // One of Spanish's set is there: no first-run offer, but a Settings one.
+        session.handle(Event::Indexes {
+            generation: 0,
+            indexes: Indexes {
+                presence: Indexes::MISSING.presence.with(required[0]),
+                ..Indexes::MISSING
+            },
+        });
+        let mut revision = session.view_state.revision;
+        let mut snapshot = |languages_read: bool, my: Language, my_chosen: u64| {
+            revision += 1;
+            let mut state = addict_controller::ViewState {
+                revision,
+                ..addict_controller::ViewState::default()
+            };
+            state.settings.languages_read = languages_read;
+            state.settings.my_language = my;
+            state.settings.my_chosen = my_chosen;
+            Event::Controller(Box::new(state), Vec::new())
+        };
+        session.handle(snapshot(false, Language::Ru, 0));
+        // Spanish chosen while the files are still being read: nothing yet.
+        session.handle(snapshot(false, Language::Es, 1));
+        assert!(matches!(session.first_run, FirstRun::Unasked));
+        assert_eq!(session.settings.download_text(), "");
+        // The read ends: the decision, then the offer of what Spanish lacks.
+        session.handle(snapshot(true, Language::Es, 1));
+        assert!(matches!(session.first_run, FirstRun::Done));
+        assert_eq!(
+            session.settings.download_text(),
+            first_run::recovery_failed_text(first_run::NO_PLACE)
         );
         session.settings.window().destroy();
         session.window.destroy();
@@ -5371,24 +4981,42 @@ mod tests {
             test_session("io.github.doqhu.Addict.FirstRunTest", Dirs::default());
         // Observe request IDs without contacting the release server.
         session.work = WorkRef::new();
-        let pending = || work.run(LANGUAGE_FILE_LIMIT, std::future::pending::<()>(), |_| {});
+        let pending = || {
+            work.run(
+                addict_controller::deadlines::LANGUAGE_FILE_LIMIT,
+                std::future::pending::<()>(),
+                |_| {},
+            )
+        };
         let indexes = Indexes {
             presence: Indexes::MISSING.presence.with(Source::WikdictRuEs),
             ..Indexes::MISSING
+        };
+        // The controller's snapshots reach the shell as this event; the read
+        // of my language is the first one whose start read has ended.
+        let mut revision = session.view_state.revision;
+        let mut snapshot = |languages_read: bool, my: Language| {
+            revision += 1;
+            let mut state = addict_controller::ViewState {
+                revision,
+                ..addict_controller::ViewState::default()
+            };
+            state.settings.languages_read = languages_read;
+            state.settings.my_language = my;
+            Event::Controller(Box::new(state), Vec::new())
         };
         for my in [Language::En, Language::Ru] {
             for indexes_first in [false, true] {
                 session.first_run = FirstRun::Unasked;
                 session.download_run = 0;
-                session.my_language = Language::Ru;
-                session.my_language_job = Some(pending());
+                session.handle(snapshot(false, Language::Ru));
                 session.indexes = IndexCache::default();
                 session.check = Some(pending());
                 let indexes = Event::Indexes {
                     generation: 0,
                     indexes,
                 };
-                let language = Event::MyLanguageRead(my);
+                let language = snapshot(true, my);
                 let [first, second] = if indexes_first {
                     [indexes, language]
                 } else {
@@ -5405,7 +5033,7 @@ mod tests {
 
         // A stale snapshot cannot dismiss a pending offer, and an unrelated
         // file in the latest accepted snapshot keeps the offer due.
-        session.my_language = Language::En;
+        session.handle(snapshot(true, Language::En));
         let manifest = Manifest {
             format: addict_dictionary::format::VERSION,
             indexes: vec![Published::of("oewn", b"xz")],
@@ -5465,176 +5093,8 @@ mod tests {
         session.window.destroy();
     }
 
-    /// On a fresh install the first-run offer, fed `manifest-3.json` by the
-    /// download stub, queues Russian's set when no choice is made, and
-    /// exactly English's when English is chosen in the dialog, which makes
-    /// it my language and shows it in Settings. Nothing is installed: the
-    /// stub has no asset, and the installs are cancelled.
-    #[test]
-    #[ignore = "needs a display; run alone"]
-    fn first_run_queues_the_set_of_the_language_chosen_in_the_offer() {
-        use std::collections::HashMap;
-
-        use super::*;
-        use crate::stub::{Route, Stub};
-        use addict_dictionary::{pairs, release, sources};
-
-        struct Temp(std::path::PathBuf);
-        impl Drop for Temp {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let temp = Temp(
-            std::env::temp_dir().join(format!("addict-first-run-language-{}", std::process::id())),
-        );
-        std::fs::create_dir(&temp.0).unwrap();
-        let dirs = Dirs {
-            config: Some(temp.0.join("config/addict")),
-            data: Some(temp.0.join("data/addict")),
-            cache: None,
-        };
-
-        let manifest = Manifest {
-            format: addict_dictionary::format::VERSION,
-            indexes: sources::ROWS
-                .iter()
-                .filter(|row| addict_dictionary::release::MANIFEST_3_PUBLISHED.contains(&row.index))
-                .map(|row| Published::of(row.index, row.index.as_bytes()))
-                .collect(),
-        };
-        assert_eq!(manifest.indexes.len(), 20);
-        let stub = Stub::start(HashMap::from([(
-            format!("/{}/{}", release::tag(), release::MANIFEST_3),
-            Route::File(manifest.to_json().into_bytes()),
-        )]))
-        .unwrap();
-
-        gtk::init().expect("a display");
-        let (mut session, mut events, _work) =
-            test_session("io.github.doqhu.Addict.FirstRunLanguageTest", dirs);
-        session.release = stub.base_url();
-        let context = glib::MainContext::default();
-        // Handles the events of the runner until `done` holds.
-        let mut wait = |session: &mut Session, done: &dyn Fn(&Session) -> bool| {
-            while !done(session) {
-                let event = context.block_on(events.next()).expect("an event");
-                session.handle(event);
-            }
-        };
-        let queued = |session: &Session| -> Vec<String> {
-            let FirstRun::Installing { queue, .. } = &session.first_run else {
-                panic!("installing");
-            };
-            queue
-                .rows()
-                .iter()
-                .map(|(published, _)| published.name.clone())
-                .collect()
-        };
-        let set = |my: Language| -> Vec<String> {
-            pairs::required_index_names(my).map(str::to_owned).collect()
-        };
-        // The rows are grouped by language, so they are compared as a set.
-        let sorted = |mut names: Vec<String>| -> Vec<String> {
-            names.sort();
-            names
-        };
-
-        for chosen in [None, Some(Language::En)] {
-            // A fresh start: nothing chosen yet.
-            session.my_language = Language::Ru;
-            session.my_language_chosen = false;
-            session.my_language_job = None;
-            session.first_run = FirstRun::Unasked;
-            session.indexes = IndexCache::default();
-            session.window.set_visible(true);
-            session.handle(Event::MyLanguageRead(Language::Ru));
-            session.handle(Event::Indexes {
-                generation: 0,
-                indexes: Indexes::MISSING,
-            });
-            assert!(matches!(session.first_run, FirstRun::Asking { .. }));
-            wait(&mut session, &|session| {
-                matches!(session.first_run, FirstRun::Shown { .. })
-            });
-            let FirstRun::Shown { offer, .. } = &session.first_run else {
-                unreachable!();
-            };
-            assert_eq!(offer.my_language().selected(), 3, "Russian at first");
-            assert_eq!(sorted(offer.listed()), sorted(set(Language::Ru)));
-            if chosen.is_none() {
-                // A choice in Settings while the offer waits: it shows it
-                // and lists its set, and back to Russian.
-                session.handle(Event::MyLanguageChosen(Language::Es));
-                let FirstRun::Shown { offer, .. } = &session.first_run else {
-                    panic!("the offer stays");
-                };
-                assert_eq!(offer.my_language().selected(), 1);
-                assert_eq!(sorted(offer.listed()), sorted(set(Language::Es)));
-                session.handle(Event::MyLanguageChosen(Language::Ru));
-                let FirstRun::Shown { offer, .. } = &session.first_run else {
-                    panic!("the offer stays");
-                };
-                assert_eq!(sorted(offer.listed()), sorted(set(Language::Ru)));
-            }
-            let FirstRun::Shown { offer, .. } = &session.first_run else {
-                unreachable!();
-            };
-            if let Some(language) = chosen {
-                let index = Language::ALL
-                    .iter()
-                    .position(|one| *one == language)
-                    .unwrap();
-                offer.my_language().set_selected(index as u32);
-                wait(&mut session, &|session| session.my_language == language);
-                assert_eq!(session.settings.shown_my_language(), Some(language));
-                let FirstRun::Shown { offer, .. } = &session.first_run else {
-                    panic!("the offer stays");
-                };
-                assert_eq!(offer.my_language().selected(), index as u32);
-                assert_eq!(sorted(offer.listed()), sorted(set(language)));
-            }
-            let run = session.download_run;
-            session.handle(Event::FirstRunDownload(run));
-            assert_eq!(
-                queued(&session),
-                set(chosen.unwrap_or(Language::Ru)),
-                "{chosen:?}"
-            );
-            // Once Download is pressed the choice is gone, and one in
-            // Settings leaves the queue as it is.
-            let FirstRun::Installing { offer, .. } = &session.first_run else {
-                panic!("installing");
-            };
-            assert!(!offer.shows_my_language());
-            let before = queued(&session);
-            session.handle(Event::MyLanguageChosen(Language::Ca));
-            assert_eq!(queued(&session), before);
-            session.handle(Event::FirstRunCancel(run, None));
-            // At most the first of the set was asked for before the cancel.
-            let allowed = set(chosen.unwrap_or(Language::Ru));
-            for path in stub.seen() {
-                if let Some(asset) = path.rsplit('/').next()
-                    && let Some(name) = asset.strip_suffix(".index.xz")
-                {
-                    assert!(allowed.iter().any(|one| one == name), "{path}");
-                }
-            }
-        }
-        assert_eq!(set(Language::Ru), release::LEGACY_PUBLISHED);
-        assert_ne!(set(Language::En), set(Language::Ru));
-        session.settings.window().destroy();
-        session.window.destroy();
-    }
-
-    /// With Russian's set installed, a change of my language in Settings to
-    /// English opens the Settings offer for missing indexes listing exactly
-    /// the five indexes English lacks (four pairs and the Russian article),
-    /// and Download queues them; a waiting
-    /// offer follows a later change; back to Russian nothing is offered and
-    /// nothing is asked of the network. A change while the first-run offer
-    /// owns the decision starts nothing. No file is removed.
+    /// A change of my language in Settings offers just what the new set
+    /// lacks, and a waiting offer follows later changes. Run alone.
     #[test]
     #[ignore = "needs a display; run alone"]
     fn a_change_of_my_language_in_settings_offers_what_the_new_set_lacks() {
@@ -5710,15 +5170,26 @@ mod tests {
         let (mut session, mut events, _work) =
             test_session("io.github.doqhu.Addict.LanguageChangeTest", dirs);
         session.release = stub.base_url();
-        session.my_language = Language::Ru;
+        let controller = attach_controller(&mut session);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        assert!(
+            controller.dispatch_settings_read(addict_controller::SettingsRead::My(Language::Ru))
+        );
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.my_language == Language::Ru
+        });
         session.first_run = FirstRun::Done;
         assert!(session.indexes.update(0, indexes));
-        let context = glib::MainContext::default();
-        let mut wait = |session: &mut Session, done: &dyn Fn(&Session) -> bool| {
-            while !done(session) {
-                let event = context.block_on(events.next()).expect("an event");
-                session.handle(event);
-            }
+        let choose = |session: &mut super::Session, events: &mut _, language| {
+            let before = session.view_state.settings.my_chosen;
+            session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
+                language,
+            )));
+            pump_until(session, events, |session| {
+                session.view_state.settings.my_chosen > before
+            });
         };
         let lacks = |my: Language| -> Vec<String> {
             first_run::missing(&indexes, my)
@@ -5743,24 +5214,24 @@ mod tests {
         };
 
         // The same language again, and Russian's set present: nothing.
-        session.handle(Event::MyLanguageChosen(Language::Ru));
+        choose(&mut session, &mut events, Language::Ru);
         assert!(matches!(session.first_run, FirstRun::Done));
         // On a fresh install the first-run offer owns the decision while it
         // is due (a `--background` start, the window not yet shown).
         assert!(session.indexes.update(0, Indexes::MISSING));
         session.first_run = FirstRun::Pending(manifest.clone());
-        session.handle(Event::MyLanguageChosen(Language::Es));
+        choose(&mut session, &mut events, Language::Es);
         assert!(matches!(session.first_run, FirstRun::Pending(_)));
         assert!(session.indexes.update(0, indexes));
         session.first_run = FirstRun::Done;
-        session.handle(Event::MyLanguageChosen(Language::Ru));
+        choose(&mut session, &mut events, Language::Ru);
         assert!(matches!(session.first_run, FirstRun::Done));
         assert!(stub.seen().is_empty(), "no request: {:?}", stub.seen());
 
         // Download dictionaries with Russian's set readable: only other
         // languages' indexes are missing, so no dialog opens.
         session.handle(Event::SettingsDownload);
-        wait(&mut session, &|session| {
+        pump_until(&mut session, &mut events, |session| {
             !matches!(session.first_run, FirstRun::Preparing { .. })
         });
         assert!(matches!(session.first_run, FirstRun::Done));
@@ -5781,16 +5252,16 @@ mod tests {
                 "wikdict-ca-en"
             ]
         );
-        session.handle(Event::MyLanguageChosen(Language::En));
+        choose(&mut session, &mut events, Language::En);
         assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
         // A change while preparing keeps the preparation, which lists for
         // the language in use when it ends.
         let run = session.download_run;
-        session.handle(Event::MyLanguageChosen(Language::Es));
-        session.handle(Event::MyLanguageChosen(Language::En));
+        choose(&mut session, &mut events, Language::Es);
+        choose(&mut session, &mut events, Language::En);
         assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
         assert_eq!(session.download_run, run);
-        wait(&mut session, &|session| {
+        pump_until(&mut session, &mut events, |session| {
             matches!(session.first_run, FirstRun::Shown { .. })
         });
         assert_eq!(sorted(shown(&session)), sorted(lacks(Language::En)));
@@ -5803,17 +5274,17 @@ mod tests {
         let window = offer.window().clone();
         window.close();
         assert!(!window.is_visible());
-        session.handle(Event::MyLanguageChosen(Language::Ca));
+        choose(&mut session, &mut events, Language::Ca);
         assert_eq!(sorted(shown(&session)), sorted(lacks(Language::Ca)));
         assert!(window.is_visible(), "the waiting offer is shown again");
-        session.handle(Event::MyLanguageChosen(Language::Ru));
+        choose(&mut session, &mut events, Language::Ru);
         assert!(matches!(session.first_run, FirstRun::Done));
         assert!(!window.is_visible(), "the empty offer closes");
 
         // English again, accepted: the queue is what English lacks, in
         // manifest order.
-        session.handle(Event::MyLanguageChosen(Language::En));
-        wait(&mut session, &|session| {
+        choose(&mut session, &mut events, Language::En);
+        pump_until(&mut session, &mut events, |session| {
             matches!(session.first_run, FirstRun::Shown { .. })
         });
         let run = session.download_run;
@@ -5832,7 +5303,7 @@ mod tests {
             .collect();
         assert_eq!(queued, lacks(Language::En));
         // A change while installing leaves the install as it is.
-        session.handle(Event::MyLanguageChosen(Language::Ca));
+        choose(&mut session, &mut events, Language::Ca);
         assert!(matches!(session.first_run, FirstRun::Installing { .. }));
         session.handle(Event::FirstRunCancel(run, None));
         // English's set present too, back to Russian: nothing is offered.
@@ -5846,7 +5317,7 @@ mod tests {
             }
         ));
         let run = session.download_run;
-        session.handle(Event::MyLanguageChosen(Language::Ru));
+        choose(&mut session, &mut events, Language::Ru);
         assert!(matches!(session.first_run, FirstRun::Ended { .. }));
         assert_eq!(session.download_run, run);
 
@@ -5865,9 +5336,10 @@ mod tests {
             )
         );
         session.first_run = FirstRun::Pending(manifest.clone());
-        session.handle(Event::MyLanguageChosen(Language::En));
-        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
-        session.first_run = FirstRun::Done;
+        choose(&mut session, &mut events, Language::En);
+        // The pending first-run offer ends and the Settings offer takes over;
+        // the controller's wait may already have carried preparation through.
+        assert!(!matches!(session.first_run, FirstRun::Pending(_)));
         for source in &russian {
             assert!(
                 import::index_path(&dir, *source).exists(),
@@ -6038,26 +5510,27 @@ mod tests {
         session.window.destroy();
     }
 
+    /// A spy that records the reports the shell sends to the controller. It
+    /// does not copy the controller's transitions: those are tested with a
+    /// real controller and a real window.
     #[derive(Default)]
     struct ObservedWindow {
-        binding: Option<crate::view::Binding>,
-        assignments: addict_platform::shortcut::Bindings,
+        reports: Vec<ShortcutState>,
         presentations: usize,
         settings: usize,
         clipboard: Vec<(Option<String>, u64, Option<u64>)>,
         captures: Vec<Option<String>>,
-        status: String,
-        rebinding: bool,
+    }
+
+    impl ObservedWindow {
+        fn last(&self) -> Option<&ShortcutState> {
+            self.reports.last()
+        }
     }
 
     impl WindowActions for ObservedWindow {
-        fn set_bindings(
-            &mut self,
-            binding: crate::view::Binding,
-            assignments: addict_platform::shortcut::Bindings,
-        ) {
-            self.binding = Some(binding);
-            self.assignments = assignments;
+        fn shortcut(&mut self, state: ShortcutState) {
+            self.reports.push(state);
         }
         fn present_main(&mut self) {
             self.presentations += 1;
@@ -6072,17 +5545,120 @@ mod tests {
         fn capture(&mut self, token: Option<&str>) {
             self.captures.push(token.map(str::to_owned));
         }
-        fn shortcut_status(&mut self, message: &str) {
-            self.status = message.to_owned();
-        }
-        fn set_rebinding(&mut self, rebinding: bool) {
-            self.rebinding = rebinding;
-        }
+    }
+
+    /// The shell's shortcut events, mapped by [`super::shortcut_state`] and
+    /// sent to a real controller, move Settings as 0.5.0 did. No display.
+    #[test]
+    fn a_rebind_shows_the_old_keys_and_holds_the_button_until_it_ends() {
+        use std::{sync::mpsc, time::Duration};
+
+        use addict_controller::{Bindings as Keys, SettingsView, StartFacts};
+        use addict_deepl::key::KeyError;
+        use addict_platform::shortcut::{Bindings, ShortcutEvent};
+
+        use crate::view::Binding;
+
+        let (views, rendered) = mpsc::channel::<SettingsView>();
+        let controller = addict_controller::start(
+            Dirs::default(),
+            super::controller_platform(),
+            StartFacts {
+                key: Some(Err(KeyError::Missing)),
+                recording: false,
+            },
+            move |state: addict_controller::ViewState, _effects| {
+                let _ = views.send(state.settings);
+            },
+        )
+        .unwrap();
+        let dispatcher = controller.dispatcher();
+        // Sends `event` as the shell does and returns the settled snapshot.
+        let send = |event: ShortcutEvent, done: &dyn Fn(&SettingsView) -> bool| {
+            let state = super::shortcut_state(event).expect("a shortcut state");
+            assert!(dispatcher.dispatch(addict_controller::Event::ShortcutChanged(state)));
+            loop {
+                let view = rendered
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("a snapshot");
+                if done(&view) {
+                    return view;
+                }
+            }
+        };
+        let keys = |bindings: &Bindings| Keys {
+            clipboard: bindings.clipboard.clone(),
+            screenshot: bindings.screenshot.clone(),
+        };
+        let old = Bindings {
+            clipboard: Some("F8".to_owned()),
+            screenshot: None,
+        };
+        let new = Bindings {
+            clipboard: Some("F7".to_owned()),
+            screenshot: Some("F6".to_owned()),
+        };
+
+        let window = send(
+            ShortcutEvent::Rebinding {
+                bindings: old.clone(),
+            },
+            &|view| view.rebinding,
+        );
+        assert!(window.rebinding);
+        assert_eq!(window.bindings, keys(&old));
+        assert!(matches!(window.binding, Binding::Bound));
+        assert_eq!(window.status_line, crate::settings::REBINDING);
+
+        // Settings updates first; the button stays held until the end.
+        let window = send(
+            ShortcutEvent::Bound {
+                bindings: new.clone(),
+            },
+            &|view| view.bindings.clipboard.as_deref() == Some("F7"),
+        );
+        assert_eq!(window.bindings, keys(&new));
+        assert!(window.rebinding);
+        let window = send(ShortcutEvent::RebindEnded { message: None }, &|view| {
+            !view.rebinding
+        });
+        assert!(!window.rebinding);
+        assert_eq!(window.status_line, crate::settings::rebind_text(None));
+
+        // Each way a rebind ends without new keys says so.
+        send(
+            ShortcutEvent::Rebinding {
+                bindings: old.clone(),
+            },
+            &|view| view.rebinding,
+        );
+        let window = send(
+            ShortcutEvent::RebindEnded {
+                message: Some("The keys are unchanged.".to_owned()),
+            },
+            &|view| !view.rebinding,
+        );
+        assert!(!window.rebinding);
+        assert_eq!(window.status_line, "The keys are unchanged.");
+
+        // A second failure ends it too, and leaves Retry.
+        send(ShortcutEvent::Rebinding { bindings: new }, &|view| {
+            view.rebinding
+        });
+        let window = send(
+            ShortcutEvent::Failed {
+                message: "broke".to_owned(),
+            },
+            &|view| matches!(view.binding, Binding::NotBound { .. }),
+        );
+        assert!(!window.rebinding);
+        assert!(window.status_line.is_empty());
+        assert!(matches!(window.binding, Binding::NotBound { .. }));
     }
 
     #[test]
     fn a_failed_capture_focuses_capture_or_retry_when_offered() {
-        use crate::view::Binding;
+        use crate::view::{Binding, FailedEndFocus, failed_end_focus};
         assert_eq!(
             failed_end_focus(&Binding::Attempting),
             FailedEndFocus::Capture
@@ -6094,6 +5670,48 @@ mod tests {
             }),
             FailedEndFocus::Retry
         );
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_failed_capture_focuses_retry_in_the_window_through_the_controller() {
+        use super::*;
+        gtk::init().expect("a display");
+        let (mut session, mut events, work) =
+            test_session("io.github.doqhu.Addict.FailedFocusTest", Dirs::default());
+        drop(work);
+        let _controller = attach_controller(&mut session);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        // A portal that could not bind leaves Retry offered; that is where a
+        // capture without text sends the focus.
+        session.handle(Event::Setting(addict_controller::Event::ShortcutChanged(
+            ShortcutState::Failed("portal unavailable".to_owned()),
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            matches!(
+                session.view_state.settings.binding,
+                Binding::NotBound { .. }
+            )
+        });
+        assert_eq!(
+            failed_end_focus(&session.view_state.settings.binding),
+            FailedEndFocus::Retry
+        );
+        // Once it is bound again, the capture button takes the focus.
+        session.handle(Event::Setting(addict_controller::Event::ShortcutChanged(
+            ShortcutState::Bound(Default::default()),
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.binding == Binding::Bound
+        });
+        assert_eq!(
+            failed_end_focus(&session.view_state.settings.binding),
+            FailedEndFocus::Capture
+        );
+        session.settings.window().destroy();
+        session.window.destroy();
     }
 
     #[test]
@@ -6111,7 +5729,7 @@ mod tests {
             ),
         );
         assert!(
-            matches!(&window.binding, Some(crate::view::Binding::NotBound { detail }) if detail == "portal unavailable")
+            matches!(window.last(), Some(ShortcutState::Failed(detail)) if detail == "portal unavailable")
         );
         assert_eq!(window.presentations, 0);
         assert_eq!(window.settings, 0);
@@ -6120,16 +5738,29 @@ mod tests {
         assert_eq!(window.presentations, 0);
         dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Normal));
         assert_eq!(window.presentations, 1);
-        assert!(matches!(
-            window.binding,
-            Some(crate::view::Binding::NotBound { .. })
-        ));
+        assert!(matches!(window.last(), Some(ShortcutState::Failed(_))));
     }
 
     #[test]
-    fn a_rebind_shows_the_old_keys_and_holds_the_button_until_it_ends() {
-        use crate::view::Binding;
+    #[ignore = "needs a display; run alone"]
+    fn a_rebind_holds_configure_and_the_binding_row_in_the_window() {
+        use super::*;
         use addict_platform::shortcut::{Bindings, ShortcutEvent};
+
+        /// The keycaps the Settings window shows on its two shortcut rows.
+        fn keycaps(root: &gtk::Widget, into: &mut Vec<String>) {
+            if let Some(label) = root.downcast_ref::<gtk::Label>()
+                && label.has_css_class("keycap")
+            {
+                into.push(label.label().into());
+            }
+            let mut child = root.first_child();
+            while let Some(widget) = child {
+                keycaps(&widget, into);
+                child = widget.next_sibling();
+            }
+        }
+
         let old = Bindings {
             clipboard: Some("F8".to_owned()),
             screenshot: None,
@@ -6138,63 +5769,105 @@ mod tests {
             clipboard: Some("F7".to_owned()),
             screenshot: Some("F6".to_owned()),
         };
-        let shortcut = |event| WindowEvent::Shortcut(event, None);
-        let mut window = ObservedWindow::default();
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::Rebinding {
-                bindings: old.clone(),
-            }),
+        gtk::init().expect("a display");
+        let (mut session, mut events, work) =
+            test_session("io.github.doqhu.Addict.RebindTest", Dirs::default());
+        drop(work);
+        let _controller = attach_controller(&mut session);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        let shortcut = |event| Event::Window(WindowEvent::Shortcut(event, None));
+        let bindings = |session: &super::Session| session.view_state.settings.bindings.clone();
+        let shown = |session: &super::Session| {
+            let mut caps = Vec::new();
+            keycaps(session.settings.window().upcast_ref(), &mut caps);
+            caps
+        };
+
+        session.handle(shortcut(ShortcutEvent::Rebinding {
+            bindings: old.clone(),
+        }));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.rebinding
+                && bindings(session).clipboard.as_deref() == Some("F8")
+        });
+        assert!(shown(&session).iter().any(|cap| cap == "F8"));
+        assert_eq!(session.view_state.settings.status_line, settings::REBINDING);
+        assert!(matches!(
+            session.view_state.settings.binding,
+            Binding::Bound
+        ));
+        assert!(
+            !session.settings.change_is_sensitive(),
+            "held while rebinding"
         );
-        assert!(window.rebinding);
-        assert_eq!(window.assignments, old);
-        assert!(matches!(window.binding, Some(Binding::Bound)));
-        assert_eq!(window.status, crate::settings::REBINDING);
+        assert!(
+            !session.view.binding_row().0,
+            "a bound shortcut shows no row"
+        );
 
         // Settings updates first; the button stays held until the end.
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::Bound {
-                bindings: new.clone(),
-            }),
-        );
-        assert_eq!(window.assignments, new);
-        assert!(window.rebinding);
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::RebindEnded { message: None }),
-        );
-        assert!(!window.rebinding);
-        assert_eq!(window.status, crate::settings::rebind_text(None));
+        session.handle(shortcut(ShortcutEvent::Bound {
+            bindings: new.clone(),
+        }));
+        pump_until(&mut session, &mut events, |session| {
+            bindings(session).clipboard.as_deref() == Some("F7")
+                && session.view_state.settings.rebinding
+        });
+        assert!(shown(&session).iter().any(|cap| cap == "F7"));
+        assert_eq!(session.view_state.settings.status_line, settings::REBINDING);
+        assert!(!session.settings.change_is_sensitive(), "still held");
 
-        // Each way a rebind ends without new keys says so.
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::Rebinding { bindings: old }),
+        session.handle(shortcut(ShortcutEvent::RebindEnded { message: None }));
+        pump_until(&mut session, &mut events, |session| {
+            !session.view_state.settings.rebinding
+        });
+        assert_eq!(
+            session.view_state.settings.status_line,
+            settings::rebind_text(None)
         );
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::RebindEnded {
-                message: Some("The keys are unchanged.".to_owned()),
-            }),
+        assert!(
+            session.settings.change_is_sensitive(),
+            "released at the end"
         );
-        assert!(!window.rebinding);
-        assert_eq!(window.status, "The keys are unchanged.");
 
-        // A second failure ends it too, and leaves Retry.
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::Rebinding { bindings: new }),
+        // Each way a rebind ends without new keys says so, and a failed bind
+        // leaves Retry offered.
+        session.handle(shortcut(ShortcutEvent::Rebinding { bindings: old }));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.rebinding
+        });
+        session.handle(shortcut(ShortcutEvent::RebindEnded {
+            message: Some("The keys are unchanged.".to_owned()),
+        }));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.status_line == "The keys are unchanged."
+        });
+        session.handle(shortcut(ShortcutEvent::Rebinding { bindings: new }));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.rebinding
+        });
+        session.handle(shortcut(ShortcutEvent::Failed {
+            message: "broke".to_owned(),
+        }));
+        pump_until(&mut session, &mut events, |session| {
+            matches!(
+                session.view_state.settings.binding,
+                Binding::NotBound { .. }
+            )
+        });
+        assert_eq!(session.view_state.settings.status_line, "");
+        assert!(!session.view_state.settings.rebinding);
+        // The main window shows the failure, with Retry offered.
+        let (visible, _, retry) = session.view.binding_row();
+        assert!(visible && retry, "the binding row offers Retry");
+        assert!(
+            !session.settings.change_is_sensitive(),
+            "no session to configure"
         );
-        dispatch_window(
-            &mut window,
-            shortcut(ShortcutEvent::Failed {
-                message: "broke".to_owned(),
-            }),
-        );
-        assert!(!window.rebinding);
-        assert!(window.status.is_empty());
-        assert!(matches!(window.binding, Some(Binding::NotBound { .. })));
+        session.settings.window().destroy();
+        session.window.destroy();
     }
 
     #[test]
@@ -6431,7 +6104,7 @@ mod tests {
         };
 
         use super::super::request_startup_change;
-        use crate::settings::StartupEnd;
+        use addict_core::failure::login_item::StartupEnd;
 
         const TEST: &str =
             "resident::tests::startup_portal::the_switch_changes_startup_only_through_the_portal";
@@ -6682,5 +6355,304 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&entry).unwrap(), foreign);
             assert_eq!(std::fs::read_to_string(&state_file).unwrap(), "disabled\n");
         }
+    }
+
+    /// A key the shell committed stays active even when the store's answer
+    /// is a timeout: 0.5.0 published the active key before reporting the end.
+    #[test]
+    fn a_committed_key_save_stays_active_when_the_runner_reports_a_timeout() {
+        use std::{future, sync::mpsc, time::Duration};
+
+        use addict_controller::StartFacts;
+        use addict_deepl::key::{self, KeyError, Secret};
+        use addict_engine::view::KeyState;
+        use addict_engine::work::{Outcome, Work};
+
+        let temp = KeyTestDir::new("addict-key-timeout");
+        let path = temp.0.join("deepl.key");
+        // A real controller, rendering into a channel: no display is needed.
+        let (views, rendered) = mpsc::channel();
+        let controller = addict_controller::start(
+            Dirs::default(),
+            super::controller_platform(),
+            StartFacts {
+                key: Some(Err(KeyError::Missing)),
+                recording: false,
+            },
+            move |state: addict_controller::ViewState, _effects| {
+                let _ = views.send(state.settings.key);
+            },
+        )
+        .unwrap();
+        let key = Secret::new("synthetic-timed-out-deepl").unwrap();
+        let save = super::persist_key(path.clone(), key.clone(), controller.dispatcher());
+        assert_eq!(key::read(&path), Err(KeyError::Missing));
+
+        let work = Work::start().unwrap();
+        let (send, receive) = mpsc::channel();
+        let _job = work.run(
+            Duration::from_secs(1),
+            async move {
+                save.await?;
+                // Hold completion until the runner has to report a timeout.
+                future::pending().await
+            },
+            move |outcome: Outcome<Result<(), key::WriteError>>| send.send(outcome).unwrap(),
+        );
+        let outcome = receive.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(outcome, Outcome::TimedOut);
+        assert_eq!(key::read(&path), Ok(key.clone()));
+        // The written key went active although its job timed out.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rendered.recv_timeout(left) {
+                Ok(KeyState::Free | KeyState::Pro) => break,
+                Ok(_) => {}
+                Err(error) => panic!("the committed key never went active: {error}"),
+            }
+        }
+    }
+
+    /// Saving a key in Settings writes the file and makes the key active for
+    /// the next request, with the stub server checking the authorization sent
+    /// on every request, including a superseded save.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn settings_saves_update_the_active_deepl_key() {
+        use super::*;
+        use addict_deepl::{
+            DeepL,
+            key::{self, KeySource, Secret},
+            stub::{Reply, Stub},
+        };
+        use std::fs;
+
+        const INITIAL: &str = "synthetic-startup-deepl:fx";
+        const SAVED: &str = "synthetic-settings-deepl";
+        const SUPERSEDED: &str = "synthetic-superseded-deepl:fx";
+        const FREE: &str = "A DeepL key of the Free plan is set.";
+        const PRO: &str = "A DeepL key of the Pro plan is set.";
+
+        gtk::init().expect("a display");
+        let temp = KeyTestDir::new("addict-key-session");
+        let path = temp.0.join("config/deepl.key");
+        let initial = key::write(&path, Secret::new(INITIAL).unwrap()).expect("startup key");
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.KeyTest",
+            Dirs {
+                config: Some(temp.0.join("config")),
+                cache: Some(temp.0.join("cache")),
+                ..Dirs::default()
+            },
+        );
+        let stub = Stub::start(Reply::translation("translated")).expect("stub");
+        let source = KeySource::pending();
+        let deepl = DeepL::with_base_url(source.clone(), stub.base_url());
+        let controller = attach_translator_with_source(&mut session, deepl, source.clone());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+        });
+        let request = |text: &str| addict_core::translation::Request {
+            text: text.to_owned(),
+            context: None,
+            source: Language::En,
+            target: Language::Ru,
+            english: addict_core::translation::English::Us,
+        };
+        controller.cache().put(
+            &addict_engine::cache::key_of(&request("cached")),
+            "from cache",
+        );
+        let assert_authorization = |index: usize, expected: &str| {
+            let seen = stub.seen();
+            assert_eq!(seen.len(), index + 1);
+            assert!(
+                seen[index].header("authorization")
+                    == Some(format!("DeepL-Auth-Key {expected}").as_str()),
+                "unexpected authorization"
+            );
+        };
+        let submit = |session: &mut super::Session, events: &mut _, text: &str| {
+            session.view.set_field_text(text);
+            session.sentence_changed(text.to_owned(), super::FieldEdit::Typed);
+            pump_until(session, events, |session| {
+                session.view_state.sentence == text
+            });
+            session.submitted();
+        };
+        let translate =
+            |session: &mut super::Session, events: &mut _, text: &str, expected: &str| {
+                let count = stub.seen().len();
+                submit(session, events, text);
+                pump_until(session, events, |session| {
+                    stub.seen().len() > count
+                        && session
+                            .view_state
+                            .online
+                            .iter()
+                            .any(|row| row.line == "translated")
+                });
+                assert_authorization(count, expected);
+            };
+
+        session.show_settings();
+        let window = session.settings.window().clone();
+        let root = window.upcast_ref::<gtk::Widget>();
+        let entry = find::<gtk::PasswordEntry>(root, &|_| true).unwrap();
+        let save = find::<gtk::Button>(root, &|button| {
+            button.label().as_deref() == Some("Save key")
+        })
+        .unwrap();
+        let state = find::<gtk::Label>(root, &|label| label.has_css_class("key-state")).unwrap();
+        let error_shown = || {
+            find::<gtk::Label>(root, &|label| {
+                label.is_visible() && label.label().starts_with("The key was not saved:")
+            })
+            .is_some()
+        };
+
+        assert_eq!(state.label(), "Checking…");
+        assert!(!entry.is_sensitive());
+        // While the startup key is still loading, a cached answer is shown
+        // and an uncached request waits: nothing goes to DeepL yet.
+        submit(&mut session, &mut events, "cached");
+        pump_until(&mut session, &mut events, |session| {
+            session
+                .view_state
+                .online
+                .iter()
+                .any(|row| row.line == "from cache")
+        });
+        submit(&mut session, &mut events, "uncached");
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "uncached"
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.state == crate::view::OnlineState::Pending)
+        });
+        assert!(stub.seen().is_empty());
+
+        // The shell's real key load publishes the startup key, and the
+        // waiting request goes out with it.
+        super::start_key_load(session.key_file.clone(), &session.sender);
+        pump_until(&mut session, &mut events, |session| {
+            source.snapshot() == Some(Ok(initial.clone()))
+                && session.view_state.settings.key == crate::view::KeyState::Free
+        });
+        assert_eq!(state.label(), FREE);
+        assert!(entry.is_sensitive());
+        pump_until(&mut session, &mut events, |session| {
+            session
+                .view_state
+                .online
+                .iter()
+                .any(|row| row.line == "translated")
+        });
+        assert_authorization(0, INITIAL);
+
+        fs::remove_file(&path).expect("external removal");
+        translate(&mut session, &mut events, "removed", INITIAL);
+        key::write(&path, Secret::new("external-file-edit").unwrap()).expect("external edit");
+        translate(&mut session, &mut events, "replaced", INITIAL);
+        assert_eq!(source.snapshot(), Some(Ok(initial.clone())));
+
+        let press = |session: &mut super::Session, events: &mut _, input: &str| {
+            let before = session.view_state.settings.key_entry_clears;
+            entry.set_text(input);
+            assert!(save.is_sensitive());
+            save.emit_clicked();
+            pump_until(session, events, |session| {
+                session.view_state.settings.key_entry_clears > before
+                    || session
+                        .view_state
+                        .settings
+                        .key_line
+                        .starts_with("The key was not saved:")
+            });
+            session.view_state.settings.key_line.clone()
+        };
+
+        assert_eq!(state.label(), FREE);
+        let line = press(&mut session, &mut events, &format!("  {SAVED}  "));
+        assert!(line.is_empty(), "{line}");
+        pump_until(&mut session, &mut events, |_| {
+            source.snapshot() == Some(Ok(Secret::new(SAVED).unwrap()))
+        });
+        translate(&mut session, &mut events, "saved", SAVED);
+        pump_until(&mut session, &mut events, |session| {
+            session.settings.window().is_visible() && state.label() == PRO
+        });
+        assert!(entry.text().is_empty());
+        assert!(!error_shown());
+
+        let line = press(&mut session, &mut events, SUPERSEDED);
+        assert!(line.is_empty(), "{line}");
+        pump_until(&mut session, &mut events, |_| {
+            source.snapshot() == Some(Ok(Secret::new(SUPERSEDED).unwrap()))
+        });
+        let line = press(&mut session, &mut events, "invalid input");
+        assert!(line.starts_with("The key was not saved:"), "{line}");
+        // A refused key stays in the field, and the active one is the
+        // superseding save's.
+        assert_eq!(entry.text(), "invalid input");
+        assert!(error_shown());
+        assert_eq!(state.label(), FREE);
+        assert_eq!(
+            source.snapshot(),
+            Some(Ok(Secret::new(SUPERSEDED).unwrap()))
+        );
+        let persisted = fs::read_to_string(&path).expect("persisted file");
+        assert_eq!(
+            persisted,
+            format!("{SUPERSEDED}\n"),
+            "unexpected persisted key"
+        );
+        translate(&mut session, &mut events, "superseded", SUPERSEDED);
+
+        let backup = path.with_extension("old");
+        fs::rename(&path, &backup).expect("save old file");
+        fs::create_dir(&path).expect("block atomic replacement");
+        let line = press(&mut session, &mut events, "synthetic-unwritten-deepl");
+        assert!(line.starts_with("The key was not saved:"), "{line}");
+        assert!(error_shown());
+        assert_eq!(state.label(), FREE);
+        assert!(path.is_dir());
+        assert_eq!(fs::read_to_string(backup).unwrap(), persisted);
+        translate(&mut session, &mut events, "unwritten", SUPERSEDED);
+        window.destroy();
+        session.window.destroy();
+    }
+
+    /// Without a controller there is no runner to read or change the login
+    /// item: Settings says so and leaves the switch alone.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn settings_without_a_controller_say_the_runner_is_missing() {
+        use super::*;
+
+        gtk::init().expect("a display");
+        let (mut session, mut events, work) =
+            test_session("io.github.doqhu.Addict.NoRunnerTest", Dirs::default());
+        drop(work);
+        session.show_settings();
+        pump_until(&mut session, &mut events, |session| {
+            session.settings.window().is_visible()
+        });
+        let root = session.settings.window().upcast_ref::<gtk::Widget>();
+        let hint = find::<gtk::Label>(root, &|label| {
+            label.has_css_class("hint")
+                && label
+                    .label()
+                    .contains(addict_engine::view::STARTUP_NO_RUNNER)
+        })
+        .expect("the runner's message");
+        assert!(hint.is_visible());
+        // The Start at login switch itself, not the first switch of the window.
+        assert!(!session.settings.startup_is_sensitive());
+        session.settings.window().destroy();
+        session.window.destroy();
     }
 }

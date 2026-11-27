@@ -25,12 +25,14 @@
 mod capture;
 mod recognize;
 mod selection;
+pub mod settings;
 
 #[cfg(test)]
 use capture::CAPTURE_RETRY;
 pub use capture::capture_failure_text;
 pub use recognize::{install_language, install_tesseract, recognize_failure_text};
 pub use selection::selection_failure_text;
+pub use settings::*;
 
 use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 
