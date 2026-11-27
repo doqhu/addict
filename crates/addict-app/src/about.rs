@@ -261,12 +261,11 @@ mod tests {
 
     #[test]
     fn credit_markup_escapes_plain_text_and_links_urls() {
+        assert_eq!(credit_markup("A & B <test>"), "A &amp; B &lt;test&gt;");
         assert_eq!(
-            credit_markup("A & B <test>"),
-            "A &amp; B &lt;test&gt;"
-        );
-        assert_eq!(
-            credit_markup("Wiktionary contributors (https://www.wiktionary.org/); extracted by kaikki.org"),
+            credit_markup(
+                "Wiktionary contributors (https://www.wiktionary.org/); extracted by kaikki.org"
+            ),
             "Wiktionary contributors (<a href=\"https://www.wiktionary.org/\">https://www.wiktionary.org/</a>); extracted by kaikki.org"
         );
         assert_eq!(
