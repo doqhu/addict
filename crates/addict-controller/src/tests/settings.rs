@@ -970,7 +970,8 @@ fn a_stale_login_read_after_a_change_is_ignored_until_settings_opens_again() {
         }),
         runner_missing: false,
     });
-    let view = marker(&mut shell);
+    // The cache refresh from opening Settings can render before the login read.
+    let view = shell.wait_for(|view| view.settings.login_sensitive);
     assert!(view.settings.login_on);
     assert_eq!(view.settings.login_line, STARTUP_LEGACY);
 }
