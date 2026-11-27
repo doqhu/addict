@@ -89,7 +89,9 @@ impl Model {
         if self.read_before_show {
             effects.push(Effect::ReadSelection { id, read_sequence });
         } else {
-            effects.push(Effect::ShowPanel { read_sequence });
+            effects.push(Effect::ShowPanel {
+                read_sequence: Some(read_sequence),
+            });
             effects.push(Effect::ReadSelection { id, read_sequence });
         }
         true
@@ -159,7 +161,7 @@ impl Model {
         }
         if self.read_before_show {
             effects.push(Effect::ShowPanel {
-                read_sequence: self.read_sequence,
+                read_sequence: Some(self.read_sequence),
             });
         }
         true
@@ -184,7 +186,7 @@ impl Model {
         self.selection.source_failure = Some(NOTHING_SELECTED_TEXT.to_owned());
         if self.read_before_show {
             effects.push(Effect::ShowPanel {
-                read_sequence: self.read_sequence,
+                read_sequence: Some(self.read_sequence),
             });
         }
         true

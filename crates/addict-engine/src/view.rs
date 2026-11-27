@@ -23,8 +23,10 @@
 //! widget: `View` puts the results into its own.
 
 mod capture;
+pub mod fatal;
 pub mod file_choice;
 pub mod first_run;
+pub mod playback;
 mod recognize;
 mod selection;
 pub mod settings;

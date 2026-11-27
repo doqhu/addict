@@ -19,6 +19,7 @@ pub const IMPORT_LIMIT: Duration = Duration::from_secs(30 * 60);
 
 pub const CREDIT_LIMIT: Duration = Duration::from_secs(10);
 pub const AUDIO_LIMIT: Duration = Duration::from_secs(20);
+pub const SHELL_QUIT_LIMIT: Duration = Duration::from_secs(2);
 
 pub const LANGUAGE_FILE_LIMIT: Duration = Duration::from_secs(2);
 pub const FIRST_RUN_FILE_LIMIT: Duration = Duration::from_secs(2);

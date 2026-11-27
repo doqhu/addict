@@ -40,7 +40,7 @@ fn press_read(
         assert_eq!(
             effects[effects.len() - 2],
             Effect::ShowPanel {
-                read_sequence: sequence
+                read_sequence: Some(sequence)
             }
         );
         assert_eq!(shown, 1, "{effects:?}");
@@ -266,7 +266,9 @@ fn a_read_that_waits_for_the_window_is_ended_without_a_cancellable() {
         assert_eq!(view.reading_source, None);
         let mut expected = vec![Effect::Cancel(id)];
         if read_before_show {
-            expected.push(Effect::ShowPanel { read_sequence: 1 });
+            expected.push(Effect::ShowPanel {
+                read_sequence: Some(1),
+            });
         }
         assert_eq!(effects, expected);
         // The shell's acknowledgement and a late text change nothing.
@@ -294,7 +296,9 @@ fn a_platform_that_reads_first_shows_the_window_after_the_result() {
     assert_eq!(view.field.text, "The bank was closed.");
     assert_eq!(
         effects.last(),
-        Some(&Effect::ShowPanel { read_sequence: 1 })
+        Some(&Effect::ShowPanel {
+            read_sequence: Some(1)
+        })
     );
 
     // A failure shows the window too, with its line.
@@ -305,7 +309,12 @@ fn a_platform_that_reads_first_shows_the_window_after_the_result() {
     });
     let (view, effects) = shell.next();
     assert_eq!(view.source_failure.as_deref(), Some(NOTHING_SELECTED_TEXT));
-    assert_eq!(effects, [Effect::ShowPanel { read_sequence: 2 }]);
+    assert_eq!(
+        effects,
+        [Effect::ShowPanel {
+            read_sequence: Some(2)
+        }]
+    );
 }
 
 /// Moved from `addict-app`'s resident tests.

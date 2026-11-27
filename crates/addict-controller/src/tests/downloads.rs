@@ -162,7 +162,10 @@ fn route(asset: &str) -> String {
     format!("/{}/{}", release::tag(), asset)
 }
 
-fn stub(indexes: Vec<Published>, routes: impl IntoIterator<Item = (String, Route)>) -> Stub {
+pub(super) fn stub(
+    indexes: Vec<Published>,
+    routes: impl IntoIterator<Item = (String, Route)>,
+) -> Stub {
     let manifest = Manifest {
         format: VERSION,
         indexes,
@@ -175,7 +178,7 @@ fn stub(indexes: Vec<Published>, routes: impl IntoIterator<Item = (String, Route
     Stub::start(routes).unwrap()
 }
 
-fn at_release(dirs: Dirs, stub: &Stub) -> FakeShell {
+pub(super) fn at_release(dirs: Dirs, stub: &Stub) -> FakeShell {
     shell(
         dirs,
         stub.base_url(),
@@ -185,7 +188,7 @@ fn at_release(dirs: Dirs, stub: &Stub) -> FakeShell {
     )
 }
 
-fn listing(shell: &mut FakeShell) -> ViewState {
+pub(super) fn listing(shell: &mut FakeShell) -> ViewState {
     shell.wait_for(|view| {
         view.downloads
             .offer

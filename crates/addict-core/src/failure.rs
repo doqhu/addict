@@ -5,6 +5,7 @@ pub mod capture;
 pub mod file_choice;
 pub mod key_store;
 pub mod login_item;
+pub mod playback;
 pub mod recognize;
 pub mod selection;
 

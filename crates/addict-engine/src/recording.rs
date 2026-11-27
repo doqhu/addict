@@ -1,6 +1,16 @@
-//! Credits for Wikimedia Commons recordings referenced by a dictionary.
+//! Pronunciation audio and credits for Wikimedia Commons recordings.
 
-use std::{error::Error, fmt, io, net::ToSocketAddrs, sync::Arc, time::Duration};
+use std::{
+    error::Error,
+    fmt, fs,
+    io::{self, Write},
+    net::ToSocketAddrs,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use addict_core::failure::playback::PlaybackFailure;
 
 use percent_encoding::percent_decode_str;
 use quick_xml::{Reader, escape::resolve_html5_entity, events::Event};
@@ -10,6 +20,7 @@ use reqwest::{
     redirect::Policy,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const COMMONS: &str = "https://commons.wikimedia.org";
 const API: &str = "https://commons.wikimedia.org/w/api.php";
@@ -19,17 +30,129 @@ const USER_AGENT: &str = concat!(
     " (https://github.com/doqhu/addict)"
 );
 
-/// Size bound for buffering a remote pronunciation for GTK.
 const AUDIO_MAX_BYTES: usize = 16 * 1024 * 1024;
+const CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AudioFailure {
-    Network,
-    Failed,
+// Serialize publication and pruning when an earlier cache job is still
+// writing on a blocking thread after its request was cancelled.
+static CACHE_WRITE: Mutex<()> = Mutex::new(());
+
+/// Resolves file URLs locally. HTTP(S) URLs are left for the cache job.
+pub fn local_audio(url: &str) -> Result<Option<PathBuf>, PlaybackFailure> {
+    let url = Url::parse(url).map_err(|error| PlaybackFailure::Failed(error.to_string()))?;
+    match url.scheme() {
+        "http" | "https" => Ok(None),
+        "file" => url
+            .to_file_path()
+            .map(Some)
+            .map_err(|()| PlaybackFailure::Failed("invalid recording file URL".into())),
+        _ => Err(PlaybackFailure::Failed(
+            "unsupported recording URL scheme".into(),
+        )),
+    }
+}
+
+/// Reuses a cached pronunciation or fetches and atomically publishes it.
+pub async fn cached_audio(cache_dir: &Path, url: &str) -> Result<PathBuf, PlaybackFailure> {
+    let parsed = Url::parse(url).map_err(|error| PlaybackFailure::Failed(error.to_string()))?;
+    let extension = parsed
+        .path()
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, suffix)| suffix)
+        .filter(|suffix| {
+            !suffix.is_empty()
+                && suffix.len() <= 10
+                && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+        .unwrap_or("audio");
+    let digest = Sha256::digest(url.as_bytes());
+    let dir = cache_dir.join("recordings");
+    let path = dir.join(format!("{digest:x}.{extension}"));
+    let check = path.clone();
+    if tokio::task::spawn_blocking(move || check.is_file())
+        .await
+        .map_err(|error| PlaybackFailure::Failed(error.to_string()))?
+    {
+        return Ok(path);
+    }
+
+    let audio = fetch_audio(url.to_owned()).await?;
+    tokio::task::spawn_blocking(move || {
+        cache_audio(&dir, &path, &audio)?;
+        Ok(path)
+    })
+    .await
+    .map_err(|error| PlaybackFailure::Failed(error.to_string()))?
+    .map_err(|error: io::Error| PlaybackFailure::Failed(error.to_string()))
+}
+
+fn cache_audio(dir: &Path, path: &Path, audio: &[u8]) -> io::Result<()> {
+    let _guard = CACHE_WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if path.is_file() {
+        return Ok(());
+    }
+    fs::create_dir_all(dir)?;
+    let mut temp = tempfile::NamedTempFile::new_in(dir)?;
+    temp.write_all(audio)?;
+    temp.persist(path)?;
+
+    if let Err(error) = prune_recordings(dir, path) {
+        eprintln!("addict: could not read the recording cache: {error}");
+    }
+    Ok(())
+}
+
+fn prune_recordings(dir: &Path, path: &Path) -> io::Result<()> {
+    let mut entries = Vec::new();
+    let mut total = 0_u64;
+    for entry in fs::read_dir(dir)? {
+        let (entry, metadata) = match entry.and_then(|entry| Ok((entry.path(), entry.metadata()?)))
+        {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!("addict: could not inspect a recording cache entry: {error}");
+                continue;
+            }
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        total = total.saturating_add(metadata.len());
+        if entry != path {
+            match metadata.modified() {
+                Ok(modified) => entries.push((modified, entry, metadata.len())),
+                Err(error) => {
+                    eprintln!(
+                        "addict: could not read the age of {}: {error}",
+                        entry.display()
+                    );
+                }
+            }
+        }
+    }
+    entries.sort_unstable();
+    for (_, old, size) in entries {
+        if total <= CACHE_MAX_BYTES {
+            break;
+        }
+        if let Err(error) = fs::remove_file(&old) {
+            eprintln!(
+                "addict: could not remove cached recording {}: {error}",
+                old.display()
+            );
+            continue;
+        }
+        total -= size;
+    }
+    Ok(())
 }
 
 /// Fetches the URL from the dictionary independently of desktop VFS helpers.
-pub async fn fetch_audio(url: String) -> Result<Vec<u8>, AudioFailure> {
+pub async fn fetch_audio(url: String) -> Result<Vec<u8>, PlaybackFailure> {
     let client = Client::builder()
         .user_agent(USER_AGENT)
         .dns_resolver(Arc::new(AudioResolver))
@@ -46,17 +169,21 @@ pub async fn fetch_audio(url: String) -> Result<Vec<u8>, AudioFailure> {
         .content_length()
         .is_some_and(|bytes| bytes > AUDIO_MAX_BYTES as u64)
     {
-        return Err(AudioFailure::Failed);
+        return Err(PlaybackFailure::Failed(
+            "recording exceeds the size limit".into(),
+        ));
     }
     let mut audio = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(audio_failure)? {
         if chunk.len() > AUDIO_MAX_BYTES - audio.len() {
-            return Err(AudioFailure::Failed);
+            return Err(PlaybackFailure::Failed(
+                "recording exceeds the size limit".into(),
+            ));
         }
         audio.extend_from_slice(&chunk);
     }
     if audio.is_empty() {
-        return Err(AudioFailure::Failed);
+        return Err(PlaybackFailure::Failed("empty recording".into()));
     }
     Ok(audio)
 }
@@ -91,9 +218,9 @@ impl Error for AudioDnsError {
     }
 }
 
-fn audio_failure(error: reqwest::Error) -> AudioFailure {
+fn audio_failure(error: reqwest::Error) -> PlaybackFailure {
     if error.is_timeout() {
-        return AudioFailure::Network;
+        return PlaybackFailure::Network;
     }
     let mut cause = error.source();
     while let Some(error) = cause {
@@ -110,11 +237,11 @@ fn audio_failure(error: reqwest::Error) -> AudioFailure {
                 )
             })
         {
-            return AudioFailure::Network;
+            return PlaybackFailure::Network;
         }
         cause = error.source();
     }
-    AudioFailure::Failed
+    PlaybackFailure::Failed(error.without_url().to_string())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,6 +299,12 @@ impl CommonsFile {
     /// Loads structured credit from Commons, falling back to an explicit
     /// Shtooka credit in the description when no author was supplied.
     pub async fn fetch_credit(&self) -> Credit {
+        self.fetch_credit_from(API).await
+    }
+
+    /// Lets the controller's stub-server tests supply a MediaWiki API endpoint.
+    #[doc(hidden)]
+    pub async fn fetch_credit_from(&self, endpoint: &str) -> Credit {
         let Ok(client) = Client::builder()
             .user_agent(USER_AGENT)
             .redirect(Policy::none())
@@ -183,6 +316,7 @@ impl CommonsFile {
         let Some(page) = self
             .query_page(
                 &client,
+                endpoint,
                 &[
                     ("prop", "imageinfo"),
                     ("iiprop", "extmetadata"),
@@ -198,6 +332,7 @@ impl CommonsFile {
             let revision = self
                 .query_page(
                     &client,
+                    endpoint,
                     &[
                         ("prop", "revisions"),
                         ("rvprop", "content"),
@@ -213,9 +348,14 @@ impl CommonsFile {
         credit
     }
 
-    async fn query_page(&self, client: &Client, props: &[(&str, &str)]) -> Option<Value> {
+    async fn query_page(
+        &self,
+        client: &Client,
+        endpoint: &str,
+        props: &[(&str, &str)],
+    ) -> Option<Value> {
         let value = client
-            .get(API)
+            .get(endpoint)
             .query(&[
                 ("action", "query"),
                 ("format", "json"),
@@ -322,7 +462,7 @@ mod tests {
             .send()
             .await
             .expect_err("injected DNS failure");
-        assert_eq!(audio_failure(error), AudioFailure::Network);
+        assert_eq!(audio_failure(error), PlaybackFailure::Network);
     }
 
     #[tokio::test]
@@ -346,8 +486,90 @@ mod tests {
             Ok(b"recording bytes".to_vec())
         );
         for path in ["/server-error", "/missing", "/oversized"] {
-            assert_eq!(fetch_audio(url(path)).await, Err(AudioFailure::Failed));
+            assert!(matches!(
+                fetch_audio(url(path)).await,
+                Err(PlaybackFailure::Failed(_))
+            ));
         }
+    }
+
+    #[tokio::test]
+    async fn buffered_recording_can_be_reopened_from_the_beginning() {
+        use std::io::Read;
+
+        let audio = b"buffered recording";
+        let temp = tempfile::tempdir().unwrap();
+        let stub = Stub::start(HashMap::from([(
+            "/audio.ogg".into(),
+            Route::File(audio.to_vec()),
+        )]))
+        .unwrap();
+        let url = format!("{}/audio.ogg", stub.base_url());
+        let path = cached_audio(temp.path(), &url)
+            .await
+            .expect("cached recording");
+        let mut opened = fs::File::open(&path).unwrap();
+        opened.read_exact(&mut [0; 5]).unwrap();
+        drop(stub);
+        let reopened = cached_audio(temp.path(), &url).await.unwrap();
+        assert_eq!(reopened, path);
+        assert_eq!(fs::read(reopened).unwrap(), audio);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cached_audio_returns_the_path_when_pruning_cannot_read_the_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("recordings");
+        fs::create_dir(&dir).unwrap();
+        let permissions = fs::metadata(&dir).unwrap().permissions();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o300)).unwrap();
+        if fs::read_dir(&dir).is_ok() {
+            // A privileged test process can list the directory anyway.
+            fs::set_permissions(&dir, permissions).unwrap();
+            return;
+        }
+
+        let stub = Stub::start(HashMap::from([(
+            "/audio.ogg".into(),
+            Route::File(b"playable bytes".to_vec()),
+        )]))
+        .unwrap();
+        let url = format!("{}/audio.ogg", stub.base_url());
+        let outcome = cached_audio(temp.path(), &url).await;
+        fs::set_permissions(&dir, permissions).unwrap();
+
+        let path = outcome.expect("audio was published despite the pruning error");
+        assert_eq!(path.parent(), Some(dir.as_path()));
+        assert_eq!(fs::read(path).unwrap(), b"playable bytes");
+    }
+
+    #[test]
+    fn the_recording_cache_prunes_oldest_files_to_the_byte_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let oldest = temp.path().join("oldest.ogg");
+        for (name, seconds) in [("oldest", 1), ("old", 2), ("newer", 3), ("newest", 4)] {
+            let file = fs::File::create(temp.path().join(format!("{name}.ogg"))).unwrap();
+            file.set_len(AUDIO_MAX_BYTES as u64).unwrap();
+            file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap();
+        }
+        let added = temp.path().join("added.ogg");
+        cache_audio(temp.path(), &added, b"recording").unwrap();
+        assert!(!oldest.exists());
+        assert_eq!(fs::read(&added).unwrap(), b"recording");
+        let entries = fs::read_dir(temp.path())
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 4);
+        let bytes: u64 = entries
+            .iter()
+            .map(|entry| entry.metadata().unwrap().len())
+            .sum();
+        assert!(bytes <= CACHE_MAX_BYTES);
     }
 
     #[test]

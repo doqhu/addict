@@ -143,12 +143,11 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
-    fs::File,
-    future::Future,
-    io::{self, Write},
-    os::fd::FromRawFd,
+    ffi::OsString,
+    io,
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{Command, ExitCode},
     rc::{Rc, Weak},
     sync::{Arc, Mutex, Weak as WorkRef},
     time::Duration,
@@ -158,8 +157,8 @@ use addict_controller::{
     self as controller, ArticleId, Bindings as ControllerBindings, Controller, Dispatcher, Effect,
     OfferId, OfferPhase, Platform, RequestId, ShortcutState, StartFacts, ViewState,
     deadlines::{
-        AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CREDIT_LIMIT, KEY_SAVE_LIMIT,
-        STARTUP_LIMIT, STARTUP_READ_LIMIT,
+        BIND_ANSWER_LIMIT, BIND_START_LIMIT, KEY_SAVE_LIMIT, SHELL_QUIT_LIMIT, STARTUP_LIMIT,
+        STARTUP_READ_LIMIT,
     },
 };
 use addict_core::{
@@ -169,6 +168,7 @@ use addict_core::{
         Ended,
         capture::CaptureFailure,
         login_item::{LoginItemShown, StartupEnd},
+        playback::PlaybackFailure,
         recognize::OcrFailure,
         selection::SelectionFailure,
     },
@@ -176,19 +176,13 @@ use addict_core::{
     translation::{Source as Language, reading_languages},
 };
 use addict_deepl::key::{self, KeyError, Secret, WriteError};
-use addict_engine::{
-    recording::{AudioFailure, fetch_audio},
-    work::{Job, Outcome, Work},
-};
+use addict_engine::work::{Job, Outcome, Work};
 use addict_platform::{
     shortcut::{self, Action, KeyOwner, ShortcutEvent, ShortcutHandle},
     startup,
     tray::{self, TrayEvent, TrayHandle},
 };
-use futures_channel::{
-    mpsc::{UnboundedReceiver, UnboundedSender},
-    oneshot,
-};
+use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures_util::StreamExt;
 use gtk::{gdk, gio, glib, prelude::*};
 
@@ -200,7 +194,7 @@ use crate::{
     settings::{self, Settings},
     style,
     view::{Binding, Choice, FailedEndFocus, Held, failed_end_focus},
-    widgets::{FieldEdit, KEY_LOCATION_HINT, PlaybackMedia, View},
+    widgets::{FieldEdit, KEY_LOCATION_HINT, MediaPlayback, View, fatal_page},
 };
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
@@ -255,6 +249,7 @@ enum Event {
     Back,
     /// Forward was pressed, or Alt+Right.
     Forward,
+    PlayPressed(ArticleId, String),
     /// The user explicitly requested the selected dictionary definition.
     DefinitionAction(ArticleId, Choice),
     /// The English word of a gloss was clicked: it is looked up in English.
@@ -362,7 +357,11 @@ fn main_menu() -> gtk::MenuButton {
 }
 
 /// The hidden window around the `view`: closing it hides it, and so does Esc.
-fn build_window(application: &gtk::Application, view: &View) -> gtk::ApplicationWindow {
+fn build_window(
+    application: &gtk::Application,
+    view: &View,
+    sender: &UnboundedSender<Event>,
+) -> gtk::ApplicationWindow {
     let header = header_bar("Addict");
     header.pack_end(&main_menu());
     let window = gtk::ApplicationWindow::builder()
@@ -375,8 +374,10 @@ fn build_window(application: &gtk::Application, view: &View) -> gtk::Application
         .titlebar(&header)
         .build();
     // Closing hides; the process and this window stay.
-    window.connect_close_request(|window| {
+    let closed = sender.clone();
+    window.connect_close_request(move |window| {
         window.set_visible(false);
+        let _ = closed.unbounded_send(Event::Setting(controller::Event::PanelClosed));
         glib::Propagation::Stop
     });
     // Bubble phase: a focused child that uses Esc itself keeps it.
@@ -430,6 +431,10 @@ struct Session {
     /// upgrades when the runner could not be started.
     work: WorkRef<Work>,
     controller: Option<Dispatcher>,
+    playback: Option<(RequestId, MediaPlayback)>,
+    quit_timer: Rc<RefCell<Option<glib::SourceId>>>,
+    quit_timed_out: Rc<Cell<bool>>,
+    restart: Rc<dyn Fn()>,
     /// Where the Linux key file is, for the `StoreKey` effect.
     key_file: Option<PathBuf>,
     /// The jobs of the settings effects; each is kept until its one result
@@ -515,6 +520,9 @@ impl Session {
             Event::Submitted => self.submitted(),
             Event::Back => self.back(),
             Event::Forward => self.forward(),
+            Event::PlayPressed(article, url) => {
+                self.article_action(article, controller::Event::PlayPressed { article, url })
+            }
             Event::DefinitionAction(article, choice) => self.article_action(
                 article,
                 addict_controller::Event::DefinitionAction { article, choice },
@@ -882,7 +890,13 @@ impl Session {
     /// A controller effect is given up: the read when it is that request,
     /// else the capture.
     fn cancel_effect(&mut self, id: RequestId) {
-        if !self.cancel_read_effect(id) {
+        if self
+            .playback
+            .as_ref()
+            .is_some_and(|(playing, _)| *playing == id)
+        {
+            self.stop_playback();
+        } else if !self.cancel_read_effect(id) {
             self.cancel_capture_effect(id);
         }
     }
@@ -890,11 +904,12 @@ impl Session {
     /// Shows the window for the press when it is not shown for it yet: Linux
     /// presents at the press, so this does nothing there, and the order of
     /// a read-before-show platform is the controller's to decide.
-    fn show_panel(&mut self, read_sequence: u64) {
-        if read_sequence != self.read_sequence || self.window.is_visible() {
-            return;
+    fn show_panel(&self, read_sequence: Option<u64>) {
+        if read_sequence
+            .is_none_or(|sequence| sequence == self.read_sequence && !self.window.is_visible())
+        {
+            self.reveal();
         }
-        self.reveal();
     }
 
     /// Sends the one result of the read with `id` to the controller.
@@ -911,8 +926,10 @@ impl Session {
     /// the caller gave a token if it has one, and for a launch GTK has already
     /// applied the launcher's.
     fn reveal(&self) {
-        self.render_window();
-        self.focus();
+        if self.view_state.fatal.is_none() {
+            self.render_window();
+            self.focus();
+        }
         if let Some(recording) = &self.recording {
             recording.shown_without_press();
         }
@@ -1019,9 +1036,23 @@ impl Session {
     /// Applies the newest snapshot and handles every effect, even when the
     /// visual state of that snapshot has already been superseded.
     fn render_controller(&mut self, state: ViewState, effects: Vec<Effect>) {
-        if state.read_sequence == self.read_sequence && state.revision > self.view_state.revision {
+        if state.revision > self.view_state.revision
+            && (state.read_sequence == self.read_sequence || state.fatal.is_some())
+        {
             let previous = std::mem::replace(&mut self.view_state, state);
-            self.apply_snapshot(&previous);
+            if let Some(fatal) = self.view_state.fatal.as_ref() {
+                let restart = self.restart.clone();
+                let page = fatal_page(fatal, move || restart());
+                self.stop_playback();
+                if let Some((_, offer)) = self.download_offer.take() {
+                    offer.close();
+                }
+                self.settings.window().set_visible(false);
+                self.window.set_child(Some(&page));
+                self.reveal();
+            } else {
+                self.apply_snapshot(&previous);
+            }
         }
         for effect in effects {
             self.run_effect(effect);
@@ -1089,6 +1120,9 @@ impl Session {
             // The definition button names my language, so it follows a
             // choice made in Settings too. The indexes line does as well.
             self.render_shown();
+        }
+        if previous.playback != current.playback {
+            self.view.render_playback(current.playback.as_ref());
         }
         self.settings.render(&current.settings);
         // The main window's binding row follows both the binding state and
@@ -1261,6 +1295,17 @@ impl Session {
                 self.read_selection(id, read_sequence);
             }
             Effect::ShowPanel { read_sequence } => self.show_panel(read_sequence),
+            Effect::Play { id, path } => {
+                self.stop_playback();
+                let controller = self.controller.clone();
+                let media = MediaPlayback::start(&path, move |result| {
+                    if let Some(controller) = &controller {
+                        controller.dispatch(controller::Event::Played { id, result });
+                    }
+                });
+                self.playback = Some((id, media));
+            }
+            Effect::Quit => self.quit(),
             Effect::PresentCapture {
                 read_sequence,
                 retry,
@@ -1295,6 +1340,17 @@ impl Session {
         }
     }
 
+    fn stop_playback(&mut self) {
+        if let Some((id, media)) = self.playback.take()
+            && media.stop()
+        {
+            self.dispatch_controller(controller::Event::Played {
+                id,
+                result: Err(PlaybackFailure::Cancelled),
+            });
+        }
+    }
+
     /// Updates the word and sentence rows without rebuilding the article.
     fn render_online(&self) {
         self.view.render_online_rows(&self.view_state.online);
@@ -1304,6 +1360,7 @@ impl Session {
     fn render_shown(&self) {
         self.view
             .render_result(&self.view_state.shown, self.key_file.as_deref());
+        self.view.render_playback(self.view_state.playback.as_ref());
     }
 
     fn accepts_article(&self, article: ArticleId) -> bool {
@@ -1365,9 +1422,13 @@ impl Session {
 
     /// Sends a fact to the shared controller.
     fn dispatch_controller(&self, event: controller::Event) {
-        if let Some(controller) = &self.controller {
-            controller.dispatch(event);
-        }
+        self.send_controller(event);
+    }
+
+    fn send_controller(&self, event: controller::Event) -> bool {
+        self.controller
+            .as_ref()
+            .is_some_and(|controller| controller.dispatch(event))
     }
 
     /// The shortcut was pressed: a running capture and read are given up,
@@ -1430,17 +1491,54 @@ impl Session {
     /// said once and changes nothing.
     fn tray(&mut self, event: TrayEvent) {
         match event {
-            TrayEvent::Show => self.reveal(),
+            TrayEvent::Show => self.reopened(),
             TrayEvent::Settings => self.show_settings(),
             TrayEvent::About => self.about.present(),
-            TrayEvent::Exit => {
-                if let Some(application) = self.window.application() {
-                    application.quit();
-                }
-            }
+            TrayEvent::Exit => self.request_quit(),
             TrayEvent::Unavailable { message } => {
                 eprintln!("addict: no tray icon: {message}");
             }
+        }
+    }
+
+    fn reopened(&self) {
+        if !self.send_controller(controller::Event::Reopened) {
+            self.reveal();
+        }
+    }
+
+    fn request_quit(&self) {
+        if !self.send_controller(controller::Event::QuitRequested) {
+            self.quit();
+            return;
+        }
+        let Some(application) = self.window.application() else {
+            return;
+        };
+        if self.quit_timer.borrow().is_some() {
+            return;
+        }
+        let timer = self.quit_timer.clone();
+        let timed_out = self.quit_timed_out.clone();
+        let application = application.downgrade();
+        self.quit_timer.replace(Some(glib::timeout_add_local_once(
+            SHELL_QUIT_LIMIT,
+            move || {
+                timer.take();
+                if let Some(application) = application.upgrade() {
+                    timed_out.set(true);
+                    application.quit();
+                }
+            },
+        )));
+    }
+
+    fn quit(&self) {
+        if let Some(timer) = self.quit_timer.take() {
+            timer.remove();
+        }
+        if let Some(application) = self.window.application() {
+            application.quit();
         }
     }
 
@@ -1710,6 +1808,11 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>, actions: &Rc<Cell<
     view.connect_sense_chosen(move |index| {
         let _ = sense.unbounded_send(Event::Sense(sense_actions.get().article, index));
     });
+    let play = sender.clone();
+    let play_actions = actions.clone();
+    view.connect_play_pressed(move |url| {
+        let _ = play.unbounded_send(Event::PlayPressed(play_actions.get().article, url));
+    });
     let gloss = sender.clone();
     let gloss_actions = actions.clone();
     view.connect_gloss_chosen(move |index| {
@@ -1734,7 +1837,7 @@ fn build_ui(
     let view = View::new(window_state(None, None), binding);
     let actions = Rc::new(Cell::new(ViewActions::default()));
     connect_view(&view, sender, &actions);
-    let window = build_window(application, &view);
+    let window = build_window(application, &view, sender);
     // Capture phase: Alt+Left and Alt+Right are Back and Forward wherever
     // the focus is.
     window.add_controller(view.history_keys());
@@ -1935,49 +2038,6 @@ fn controller_renderer(sender: &UnboundedSender<Event>) -> impl controller::Rend
     }
 }
 
-/// GTK 4.20's GStreamer backend needs a file URI even for buffered audio.
-/// An anonymous file gives it a seekable source and disappears when closed.
-fn buffer_recording(audio: &[u8]) -> io::Result<File> {
-    let create = |flags| {
-        // SAFETY: The name is NUL-terminated. A nonnegative result is a new fd.
-        let fd = unsafe { libc::memfd_create(c"addict-recording".as_ptr(), flags) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: This takes sole ownership of the newly created fd.
-        Ok(unsafe { File::from_raw_fd(fd) })
-    };
-    let mut file = create(libc::MFD_CLOEXEC | libc::MFD_NOEXEC_SEAL).or_else(|error| {
-        if error.raw_os_error() == Some(libc::EINVAL) {
-            // Older kernels do not recognize MFD_NOEXEC_SEAL.
-            create(libc::MFD_CLOEXEC)
-        } else {
-            Err(error)
-        }
-    })?;
-    file.write_all(audio)?;
-    Ok(file)
-}
-
-/// Moves the outcome of a recording request from the worker to GTK.
-fn start_recording_job<T: Send + 'static>(
-    work: &Work,
-    limit: Duration,
-    run: impl Future<Output = T> + Send + 'static,
-    ready: impl FnOnce(Outcome<T>) + 'static,
-) -> Job {
-    let (send, receive) = oneshot::channel();
-    let job = work.run(limit, run, move |outcome| {
-        let _ = send.send(outcome);
-    });
-    glib::spawn_future_local(async move {
-        if let Ok(outcome) = receive.await {
-            ready(outcome);
-        }
-    });
-    job
-}
-
 /// Loads the configured key once without blocking GTK or the translation
 /// runner. The result reaches the controller as its first `KeyChanged`.
 fn start_key_load(path: Option<PathBuf>, sender: &UnboundedSender<Event>) {
@@ -2026,6 +2086,8 @@ fn start(
     application: &gtk::Application,
     evidence: Option<Rc<RefCell<evidence::Writer>>>,
     dirs: &Dirs,
+    quit_timed_out: Rc<Cell<bool>>,
+    restart: Rc<dyn Fn()>,
 ) -> Resident {
     // The worker threads push; the main context wakes only for an event.
     let (sender, receiver) = futures_channel::mpsc::unbounded();
@@ -2060,51 +2122,6 @@ fn start(
     let work = controller
         .as_ref()
         .map_or_else(WorkRef::new, Controller::work);
-    if controller.is_some() {
-        view.connect_recording_audio({
-            let work = work.clone();
-            move |url, ready| {
-                let Some(work) = work.upgrade() else {
-                    ready(Err(AudioFailure::Failed));
-                    return None;
-                };
-                Some(start_recording_job(
-                    &work,
-                    AUDIO_LIMIT,
-                    async move {
-                        let audio = fetch_audio(url).await?;
-                        buffer_recording(&audio).map_err(|error| {
-                            eprintln!("addict: could not buffer recording: {error}");
-                            AudioFailure::Failed
-                        })
-                    },
-                    move |outcome| {
-                        let result = match outcome {
-                            Outcome::Finished(audio) => audio,
-                            Outcome::Cancelled => return,
-                            Outcome::TimedOut => Err(AudioFailure::Network),
-                            Outcome::Panicked => Err(AudioFailure::Failed),
-                        };
-                        ready(result.map(PlaybackMedia::from_recording));
-                    },
-                ))
-            }
-        });
-        let work = work.clone();
-        view.connect_recording_credit(move |file, ready| {
-            let work = work.upgrade()?;
-            Some(start_recording_job(
-                &work,
-                CREDIT_LIMIT,
-                async move { file.fetch_credit().await },
-                move |outcome| {
-                    if let Outcome::Finished(credit) = outcome {
-                        ready(credit);
-                    }
-                },
-            ))
-        });
-    }
     let settings = start_settings(&window, key_file.as_deref(), KeyOwner::detect(), &sender);
     let about = About::new(&window);
     let session = Session {
@@ -2124,6 +2141,10 @@ fn start(
         read_sequence: 0,
         work,
         controller: controller.as_ref().map(Controller::dispatcher),
+        playback: None,
+        quit_timer: Rc::default(),
+        quit_timed_out,
+        restart,
         key_file,
         store_job: None,
         startup_job: None,
@@ -2160,6 +2181,12 @@ impl LaunchMode {
             Self::Normal
         }
     }
+
+    fn forward(self, send: impl FnOnce(WindowEvent)) {
+        if self == Self::Normal {
+            send(WindowEvent::Reopened);
+        }
+    }
 }
 
 /// These events own presentation policy; binding failures only update state.
@@ -2167,7 +2194,7 @@ impl LaunchMode {
 /// callbacks used by the resident, including silent initialization failures.
 enum WindowEvent {
     Shortcut(ShortcutEvent, Option<u64>),
-    Launched(LaunchMode),
+    Reopened,
     Settings,
 }
 
@@ -2201,8 +2228,7 @@ fn shortcut_state(event: ShortcutEvent) -> Option<ShortcutState> {
 
 fn dispatch_window(ui: &mut impl WindowActions, event: WindowEvent) {
     match event {
-        WindowEvent::Launched(LaunchMode::Normal) => ui.present_main(),
-        WindowEvent::Launched(LaunchMode::Background) => {}
+        WindowEvent::Reopened => ui.present_main(),
         WindowEvent::Settings => ui.present_settings(),
         WindowEvent::Shortcut(event, receipt) => match event {
             ShortcutEvent::Activated {
@@ -2236,7 +2262,7 @@ impl WindowActions for Session {
     }
 
     fn present_main(&mut self) {
-        self.reveal();
+        self.reopened();
     }
     fn present_settings(&mut self) {
         self.show_settings();
@@ -2319,6 +2345,11 @@ fn primary(application: gtk::Application) -> Result<gtk::Application, ExitCode> 
     Ok(application)
 }
 
+/// The command to re-execute after GApplication releases its bus name.
+fn restart_command() -> Result<(PathBuf, Vec<OsString>), String> {
+    Ok((startup::launch_target()?, Vec::new()))
+}
+
 /// Runs the resident application until it quits. With `evidence`, each
 /// activation is recorded to it.
 pub fn run(
@@ -2339,22 +2370,44 @@ pub fn run(
     let resident: Rc<RefCell<Option<Resident>>> = Rc::default();
     let recording = evidence.is_some();
 
+    let restart = Rc::new(Cell::new(false));
+    let quit_timed_out = Rc::new(Cell::new(false));
     let slot = resident.clone();
+    let restart_flag = restart.clone();
+    let timeout_flag = quit_timed_out.clone();
     application.connect_startup(move |application| {
-        let resident = start(application, evidence.clone(), &dirs);
+        let app = application.downgrade();
+        let restart_flag = restart_flag.clone();
+        let restarter = Rc::new(move || {
+            if let Some(application) = app.upgrade() {
+                restart_flag.set(true);
+                application.quit();
+            }
+        });
+        let resident = start(
+            application,
+            evidence.clone(),
+            &dirs,
+            timeout_flag.clone(),
+            restarter,
+        );
         *slot.borrow_mut() = Some(resident);
     });
     let launches = resident.clone();
     connect_launches(&application, move |mode| {
-        if let Some(resident) = launches.borrow().as_ref() {
-            let _ = resident
-                .events
-                .unbounded_send(Event::Window(WindowEvent::Launched(mode)));
-        }
+        mode.forward(|event| {
+            if let Some(resident) = launches.borrow().as_ref() {
+                let _ = resident.events.unbounded_send(Event::Window(event));
+            }
+        });
     });
+    let timeout_flag = quit_timed_out.clone();
     application.connect_shutdown(move |_| {
-        // Stops the workers; the shortcut one closes the portal session.
-        resident.borrow_mut().take();
+        // A deadline can mean a worker is stuck. Leave with GApplication
+        // after the timeout without waiting for worker teardown.
+        if !timeout_flag.get() {
+            resident.borrow_mut().take();
+        }
     });
 
     // With the flag only: registering here tells whether this launch is the
@@ -2370,6 +2423,18 @@ pub fn run(
         LaunchMode::Background => vec!["addict", "--background"],
     };
     let status = application.run_with_args(&args);
+    if quit_timed_out.get() {
+        std::process::exit(i32::from(status.get()));
+    }
+    drop(application);
+    if restart.get() {
+        let error = match restart_command() {
+            Ok((program, args)) => Command::new(program).args(args).exec().to_string(),
+            Err(error) => error,
+        };
+        eprintln!("addict: could not restart: {error}");
+        return ExitCode::FAILURE;
+    }
     if status == glib::ExitCode::SUCCESS {
         ExitCode::SUCCESS
     } else {
@@ -2403,13 +2468,316 @@ mod tests {
     }
 
     #[test]
-    fn buffered_recording_can_be_reopened_from_the_beginning() {
-        use std::os::fd::AsRawFd;
+    fn restart_command_is_the_launch_target_without_background() {
+        let (program, args) = super::restart_command().expect("launch target");
+        assert_eq!(program, addict_platform::startup::launch_target().unwrap());
+        assert!(args.is_empty(), "{args:?}");
+    }
 
-        let audio = b"buffered recording";
-        let file = super::buffer_recording(audio).expect("recording descriptor");
-        let path = format!("/proc/self/fd/{}", file.as_raw_fd());
-        assert_eq!(std::fs::read(path).unwrap(), audio);
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn cancel_effect_stops_media_and_reports_cancelled_playback() {
+        use super::*;
+        use addict_dictionary::{
+            format::{Contents, Headword, SenseRecord, encode},
+            import::{self, Source as IndexSource},
+        };
+
+        gtk::init().expect("a display");
+        let data = KeyTestDir::new("addict-cancel-playback");
+        let index = encode(&Contents {
+            source: "oewn".into(),
+            senses: vec![SenseRecord {
+                definition: "the ground alongside a river".into(),
+                members: vec!["bank".into()],
+                ..Default::default()
+            }],
+            headwords: vec![Headword {
+                word: "bank".into(),
+                senses: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(import::index_path(&data.0, IndexSource::Oewn), index).unwrap();
+
+        // Four seconds of mono 16-bit PCM silence at 8 kHz.
+        let path = data.0.join("silence.wav");
+        let pcm_bytes = 64_000_u32;
+        let mut wave = b"RIFF".to_vec();
+        wave.extend((36 + pcm_bytes).to_le_bytes());
+        wave.extend_from_slice(b"WAVEfmt \x10\0\0\0\x01\0\x01\0");
+        wave.extend(8_000_u32.to_le_bytes());
+        wave.extend(16_000_u32.to_le_bytes());
+        wave.extend_from_slice(b"\x02\0\x10\0data");
+        wave.extend(pcm_bytes.to_le_bytes());
+        wave.resize(44 + pcm_bytes as usize, 0);
+        std::fs::write(&path, wave).unwrap();
+
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.CancelPlaybackTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
+            },
+        );
+        let _controller = attach_controller(&mut session);
+        session.dispatch_controller(controller::Event::FieldEdited {
+            text: "bank".into(),
+            replaced: false,
+            source: None,
+        });
+        pump_until(&mut session, &mut events, |session| {
+            matches!(
+                session.view_state.shown.lookup(),
+                Some(crate::view::Lookup::Article(_))
+            )
+        });
+        let file = gio::File::for_path(path);
+        session.dispatch_controller(controller::Event::PlayPressed {
+            article: session.view_state.article_id(),
+            url: file.uri().into(),
+        });
+        pump_until(&mut session, &mut events, |session| {
+            session.playback.is_some()
+        });
+        let (id, media) = session.playback.as_ref().unwrap();
+        let id = *id;
+        let stream = media.stream().clone();
+        assert!(stream.file().is_some_and(|playing| playing.equal(&file)));
+        assert!(stream.is_playing());
+        let playing = session.view_state.playback.as_ref().unwrap();
+        assert_eq!(playing.id, id);
+        assert_eq!(playing.state, controller::PlaybackState::Playing);
+
+        session.run_effect(Effect::Cancel(id));
+        assert!(session.playback.is_none());
+        assert!(!stream.is_playing());
+        assert!(stream.file().is_none());
+        // For the current id, only Played(Cancelled) clears the controller's playback.
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.playback.is_none()
+        });
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn the_fatal_screen_offers_restart() {
+        use addict_controller::{FatalView, ViewState};
+        use addict_engine::view::fatal;
+        use std::{cell::Cell, rc::Rc};
+
+        gtk::init().expect("a display");
+        let (mut session, _events, _work) =
+            test_session("io.github.doqhu.Addict.FatalScreenTest", Dirs::default());
+        let restarted = Rc::new(Cell::new(0));
+        session.restart = {
+            let restarted = restarted.clone();
+            Rc::new(move || restarted.set(restarted.get() + 1))
+        };
+        session.read_sequence = 3;
+        assert!(!session.window.is_visible());
+        session.handle(Event::Controller(
+            Box::new(ViewState {
+                revision: 1,
+                fatal: Some(FatalView {
+                    heading: fatal::HEADING,
+                    text: fatal::TEXT,
+                    restart: fatal::RESTART,
+                }),
+                ..ViewState::default()
+            }),
+            Vec::new(),
+        ));
+        assert!(session.window.is_visible());
+        let page = session
+            .window
+            .child()
+            .unwrap()
+            .downcast::<gtk::Box>()
+            .unwrap();
+        let heading = page
+            .first_child()
+            .unwrap()
+            .downcast::<gtk::Label>()
+            .unwrap();
+        let text = heading
+            .next_sibling()
+            .unwrap()
+            .downcast::<gtk::Label>()
+            .unwrap();
+        let restart = text
+            .next_sibling()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+        assert_eq!(heading.text(), fatal::HEADING);
+        assert_eq!(text.text(), fatal::TEXT);
+        assert_eq!(restart.label().as_deref(), Some(fatal::RESTART));
+        assert_eq!(restarted.get(), 0);
+        restart.emit_clicked();
+        assert_eq!(restarted.get(), 1);
+        session.settings.window().destroy();
+        session.window.destroy();
+    }
+
+    /// Keeps the hidden test application running until the tested exit path
+    /// stops it. A broken exit fails the test without leaving GTK running.
+    fn run_quit_test(application: &gtk::Application) -> std::time::Instant {
+        use std::{cell::Cell, rc::Rc, time::Duration};
+
+        use gtk::glib;
+
+        let _hold = application.hold();
+        application.connect_activate(|_| {});
+        let watchdog_fired = Rc::new(Cell::new(false));
+        let watchdog = glib::timeout_add_local_once(Duration::from_secs(5), {
+            let application = application.clone();
+            let fired = watchdog_fired.clone();
+            move || {
+                fired.set(true);
+                application.quit();
+            }
+        });
+        let status = application.run_with_args(&["addict-test"]);
+        let stopped = std::time::Instant::now();
+        assert!(!watchdog_fired.get(), "the shell did not quit");
+        watchdog.remove();
+        assert_eq!(status, glib::ExitCode::SUCCESS);
+        stopped
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn quit_effect_clears_the_fallback_timer_and_a_held_write_triggers_it() {
+        use super::*;
+        use std::time::Instant;
+
+        use addict_engine::at_once;
+
+        gtk::init().expect("a display");
+        for (id, finish_write) in [
+            ("io.github.doqhu.Addict.QuitEffectTest", true),
+            ("io.github.doqhu.Addict.QuitTimeoutTest", false),
+        ] {
+            let dir = KeyTestDir::new(id);
+            let dirs = Dirs {
+                config: Some(dir.0.clone()),
+                ..Dirs::default()
+            };
+            let path = at_once::path(dirs.config.as_deref()).unwrap();
+            let (mut session, mut events, _work) = test_session(id, dirs);
+            let application = session.window.application().unwrap();
+            let controller = attach_controller(&mut session);
+            pump_until(&mut session, &mut events, |session| {
+                session.view_state.settings.languages_read
+            });
+
+            let (release, _gate) = hold_controller_worker(&controller);
+            session.handle(Event::Setting(controller::Event::AtOnceChosen(false)));
+            pump_until(&mut session, &mut events, |session| {
+                !session.view_state.settings.at_once
+            });
+            assert!(!path.exists(), "the write is still held");
+
+            let mut release = Some(release);
+            let finish = if finish_write { release.take() } else { None };
+            let session = Rc::new(RefCell::new(session));
+            let requested = glib::spawn_future_local({
+                let session = session.clone();
+                async move {
+                    let started = Instant::now();
+                    let mut session = session.borrow_mut();
+                    session.handle(Event::Tray(TrayEvent::Exit));
+                    let source = glib::MainContext::default()
+                        .find_source_by_id(
+                            session.quit_timer.borrow().as_ref().expect("timer armed"),
+                        )
+                        .expect("active quit timer");
+                    if let Some(finish) = finish {
+                        finish.send(()).unwrap();
+                    }
+                    (started, source)
+                }
+            });
+            let render = glib::spawn_future_local({
+                let session = session.clone();
+                async move {
+                    while let Some(event) = events.next().await {
+                        session.borrow_mut().handle(event);
+                    }
+                }
+            });
+            let stopped = run_quit_test(&application);
+            render.abort();
+            let (started, source) = glib::MainContext::default().block_on(requested).unwrap();
+            let elapsed = stopped.duration_since(started);
+            let session = session.borrow();
+            assert!(source.is_destroyed());
+            assert!(session.quit_timer.borrow().is_none());
+            assert_eq!(session.quit_timed_out.get(), !finish_write);
+            if finish_write {
+                assert!(elapsed < SHELL_QUIT_LIMIT, "{elapsed:?}");
+                assert!(path.is_file());
+                assert!(!at_once::read(Some(&path)));
+            } else {
+                assert!(elapsed >= SHELL_QUIT_LIMIT, "{elapsed:?}");
+                assert!(!path.exists(), "the shell quit while the write was held");
+                release.take().unwrap().send(()).unwrap();
+            }
+            session.settings.window().destroy();
+            session.window.destroy();
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn launch_show_and_exit_fall_back_with_no_or_disconnected_controller() {
+        use super::*;
+        use std::time::Instant;
+
+        gtk::init().expect("a display");
+        for (id, disconnected) in [
+            ("io.github.doqhu.Addict.NoControllerTest", false),
+            ("io.github.doqhu.Addict.DisconnectedControllerTest", true),
+        ] {
+            let (mut session, _events, _work) = test_session(id, Dirs::default());
+            let application = session.window.application().unwrap();
+            if disconnected {
+                drop(attach_controller(&mut session));
+                let dispatcher = session.controller.as_ref().unwrap();
+                assert!(!dispatcher.dispatch(controller::Event::PanelClosed));
+            } else {
+                assert!(session.controller.is_none());
+            }
+
+            let requested = glib::spawn_future_local(async move {
+                assert!(!session.window.is_visible());
+                LaunchMode::Normal.forward(|event| session.handle(Event::Window(event)));
+                assert!(
+                    session.window.is_visible(),
+                    "a normal launch reveals the window"
+                );
+                session.window.set_visible(false);
+                session.handle(Event::Tray(TrayEvent::Show));
+                assert!(session.window.is_visible(), "tray Show reveals the window");
+
+                let started = Instant::now();
+                session.handle(Event::Tray(TrayEvent::Exit));
+                assert!(session.quit_timer.borrow().is_none());
+                assert!(!session.quit_timed_out.get());
+                (started, session)
+            });
+            let stopped = run_quit_test(&application);
+            let (started, session) = glib::MainContext::default().block_on(requested).unwrap();
+            let elapsed = stopped.duration_since(started);
+            assert!(elapsed < SHELL_QUIT_LIMIT, "{elapsed:?}");
+            session.settings.window().destroy();
+            session.window.destroy();
+        }
     }
 
     /// A full session of the window for a test, its application registered
@@ -2467,6 +2835,10 @@ mod tests {
             read_sequence: 0,
             work: Arc::downgrade(&work),
             controller: None,
+            playback: None,
+            quit_timer: Rc::default(),
+            quit_timed_out: Rc::default(),
+            restart: Rc::new(|| {}),
             key_file,
             store_job: None,
             startup_job: None,
@@ -3917,7 +4289,7 @@ mod tests {
         });
         assert!(!session.window.is_visible());
         assert!(session.download_offer.is_none());
-        session.handle(Event::Window(WindowEvent::Launched(LaunchMode::Normal)));
+        session.handle(Event::Window(WindowEvent::Reopened));
         pump_until(&mut session, &mut events, |session| {
             session.download_offer.is_some()
         });
@@ -4596,7 +4968,7 @@ mod tests {
     fn failed_initialization_stays_silent_until_a_normal_launch_and_retains_the_error() {
         use addict_platform::shortcut::ShortcutEvent;
         let mut window = ObservedWindow::default();
-        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Background));
+        LaunchMode::Background.forward(|event| dispatch_window(&mut window, event));
         dispatch_window(
             &mut window,
             WindowEvent::Shortcut(
@@ -4612,9 +4984,9 @@ mod tests {
         assert_eq!(window.presentations, 0);
         assert_eq!(window.settings, 0);
         // A later login invocation must not accidentally reveal the retained failure either.
-        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Background));
+        LaunchMode::Background.forward(|event| dispatch_window(&mut window, event));
         assert_eq!(window.presentations, 0);
-        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Normal));
+        dispatch_window(&mut window, WindowEvent::Reopened);
         assert_eq!(window.presentations, 1);
         assert!(matches!(window.last(), Some(ShortcutState::Failed(_))));
     }
@@ -4755,7 +5127,7 @@ mod tests {
         let (sender, mut events) = futures_channel::mpsc::unbounded();
         connect_settings_action(&actions, &sender);
         let mut window = ObservedWindow::default();
-        dispatch_window(&mut window, WindowEvent::Launched(LaunchMode::Normal));
+        dispatch_window(&mut window, WindowEvent::Reopened);
         dispatch_window(
             &mut window,
             WindowEvent::Shortcut(

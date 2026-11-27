@@ -169,6 +169,10 @@ impl Downloads {
         }
     }
 
+    pub(crate) fn waiting_for_choice(&self) -> bool {
+        self.decline.is_some()
+    }
+
     fn settings_line(&mut self, busy: bool, text: impl Into<String>) {
         self.view.settings_busy = busy;
         self.view.settings_line = text.into();

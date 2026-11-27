@@ -223,10 +223,10 @@ pub(crate) struct Settings {
     my_read_job: Option<Job>,
     english_read_job: Option<Job>,
     at_once_read_job: Option<Job>,
-    reading_job: Option<Job>,
-    my_job: Option<Job>,
-    english_job: Option<Job>,
-    at_once_job: Option<Job>,
+    reading_write: Option<RequestId>,
+    my_write: Option<RequestId>,
+    english_write: Option<RequestId>,
+    at_once_write: Option<RequestId>,
     limits: Limits,
     /// Held by a test that wants to act before the start reads land.
     read_gate: Option<Arc<ReadGate>>,
@@ -278,10 +278,10 @@ impl Settings {
             my_read_job: None,
             english_read_job: None,
             at_once_read_job: None,
-            reading_job: None,
-            my_job: None,
-            english_job: None,
-            at_once_job: None,
+            reading_write: None,
+            my_write: None,
+            english_write: None,
+            at_once_write: None,
             limits,
             read_gate: None,
         }
@@ -289,6 +289,10 @@ impl Settings {
 
     pub(crate) fn set_read_gate(&mut self, gate: Option<Arc<ReadGate>>) {
         self.read_gate = gate;
+    }
+
+    pub(crate) fn waiting_for_writes(&self) -> bool {
+        self.store.is_some() || self.login_change.is_some()
     }
 
     pub(crate) fn reading(&self) -> Language {
@@ -530,26 +534,16 @@ impl Model {
         true
     }
 
-    /// Each write happens on the runner with the file contents of 0.5.0. A
-    /// failure says so on stderr and changes nothing on screen.
     pub(crate) fn write_reading(&mut self) {
         // The choice owns this file now: only its read is given up, not the
         // reads of the other three files.
         self.settings.reading_read_job = None;
         let path = self.settings.language_file.clone();
         let language = self.settings.saved_reading;
-        self.settings.reading_job = Some(self.work.run(
-            self.settings.limits.language_file,
+        self.settings.reading_write = Some(self.write_setting(
+            self.settings.reading_write,
+            "the reading language",
             async move { language::write(path.as_deref(), language) },
-            |outcome| match outcome {
-                Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                Outcome::Finished(Err(e)) => {
-                    eprintln!("addict: the reading language was not kept: {e}");
-                }
-                Outcome::TimedOut | Outcome::Panicked => {
-                    eprintln!("addict: the reading language was not kept");
-                }
-            },
         ));
     }
 
@@ -557,18 +551,10 @@ impl Model {
         self.settings.my_read_job = None;
         let path = self.settings.my_language_file.clone();
         let language = self.settings.my_language;
-        self.settings.my_job = Some(self.work.run(
-            self.settings.limits.language_file,
+        self.settings.my_write = Some(self.write_setting(
+            self.settings.my_write,
+            "my language",
             async move { my_language::write(path.as_deref(), language) },
-            |outcome| match outcome {
-                Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                Outcome::Finished(Err(e)) => {
-                    eprintln!("addict: my language was not kept: {e}");
-                }
-                Outcome::TimedOut | Outcome::Panicked => {
-                    eprintln!("addict: my language was not kept");
-                }
-            },
         ));
     }
 
@@ -576,18 +562,10 @@ impl Model {
         self.settings.english_read_job = None;
         let path = self.settings.english_file.clone();
         let english = self.settings.english;
-        self.settings.english_job = Some(self.work.run(
-            self.settings.limits.language_file,
+        self.settings.english_write = Some(self.write_setting(
+            self.settings.english_write,
+            "the English spelling",
             async move { english::write(path.as_deref(), english) },
-            |outcome| match outcome {
-                Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                Outcome::Finished(Err(e)) => {
-                    eprintln!("addict: the English spelling was not kept: {e}");
-                }
-                Outcome::TimedOut | Outcome::Panicked => {
-                    eprintln!("addict: the English spelling was not kept");
-                }
-            },
         ));
     }
 
@@ -595,19 +573,42 @@ impl Model {
         self.settings.at_once_read_job = None;
         let path = self.settings.at_once_file.clone();
         let at_once = self.settings.at_once;
-        self.settings.at_once_job = Some(self.work.run(
-            self.settings.limits.language_file,
+        self.settings.at_once_write = Some(self.write_setting(
+            self.settings.at_once_write,
+            "Translate sentence at once",
             async move { at_once::write(path.as_deref(), at_once) },
-            |outcome| match outcome {
-                Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                Outcome::Finished(Err(e)) => {
-                    eprintln!("addict: Translate sentence at once was not kept: {e}");
-                }
-                Outcome::TimedOut | Outcome::Panicked => {
-                    eprintln!("addict: Translate sentence at once was not kept");
-                }
-            },
         ));
+    }
+
+    /// Keep even a superseded job until it reports its outcome: a write
+    /// that started before cancellation may still be committing.
+    fn write_setting(
+        &mut self,
+        previous: Option<RequestId>,
+        name: &'static str,
+        write: impl Future<Output = std::io::Result<()>> + Send + 'static,
+    ) -> RequestId {
+        if let Some(job) = previous.and_then(|id| self.lifecycle.writes.get(&id)) {
+            job.cancel();
+        }
+        let id = self.next_request();
+        let send = self.send.clone();
+        let job = self
+            .work
+            .run(self.settings.limits.language_file, write, move |outcome| {
+                match outcome {
+                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
+                    Outcome::Finished(Err(error)) => {
+                        eprintln!("addict: {name} was not kept: {error}")
+                    }
+                    Outcome::TimedOut | Outcome::Panicked => {
+                        eprintln!("addict: {name} was not kept")
+                    }
+                }
+                let _ = send.send(Message::SettingWritten(id));
+            });
+        self.lifecycle.writes.insert(id, job);
+        id
     }
 
     /// Settings was opened: clear the lines, empty the key field, ask for the

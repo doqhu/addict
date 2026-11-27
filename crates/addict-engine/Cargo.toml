@@ -25,6 +25,7 @@ reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-
 rusqlite = { version = "=0.41.0", features = ["bundled"] }
 serde_json = "=1.0.151"
 sha2 = "=0.10.9"
+tempfile = "=3.27.0"
 # `rt` for `spawn_blocking`: the checks and the install of a downloaded
 # index leave the runner's thread. `macros` for the runner's `select!`.
 tokio = { version = "=1.53.2", features = ["macros", "rt", "sync", "time"] }

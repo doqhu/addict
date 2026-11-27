@@ -12,9 +12,13 @@ pub mod deadlines;
 pub use capture::ImageRef;
 mod downloads;
 mod import;
+mod lifecycle;
 mod online;
+mod playback;
 
 pub use downloads::{DownloadsView, OfferId, OfferPhase, OfferView, first_run_choice_path};
+pub use lifecycle::FatalView;
+pub use playback::{PlaybackState, PlaybackView};
 mod selection;
 mod settings;
 
@@ -28,6 +32,7 @@ pub use settings::{Bindings, SettingsRead, SettingsView, ShortcutState};
 use std::{
     io,
     ops::Range,
+    panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{Arc, Weak, mpsc},
     thread::{self, JoinHandle},
@@ -36,8 +41,8 @@ use std::{
 use addict_core::{
     dirs::Dirs,
     failure::{
-        Ended, capture::CaptureFailure, file_choice::FileChoiceFailure, recognize::OcrFailure,
-        selection::SelectionFailure,
+        Ended, capture::CaptureFailure, file_choice::FileChoiceFailure, playback::PlaybackFailure,
+        recognize::OcrFailure, selection::SelectionFailure,
     },
     input::{Input, Source, WindowState},
     translation::{English, Source as Language, Translator},
@@ -54,6 +59,7 @@ use addict_engine::{
     history::History,
     language,
     manual::{self, Edit, Manual},
+    recording::Credit,
     view::{Choice, Lookup, OnlineRow, Shown},
     work::{Job, Outcome, Work},
 };
@@ -111,6 +117,22 @@ pub struct SelectionText {
 /// Facts sent to the controller by the shell or made by the user in Settings.
 #[derive(Debug)]
 pub enum Event {
+    /// A pronunciation of the shown article was requested.
+    PlayPressed {
+        article: ArticleId,
+        url: String,
+    },
+    /// The shell's one outcome for a Play effect.
+    Played {
+        id: RequestId,
+        result: Result<(), PlaybackFailure>,
+    },
+    /// A foreground launch or the tray's Show requested the existing panel.
+    Reopened,
+    /// The shell hid the panel.
+    PanelClosed,
+    /// The user asked to leave the application.
+    QuitRequested,
     /// The field holds `text`, which the shell put there itself. `replaced`
     /// is true when a new text was put in rather than typed: a paste, a
     /// read selection or clipboard, a capture. `source` names where a
@@ -279,9 +301,13 @@ pub enum Effect {
     /// Read the primary selection and the clipboard; one
     /// [`Event::SelectionRead`] follows.
     ReadSelection { id: RequestId, read_sequence: u64 },
-    /// Show the window, before the read or after it. Does nothing when the
-    /// press has already shown it.
-    ShowPanel { read_sequence: u64 },
+    /// Present the current panel, or present it for a specific read when
+    /// that read has not already shown it.
+    ShowPanel { read_sequence: Option<u64> },
+    /// Play a local recording. One [`Event::Played`] follows.
+    Play { id: RequestId, path: PathBuf },
+    /// Quit once the pending writes have ended.
+    Quit,
     /// Restore the capture window, with retry focus after a failure.
     PresentCapture { read_sequence: u64, retry: bool },
     /// Record an OCR outcome after the effect has cleaned up.
@@ -350,6 +376,8 @@ pub struct ViewState {
     /// Settings and the OS state beside them, as last known by the controller.
     pub settings: SettingsView,
     pub downloads: DownloadsView,
+    pub playback: Option<PlaybackView>,
+    pub fatal: Option<FatalView>,
 }
 
 impl Default for ViewState {
@@ -378,6 +406,8 @@ impl Default for ViewState {
             looking_up: false,
             answered: None,
             downloads: DownloadsView::default(),
+            playback: None,
+            fatal: None,
             settings: SettingsView {
                 my_language: Language::Ru,
                 reading: Language::En,
@@ -587,6 +617,10 @@ fn start_with_capture(
         settings,
         downloads: downloads::Downloads::new(dirs, release, download_limits),
         import: import::Import::default(),
+        playback: None,
+        lifecycle: lifecycle::Lifecycle::default(),
+        #[cfg(test)]
+        credit_endpoint: None,
         lookup: None,
         answered: None,
     };
@@ -623,6 +657,15 @@ enum Message {
         RequestId,
         Outcome<Result<addict_dictionary::import::Imported, String>>,
     ),
+    AudioReady(RequestId, Outcome<Result<PathBuf, PlaybackFailure>>),
+    CreditReady(RequestId, Outcome<Credit>),
+    SettingWritten(RequestId),
+    #[cfg(test)]
+    CreditEndpoint(String),
+    #[cfg(test)]
+    FieldEditedKeepingArticle(String),
+    #[cfg(test)]
+    Panic,
     Stop,
 }
 
@@ -667,6 +710,10 @@ struct Model {
     settings: settings::Settings,
     downloads: downloads::Downloads,
     import: import::Import,
+    playback: Option<playback::Playback>,
+    lifecycle: lifecycle::Lifecycle,
+    #[cfg(test)]
+    credit_endpoint: Option<String>,
     /// The lookup whose outcome is awaited.
     lookup: Option<Active>,
     /// The language that gave the result of the last started lookup, once
@@ -679,32 +726,72 @@ impl Model {
         self.render(&renderer, Vec::new());
         while let Ok(message) = receive.recv() {
             let mut effects = Vec::new();
-            let changed = match message {
-                Message::Event(event) => self.apply(event, &mut effects),
-                Message::LookedUp(looked) => self.looked_up(looked, &mut effects),
-                Message::Translated(translated) => self.translated(translated, &mut effects),
-                Message::CaptureDeadline(id) => self.capture_deadline(id, &mut effects),
-                Message::SelectionDeadline(id) => self.selection_deadline(id, &mut effects),
-                Message::SettingsRead(read) => self.settings_read(read, &mut effects),
-                Message::CacheFootprint(found) => self.cache_read(found),
-                Message::CacheCleared(reason) => self.cache_cleared(reason),
-                Message::KeySaveDeadline(id) => self.key_save_deadline(id, &mut effects),
-                Message::LoginDeadline(id) => self.login_deadline(id, &mut effects),
-                Message::Downloads(update) => self.update_downloads(update),
-                Message::Imported(id, outcome) => self.imported(id, outcome),
-                Message::Stop => {
-                    self.cancel_read(&mut effects);
-                    self.cancel_capture(&mut effects);
-                    if !effects.is_empty() {
-                        self.render(&renderer, effects);
-                    }
-                    break;
+            if matches!(message, Message::Stop) {
+                self.cancel_read(&mut effects);
+                self.cancel_capture(&mut effects);
+                self.cancel_playback(&mut effects);
+                if !effects.is_empty() {
+                    self.render(&renderer, effects);
                 }
-            };
-            let downloads_changed = self.finish_download_update();
-            if changed || downloads_changed || !effects.is_empty() {
-                self.render(&renderer, effects);
+                break;
             }
+            if self.quit_emitted() {
+                continue;
+            }
+            let handled = catch_unwind(AssertUnwindSafe(|| {
+                let changed = self.handle(message, &mut effects);
+                let downloads_changed = self.finish_download_update();
+                self.cancel_stale_playback(&mut effects);
+                self.finish_quit(&mut effects);
+                if changed || downloads_changed || !effects.is_empty() {
+                    self.render(&renderer, effects);
+                }
+            }));
+            if handled.is_err() {
+                // Rust's panic hook reports the message on stderr. Close
+                // the queue before handing the fatal view to the shell.
+                drop(receive);
+                renderer.render(self.fatal_view(), Vec::new());
+                break;
+            }
+        }
+    }
+
+    fn handle(&mut self, message: Message, effects: &mut Vec<Effect>) -> bool {
+        match message {
+            Message::Event(event) => self.apply(event, effects),
+            Message::LookedUp(looked) => self.looked_up(looked, effects),
+            Message::Translated(translated) => self.translated(translated, effects),
+            Message::CaptureDeadline(id) => self.capture_deadline(id, effects),
+            Message::SelectionDeadline(id) => self.selection_deadline(id, effects),
+            Message::SettingsRead(read) => self.settings_read(read, effects),
+            Message::CacheFootprint(found) => self.cache_read(found),
+            Message::CacheCleared(reason) => self.cache_cleared(reason),
+            Message::KeySaveDeadline(id) => self.key_save_deadline(id, effects),
+            Message::LoginDeadline(id) => self.login_deadline(id, effects),
+            Message::Downloads(update) => self.update_downloads(update),
+            Message::Imported(id, outcome) => self.imported(id, outcome),
+            Message::AudioReady(id, outcome) => self.audio_ready(id, outcome, effects),
+            Message::CreditReady(id, outcome) => self.credit_ready(id, outcome),
+            Message::SettingWritten(id) => {
+                self.lifecycle.writes.remove(&id);
+                false
+            }
+            #[cfg(test)]
+            Message::CreditEndpoint(endpoint) => {
+                self.credit_endpoint = Some(endpoint);
+                false
+            }
+            #[cfg(test)]
+            Message::FieldEditedKeepingArticle(text) => {
+                // Isolate a text change from the result replacement an edit normally starts.
+                self.manual.edit(text.clone());
+                self.set_field(text);
+                true
+            }
+            #[cfg(test)]
+            Message::Panic => panic!("forced controller panic"),
+            Message::Stop => unreachable!("stop is handled by the event loop"),
         }
     }
 
@@ -744,6 +831,8 @@ impl Model {
             answered: self.answered,
             settings: self.settings.view(),
             downloads: self.downloads.view.clone(),
+            playback: self.playback.as_ref().map(|playback| playback.view.clone()),
+            fatal: None,
         }
     }
 
@@ -762,6 +851,20 @@ impl Model {
     /// Applies `event`; says whether the view changed.
     fn apply(&mut self, event: Event, effects: &mut Vec<Effect>) -> bool {
         match event {
+            Event::PlayPressed { article, url } => self.play_pressed(article, url, effects),
+            Event::Played { id, result } => self.played(id, result),
+            Event::Reopened => {
+                self.reopened(effects);
+                false
+            }
+            Event::PanelClosed => {
+                self.panel_closed();
+                false
+            }
+            Event::QuitRequested => {
+                self.quit_requested();
+                false
+            }
             Event::FieldEdited {
                 text,
                 replaced,
@@ -1148,8 +1251,9 @@ impl Model {
 mod tests {
     mod downloads;
     mod import;
+    mod lifecycle;
     mod online;
-
+    mod playback;
     mod selection;
     mod settings;
 
@@ -1821,7 +1925,9 @@ mod tests {
         assert_eq!(view.read_sequence, 1);
         let [
             Effect::Cancel(cancelled),
-            Effect::ShowPanel { read_sequence: 1 },
+            Effect::ShowPanel {
+                read_sequence: Some(1),
+            },
             Effect::ReadSelection { .. },
         ] = effects.as_slice()
         else {
