@@ -36,7 +36,10 @@ dependencies = [
  "addict-deepl",
  "addict-dictionary",
  "addict-engine",
+ "flate2",
  "futures-channel",
+ "lzma-rs",
+ "tokio",
 ]
 
 [[package]]

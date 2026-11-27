@@ -15,6 +15,7 @@ pub const CAPTURE_LIMIT: Duration = Duration::from_secs(300);
 pub const OCR_LIMIT: Duration = Duration::from_secs(15);
 pub const MANIFEST_LIMIT: Duration = Duration::from_secs(60);
 pub const DOWNLOAD_LIMIT: Duration = Duration::from_secs(30 * 60);
+pub const IMPORT_LIMIT: Duration = Duration::from_secs(30 * 60);
 
 pub const CREDIT_LIMIT: Duration = Duration::from_secs(10);
 pub const AUDIO_LIMIT: Duration = Duration::from_secs(20);

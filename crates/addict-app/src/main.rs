@@ -269,7 +269,7 @@ mod stub;
 // in scope for the shell's tests, which still use the same paths.
 #[cfg(test)]
 pub(crate) use addict_engine::cache;
-pub(crate) use addict_engine::{dictionaries, download, evidence, manual, view};
+pub(crate) use addict_engine::{dictionaries, download, evidence, view};
 
 use std::{
     cell::RefCell,

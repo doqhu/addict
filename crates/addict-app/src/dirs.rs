@@ -52,7 +52,7 @@ mod tests {
     use addict_engine::{at_once, cache::Cached, english, language, my_language};
 
     use super::*;
-    use crate::{capture, entries, first_run, gpu};
+    use crate::{capture, entries, gpu};
 
     fn os(text: &str) -> Option<&OsStr> {
         Some(OsStr::new(text))
@@ -196,7 +196,10 @@ mod tests {
                 (my_language::path(config_dir), "my-language"),
                 (english::path(config_dir), "english"),
                 (at_once::path(config_dir), "translate-sentence"),
-                (first_run::path(config_dir), "first-run-download"),
+                (
+                    addict_controller::first_run_choice_path(config_dir),
+                    "first-run-download",
+                ),
                 (entries::startup_file(config_dir), "login-startup"),
                 (entries::shortcut_file(config_dir), "shortcut-generation"),
                 (gpu::path(config_dir), "vulkan-drivers"),

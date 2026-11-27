@@ -10,22 +10,35 @@ mod capture;
 pub mod deadlines;
 
 pub use capture::ImageRef;
+mod downloads;
+mod import;
 mod online;
+
+pub use downloads::{DownloadsView, OfferId, OfferPhase, OfferView, first_run_choice_path};
 mod selection;
 mod settings;
+
+#[cfg(test)]
+#[allow(dead_code)] // The remaining routes are exercised by the engine.
+#[path = "../../addict-engine/src/download/stub.rs"]
+mod stub;
 
 pub use settings::{Bindings, SettingsRead, SettingsView, ShortcutState};
 
 use std::{
     io,
     ops::Range,
+    path::PathBuf,
     sync::{Arc, Weak, mpsc},
     thread::{self, JoinHandle},
 };
 
 use addict_core::{
     dirs::Dirs,
-    failure::{Ended, capture::CaptureFailure, recognize::OcrFailure, selection::SelectionFailure},
+    failure::{
+        Ended, capture::CaptureFailure, file_choice::FileChoiceFailure, recognize::OcrFailure,
+        selection::SelectionFailure,
+    },
     input::{Input, Source, WindowState},
     translation::{English, Source as Language, Translator},
 };
@@ -36,7 +49,7 @@ use addict_deepl::{
 use addict_engine::{
     cache,
     capture::Timing,
-    dictionaries::{Dictionaries, Indexes, Looked},
+    dictionaries::{Dictionaries, Looked},
     evidence::{self, Answered},
     history::History,
     language,
@@ -61,6 +74,7 @@ pub struct Platform {
 pub struct StartFacts {
     pub key: Option<Result<Secret, addict_deepl::key::KeyError>>,
     pub recording: bool,
+    pub release: String,
 }
 
 /// Identity of a controller request, issued in increasing order.
@@ -109,9 +123,13 @@ pub enum Event {
         source: Option<Source>,
     },
     /// The user pressed Capture, or invoked the capture shortcut.
-    CapturePressed { activation_token: Option<String> },
+    CapturePressed {
+        activation_token: Option<String>,
+    },
     /// The hide has settled and the shell is opening the area picker.
-    PickerStarted { id: RequestId },
+    PickerStarted {
+        id: RequestId,
+    },
     /// The current picker returned its opaque image, or a failure.
     AreaCaptured {
         id: RequestId,
@@ -126,7 +144,9 @@ pub enum Event {
     },
     /// Read was pressed: the field is cleared and the selection and the
     /// clipboard are read. `sequence` numbers the press for presentation.
-    ReadPressed { sequence: u64 },
+    ReadPressed {
+        sequence: u64,
+    },
     /// The read of the selection and the clipboard with this id ended, or
     /// was cancelled: the raw texts, or why there is none.
     SelectionRead {
@@ -138,13 +158,25 @@ pub enum Event {
     /// The text of the field was submitted, by Enter or by a paste.
     FieldSubmitted,
     /// The word with this index in the shown sentence was chosen.
-    WordChosen { text: u64, index: usize },
+    WordChosen {
+        text: u64,
+        index: usize,
+    },
     /// The sense with this index in the shown list was chosen.
-    SenseChosen { article: ArticleId, index: usize },
+    SenseChosen {
+        article: ArticleId,
+        index: usize,
+    },
     /// The English gloss with this index in the shown article was chosen.
-    GlossChosen { article: ArticleId, index: usize },
+    GlossChosen {
+        article: ArticleId,
+        index: usize,
+    },
     /// A synonym was chosen: its word goes into the field and is submitted.
-    SynonymChosen { article: ArticleId, word: String },
+    SynonymChosen {
+        article: ArticleId,
+        word: String,
+    },
     /// The English link of the chosen gloss was clicked, submitting its word
     /// with the effective reading language.
     LookUpEnglish {
@@ -205,16 +237,25 @@ pub enum Event {
     ConfigurePressed,
     /// The shell reported a change of the bindings or of the dialog.
     ShortcutChanged(ShortcutState),
-    /// The shell's `IndexCache` stands at `generation`, knowing `indexes`.
-    KnownIndexes {
-        generation: u64,
-        indexes: Option<Indexes>,
+    DownloadPressed,
+    /// The shell has opened the first-run dialog for this offer.
+    OfferPresented(OfferId),
+    OfferDownloadPressed(OfferId),
+    OfferNotNowPressed(OfferId),
+    OfferCancelPressed(OfferId, Option<String>),
+    ImportPressed,
+    FileChosen {
+        id: RequestId,
+        result: Result<PathBuf, FileChoiceFailure>,
     },
     /// Redo the offline result of the shown word and ask its online texts
     /// again.
     AskAgain,
     /// The user explicitly requested the selected dictionary definition.
-    DefinitionAction { article: ArticleId, choice: Choice },
+    DefinitionAction {
+        article: ArticleId,
+        choice: Choice,
+    },
 }
 
 /// Commands for the shell. Lookup and translation use the shared runner.
@@ -248,14 +289,8 @@ pub enum Effect {
         read: evidence::Read,
         timing: Timing,
     },
-    /// The shell's `IndexCache` should check where the indexes stand and
-    /// report back with [`Event::KnownIndexes`]. `index_generation` is the
-    /// generation at emission; a shell refresh newer than this already owns
-    /// it.
-    CheckIndexes { index_generation: u64 },
-    /// A lookup started at `generation` read where the dictionary indexes
-    /// stand; the shell updates its `IndexCache`.
-    ObserveIndexes { generation: u64, indexes: Indexes },
+    /// Open a native file chooser; one [`Event::FileChosen`] follows.
+    ChooseFile { id: RequestId },
     /// A lookup ended; the shell records its evidence.
     RecordLookup(Answered),
     /// An online attempt ended and the shell records its evidence.
@@ -314,6 +349,7 @@ pub struct ViewState {
     pub answered: Option<Language>,
     /// Settings and the OS state beside them, as last known by the controller.
     pub settings: SettingsView,
+    pub downloads: DownloadsView,
 }
 
 impl Default for ViewState {
@@ -341,6 +377,7 @@ impl Default for ViewState {
             context: None,
             looking_up: false,
             answered: None,
+            downloads: DownloadsView::default(),
             settings: SettingsView {
                 my_language: Language::Ru,
                 reading: Language::En,
@@ -405,7 +442,6 @@ pub struct Controller {
     dispatch: Dispatcher,
     thread: Option<JoinHandle<()>>,
     work: Weak<Work>,
-    dictionaries: Arc<Dictionaries>,
     cache: Arc<cache::Store>,
 }
 
@@ -430,11 +466,6 @@ impl Controller {
     /// The one runner instance; the shell's own jobs run on it too.
     pub fn work(&self) -> Weak<Work> {
         self.work.clone()
-    }
-
-    /// The one set of dictionaries; the shell's index checks read it too.
-    pub fn dictionaries(&self) -> Arc<Dictionaries> {
-        self.dictionaries.clone()
     }
 
     /// The translation cache used by requests, exposed for Settings.
@@ -471,6 +502,7 @@ pub fn start(
         translator,
         start_facts.recording,
         source,
+        start_facts.release,
         renderer,
     )
 }
@@ -483,6 +515,7 @@ pub fn start_with_translator(
     translator: impl Translator + 'static,
     recording: bool,
     source: KeySource,
+    release: String,
     renderer: impl Renderer,
 ) -> io::Result<Controller> {
     start_with_capture(
@@ -495,6 +528,10 @@ pub fn start_with_translator(
         capture::Capture::default(),
         selection::Selection::default(),
         None,
+        release,
+        downloads::Limits::default(),
+        #[cfg(test)]
+        downloads::ReadGates::default(),
         renderer,
     )
 }
@@ -510,6 +547,9 @@ fn start_with_capture(
     capture: capture::Capture,
     selection: selection::Selection,
     read_gate: Option<Arc<settings::ReadGate>>,
+    release: String,
+    download_limits: downloads::Limits,
+    #[cfg(test)] read_gates: downloads::ReadGates,
     renderer: impl Renderer,
 ) -> io::Result<Controller> {
     let work = Arc::new(Work::start()?);
@@ -517,7 +557,7 @@ fn start_with_capture(
     let mut settings = settings::Settings::with_limits(&dirs, source, settings_limits);
     settings.set_read_gate(read_gate);
     let dictionaries = Arc::new(Dictionaries::new(dirs.data.clone()));
-    let translator = cache::Cached::new(translator, dirs.cache);
+    let translator = cache::Cached::new(translator, dirs.cache.clone());
     let cache = translator.store();
     let (send, receive) = mpsc::channel();
     let mut model = Model {
@@ -529,7 +569,7 @@ fn start_with_capture(
         ),
         work,
         cache: cache.clone(),
-        dictionaries: dictionaries.clone(),
+        dictionaries,
         send: send.clone(),
         request: 0,
         revision: 0,
@@ -545,11 +585,16 @@ fn start_with_capture(
         shown: Shown::default(),
         choice_revision: 0,
         settings,
-        known: None,
-        index_generation: 0,
+        downloads: downloads::Downloads::new(dirs, release, download_limits),
+        import: import::Import::default(),
         lookup: None,
         answered: None,
     };
+    #[cfg(test)]
+    {
+        model.downloads.read_gates = read_gates;
+    }
+    model.start_index_check();
     model.start_settings_read();
     let thread = thread::Builder::new()
         .name("addict-controller".to_owned())
@@ -558,7 +603,6 @@ fn start_with_capture(
         dispatch: Dispatcher(send),
         thread: Some(thread),
         work: worker,
-        dictionaries,
         cache,
     })
 }
@@ -574,15 +618,20 @@ enum Message {
     CacheCleared(Option<String>),
     KeySaveDeadline(RequestId),
     LoginDeadline(RequestId),
+    Downloads(downloads::Update),
+    Imported(
+        RequestId,
+        Outcome<Result<addict_dictionary::import::Imported, String>>,
+    ),
     Stop,
 }
 
 /// The end of the lookup `id`, started as `Manual`'s run `run` while the
-/// shell's indexes stood at `generation`, answered by `language`.
+/// indexes stood at `generation`, answered by `language`.
 struct LookedUp {
     id: RequestId,
     run: u64,
-    generation: u64,
+    generation: Option<u64>,
     language: Language,
     outcome: Box<Outcome<Looked>>,
 }
@@ -616,10 +665,8 @@ struct Model {
     shown: Shown,
     choice_revision: u64,
     settings: settings::Settings,
-    /// What the shell's `IndexCache` knows of the indexes, and its
-    /// generation.
-    known: Option<Indexes>,
-    index_generation: u64,
+    downloads: downloads::Downloads,
+    import: import::Import,
     /// The lookup whose outcome is awaited.
     lookup: Option<Active>,
     /// The language that gave the result of the last started lookup, once
@@ -643,6 +690,8 @@ impl Model {
                 Message::CacheCleared(reason) => self.cache_cleared(reason),
                 Message::KeySaveDeadline(id) => self.key_save_deadline(id, &mut effects),
                 Message::LoginDeadline(id) => self.login_deadline(id, &mut effects),
+                Message::Downloads(update) => self.update_downloads(update),
+                Message::Imported(id, outcome) => self.imported(id, outcome),
                 Message::Stop => {
                     self.cancel_read(&mut effects);
                     self.cancel_capture(&mut effects);
@@ -652,7 +701,8 @@ impl Model {
                     break;
                 }
             };
-            if changed || !effects.is_empty() {
+            let downloads_changed = self.finish_download_update();
+            if changed || downloads_changed || !effects.is_empty() {
                 self.render(&renderer, effects);
             }
         }
@@ -693,6 +743,7 @@ impl Model {
             looking_up: self.lookup.is_some(),
             answered: self.answered,
             settings: self.settings.view(),
+            downloads: self.downloads.view.clone(),
         }
     }
 
@@ -785,7 +836,12 @@ impl Model {
                 self.forward(effects) || changed
             }
             Event::ReadingChosen(language) => self.choose_reading(language, effects),
-            Event::MyLanguageChosen(language) => self.choose_my_language(language, effects),
+            Event::MyLanguageChosen(language) => {
+                if language != self.settings.my_language {
+                    self.download_language_chosen();
+                }
+                self.choose_my_language(language, effects)
+            }
             Event::SetPressed(language) => {
                 self.shown.set_pressed(language);
                 true
@@ -820,14 +876,16 @@ impl Model {
             Event::RetryPressed => self.retry_pressed(effects),
             Event::ConfigurePressed => self.configure_pressed(effects),
             Event::ShortcutChanged(state) => self.shortcut_changed(state),
-            Event::KnownIndexes {
-                generation,
-                indexes,
-            } => {
-                self.index_generation = generation;
-                self.known = indexes;
+            Event::DownloadPressed => self.settings_download(),
+            Event::OfferPresented(id) => {
+                self.offer_presented(id);
                 false
             }
+            Event::OfferDownloadPressed(id) => self.offer_download(id),
+            Event::OfferNotNowPressed(id) => self.offer_not_now(id),
+            Event::OfferCancelPressed(id, name) => self.offer_cancel(id, name),
+            Event::ImportPressed => self.import_pressed(effects),
+            Event::FileChosen { id, result } => self.file_chosen(id, result),
             Event::AskAgain => self.ask_again(effects),
             Event::DefinitionAction { article, choice } => {
                 article == self.article_id()
@@ -861,7 +919,7 @@ impl Model {
         if replaced && edit != Edit::Same {
             self.history.record(self.manual.sentence());
         }
-        self.text_replaced(edit, effects);
+        self.text_replaced(edit);
         if replaced && source == Some(Source::Clipboard) && self.online.at_once {
             self.ask_whole(effects);
         }
@@ -878,14 +936,14 @@ impl Model {
         self.selection.source_failure = None;
         let edit = self.manual.edit(String::new());
         self.set_field(String::new());
-        self.text_replaced(edit, effects);
+        self.text_replaced(edit);
         true
     }
 
     /// What follows a new text in the field: a lone word is looked up at
     /// once; a new text with no word chosen hides the result, and the
     /// lookup of the old one is given up.
-    fn text_replaced(&mut self, edit: Edit, effects: &mut Vec<Effect>) {
+    fn text_replaced(&mut self, edit: Edit) {
         if edit != Edit::Same {
             self.reset_online();
         }
@@ -898,7 +956,7 @@ impl Model {
                 self.answered = None;
                 self.shown.show(None);
             }
-            Edit::Lone(run) => self.start_lookup(run, effects),
+            Edit::Lone(run) => self.start_lookup(run),
         }
     }
 
@@ -908,7 +966,7 @@ impl Model {
         let Some(run) = self.manual.choose(index) else {
             return false;
         };
-        self.start_lookup(run, effects);
+        self.start_lookup(run);
         self.ask_word(index, effects);
         true
     }
@@ -970,10 +1028,10 @@ impl Model {
     fn put(&mut self, text: String, effects: &mut Vec<Effect>) -> bool {
         // A paste replaces the text with none first, then with the new one.
         let cleared = self.manual.edit(String::new());
-        self.text_replaced(cleared, effects);
+        self.text_replaced(cleared);
         let edit = self.manual.edit(text.clone());
         self.set_field(text);
-        self.text_replaced(edit, effects);
+        self.text_replaced(edit);
         self.submitted(effects)
     }
 
@@ -987,7 +1045,7 @@ impl Model {
     /// Redoes the offline result of the shown word and its online texts.
     fn ask_again(&mut self, effects: &mut Vec<Effect>) -> bool {
         if let Some(run) = self.manual.again() {
-            self.start_lookup(run, effects);
+            self.start_lookup(run);
         }
         self.ask_online_again(effects);
         true
@@ -997,7 +1055,7 @@ impl Model {
     /// `run`, superseding any earlier one; for a reading language without
     /// an offline dictionary no lookup starts, and the line that says so is
     /// shown.
-    fn start_lookup(&mut self, run: u64, effects: &mut Vec<Effect>) {
+    fn start_lookup(&mut self, run: u64) {
         // Dropping the old job cancels it. Any outcome already queued still
         // carries its old request id and run.
         self.lookup = None;
@@ -1010,7 +1068,7 @@ impl Model {
         let id = self.next_request();
         let send = self.send.clone();
         let language = self.settings.reading();
-        let generation = self.index_generation;
+        let generation = self.downloads.lookup_generation();
         let started = manual::offline(
             Some(&self.work),
             deadlines::LOOKUP_LIMIT,
@@ -1018,7 +1076,7 @@ impl Model {
             word,
             language,
             self.settings.my_language,
-            self.known,
+            self.downloads.indexes.known,
             move |language, outcome| {
                 // On the worker: only the queue is touched.
                 let _ = send.send(Message::LookedUp(LookedUp {
@@ -1039,9 +1097,7 @@ impl Model {
                 let checks = manual::checks_again(&lookup, language);
                 self.shown.show(Some(*lookup));
                 if checks {
-                    effects.push(Effect::CheckIndexes {
-                        index_generation: generation,
-                    });
+                    self.start_index_check();
                 }
             }
         }
@@ -1059,18 +1115,18 @@ impl Model {
             language,
             outcome,
         } = looked;
-        if let Outcome::Finished(looked) = outcome.as_ref() {
-            effects.push(Effect::ObserveIndexes {
-                generation,
-                indexes: looked.indexes,
-            });
-        }
+        let observed =
+            if let (Some(generation), Outcome::Finished(looked)) = (generation, outcome.as_ref()) {
+                self.observe_indexes(generation, looked.indexes)
+            } else {
+                false
+            };
         if let Some(answered) = evidence::answered(&outcome) {
             effects.push(Effect::RecordLookup(answered));
         }
         let current = self.lookup.as_ref().is_some_and(|active| active.id == id);
         if !current || !self.manual.awaits(run) {
-            return false;
+            return observed;
         }
         self.lookup = None;
         let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
@@ -1090,7 +1146,10 @@ impl Model {
 
 #[cfg(test)]
 mod tests {
+    mod downloads;
+    mod import;
     mod online;
+
     mod selection;
     mod settings;
 
@@ -1105,9 +1164,12 @@ mod tests {
     use addict_core::translation::{Refusal, Request, Source as Language, Translating};
     use addict_dictionary::{
         format::{Contents, Headword, SenseRecord, encode},
-        import::{self, Source as IndexSource},
+        import::{self as dictionary_import, Source as IndexSource},
     };
-    use addict_engine::view::{Online, OnlineKind, OnlineState};
+    use addict_engine::{
+        dictionaries::Indexes,
+        view::{Online, OnlineKind, OnlineState},
+    };
     use futures_channel::oneshot;
 
     use super::*;
@@ -1115,11 +1177,6 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(5);
     const DEFINITION: &str = "the ground alongside a river";
     const RIVER: &str = "a large natural stream of water";
-    /// What a check finds after the Spanish import.
-    const SPANISH: Indexes = Indexes {
-        spanish: addict_engine::dictionaries::State::Open,
-        ..Indexes::OPEN
-    };
     static TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
     /// A data directory with an English index of `bank` and `river`, and on
@@ -1229,7 +1286,7 @@ mod tests {
 
         fn write(&self, source: IndexSource, contents: Contents) {
             fs::write(
-                import::index_path(&self.0, source),
+                dictionary_import::index_path(&self.0, source),
                 encode(&contents).unwrap(),
             )
             .unwrap();
@@ -1339,6 +1396,37 @@ mod tests {
             read_before_show: bool,
             read_gate: Option<Arc<crate::settings::ReadGate>>,
         ) -> Self {
+            Self::with_downloads(
+                dirs,
+                translator,
+                recording,
+                source,
+                limits,
+                capture,
+                selection,
+                read_before_show,
+                read_gate,
+                String::new(),
+                crate::downloads::Limits::default(),
+                crate::downloads::ReadGates::default(),
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn with_downloads(
+            dirs: Dirs,
+            translator: impl Translator + 'static,
+            recording: bool,
+            source: KeySource,
+            limits: crate::settings::Limits,
+            capture: capture::Capture,
+            selection: crate::selection::Selection,
+            read_before_show: bool,
+            read_gate: Option<Arc<crate::settings::ReadGate>>,
+            release: String,
+            download_limits: crate::downloads::Limits,
+            read_gates: crate::downloads::ReadGates,
+        ) -> Self {
             let caller = thread::current().id();
             let (send, renders) = mpsc::channel();
             let controller = start_with_capture(
@@ -1355,6 +1443,9 @@ mod tests {
                 capture,
                 selection,
                 read_gate,
+                release,
+                download_limits,
+                read_gates,
                 move |view, effects| {
                     assert_ne!(thread::current().id(), caller);
                     send.send((view, effects)).unwrap();
@@ -1398,7 +1489,7 @@ mod tests {
                 let (view, effects) = shell.next();
                 assert_eq!(view.field, Field::default());
                 assert!(effects.is_empty());
-                if view.settings.languages_read {
+                if view.settings.languages_read && view.downloads.indexes.is_some() {
                     break;
                 }
             }
@@ -1415,6 +1506,25 @@ mod tests {
             assert!(view.revision > self.revision);
             self.revision = view.revision;
             (view, effects)
+        }
+
+        fn wait_for(&mut self, condition: impl Fn(&ViewState) -> bool) -> ViewState {
+            self.wait_for_within(WAIT, condition)
+        }
+
+        fn wait_for_within(
+            &mut self,
+            limit: Duration,
+            condition: impl Fn(&ViewState) -> bool,
+        ) -> ViewState {
+            let deadline = std::time::Instant::now() + limit;
+            loop {
+                let (view, _) =
+                    self.next_within(deadline.saturating_duration_since(std::time::Instant::now()));
+                if condition(&view) {
+                    return view;
+                }
+            }
         }
 
         /// Renders until the lookup of the chosen word has ended.
@@ -1862,10 +1972,9 @@ mod tests {
         assert_eq!(article_definition(&completed), DEFINITION);
         assert_eq!(completed.answered, Some(Language::En));
         assert!(effects.contains(&Effect::RecordLookup(Answered::Article)));
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::ObserveIndexes { generation: 0, .. }))
+        assert_eq!(
+            completed.downloads.indexes.unwrap().definitions,
+            addict_engine::dictionaries::State::Open
         );
         assert!(completed.online.is_empty(), "no DeepL");
 
@@ -1879,7 +1988,19 @@ mod tests {
 
     #[test]
     fn a_replaced_lookup_cannot_settle_the_new_one_and_a_refusal_asks_for_indexes() {
-        let mut shell = FakeShell::start(None);
+        let (checked, checks) = mpsc::channel();
+        let mut shell = downloads::shell(
+            Dirs::default(),
+            String::new(),
+            None,
+            crate::downloads::ReadGates {
+                checked: Some(checked),
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        shell.wait_for(|view| view.settings.languages_read && view.downloads.indexes.is_some());
+        checks.recv_timeout(WAIT).expect("startup index check");
         // Hold the worker while both edits are handled on the controller.
         let (release, _gate) = shell.hold_worker();
         shell.edit("bank");
@@ -1896,9 +2017,9 @@ mod tests {
             .dispatch
             .0
             .send(Message::LookedUp(LookedUp {
-                id: RequestId(1),
+                id: RequestId(3),
                 run: 1,
-                generation: 0,
+                generation: Some(0),
                 language: Language::En,
                 outcome: Box::new(Outcome::Panicked),
             }))
@@ -1915,10 +2036,7 @@ mod tests {
         );
 
         // A missing dictionary starts no job and asks for the indexes.
-        shell.dispatch(Event::KnownIndexes {
-            generation: 7,
-            indexes: Some(Indexes::MISSING),
-        });
+        assert_eq!(checks.try_recv(), Err(mpsc::TryRecvError::Empty));
         shell.dispatch(Event::ReadingChosen(Language::Es));
         let (refused, effects) = shell.next();
         assert_eq!(
@@ -1926,14 +2044,15 @@ mod tests {
             Some(&Lookup::NoDictionary(Language::Es))
         );
         assert!(!refused.looking_up);
-        assert!(effects.contains(&Effect::CheckIndexes {
-            index_generation: 7
-        }));
+        assert_eq!(refused.downloads.indexes, Some(Indexes::MISSING));
         assert!(
             !effects
                 .iter()
                 .any(|effect| matches!(effect, Effect::RecordLookup(_)))
         );
+        checks
+            .recv_timeout(WAIT)
+            .expect("index check after refusal");
     }
 
     #[test]
@@ -2027,9 +2146,9 @@ mod tests {
             .dispatch
             .0
             .send(Message::LookedUp(LookedUp {
-                id: RequestId(1),
+                id: RequestId(2),
                 run: 2,
-                generation: 0,
+                generation: Some(0),
                 language: Language::En,
                 outcome: Box::new(Outcome::Panicked),
             }))
@@ -2108,10 +2227,6 @@ mod tests {
     fn picking_a_gloss_requests_its_definition_and_records_nothing() {
         let data = TestData::with_banco();
         let (mut shell, asked) = FakeShell::scripted(Some(data.0.clone()), false);
-        shell.quiet(Event::KnownIndexes {
-            generation: 0,
-            indexes: Some(SPANISH),
-        });
         shell.dispatch(Event::ReadingChosen(Language::Es));
         shell.next();
         shell.edit("banco");
@@ -2281,10 +2396,6 @@ mod tests {
     fn a_change_of_language_redoes_the_lookup_and_asks_again() {
         let data = TestData::with_banco();
         let mut shell = FakeShell::start(Some(data.0.clone()));
-        shell.quiet(Event::KnownIndexes {
-            generation: 0,
-            indexes: Some(SPANISH),
-        });
         shell.edit("banco");
         let (english, _) = shell.settled();
         assert_eq!(english.answered, Some(Language::Es), "found elsewhere");

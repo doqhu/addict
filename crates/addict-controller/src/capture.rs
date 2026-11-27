@@ -254,7 +254,7 @@ impl Model {
                 self.set_field(self.manual.sentence().to_owned());
                 self.ocr_field_revision = Some(self.field.revision);
                 self.history.record(self.manual.sentence());
-                self.text_replaced(edit, effects);
+                self.text_replaced(edit);
                 (Read::Recognized, false)
             }
             Err(failure) => {

@@ -873,7 +873,7 @@ fn stale_completions_record_evidence_and_cancelled_jobs_leave_no_rows_or_record(
         .dispatch
         .0
         .send(crate::online::finished_word(
-            RequestId(3),
+            RequestId(4),
             typed.text_number,
             BANK,
             1,
@@ -900,7 +900,7 @@ fn stale_completions_record_evidence_and_cancelled_jobs_leave_no_rows_or_record(
         .dispatch
         .0
         .send(crate::online::finished_word(
-            RequestId(5),
+            RequestId(6),
             typed.text_number,
             RIVER_WORD,
             3,
@@ -1022,10 +1022,6 @@ fn a_controller_translation_times_out_and_can_be_retried() {
 fn an_english_gloss_link_submits_its_replacement_without_sending_the_old_word_again() {
     let data = TestData::with_banco();
     let (mut shell, asked) = FakeShell::scripted(Some(data.0.clone()), false);
-    shell.quiet(Event::KnownIndexes {
-        generation: 0,
-        indexes: Some(SPANISH),
-    });
     shell.dispatch(Event::ReadingChosen(Language::Es));
     shell.next();
     shell.edit("banco");
@@ -1084,7 +1080,7 @@ fn an_english_gloss_link_submits_its_replacement_without_sending_the_old_word_ag
     assert_cancelled(&old);
     assert_cancelled(&gloss);
     current.send(Ok("берег".into())).unwrap();
-    let (translated, _) = shell.next();
+    let translated = shell.wait_for(|view| !pending(view, OnlineKind::Lone));
     assert_eq!(translated.online[0].line, "берег");
 }
 

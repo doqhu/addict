@@ -8,6 +8,7 @@ use addict_core::failure::{
     key_store::KeyStoreFailure,
     login_item::{StartupEnd, StartupFailure},
 };
+use addict_core::translation::Source;
 use addict_deepl::key::{KeyError, WriteError};
 
 use super::{Binding, failure_reason};
@@ -280,4 +281,20 @@ pub fn failed_end_focus(binding: &Binding) -> FailedEndFocus {
         Binding::NotBound { .. } => FailedEndFocus::Retry,
         Binding::Attempting | Binding::Bound => FailedEndFocus::Capture,
     }
+}
+
+/// The name of a language in the my-language row. No wildcard arm: a new
+/// language does not compile until it is named.
+pub fn my_language_name(language: Source) -> &'static str {
+    match language {
+        Source::En => "English",
+        Source::Es => "Spanish",
+        Source::Ca => "Catalan",
+        Source::Ru => "Russian",
+    }
+}
+
+/// The names of the my-language row, in the order of its choices.
+pub fn my_language_names() -> Vec<&'static str> {
+    Source::ALL.into_iter().map(my_language_name).collect()
 }

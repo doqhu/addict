@@ -148,7 +148,7 @@ impl Model {
                 if edit != Edit::Same {
                     self.history.record(self.manual.sentence());
                 }
-                self.text_replaced(edit, effects);
+                self.text_replaced(edit);
                 // With Translate sentence at once on, a text of more words
                 // is asked for online as a whole sentence, and nothing else.
                 if self.online.at_once {

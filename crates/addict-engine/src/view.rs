@@ -23,6 +23,8 @@
 //! widget: `View` puts the results into its own.
 
 mod capture;
+pub mod file_choice;
+pub mod first_run;
 mod recognize;
 mod selection;
 pub mod settings;

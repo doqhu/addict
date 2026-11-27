@@ -9,8 +9,11 @@ publish.workspace = true
 [dependencies]
 addict-core = { path = "../addict-core" }
 addict-deepl = { path = "../addict-deepl" }
+addict-dictionary = { path = "../addict-dictionary" }
 addict-engine = { path = "../addict-engine" }
+futures-channel = "0.3"
 
 [dev-dependencies]
-addict-dictionary = { path = "../addict-dictionary" }
-futures-channel = "0.3"
+flate2 = "=1.1.10"
+lzma-rs = "=0.3.0"
+tokio = { version = "=1.53.2", features = ["macros", "rt", "io-util", "net"] }

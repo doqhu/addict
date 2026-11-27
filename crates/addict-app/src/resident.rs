@@ -4,10 +4,9 @@
 //! This module owns the GTK application, its uniqueness, the window with its
 //! close and Esc handling, and the order of what happens on each event of the
 //! shortcut worker, of Retry, of a repeated launch, of the field and of a
-//! lookup, which runs on the work runner and comes back as an event. The
-//! dictionary indexes are opened and read there too: where they stand is
-//! asked once at the start and comes with the outcome of every lookup, and
-//! the window says it whenever one is missing or unreadable.
+//! lookup. The controller supplies the dictionary inventory, the offer and
+//! its progress, and Settings' import and download lines. This module
+//! renders them and opens the native file chooser when asked.
 //!
 //! The module keeps the shown result with the sense chosen in it, and a
 //! click on a sense only changes that choice.
@@ -157,11 +156,10 @@ use std::{
 
 use addict_controller::{
     self as controller, ArticleId, Bindings as ControllerBindings, Controller, Dispatcher, Effect,
-    Platform, RequestId, ShortcutState, StartFacts, ViewState,
+    OfferId, OfferPhase, Platform, RequestId, ShortcutState, StartFacts, ViewState,
     deadlines::{
-        AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CREDIT_LIMIT, DOWNLOAD_LIMIT,
-        FIRST_RUN_FILE_LIMIT, KEY_SAVE_LIMIT, LOOKUP_LIMIT, MANIFEST_LIMIT, STARTUP_LIMIT,
-        STARTUP_READ_LIMIT,
+        AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CREDIT_LIMIT, KEY_SAVE_LIMIT,
+        STARTUP_LIMIT, STARTUP_READ_LIMIT,
     },
 };
 use addict_core::{
@@ -178,7 +176,6 @@ use addict_core::{
     translation::{Source as Language, reading_languages},
 };
 use addict_deepl::key::{self, KeyError, Secret, WriteError};
-use addict_dictionary::release::{Manifest, Published};
 use addict_engine::{
     recording::{AudioFailure, fetch_audio},
     work::{Job, Outcome, Work},
@@ -197,12 +194,8 @@ use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     about::About,
-    capture,
-    dictionaries::{Articles, Dictionaries, Indexes},
-    download::{self, Downloader},
-    entries, evidence,
-    first_run::{self, Offer},
-    manual,
+    capture, download, entries, evidence, file_import,
+    first_run::Offer,
     recording::Recording,
     settings::{self, Settings},
     style,
@@ -271,32 +264,6 @@ enum Event {
     /// A setting was changed in the window, or an OS effect answered: the
     /// controller decides everything that follows.
     Setting(controller::Event),
-    /// The check at the start says where the dictionary indexes stand.
-    Indexes {
-        generation: u64,
-        indexes: Indexes,
-    },
-    /// The post-import check finished off-thread. Acknowledge only after
-    /// the resident cache and view have received these states.
-    ImportRefreshing(oneshot::Sender<u64>),
-    Imported(ImportCompletion),
-    SettingsDownload,
-    RecoveryPrepared(u64, Outcome<Result<Manifest, String>>),
-    /// The first-run offer to download a dictionary is due; this is the
-    /// manifest of the published indexes.
-    FirstRunOffer(u64, Manifest),
-    /// Download was pressed in the first-run dialog.
-    FirstRunDownload(u64),
-    /// Not now was pressed in the first-run dialog.
-    FirstRunNotNow(u64),
-    /// This many bytes of the asset of the named index came.
-    FirstRunProgress(u64, String, u64),
-    /// Cancel was pressed on the row of the named index, or, with `None`,
-    /// the dialog's own.
-    FirstRunCancel(u64, Option<String>),
-    /// The download and the install of the named index ended: its path, or
-    /// why not, in one line.
-    FirstRunInstalled(u64, String, Outcome<Result<std::path::PathBuf, String>>),
     /// Capture was pressed.
     Capture,
     /// The window hidden for a capture is off the screen.
@@ -463,7 +430,6 @@ struct Session {
     /// upgrades when the runner could not be started.
     work: WorkRef<Work>,
     controller: Option<Dispatcher>,
-    articles: Arc<dyn Articles>,
     /// Where the Linux key file is, for the `StoreKey` effect.
     key_file: Option<PathBuf>,
     /// The jobs of the settings effects; each is kept until its one result
@@ -471,116 +437,16 @@ struct Session {
     store_job: Option<Job>,
     startup_job: Option<Job>,
     startup_read_job: Option<Job>,
-    /// A user choice of my language made before the files were read; its
-    /// side effects run when they are, and only for that choice.
-    my_choice_pending: Option<(Language, u64)>,
     /// The Settings window, reached from the main window or tray.
     settings: Settings,
     /// The About window, which the tray shows.
     about: About,
-    /// The check of the indexes at the start, or the last one a Spanish or
-    /// Catalan word without its indexes asked for, which replaces any still running;
-    /// dropping it cancels the check.
-    check: Option<Job>,
-    /// Where the indexes stood when last asked, by a check or a lookup;
-    /// `None` until the first answer.
-    indexes: IndexCache,
     /// Where the capture stands.
     capturing: Capturing,
     /// Where the read of the selection and the clipboard of a press stands.
     copying: Copying,
-    /// Where the first-run offer to download a dictionary stands.
-    first_run: FirstRun,
-    download_run: u64,
-    /// Where the dictionaries are downloaded from: [`download::BASE_URL`],
-    /// a stub in the tests.
-    release: String,
-    /// Independent of recovery, which must never cancel a remembered choice.
-    first_run_choice: Option<Job>,
-}
-
-/// Reject checks and lookups that started before an in-app import's
-/// refresh. A late old answer must not put Missing back in the cache.
-#[derive(Default)]
-struct IndexCache {
-    generation: u64,
-    known: Option<Indexes>,
-    known_generation: u64,
-}
-
-impl IndexCache {
-    fn update(&mut self, generation: u64, indexes: Indexes) -> bool {
-        if generation != self.generation {
-            return false;
-        }
-        self.known = Some(indexes);
-        self.known_generation = generation;
-        true
-    }
-
-    fn current(&self) -> Option<Indexes> {
-        self.known
-            .filter(|_| self.known_generation == self.generation)
-    }
-
-    fn begin_import(&mut self) -> u64 {
-        self.generation += 1;
-        self.generation
-    }
-}
-
-struct ImportCompletion {
-    generation: u64,
-    indexes: Indexes,
-    ready: oneshot::Sender<()>,
-}
-
-impl ImportCompletion {
-    fn apply(self, apply: impl FnOnce(u64, Indexes)) {
-        apply(self.generation, self.indexes);
-        let _ = self.ready.send(());
-    }
-}
-
-/// Where the first-run offer of a [`Session`] stands. When the index check
-/// and my-language read have resolved, the runner reads the choice file and
-/// fetches the manifest if all required indexes are missing. The dialog
-/// waits for a visible window on a `--background` launch.
-enum FirstRun {
-    /// Waiting for the startup results.
-    Unasked,
-    /// The choice file is read and the manifest fetched; dropping the job
-    /// gives them up.
-    Asking {
-        _job: Job,
-    },
-    Preparing {
-        _job: Job,
-    },
-    /// The offer is due and waits for the window to be shown.
-    Pending(Manifest),
-    /// The dialog is shown and waits for a press.
-    Shown {
-        offer: Offer,
-        manifest: Manifest,
-        recovery: bool,
-    },
-    /// Download was pressed: the indexes of the queue are installed one
-    /// after another into `dir`. `running` is the index whose job runs;
-    /// dropping the job gives that one up.
-    Installing {
-        offer: Offer,
-        queue: first_run::Queue,
-        dir: std::path::PathBuf,
-        running: Option<(String, Job)>,
-        recovery: bool,
-    },
-    /// The install ended, and the dialog says how.
-    Ended {
-        _offer: Offer,
-    },
-    /// Nothing is offered in this run.
-    Done,
+    /// The dialog rendered from the current offer, if its parent was shown.
+    download_offer: Option<(OfferId, Offer)>,
 }
 
 /// GTK presentation state and cancellation handles for controller effects.
@@ -623,8 +489,7 @@ struct ClipboardRead {
 impl Session {
     fn handle(&mut self, event: Event) {
         self.dispatch(event);
-        self.first_indexes();
-        self.offer_when_shown();
+        self.show_download_offer();
     }
 
     fn dispatch(&mut self, event: Event) {
@@ -658,54 +523,6 @@ impl Session {
                 self.look_up_english(article, index, word)
             }
             Event::Controller(state, effects) => self.render_controller(*state, effects),
-            Event::Indexes {
-                generation,
-                indexes,
-            } => {
-                if self.indexes.update(generation, indexes) {
-                    self.check = None;
-                    self.view
-                        .render_indexes(indexes, self.view_state.settings.my_language);
-                    self.relist_first_run();
-                    self.report_indexes();
-                }
-            }
-            Event::ImportRefreshing(ready) => {
-                self.check = None;
-                let _ = ready.send(self.indexes.begin_import());
-                self.report_indexes();
-            }
-            Event::Imported(completed) => completed.apply(|generation, indexes| {
-                if self.indexes.update(generation, indexes) {
-                    self.check = None;
-                    self.view
-                        .render_indexes(indexes, self.view_state.settings.my_language);
-                    self.relist_first_run();
-                    self.report_indexes();
-                }
-            }),
-            Event::SettingsDownload => self.settings_download(),
-            Event::RecoveryPrepared(run, outcome) => self.recovery_prepared(run, outcome),
-            Event::FirstRunOffer(run, manifest) if run == self.download_run => {
-                self.first_run_offer(manifest)
-            }
-            Event::FirstRunDownload(run) if run == self.download_run => self.first_run_download(),
-            Event::FirstRunNotNow(run) if run == self.download_run => self.first_run_not_now(),
-            Event::FirstRunProgress(run, name, received) if run == self.download_run => {
-                self.first_run_progress(&name, received)
-            }
-            Event::FirstRunCancel(run, name) if run == self.download_run => {
-                self.first_run_cancel(name)
-            }
-            Event::FirstRunInstalled(run, name, outcome) if run == self.download_run => {
-                self.first_run_installed(&name, outcome)
-            }
-            Event::FirstRunOffer(..)
-            | Event::FirstRunDownload(..)
-            | Event::FirstRunNotNow(..)
-            | Event::FirstRunProgress(..)
-            | Event::FirstRunCancel(..)
-            | Event::FirstRunInstalled(..) => {}
             Event::Capture => self.capture(None),
             Event::Hidden(id) => self.capture_hidden(id),
             Event::CaptureFinished(id, result) => {
@@ -727,529 +544,6 @@ impl Session {
 
     /// Asks for the offer once startup has the language and index results.
     /// An offer still waiting for the manifest or window uses the latest
-    /// accepted index snapshot.
-    fn first_indexes(&mut self) {
-        if !matches!(
-            self.first_run,
-            FirstRun::Unasked | FirstRun::Asking { .. } | FirstRun::Pending(_)
-        ) || !self.view_state.settings.languages_read
-        {
-            return;
-        }
-        let Some(indexes) = self.indexes.current() else {
-            return;
-        };
-        let my = self.view_state.settings.my_language;
-        let due = first_run::should_offer(&indexes, my, false);
-        match self.first_run {
-            FirstRun::Unasked if self.check.is_some() => {}
-            FirstRun::Unasked if due => {
-                self.download_run += 1;
-                self.first_run =
-                    self.work
-                        .upgrade()
-                        .map_or(FirstRun::Done, |work| FirstRun::Asking {
-                            _job: start_first_run(
-                                &work,
-                                Downloader::with_base_url(self.release.clone()),
-                                first_run::path(self.dirs.config.as_deref()),
-                                indexes,
-                                my,
-                                &self.sender,
-                                self.download_run,
-                            ),
-                        });
-            }
-            FirstRun::Unasked => self.first_run = FirstRun::Done,
-            FirstRun::Pending(_) | FirstRun::Asking { .. } if !due => {
-                self.first_run = FirstRun::Done;
-            }
-            _ => {}
-        }
-    }
-
-    /// The offer is due: it waits for the window, with every index of
-    /// `manifest`. A manifest without an index offers nothing.
-    fn first_run_offer(&mut self, manifest: Manifest) {
-        if !matches!(self.first_run, FirstRun::Asking { .. }) {
-            return;
-        }
-        self.first_run = if manifest.indexes.is_empty() {
-            eprintln!("addict: no dictionary download is offered: the manifest lists no index");
-            FirstRun::Done
-        } else {
-            FirstRun::Pending(manifest)
-        };
-    }
-
-    /// Shows the dialog of a pending offer once the window is shown.
-    fn offer_when_shown(&mut self) {
-        if !matches!(self.first_run, FirstRun::Pending(_))
-            || !self.window.is_visible()
-            || self.indexes.current().is_none()
-        {
-            return;
-        }
-        let FirstRun::Pending(manifest) = std::mem::replace(&mut self.first_run, FirstRun::Done)
-        else {
-            return;
-        };
-        self.show_download_offer(manifest, false);
-    }
-
-    fn show_download_offer(&mut self, manifest: Manifest, recovery: bool) {
-        let download = self.sender.clone();
-        let not_now = self.sender.clone();
-        let cancel = self.sender.clone();
-        let chosen = self.sender.clone();
-        let run = self.download_run;
-        let (listed, my) = if recovery {
-            (self.recovery_indexes(&manifest), None)
-        } else {
-            (
-                self.first_run_indexes(&manifest),
-                Some(self.view_state.settings.my_language),
-            )
-        };
-        let parent: &gtk::Window = if recovery {
-            self.settings.window()
-        } else {
-            self.window.upcast_ref()
-        };
-        let offer = Offer::new(
-            parent,
-            &listed,
-            recovery,
-            my,
-            move |language| {
-                let _ = chosen.unbounded_send(Event::Setting(
-                    addict_controller::Event::MyLanguageChosen(language),
-                ));
-            },
-            move || {
-                let _ = download.unbounded_send(Event::FirstRunDownload(run));
-            },
-            move || {
-                let _ = not_now.unbounded_send(Event::FirstRunNotNow(run));
-            },
-            move |name| {
-                let _ = cancel.unbounded_send(Event::FirstRunCancel(run, name));
-            },
-        );
-        offer.present();
-        if recovery {
-            self.settings
-                .render_download(false, "The dictionary download dialog is open.");
-        }
-        self.first_run = FirstRun::Shown {
-            offer,
-            manifest,
-            recovery,
-        };
-    }
-
-    /// The indexes of `manifest` that the first-run offer lists and
-    /// installs: those my language needs that the latest accepted snapshot
-    /// does not show present. The rows and the queue both come from here,
-    /// so they agree.
-    fn first_run_indexes(&self, manifest: &Manifest) -> Vec<Published> {
-        let indexes = self.indexes.known;
-        first_run::offered(
-            &manifest.indexes,
-            self.view_state.settings.my_language,
-            |name| indexes.is_some_and(|indexes| first_run::is_present(&indexes, name)),
-        )
-    }
-
-    /// The indexes of a recovery manifest that the Settings offer lists
-    /// and installs: those of my language's set. The manifest holds only
-    /// what is missing or unreadable, so no presence is asked; indexes of
-    /// other languages stay out, and none is removed.
-    fn recovery_indexes(&self, manifest: &Manifest) -> Vec<Published> {
-        first_run::offered(
-            &manifest.indexes,
-            self.view_state.settings.my_language,
-            |_| false,
-        )
-    }
-
-    /// An offer that waits for a press lists anew what my language needs,
-    /// after my language or the snapshot changed. A recovery offer left
-    /// with nothing to list closes, and Settings says why.
-    fn relist_first_run(&mut self) {
-        match &self.first_run {
-            FirstRun::Shown {
-                offer,
-                manifest,
-                recovery: false,
-            } => {
-                offer.render_my_language(self.view_state.settings.my_language);
-                offer.list(&self.first_run_indexes(manifest));
-            }
-            FirstRun::Shown {
-                offer,
-                manifest,
-                recovery: true,
-            } => {
-                let listed = self.recovery_indexes(manifest);
-                if listed.is_empty() {
-                    offer.close();
-                    self.first_run = FirstRun::Done;
-                    self.settings.render_download(
-                        false,
-                        &first_run::nothing_text(self.view_state.settings.my_language),
-                    );
-                } else {
-                    offer.list(&listed);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    /// A change of my language in Settings offers what the new language's
-    /// set lacks, through the Settings offer for missing indexes. Only when
-    /// no offer, preparation or install is under way: the first-run offer
-    /// decides for itself, and a waiting offer follows by
-    /// [`Self::relist_first_run`].
-    fn offer_missing_for_my_language(&mut self) {
-        // A waiting recovery offer, re-listed already, may have been closed
-        // (it only hides): it is shown again.
-        if let FirstRun::Shown {
-            offer,
-            recovery: true,
-            ..
-        } = &self.first_run
-        {
-            offer.present();
-            return;
-        }
-        if !matches!(self.first_run, FirstRun::Done | FirstRun::Ended { .. }) {
-            return;
-        }
-        let lacks = self.indexes.known.is_some_and(|indexes| {
-            !first_run::missing(&indexes, self.view_state.settings.my_language).is_empty()
-        });
-        if lacks {
-            self.settings_download();
-        }
-    }
-
-    /// Explicit recovery supersedes an unstarted automatic offer, while an
-    /// active preparation or installation keeps its job and progress.
-    fn settings_download(&mut self) {
-        match &self.first_run {
-            FirstRun::Preparing { .. } => return,
-            FirstRun::Installing { offer, .. }
-            | FirstRun::Shown {
-                offer,
-                recovery: true,
-                ..
-            } => {
-                offer.present();
-                return;
-            }
-            _ => {}
-        }
-        let (Some(work), Some(dir)) = (self.work.upgrade(), self.dirs.data.clone()) else {
-            self.settings
-                .render_download(false, &first_run::recovery_failed_text(first_run::NO_PLACE));
-            return;
-        };
-        self.download_run += 1;
-        let run = self.download_run;
-        let prepared = self.sender.clone();
-        let downloader = Downloader::with_base_url(self.release.clone());
-        // The manifest has its own deadline inside; the health scan of
-        // every installed index needs the longer one.
-        let job = work.run(
-            DOWNLOAD_LIMIT,
-            async move {
-                download::recovery_manifest(&downloader, dir, MANIFEST_LIMIT)
-                    .await
-                    .map_err(|error| error.to_string())
-            },
-            move |outcome| {
-                let _ = prepared.unbounded_send(Event::RecoveryPrepared(run, outcome));
-            },
-        );
-        self.first_run = FirstRun::Preparing { _job: job };
-        self.settings.render_download(true, first_run::FETCHING);
-    }
-
-    fn recovery_prepared(&mut self, run: u64, outcome: Outcome<Result<Manifest, String>>) {
-        if run != self.download_run || !matches!(self.first_run, FirstRun::Preparing { .. }) {
-            return;
-        }
-        self.first_run = FirstRun::Done;
-        match outcome {
-            Outcome::Finished(Ok(manifest)) if self.recovery_indexes(&manifest).is_empty() => {
-                self.settings.render_download(
-                    false,
-                    &first_run::nothing_text(self.view_state.settings.my_language),
-                );
-            }
-            Outcome::Finished(Ok(manifest)) => self.show_download_offer(manifest, true),
-            outcome => {
-                let why = match outcome {
-                    Outcome::Finished(Err(error)) => error,
-                    Outcome::TimedOut => "the dictionary check did not finish in time".to_owned(),
-                    _ => first_run::STOPPED.to_owned(),
-                };
-                self.settings
-                    .render_download(false, &first_run::recovery_failed_text(&why));
-            }
-        }
-    }
-
-    /// Download was pressed: the indexes of the manifest are downloaded and
-    /// installed on the runner, one after another, each within
-    /// [`DOWNLOAD_LIMIT`].
-    fn first_run_download(&mut self) {
-        if !matches!(self.first_run, FirstRun::Shown { .. }) {
-            return;
-        }
-        let FirstRun::Shown {
-            offer,
-            manifest,
-            recovery,
-        } = std::mem::replace(&mut self.first_run, FirstRun::Done)
-        else {
-            return;
-        };
-        offer.installing();
-        let indexes = if recovery {
-            self.recovery_indexes(&manifest)
-        } else {
-            self.first_run_indexes(&manifest)
-        };
-        let mut queue = first_run::Queue::new(indexes);
-        let (Some(_), Some(dir)) = (self.work.upgrade(), self.dirs.data.clone()) else {
-            let why = first_run::NO_PLACE;
-            eprintln!("addict: the dictionary download failed: {why}");
-            queue.cancel_all();
-            offer.show(&queue);
-            let text = if recovery {
-                first_run::recovery_failed_text(why)
-            } else {
-                first_run::failed_text(why)
-            };
-            offer.ended(first_run::FAILED_HEADING, &text, false);
-            self.settings.render_download(false, &text);
-            self.first_run = FirstRun::Ended { _offer: offer };
-            return;
-        };
-        offer.show(&queue);
-        self.first_run = FirstRun::Installing {
-            offer,
-            queue,
-            dir,
-            running: None,
-            recovery,
-        };
-        self.first_run_next();
-    }
-
-    /// Starts the next queued index when none runs; once every index has
-    /// ended, the dialog says how it went and the indexes are checked
-    /// again, so the line of the window follows.
-    fn first_run_next(&mut self) {
-        let FirstRun::Installing {
-            offer,
-            queue,
-            dir,
-            running,
-            recovery,
-        } = &mut self.first_run
-        else {
-            return;
-        };
-        if running.is_some() {
-            return;
-        }
-        while let Some(published) = queue.next() {
-            let Some(work) = self.work.upgrade() else {
-                queue.finished(&published.name, Err(first_run::NO_PLACE.to_owned()));
-                continue;
-            };
-            let name = published.name.clone();
-            let dir = dir.clone();
-            let progress = self.sender.clone();
-            let installed = self.sender.clone();
-            let (of, ended) = (name.clone(), name.clone());
-            let run = self.download_run;
-            let recovery = *recovery;
-            let articles = self.articles.clone();
-            let refresh = self.sender.clone();
-            let downloader = Downloader::with_base_url(self.release.clone());
-            let job = work.run(
-                DOWNLOAD_LIMIT,
-                async move {
-                    install_download(
-                        downloader,
-                        published,
-                        dir,
-                        recovery,
-                        articles,
-                        refresh,
-                        move |received| {
-                            let _ = progress.unbounded_send(Event::FirstRunProgress(
-                                run,
-                                of.clone(),
-                                received,
-                            ));
-                        },
-                    )
-                    .await
-                },
-                move |outcome| {
-                    // On the worker: the UI thread wakes for the event.
-                    let _ = installed.unbounded_send(Event::FirstRunInstalled(run, ended, outcome));
-                },
-            );
-            *running = Some((name, job));
-            offer.show(queue);
-            return;
-        }
-        offer.show(queue);
-        if !queue.is_done() {
-            return;
-        }
-        let FirstRun::Installing {
-            offer,
-            queue,
-            recovery,
-            ..
-        } = std::mem::replace(&mut self.first_run, FirstRun::Done)
-        else {
-            return;
-        };
-        let text = if recovery {
-            first_run::recovery_summary_text(&queue)
-        } else {
-            first_run::summary_text(&queue)
-        };
-        offer.ended(
-            first_run::ended_heading(&queue),
-            &text,
-            first_run::is_complete(&queue),
-        );
-        self.settings.render_download(false, &text);
-        self.first_run = FirstRun::Ended { _offer: offer };
-    }
-
-    /// Bytes of the running index came: its row says how many.
-    fn first_run_progress(&mut self, name: &str, received: u64) {
-        let FirstRun::Installing {
-            offer,
-            queue,
-            running: Some((running, _)),
-            ..
-        } = &mut self.first_run
-        else {
-            return;
-        };
-        if running != name {
-            return;
-        }
-        queue.progress(name, received);
-        offer.show(queue);
-    }
-
-    /// Cancel was pressed on a row, or on the dialog: that index, or every
-    /// index that has not ended, ends as cancelled. The job of the running
-    /// one is dropped, so nothing of it is put in place, and the next index
-    /// starts.
-    fn first_run_cancel(&mut self, name: Option<String>) {
-        let FirstRun::Installing {
-            offer,
-            queue,
-            running,
-            ..
-        } = &mut self.first_run
-        else {
-            return;
-        };
-        let was_running = match &name {
-            Some(name) => queue.cancel(name),
-            None => queue.cancel_all(),
-        };
-        if was_running {
-            // Its outcome, Cancelled, comes later and is ignored.
-            *running = None;
-        }
-        // A queued row says Cancelled at once, while another one runs.
-        offer.show(queue);
-        self.first_run_next();
-    }
-
-    /// The running index ended: its row says how, and the next one starts.
-    /// An end of an index that no longer runs, as one cancelled, changes
-    /// nothing.
-    fn first_run_installed(
-        &mut self,
-        name: &str,
-        outcome: Outcome<Result<std::path::PathBuf, String>>,
-    ) {
-        let FirstRun::Installing { queue, running, .. } = &mut self.first_run else {
-            return;
-        };
-        if running.as_ref().is_none_or(|(running, _)| running != name) {
-            return;
-        }
-        *running = None;
-        let result = match outcome {
-            Outcome::Finished(Ok(_)) => Ok(()),
-            Outcome::Finished(Err(error)) => Err(error),
-            Outcome::TimedOut => Err(first_run::late_text(DOWNLOAD_LIMIT)),
-            Outcome::Cancelled | Outcome::Panicked => Err(first_run::STOPPED.to_owned()),
-        };
-        if let Err(error) = &result {
-            eprintln!(
-                "addict: the dictionary download failed: {}",
-                first_run::failure_text(name, error)
-            );
-        }
-        queue.finished(name, result);
-        self.first_run_next();
-    }
-
-    /// Not now was pressed: the choice is written on the runner, and the
-    /// offer is not made again. A write that fails is written to stderr.
-    fn first_run_not_now(&mut self) {
-        let FirstRun::Shown { recovery, .. } = &self.first_run else {
-            return;
-        };
-        if *recovery {
-            self.first_run = FirstRun::Done;
-            self.settings.render_download(false, "");
-            return;
-        }
-        let path = first_run::path(self.dirs.config.as_deref());
-        let job = self.work.upgrade().map(|work| {
-            work.run(
-                FIRST_RUN_FILE_LIMIT,
-                async move { first_run::write(path.as_deref()) },
-                |outcome| match outcome {
-                    Outcome::Finished(Ok(())) | Outcome::Cancelled => {}
-                    Outcome::Finished(Err(e)) => {
-                        eprintln!(
-                            "addict: the answer to the dictionary download was not kept: {e}"
-                        );
-                    }
-                    Outcome::TimedOut | Outcome::Panicked => {
-                        eprintln!("addict: the answer to the dictionary download was not kept");
-                    }
-                },
-            )
-        });
-        if job.is_none() {
-            eprintln!("addict: the answer to the dictionary download was not kept: no runner");
-        }
-        self.first_run_choice = job;
-        self.first_run = FirstRun::Done;
-    }
-
     fn capture(&mut self, activation_token: Option<&str>) {
         // The window stops waiting for a read; the controller cancels the
         // read itself, before any result still queued in the Read adapter.
@@ -1788,7 +1082,6 @@ impl Session {
         }
         let my = current.settings.my_language;
         let reading = current.settings.reading;
-        let languages_read = current.settings.languages_read;
         if previous.settings.my_language != my || previous.settings.reading != reading {
             self.view
                 .set_reading_languages(reading_languages(my), reading);
@@ -1796,9 +1089,6 @@ impl Session {
             // The definition button names my language, so it follows a
             // choice made in Settings too. The indexes line does as well.
             self.render_shown();
-            if let Some(indexes) = self.indexes.known {
-                self.view.render_indexes(indexes, my);
-            }
         }
         self.settings.render(&current.settings);
         // The main window's binding row follows both the binding state and
@@ -1809,34 +1099,143 @@ impl Session {
         {
             self.view.render_binding(&current.settings.binding);
         }
-        // My-language side effects belong to a user choice, not to the read
-        // of the file at start. The controller's counter tells the two apart.
-        let chosen = (my, current.settings.my_chosen);
-        if previous.settings.my_chosen != current.settings.my_chosen
-            && previous.settings.my_language != my
+        if let Some(indexes) = current.downloads.indexes
+            && (previous.downloads.indexes != Some(indexes) || previous.settings.my_language != my)
         {
-            self.my_choice_pending = Some(chosen);
+            self.view.render_indexes(indexes, my);
         }
-        if let Some(pending) = self.my_choice_pending {
-            if languages_read {
-                self.my_choice_pending = None;
-                if let Some(indexes) = self.indexes.known {
-                    self.view.render_indexes(indexes, pending.0);
+        if previous.downloads.settings_busy != current.downloads.settings_busy
+            || previous.downloads.settings_line != current.downloads.settings_line
+        {
+            self.settings.render_download(
+                current.downloads.settings_busy,
+                &current.downloads.settings_line,
+            );
+        }
+        if previous.downloads.import != current.downloads.import {
+            self.settings.render_import(&current.downloads.import);
+        }
+        self.update_download_offer(previous);
+    }
+
+    fn update_download_offer(&mut self, previous: &ViewState) {
+        let state = &self.view_state.downloads;
+        let next_id = state.offer.as_ref().map(|offer| offer.id);
+        if self
+            .download_offer
+            .as_ref()
+            .is_some_and(|(id, _)| Some(*id) != next_id)
+            && let Some((_, offer)) = self.download_offer.take()
+        {
+            offer.close();
+        }
+        let (Some((id, offer)), Some(next)) = (&self.download_offer, &state.offer) else {
+            return;
+        };
+        let old = previous
+            .downloads
+            .offer
+            .as_ref()
+            .filter(|old| old.id == *id);
+        if old.is_none_or(|old| old.listed != next.listed) {
+            offer.list(&next.listed);
+        }
+        if !next.recovery && old.is_none_or(|old| old.my_language != next.my_language) {
+            offer.render_my_language(next.my_language);
+        }
+        match &next.phase {
+            OfferPhase::Installing(queue) => {
+                if !old.is_some_and(|old| matches!(old.phase, OfferPhase::Installing(_))) {
+                    offer.installing();
                 }
-                self.relist_first_run();
-                // The first-run decision for the new language first: an
-                // offer it ends leaves the set to the Settings offer.
-                self.first_indexes();
-                self.offer_missing_for_my_language();
+                if old.is_none_or(|old| old.phase != next.phase) {
+                    offer.show(queue);
+                }
             }
-        } else if !previous.settings.languages_read && languages_read {
-            // The start read ended: only the indexes line and the first-run
-            // decision follow. No Settings offer opens on its own here.
-            if let Some(indexes) = self.indexes.known {
-                self.view.render_indexes(indexes, my);
+            OfferPhase::Ended {
+                heading,
+                text,
+                complete,
+            } if old.is_none_or(|old| old.phase != next.phase) => {
+                if !old.is_some_and(|old| matches!(old.phase, OfferPhase::Installing(_))) {
+                    offer.installing();
+                }
+                if let Some(queue) = next.queue() {
+                    offer.show(queue);
+                }
+                offer.ended(heading, text, *complete);
             }
-            self.first_indexes();
+            _ => {}
         }
+        if state.present > previous.downloads.present {
+            offer.present();
+        }
+    }
+
+    fn show_download_offer(&mut self) {
+        let Some(state) = self.view_state.downloads.offer.as_ref() else {
+            return;
+        };
+        if self.download_offer.is_some() || (!state.recovery && !self.window.is_visible()) {
+            return;
+        }
+        let parent = if state.recovery {
+            self.settings.window()
+        } else {
+            self.window.upcast_ref()
+        };
+        let id = state.id;
+        let download = self.sender.clone();
+        let not_now = self.sender.clone();
+        let cancel = self.sender.clone();
+        let chosen = self.sender.clone();
+        let offer = Offer::new(
+            parent,
+            &state.listed,
+            state.recovery,
+            (!state.recovery).then_some(state.my_language),
+            move |language| {
+                let _ = chosen.unbounded_send(Event::Setting(controller::Event::MyLanguageChosen(
+                    language,
+                )));
+            },
+            move || {
+                let _ = download
+                    .unbounded_send(Event::Setting(controller::Event::OfferDownloadPressed(id)));
+            },
+            move || {
+                let _ = not_now
+                    .unbounded_send(Event::Setting(controller::Event::OfferNotNowPressed(id)));
+            },
+            move |name| {
+                let _ = cancel.unbounded_send(Event::Setting(
+                    controller::Event::OfferCancelPressed(id, name),
+                ));
+            },
+        );
+        offer.present();
+        match &state.phase {
+            OfferPhase::Listing => {}
+            OfferPhase::Installing(queue) => {
+                offer.installing();
+                offer.show(queue);
+            }
+            OfferPhase::Ended {
+                heading,
+                text,
+                complete,
+            } => {
+                offer.installing();
+                if let Some(queue) = state.queue() {
+                    offer.show(queue);
+                }
+                offer.ended(heading, text, *complete);
+            }
+        }
+        if !state.recovery {
+            self.dispatch_controller(controller::Event::OfferPresented(id));
+        }
+        self.download_offer = Some((id, offer));
     }
 
     /// Runs a controller effect.
@@ -1867,14 +1266,16 @@ impl Session {
                 retry,
             } => self.reveal_capture(read_sequence, retry),
             Effect::RecordCapture { read, timing } => self.record_capture(read, timing),
-            Effect::CheckIndexes { index_generation } => {
-                self.check_lookup_indexes(index_generation);
-            }
-            Effect::ObserveIndexes {
-                generation,
-                indexes,
-            } => {
-                self.observe_lookup_indexes(generation, indexes);
+            Effect::ChooseFile { id } => {
+                let parent = self.settings.window().clone();
+                let sender = self.sender.clone();
+                glib::spawn_future_local(async move {
+                    let result = file_import::choose(&parent).await;
+                    let _ = sender.unbounded_send(Event::Setting(controller::Event::FileChosen {
+                        id,
+                        result,
+                    }));
+                });
             }
             Effect::RecordLookup(answered) => {
                 if let Some(recording) = &self.recording {
@@ -1892,38 +1293,6 @@ impl Session {
             Effect::BindShortcuts => self.bind_shortcuts(),
             Effect::ConfigureShortcuts => self.configure_shortcuts(),
         }
-    }
-
-    /// The lookup of the shown word found a dictionary missing: the indexes
-    /// are checked again, unless a newer refresh, an import's, already owns
-    /// that.
-    fn check_lookup_indexes(&mut self, index_generation: u64) {
-        if index_generation != self.indexes.generation {
-            return;
-        }
-        self.check = start_check(
-            self.work.upgrade().as_deref(),
-            self.articles.clone(),
-            &self.sender,
-            self.indexes.generation,
-        );
-    }
-
-    fn observe_lookup_indexes(&mut self, generation: u64, indexes: Indexes) {
-        if self.indexes.update(generation, indexes) {
-            self.view
-                .render_indexes(indexes, self.view_state.settings.my_language);
-            self.report_indexes();
-        }
-    }
-
-    /// Tells the controller where the `IndexCache` stands now: its lookups
-    /// start from what it knows, and carry its generation.
-    fn report_indexes(&self) {
-        self.dispatch_controller(addict_controller::Event::KnownIndexes {
-            generation: self.indexes.generation,
-            indexes: self.indexes.known,
-        });
     }
 
     /// Updates the word and sentence rows without rebuilding the article.
@@ -2362,7 +1731,6 @@ fn build_ui(
     binding: &Binding,
     sender: &UnboundedSender<Event>,
 ) -> (View, gtk::ApplicationWindow, Rc<Cell<ViewActions>>) {
-    style::install();
     let view = View::new(window_state(None, None), binding);
     let actions = Rc::new(Cell::new(ViewActions::default()));
     connect_view(&view, sender, &actions);
@@ -2443,16 +1811,14 @@ async fn request_startup_change(enable: bool, state: Option<PathBuf>) -> Startup
 fn start_settings(
     window: &gtk::ApplicationWindow,
     key_file: Option<&Path>,
-    data_dir: Option<PathBuf>,
     owner: KeyOwner,
-    articles: Arc<dyn Articles>,
     sender: &UnboundedSender<Event>,
 ) -> Settings {
     let change = sender.clone();
     let save = sender.clone();
     let clear = sender.clone();
     let startup = sender.clone();
-    let imported = sender.clone();
+    let import = sender.clone();
     let my_language = sender.clone();
     let english = sender.clone();
     let at_once = sender.clone();
@@ -2460,7 +1826,6 @@ fn start_settings(
     Settings::new(
         window,
         key_file,
-        data_dir,
         owner,
         move || {
             let _ =
@@ -2493,78 +1858,13 @@ fn start_settings(
                 chosen,
             )));
         },
-        move || refresh_import(articles.clone(), imported.clone()),
         move || {
-            let _ = download.unbounded_send(Event::SettingsDownload);
+            let _ = import.unbounded_send(Event::Setting(controller::Event::ImportPressed));
+        },
+        move || {
+            let _ = download.unbounded_send(Event::Setting(controller::Event::DownloadPressed));
         },
     )
-}
-
-/// The check does disk work on a separate thread. Waiting for the event's
-/// acknowledgement guarantees the next lookup sees the refreshed states
-/// before Settings advertises that the dictionary is ready.
-async fn refresh_import(
-    articles: Arc<dyn Articles>,
-    sender: UnboundedSender<Event>,
-) -> Result<(), String> {
-    let (started, generation) = oneshot::channel();
-    sender
-        .unbounded_send(Event::ImportRefreshing(started))
-        .map_err(|_| "The resident is no longer available.".to_owned())?;
-    let generation = generation
-        .await
-        .map_err(|_| "The resident is no longer available.".to_owned())?;
-    let indexes = download::blocking(move || articles.indexes()).await?;
-    let (ready, received) = oneshot::channel();
-    sender
-        .unbounded_send(Event::Imported(ImportCompletion {
-            generation,
-            indexes,
-            ready,
-        }))
-        .map_err(|_| "The resident is no longer available.".to_owned())?;
-    received
-        .await
-        .map_err(|_| "The resident did not refresh its dictionary states.".to_owned())
-}
-
-/// The writer starts finalization from its commit callback, outside the
-/// cancellable queue future. Success waits for the resident acknowledgement.
-async fn install_download(
-    downloader: Downloader,
-    published: addict_dictionary::release::Published,
-    dir: std::path::PathBuf,
-    recovery: bool,
-    articles: Arc<dyn Articles>,
-    sender: UnboundedSender<Event>,
-    progress: impl FnMut(u64),
-) -> Result<std::path::PathBuf, String> {
-    let (ready, received) = oneshot::channel();
-    let ready = std::sync::Mutex::new(Some(ready));
-    let downloader = downloader.on_commit(move || {
-        let Some(ready) = ready.lock().expect("commit callback lock").take() else {
-            return;
-        };
-        let articles = articles.clone();
-        let sender = sender.clone();
-        // Dropping this join handle detaches, rather than aborts, refresh.
-        tokio::spawn(async move {
-            let _ = ready.send(refresh_import(articles, sender).await);
-        });
-    });
-    let downloader = if recovery {
-        downloader.recovering()
-    } else {
-        downloader
-    };
-    let path = downloader
-        .install(&published, &dir, progress)
-        .await
-        .map_err(|error| error.to_string())?;
-    received
-        .await
-        .map_err(|_| "The dictionary refresh stopped.".to_owned())??;
-    Ok(path)
 }
 
 /// Starts the icon in the top bar; the choices of its menu and the tray
@@ -2583,12 +1883,17 @@ fn start_controller(
     dirs: &Dirs,
     key: Option<Result<Secret, KeyError>>,
     recording: bool,
+    release: String,
     sender: &UnboundedSender<Event>,
 ) -> io::Result<Controller> {
     controller::start(
         dirs.clone(),
         controller_platform(),
-        StartFacts { key, recording },
+        StartFacts {
+            key,
+            recording,
+            release,
+        },
         controller_renderer(sender),
     )
 }
@@ -2673,64 +1978,6 @@ fn start_recording_job<T: Send + 'static>(
     job
 }
 
-/// Starts the check of the indexes in `articles` on `work`; where they stand
-/// comes to `sender` as an event.
-fn start_check(
-    work: Option<&Work>,
-    articles: Arc<dyn Articles>,
-    sender: &UnboundedSender<Event>,
-    generation: u64,
-) -> Option<Job> {
-    let checked = sender.clone();
-    manual::check_indexes(work, LOOKUP_LIMIT, articles, move |indexes| {
-        // On the worker: the UI thread wakes for the event.
-        let _ = checked.unbounded_send(Event::Indexes {
-            generation,
-            indexes,
-        });
-    })
-}
-
-/// Starts the decision of the first-run offer on `work`, for the `indexes`
-/// of the first check: the choice file is read and, when the offer is due,
-/// the manifest is fetched by `downloader` and comes to `sender` as an
-/// event. When the manifest cannot be had, why is written to stderr and
-/// nothing is kept, so the next start asks again.
-fn start_first_run(
-    work: &Work,
-    downloader: Downloader,
-    path: Option<PathBuf>,
-    indexes: Indexes,
-    my: Language,
-    sender: &UnboundedSender<Event>,
-    run: u64,
-) -> Job {
-    let offered = sender.clone();
-    work.run(
-        MANIFEST_LIMIT,
-        async move {
-            let chosen = first_run::read(path.as_deref());
-            first_run::offered_manifest(indexes, my, chosen, &downloader).await
-        },
-        move |outcome| match outcome {
-            Outcome::Finished(Ok(Some(manifest))) => {
-                // On the worker: the UI thread wakes for the event.
-                let _ = offered.unbounded_send(Event::FirstRunOffer(run, manifest));
-            }
-            Outcome::Finished(Ok(None)) | Outcome::Cancelled => {}
-            Outcome::Finished(Err(e)) => {
-                eprintln!("addict: no dictionary download is offered: {e}");
-            }
-            Outcome::TimedOut => {
-                eprintln!(
-                    "addict: no dictionary download is offered: the manifest did not come in time"
-                );
-            }
-            Outcome::Panicked => eprintln!("addict: no dictionary download is offered"),
-        },
-    )
-}
-
 /// Loads the configured key once without blocking GTK or the translation
 /// runner. The result reaches the controller as its first `KeyChanged`.
 fn start_key_load(path: Option<PathBuf>, sender: &UnboundedSender<Event>) {
@@ -2789,6 +2036,7 @@ fn start(
     connect_settings_action(application, &sender);
     connect_menu_actions(application, &sender);
     application.set_accels_for_action("app.settings", &["<Control>comma"]);
+    style::install();
     let (view, window, view_actions) = build_ui(application, &binding, &sender);
 
     // Only the primary instance gets here, so a second launch records no
@@ -2798,13 +2046,14 @@ fn start(
     let config = dirs.config.as_deref();
     let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed, config))));
     let events = sender.clone();
-    let controller = match start_controller(dirs, None, timed, &sender) {
-        Ok(controller) => Some(controller),
-        Err(e) => {
-            eprintln!("addict: lookups cannot run: {e}");
-            None
-        }
-    };
+    let controller =
+        match start_controller(dirs, None, timed, download::BASE_URL.to_owned(), &sender) {
+            Ok(controller) => Some(controller),
+            Err(e) => {
+                eprintln!("addict: lookups cannot run: {e}");
+                None
+            }
+        };
     // The key is read off GTK's thread; the controller publishes its result
     // as the first `KeyChanged` once this event is dispatched.
     start_key_load(key_file.clone(), &sender);
@@ -2856,22 +2105,7 @@ fn start(
             ))
         });
     }
-    // Nothing is opened here: the indexes are files, and files are the
-    // runner's.
-    let articles: Arc<dyn Articles> = controller.as_ref().map_or_else(
-        || Arc::new(Dictionaries::new(dirs.data.clone())),
-        Controller::dictionaries,
-    );
-    let runner = work.upgrade();
-    let check = start_check(runner.as_deref(), articles.clone(), &sender, 0);
-    let settings = start_settings(
-        &window,
-        key_file.as_deref(),
-        dirs.data.clone(),
-        KeyOwner::detect(),
-        articles.clone(),
-        &sender,
-    );
+    let settings = start_settings(&window, key_file.as_deref(), KeyOwner::detect(), &sender);
     let about = About::new(&window);
     let session = Session {
         dirs: dirs.clone(),
@@ -2890,22 +2124,15 @@ fn start(
         read_sequence: 0,
         work,
         controller: controller.as_ref().map(Controller::dispatcher),
-        articles,
         key_file,
         store_job: None,
         startup_job: None,
         startup_read_job: None,
-        my_choice_pending: None,
         settings,
         about,
-        check,
-        indexes: IndexCache::default(),
         capturing: Capturing::default(),
         copying: Copying::default(),
-        first_run: FirstRun::Unasked,
-        download_run: 0,
-        release: download::BASE_URL.to_owned(),
-        first_run_choice: None,
+        download_offer: None,
     };
     serve(session, receiver);
     let tray = start_tray(&events);
@@ -3155,10 +2382,10 @@ mod tests {
     use gtk::{gio, prelude::*};
 
     use super::{
-        Event, LOOKUP_LIMIT, LaunchMode, WindowActions, WindowEvent, connect_launches,
-        connect_menu_actions, connect_settings_action, dispatch_window,
+        Event, LaunchMode, WindowActions, WindowEvent, connect_launches, connect_menu_actions,
+        connect_settings_action, dispatch_window,
     };
-    use addict_controller::ShortcutState;
+    use addict_controller::{ShortcutState, deadlines::LOOKUP_LIMIT};
     use addict_core::{dirs::Dirs, translation::Source as Language};
 
     #[test]
@@ -3183,270 +2410,6 @@ mod tests {
         let file = super::buffer_recording(audio).expect("recording descriptor");
         let path = format!("/proc/self/fd/{}", file.as_raw_fd());
         assert_eq!(std::fs::read(path).unwrap(), audio);
-    }
-
-    #[tokio::test]
-    async fn import_completion_refreshes_missing_languages_before_the_next_lookup() {
-        use crate::{
-            dictionaries::{Answer, Articles, Dictionaries, State},
-            manual,
-        };
-        use addict_dictionary::{
-            format::{self, Contents, Headword},
-            import::{self, Source},
-        };
-        use addict_engine::work::{Outcome, Work};
-        use futures_util::{StreamExt, pin_mut, poll};
-        use std::{path::PathBuf, sync::Arc};
-
-        struct Temp(PathBuf);
-        impl Drop for Temp {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let temp = Temp(
-            std::env::temp_dir().join(format!("addict-import-resident-{}", std::process::id())),
-        );
-        std::fs::create_dir(&temp.0).unwrap();
-        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(Some(temp.0.clone())));
-        let missing = articles.indexes();
-        assert_eq!(missing.spanish, State::Missing);
-        assert_eq!(missing.catalan, State::Missing);
-        let mut cached = super::IndexCache {
-            known: Some(missing),
-            ..Default::default()
-        };
-        let old_generation = cached.generation;
-        let work = Work::start().expect("lookup runner");
-
-        for (language, source, word) in [
-            (Language::Es, Source::WikdictEsRu, "banco"),
-            (Language::Ca, Source::WikdictCaRu, "banc"),
-        ] {
-            assert!(
-                manual::offline(
-                    Some(&work),
-                    LOOKUP_LIMIT,
-                    articles.clone(),
-                    word.to_owned(),
-                    language,
-                    Language::Ru,
-                    cached.known,
-                    |_, _| {}
-                )
-                .is_err(),
-                "initially gated by Missing"
-            );
-            // The index writer is a small fixture for the resident cache
-            // regression; the real chooser/importer is tested separately.
-            let bytes = format::encode(&Contents {
-                source: "manual-import-regression".to_owned(),
-                headwords: vec![Headword {
-                    word: word.to_owned(),
-                    translations: vec!["банк".to_owned()],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-            .unwrap();
-            std::fs::write(import::index_path(&temp.0, source), bytes).unwrap();
-        }
-
-        let (sender, mut events) = futures_channel::mpsc::unbounded();
-        let refreshed = super::refresh_import(articles.clone(), sender);
-        pin_mut!(refreshed);
-        assert!(poll!(refreshed.as_mut()).is_pending());
-        let Event::ImportRefreshing(started) = events.next().await.unwrap() else {
-            panic!("refresh start");
-        };
-        started.send(cached.begin_import()).unwrap();
-        let event = tokio::select! {
-            result = &mut refreshed => panic!("completed before resident delivery: {result:?}"),
-            event = events.next() => event.expect("completion event"),
-        };
-        let Event::Imported(completed) = event else {
-            panic!("expected import completion");
-        };
-        assert!(
-            poll!(refreshed.as_mut()).is_pending(),
-            "not ready before resident delivery"
-        );
-        assert_eq!(cached.known, Some(missing));
-        // The same ordered completion operation used by Session::handle.
-        completed.apply(|generation, indexes| assert!(cached.update(generation, indexes)));
-        refreshed.await.expect("resident acknowledgement");
-        assert!(
-            !cached.update(old_generation, missing),
-            "late pre-import events are ignored"
-        );
-
-        for (language, word) in [(Language::Es, "banco"), (Language::Ca, "banc")] {
-            let (send, receive) = futures_channel::oneshot::channel();
-            let _job = manual::offline(
-                Some(&work),
-                LOOKUP_LIMIT,
-                articles.clone(),
-                word.to_owned(),
-                language,
-                Language::Ru,
-                cached.known,
-                move |language, outcome| {
-                    let _ = send.send((language, outcome));
-                },
-            )
-            .expect("the first lookup after completion must be allowed");
-            let (answered, Outcome::Finished(looked)) = receive.await.unwrap() else {
-                panic!("lookup did not finish");
-            };
-            assert_eq!(answered, language);
-            let Answer::Grouped(grouped) = looked.answer else {
-                panic!("expected the imported language entry");
-            };
-            assert!(
-                grouped
-                    .translations_into(addict_core::translation::Source::Ru)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|text| text == "банк")
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn downloaded_dictionaries_refresh_even_when_cancelled_after_commit_before_refresh() {
-        use crate::{
-            dictionaries::{Answer, Articles, Dictionaries, State},
-            download::Downloader,
-            manual,
-            stub::{Route, Stub},
-        };
-        use addict_dictionary::{
-            format::{self, Contents, Headword},
-            import::{self, Source},
-            release::Published,
-        };
-        use addict_engine::work::{Outcome, Work};
-        use futures_util::StreamExt;
-        use std::{collections::HashMap, path::PathBuf, sync::Arc};
-        struct Temp(PathBuf);
-        impl Drop for Temp {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let temp = Temp(std::env::temp_dir().join(format!(
-            "addict-download-cancel-resident-{}",
-            std::process::id()
-        )));
-        std::fs::create_dir(&temp.0).unwrap();
-        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(Some(temp.0.clone())));
-        let mut cached = super::IndexCache {
-            known: Some(articles.indexes()),
-            ..Default::default()
-        };
-        assert_eq!(cached.known.unwrap().spanish, State::Missing);
-        assert_eq!(cached.known.unwrap().catalan, State::Missing);
-        let work = Work::start().unwrap();
-        let (sender, mut events) = futures_channel::mpsc::unbounded();
-        for (language, source, name, word) in [
-            (Language::Es, Source::WikdictEsRu, "wikdict-es-ru", "banco"),
-            (Language::Ca, Source::WikdictCaRu, "wikdict-ca-ru", "banc"),
-        ] {
-            let stale = cached.known.unwrap();
-            let stale_generation = cached.generation;
-            let bytes = format::encode(&Contents {
-                source: "download-cancel-regression".to_owned(),
-                headwords: vec![Headword {
-                    word: word.to_owned(),
-                    translations: vec!["банк".to_owned()],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-            .unwrap();
-            let mut xz = Vec::new();
-            lzma_rs::xz_compress(&mut &bytes[..], &mut xz).unwrap();
-            let published = Published::of(name, &xz);
-            let stub = Stub::start(HashMap::from([(
-                format!(
-                    "/{}/{}",
-                    addict_dictionary::release::tag(),
-                    published.asset()
-                ),
-                Route::File(xz),
-            )]))
-            .unwrap();
-            let dir = temp.0.clone();
-            let refreshed = sender.clone();
-            let dictionaries = articles.clone();
-            let (finished, ended) = futures_channel::oneshot::channel();
-            let job = work.run(
-                addict_controller::deadlines::DOWNLOAD_LIMIT,
-                super::install_download(
-                    Downloader::with_base_url(stub.base_url()),
-                    published,
-                    dir,
-                    true,
-                    dictionaries,
-                    refreshed,
-                    |_| {},
-                ),
-                move |outcome| {
-                    let _ = finished.send(outcome);
-                },
-            );
-            // The commit callback has fired, but its independent finalizer
-            // is paused before the availability disk check can begin.
-            let Event::ImportRefreshing(started) = events.next().await.unwrap() else {
-                panic!("refresh start");
-            };
-            assert!(
-                import::index_path(&temp.0, source).is_file(),
-                "committed before cancellation"
-            );
-            drop(job);
-            assert!(matches!(ended.await.unwrap(), Outcome::Cancelled));
-            let generation = cached.begin_import();
-            assert!(
-                !cached.update(stale_generation, stale),
-                "advance before accepting old checks"
-            );
-            started.send(generation).unwrap();
-            let Event::Imported(completed) = events.next().await.unwrap() else {
-                panic!("independent completion");
-            };
-            completed.apply(|generation, indexes| assert!(cached.update(generation, indexes)));
-            assert!(!cached.update(stale_generation, stale));
-            let (send, receive) = futures_channel::oneshot::channel();
-            let _lookup = manual::offline(
-                Some(&work),
-                LOOKUP_LIMIT,
-                articles.clone(),
-                word.to_owned(),
-                language,
-                Language::Ru,
-                cached.known,
-                move |language, outcome| {
-                    let _ = send.send((language, outcome));
-                },
-            )
-            .expect("next lookup must be allowed");
-            let (answered, Outcome::Finished(looked)) = receive.await.unwrap() else {
-                panic!("lookup failed");
-            };
-            assert_eq!(answered, language);
-            let Answer::Grouped(grouped) = looked.answer else {
-                panic!("restored article");
-            };
-            assert!(
-                grouped
-                    .translations_into(addict_core::translation::Source::Ru)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|translation| translation == "банк")
-            );
-        }
     }
 
     /// A full session of the window for a test, its application registered
@@ -3479,19 +2442,13 @@ mod tests {
         app.register(gio::Cancellable::NONE).unwrap();
         let (sender, events) = futures_channel::mpsc::unbounded();
         let binding = Binding::Attempting;
+        static STYLE: std::sync::Once = std::sync::Once::new();
+        STYLE.call_once(crate::style::install);
         let (view, window, view_actions) = build_ui(&app, &binding, &sender);
         let work = Arc::new(Work::start().unwrap());
-        let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(dirs.data.clone()));
         let key_file = key::key_path(dirs.config.as_deref());
         // Not the desktop the tests run on: the portal's dialog, as on GNOME.
-        let settings = start_settings(
-            &window,
-            key_file.as_deref(),
-            dirs.data.clone(),
-            KeyOwner::Portal,
-            articles.clone(),
-            &sender,
-        );
+        let settings = start_settings(&window, key_file.as_deref(), KeyOwner::Portal, &sender);
         let about = About::new(&window);
         let session = Session {
             dirs,
@@ -3510,22 +2467,15 @@ mod tests {
             read_sequence: 0,
             work: Arc::downgrade(&work),
             controller: None,
-            articles: articles.clone(),
             key_file,
             store_job: None,
             startup_job: None,
             startup_read_job: None,
-            my_choice_pending: None,
             settings,
             about,
-            check: None,
-            indexes: IndexCache::default(),
             capturing: Capturing::default(),
             copying: Copying::default(),
-            first_run: FirstRun::Done,
-            download_run: 0,
-            release: download::BASE_URL.to_owned(),
-            first_run_choice: None,
+            download_offer: None,
         };
         (session, events, work)
     }
@@ -3580,9 +2530,16 @@ mod tests {
     /// Gives `session` a running controller, as `start` does; the session
     /// lives as long as the returned owner.
     fn attach_controller(session: &mut super::Session) -> super::Controller {
+        attach_controller_with_release(session, String::new())
+    }
+
+    fn attach_controller_with_release(
+        session: &mut super::Session,
+        release: String,
+    ) -> super::Controller {
         let key = controller_key_source(session).snapshot();
         let controller =
-            super::start_controller(&session.dirs, key, false, &session.sender).unwrap();
+            super::start_controller(&session.dirs, key, false, release, &session.sender).unwrap();
         connect_controller(session, &controller);
         controller
     }
@@ -3598,6 +2555,7 @@ mod tests {
             translator,
             false,
             source,
+            String::new(),
             super::controller_renderer(&session.sender),
         )
         .unwrap();
@@ -3618,6 +2576,7 @@ mod tests {
             translator,
             false,
             source,
+            String::new(),
             super::controller_renderer(&session.sender),
         )
         .unwrap();
@@ -3625,10 +2584,74 @@ mod tests {
         controller
     }
 
+    fn write_test_index(dir: &std::path::Path, source: addict_dictionary::import::Source) {
+        use addict_dictionary::{
+            format::{Contents, encode},
+            import::index_path,
+        };
+        let encoded = encode(&Contents {
+            source: source.index_name().trim_end_matches(".index").to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::write(index_path(dir, source), encoded).unwrap();
+    }
+
+    fn download_stub(
+        indexes: Vec<addict_dictionary::release::Published>,
+        mut routes: std::collections::HashMap<String, crate::stub::Route>,
+    ) -> crate::stub::Stub {
+        use addict_dictionary::release::{self, Manifest};
+        let manifest = Manifest {
+            format: addict_dictionary::format::VERSION,
+            indexes,
+        };
+        routes.insert(
+            format!("/{}/{}", release::tag(), release::MANIFEST_3),
+            crate::stub::Route::File(manifest.to_json().into_bytes()),
+        );
+        crate::stub::Stub::start(routes).unwrap()
+    }
+
+    fn hold_controller_worker(
+        controller: &super::Controller,
+    ) -> (std::sync::mpsc::Sender<()>, super::Job) {
+        let (started, waiting) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let wait = std::time::Duration::from_secs(5);
+        let job = controller.work().upgrade().unwrap().run(
+            wait,
+            async move {
+                started.send(()).unwrap();
+                let _ = blocked.recv_timeout(wait);
+            },
+            |_| {},
+        );
+        waiting.recv_timeout(wait).unwrap();
+        (release, job)
+    }
+
+    fn is_installing(session: &super::Session) -> bool {
+        session
+            .view_state
+            .downloads
+            .offer
+            .as_ref()
+            .is_some_and(|offer| matches!(offer.phase, super::OfferPhase::Installing(_)))
+    }
+
+    fn is_ended(session: &super::Session) -> bool {
+        session
+            .view_state
+            .downloads
+            .offer
+            .as_ref()
+            .is_some_and(|offer| matches!(offer.phase, super::OfferPhase::Ended { .. }))
+    }
+
     fn connect_controller(session: &mut super::Session, controller: &super::Controller) {
         session.work = controller.work();
         session.controller = Some(controller.dispatcher());
-        session.articles = controller.dictionaries();
     }
 
     #[derive(Clone)]
@@ -3810,93 +2833,6 @@ mod tests {
         assert_eq!(requests[0].text, "bank");
         assert_eq!(requests[0].source, Language::En);
         assert_eq!(requests[0].target, Language::Ru);
-        session.window.destroy();
-    }
-
-    #[test]
-    #[ignore = "needs a display; run alone"]
-    fn a_delayed_typed_snapshot_refreshes_a_refusal_without_overwriting_newer_indexes() {
-        use super::*;
-        use crate::dictionaries::State;
-        use futures_util::future::{Either, select};
-
-        gtk::init().expect("a display");
-        let (mut session, mut events, work) =
-            test_session("io.github.doqhu.Addict.TypedSnapshotTest", Dirs::default());
-        drop(work);
-        let _controller = attach_controller(&mut session);
-        let context = glib::MainContext::default();
-        // The snapshot of the settled lookup of `word`, read in `language`,
-        // with its effects, not yet handled.
-        let mut completed = |session: &mut Session, word: &str, language: Language| {
-            if session.view_state.settings.reading != language {
-                session.dispatch_controller(addict_controller::Event::ReadingChosen(language));
-            }
-            session.view.set_field_text(word);
-            session.sentence_changed(word.to_owned(), FieldEdit::Typed);
-            context.block_on(async {
-                let wait = async {
-                    while let Some(event) = events.next().await {
-                        if let Event::Controller(snapshot, effects) = event
-                            && snapshot.sentence == word
-                            && !snapshot.looking_up
-                        {
-                            return (snapshot, effects);
-                        }
-                    }
-                    panic!("resident event channel closed");
-                };
-                match select(Box::pin(wait), glib::timeout_future(Duration::from_secs(5))).await {
-                    Either::Left((snapshot, _)) => snapshot,
-                    Either::Right(_) => panic!("no completed typed lookup"),
-                }
-            })
-        };
-
-        // A missing Spanish dictionary refreshes the index check even when
-        // its snapshot comes after a newer text.
-        let (refused, effects) = completed(&mut session, "banco", Language::Es);
-        assert_eq!(
-            refused.shown.lookup(),
-            Some(&crate::view::Lookup::NoDictionary(Language::Es))
-        );
-        session.view.set_field_text("new text");
-        session.sentence_changed("new text".to_owned(), FieldEdit::Replaced);
-        session.render_controller(*refused, effects);
-        assert!(
-            session.check.take().is_some(),
-            "a stale refusal still refreshes"
-        );
-
-        // An import already owning the refresh wins.
-        let (refused, effects) = completed(&mut session, "otro", Language::Es);
-        session.indexes.begin_import();
-        session.report_indexes();
-        session.render_controller(*refused, effects);
-        assert!(
-            session.check.is_none(),
-            "the import already owns the refresh"
-        );
-
-        // A lookup started in the new generation reports the indexes; a
-        // delayed one of the old generation does not overwrite them.
-        let generation = session.indexes.generation;
-        let (observed, effects) = completed(&mut session, "bank", Language::En);
-        assert!(effects.iter().any(|effect| matches!(
-            effect,
-            Effect::ObserveIndexes { generation: g, .. } if *g == generation
-        )));
-        session.render_controller(*observed, effects);
-        let current = session.indexes.current().expect("observed indexes");
-        assert_eq!(current.definitions, State::Missing);
-        session.render_controller(
-            session.view_state.clone(),
-            vec![Effect::ObserveIndexes {
-                generation: generation - 1,
-                indexes: Indexes::OPEN,
-            }],
-        );
-        assert_eq!(session.indexes.current(), Some(current));
         session.window.destroy();
     }
 
@@ -4126,6 +3062,7 @@ mod tests {
             Dirs::default(),
             controller_platform(),
             StartFacts {
+                release: String::new(),
                 key: Some(Err(KeyError::NoDirectory)),
                 recording: false,
             },
@@ -4299,7 +3236,11 @@ mod tests {
 
         use super::*;
         use crate::stub::{Route, Stub};
-        use addict_dictionary::{pairs, release, sources};
+        use addict_dictionary::{
+            pairs,
+            release::{self, Manifest, Published},
+            sources,
+        };
 
         struct Temp(std::path::PathBuf);
         impl Drop for Temp {
@@ -4333,13 +3274,10 @@ mod tests {
         .unwrap();
 
         gtk::init().expect("a display");
-        let (mut session, mut events, _work) =
-            test_session("io.github.doqhu.Addict.FirstRunLanguageTest", dirs);
-        // My language lives in the controller: its choices need one.
-        let _controller = attach_controller(&mut session);
-        session.release = stub.base_url();
         let queued = |session: &Session| -> Vec<String> {
-            let FirstRun::Installing { queue, .. } = &session.first_run else {
+            let OfferPhase::Installing(queue) =
+                &session.view_state.downloads.offer.as_ref().unwrap().phase
+            else {
                 panic!("installing");
             };
             queue
@@ -4358,28 +3296,20 @@ mod tests {
         };
 
         for chosen in [None, Some(Language::En)] {
-            // A fresh start: nothing chosen yet.
-            session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
-                Language::Ru,
-            )));
-            pump_until(&mut session, &mut events, |session| {
-                session.view_state.settings.languages_read
-                    && session.view_state.settings.my_language == Language::Ru
-            });
-            session.first_run = FirstRun::Unasked;
-            session.indexes = IndexCache::default();
-            session.window.set_visible(true);
-            session.handle(Event::Indexes {
-                generation: 0,
-                indexes: Indexes::MISSING,
-            });
-            assert!(matches!(session.first_run, FirstRun::Asking { .. }));
-            pump_until(&mut session, &mut events, |session| {
-                matches!(session.first_run, FirstRun::Shown { .. })
-            });
-            let FirstRun::Shown { offer, .. } = &session.first_run else {
-                unreachable!();
+            let app_id = if chosen.is_some() {
+                "io.github.doqhu.Addict.FirstRunEnglishTest"
+            } else {
+                "io.github.doqhu.Addict.FirstRunRussianTest"
             };
+            let (mut session, mut events, _work) = test_session(app_id, dirs.clone());
+            std::fs::create_dir_all(dirs.config.as_ref().unwrap()).unwrap();
+            std::fs::write(dirs.config.as_ref().unwrap().join("my-language"), "ru\n").unwrap();
+            let _controller = attach_controller_with_release(&mut session, stub.base_url());
+            session.window.set_visible(true);
+            pump_until(&mut session, &mut events, |session| {
+                session.download_offer.is_some()
+            });
+            let (_, offer) = session.download_offer.as_ref().unwrap();
             assert_eq!(offer.my_language().selected(), 3, "Russian at first");
             assert_eq!(sorted(offer.listed()), sorted(set(Language::Ru)));
             if chosen.is_none() {
@@ -4391,9 +3321,7 @@ mod tests {
                 pump_until(&mut session, &mut events, |session| {
                     session.view_state.settings.my_language == Language::Es
                 });
-                let FirstRun::Shown { offer, .. } = &session.first_run else {
-                    panic!("the offer stays");
-                };
+                let (_, offer) = session.download_offer.as_ref().expect("the offer stays");
                 assert_eq!(offer.my_language().selected(), 1);
                 assert_eq!(sorted(offer.listed()), sorted(set(Language::Es)));
                 session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
@@ -4402,14 +3330,10 @@ mod tests {
                 pump_until(&mut session, &mut events, |session| {
                     session.view_state.settings.my_language == Language::Ru
                 });
-                let FirstRun::Shown { offer, .. } = &session.first_run else {
-                    panic!("the offer stays");
-                };
+                let (_, offer) = session.download_offer.as_ref().expect("the offer stays");
                 assert_eq!(sorted(offer.listed()), sorted(set(Language::Ru)));
             }
-            let FirstRun::Shown { offer, .. } = &session.first_run else {
-                unreachable!();
-            };
+            let (_, offer) = session.download_offer.as_ref().expect("the offer stays");
             if let Some(language) = chosen {
                 let index = Language::ALL
                     .iter()
@@ -4420,14 +3344,14 @@ mod tests {
                     session.view_state.settings.my_language == language
                 });
                 assert_eq!(session.settings.shown_my_language(), Some(language));
-                let FirstRun::Shown { offer, .. } = &session.first_run else {
-                    panic!("the offer stays");
-                };
+                let (_, offer) = session.download_offer.as_ref().expect("the offer stays");
                 assert_eq!(offer.my_language().selected(), index as u32);
                 assert_eq!(sorted(offer.listed()), sorted(set(language)));
             }
-            let run = session.download_run;
-            session.handle(Event::FirstRunDownload(run));
+            let run = session.download_offer.as_ref().unwrap().0;
+            let (release, _gate) = hold_controller_worker(&_controller);
+            session.handle(Event::Setting(controller::Event::OfferDownloadPressed(run)));
+            pump_until(&mut session, &mut events, is_installing);
             assert_eq!(
                 queued(&session),
                 set(chosen.unwrap_or(Language::Ru)),
@@ -4435,9 +3359,7 @@ mod tests {
             );
             // Once Download is pressed the choice is gone, and one in
             // Settings leaves the queue as it is.
-            let FirstRun::Installing { offer, .. } = &session.first_run else {
-                panic!("installing");
-            };
+            let (_, offer) = session.download_offer.as_ref().expect("installing");
             assert!(!offer.shows_my_language());
             let before = queued(&session);
             session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
@@ -4447,21 +3369,28 @@ mod tests {
                 session.view_state.settings.my_language == Language::Ca
             });
             assert_eq!(queued(&session), before);
-            session.handle(Event::FirstRunCancel(run, None));
+            session.handle(Event::Setting(controller::Event::OfferCancelPressed(
+                run, None,
+            )));
+            pump_until(&mut session, &mut events, is_ended);
+            drop(release);
             // At most the first of the set was asked for before the cancel.
             let allowed = set(chosen.unwrap_or(Language::Ru));
             for path in stub.seen() {
-                if let Some(asset) = path.rsplit('/').next()
+                if let Some(asset) = path
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|path| path.rsplit('/').next())
                     && let Some(name) = asset.strip_suffix(".index.xz")
                 {
                     assert!(allowed.iter().any(|one| one == name), "{path}");
                 }
             }
+            session.settings.window().destroy();
+            session.window.destroy();
         }
         assert_eq!(set(Language::Ru), release::LEGACY_PUBLISHED);
         assert_ne!(set(Language::En), set(Language::Ru));
-        session.settings.window().destroy();
-        session.window.destroy();
     }
 
     /// The reading switch and the gloss's English link end with the same
@@ -4474,7 +3403,6 @@ mod tests {
             format::{Contents, Headword, SenseRecord, encode},
             import::{self, Source as IndexSource},
         };
-        use addict_engine::dictionaries::{Indexes, State};
         gtk::init().expect("a display");
         let data = KeyTestDir::new("addict-gloss-reading");
         for (index, source, definition) in [
@@ -4563,13 +3491,7 @@ mod tests {
             reading(session) == Language::Ru
         });
 
-        session.handle(Event::Indexes {
-            generation: 0,
-            indexes: Indexes {
-                spanish: State::Open,
-                ..Indexes::MISSING
-            },
-        });
+        assert!(session.view_state.downloads.indexes.is_some());
         session.view.set_field_text("banco");
         session.sentence_changed("banco".to_owned(), super::FieldEdit::Typed);
         pump_until(&mut session, &mut events, |session| {
@@ -4846,13 +3768,26 @@ mod tests {
     #[test]
     #[ignore = "needs a display; run alone"]
     fn the_indexes_line_and_the_definition_button_follow_my_language() {
-        use addict_engine::dictionaries::{Indexes, State};
+        use addict_dictionary::{import::Source, pairs};
         gtk::init().expect("a display");
-        let (mut session, mut events, _work) =
-            test_session("io.github.doqhu.Addict.MyTextsTest", Dirs::default());
+        let data = KeyTestDir::new("addict-index-line");
+        for source in pairs::required_sources(Language::En)
+            .chain(pairs::required_sources(Language::Es))
+            .filter(|source| *source != Source::Freedict)
+        {
+            write_test_index(&data.0, source);
+        }
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.MyTextsTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
+            },
+        );
         let controller = attach_controller(&mut session);
         pump_until(&mut session, &mut events, |session| {
             session.view_state.settings.languages_read
+                && session.view_state.downloads.indexes.is_some()
         });
         // The definition button names my language, which the controller's
         // snapshot carries.
@@ -4863,16 +3798,6 @@ mod tests {
                 session.view_state.shown.translating().my == language
             });
         };
-        let indexes = Indexes {
-            definitions: State::Open,
-            spanish: State::Open,
-            catalan: State::Open,
-            ..Indexes::MISSING
-        };
-        session.handle(Event::Indexes {
-            generation: 0,
-            indexes,
-        });
         let (visible, text) = session.view.indexes_line();
         assert!(visible && text.contains("Russian translations"), "{text}");
         session.render_shown();
@@ -4924,47 +3849,47 @@ mod tests {
     #[ignore = "needs a display; run alone"]
     fn a_choice_of_my_language_before_the_read_offers_its_missing_set_after_it() {
         use super::*;
-        use addict_dictionary::pairs;
+        use addict_dictionary::{import::Source, pairs, release::Published};
 
         gtk::init().expect("a display");
-        let (mut session, _events, _work) =
-            test_session("io.github.doqhu.Addict.DeferredOfferTest", Dirs::default());
-        session.work = WorkRef::new();
-        // A launch: the first run is not decided yet.
-        session.first_run = FirstRun::Unasked;
+        let data = KeyTestDir::new("addict-early-language");
         let required: Vec<_> = pairs::required_sources(Language::Es).collect();
         assert!(required.len() > 1, "a set with something left to lack");
-        // One of Spanish's set is there: no first-run offer, but a Settings one.
-        session.handle(Event::Indexes {
-            generation: 0,
-            indexes: Indexes {
-                presence: Indexes::MISSING.presence.with(required[0]),
-                ..Indexes::MISSING
+        write_test_index(&data.0, required[0]);
+        write_test_index(&data.0, Source::Oewn);
+        let stub = download_stub(
+            vec![Published::of("wikdict-es-en", b"asset")],
+            HashMap::new(),
+        );
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.DeferredOfferTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
             },
-        });
-        let mut revision = session.view_state.revision;
-        let mut snapshot = |languages_read: bool, my: Language, my_chosen: u64| {
-            revision += 1;
-            let mut state = addict_controller::ViewState {
-                revision,
-                ..addict_controller::ViewState::default()
-            };
-            state.settings.languages_read = languages_read;
-            state.settings.my_language = my;
-            state.settings.my_chosen = my_chosen;
-            Event::Controller(Box::new(state), Vec::new())
-        };
-        session.handle(snapshot(false, Language::Ru, 0));
-        // Spanish chosen while the files are still being read: nothing yet.
-        session.handle(snapshot(false, Language::Es, 1));
-        assert!(matches!(session.first_run, FirstRun::Unasked));
+        );
+        let _controller = attach_controller_with_release(&mut session, stub.base_url());
+        assert!(session.download_offer.is_none());
         assert_eq!(session.settings.download_text(), "");
-        // The read ends: the decision, then the offer of what Spanish lacks.
-        session.handle(snapshot(true, Language::Es, 1));
-        assert!(matches!(session.first_run, FirstRun::Done));
+        session.handle(Event::Setting(controller::Event::MyLanguageChosen(
+            Language::Es,
+        )));
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_some()
+        });
+        assert!(session.view_state.settings.languages_read);
+        assert!(
+            session
+                .view_state
+                .downloads
+                .offer
+                .as_ref()
+                .unwrap()
+                .recovery
+        );
         assert_eq!(
             session.settings.download_text(),
-            first_run::recovery_failed_text(first_run::NO_PLACE)
+            "The dictionary download dialog is open."
         );
         session.settings.window().destroy();
         session.window.destroy();
@@ -4972,123 +3897,37 @@ mod tests {
 
     #[test]
     #[ignore = "needs a display; run alone"]
-    fn first_run_uses_the_saved_language_in_either_order() {
+    fn the_first_run_offer_waits_for_the_main_window() {
         use super::*;
-        use addict_dictionary::{import::Source, release::Published};
+        use addict_dictionary::release::Published;
 
         gtk::init().expect("a display");
-        let (mut session, _events, work) =
-            test_session("io.github.doqhu.Addict.FirstRunTest", Dirs::default());
-        // Observe request IDs without contacting the release server.
-        session.work = WorkRef::new();
-        let pending = || {
-            work.run(
-                addict_controller::deadlines::LANGUAGE_FILE_LIMIT,
-                std::future::pending::<()>(),
-                |_| {},
-            )
-        };
-        let indexes = Indexes {
-            presence: Indexes::MISSING.presence.with(Source::WikdictRuEs),
-            ..Indexes::MISSING
-        };
-        // The controller's snapshots reach the shell as this event; the read
-        // of my language is the first one whose start read has ended.
-        let mut revision = session.view_state.revision;
-        let mut snapshot = |languages_read: bool, my: Language| {
-            revision += 1;
-            let mut state = addict_controller::ViewState {
-                revision,
-                ..addict_controller::ViewState::default()
-            };
-            state.settings.languages_read = languages_read;
-            state.settings.my_language = my;
-            Event::Controller(Box::new(state), Vec::new())
-        };
-        for my in [Language::En, Language::Ru] {
-            for indexes_first in [false, true] {
-                session.first_run = FirstRun::Unasked;
-                session.download_run = 0;
-                session.handle(snapshot(false, Language::Ru));
-                session.indexes = IndexCache::default();
-                session.check = Some(pending());
-                let indexes = Event::Indexes {
-                    generation: 0,
-                    indexes,
-                };
-                let language = snapshot(true, my);
-                let [first, second] = if indexes_first {
-                    [indexes, language]
-                } else {
-                    [language, indexes]
-                };
-                session.handle(first);
-                assert!(matches!(session.first_run, FirstRun::Unasked));
-                assert_eq!(session.download_run, 0);
-                session.handle(second);
-                assert!(matches!(session.first_run, FirstRun::Done));
-                assert_eq!(session.download_run, u64::from(my == Language::En));
-            }
-        }
-
-        // A stale snapshot cannot dismiss a pending offer, and an unrelated
-        // file in the latest accepted snapshot keeps the offer due.
-        session.handle(snapshot(true, Language::En));
-        let manifest = Manifest {
-            format: addict_dictionary::format::VERSION,
-            indexes: vec![Published::of("oewn", b"xz")],
-        };
-        session.first_run = FirstRun::Pending(manifest.clone());
-        let current = session.indexes.begin_import();
-        session.handle(Event::Indexes {
-            generation: current - 1,
-            indexes: Indexes::OPEN,
+        let data = KeyTestDir::new("addict-background-offer");
+        let stub = download_stub(vec![Published::of("oewn", b"asset")], HashMap::new());
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.BackgroundFirstRunTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
+            },
+        );
+        let _controller = attach_controller_with_release(&mut session, stub.base_url());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.downloads.offer.is_some()
         });
-        assert!(matches!(session.first_run, FirstRun::Pending(_)));
-        let (ready, _) = oneshot::channel();
-        session.handle(Event::Imported(ImportCompletion {
-            generation: current,
-            indexes,
-            ready,
-        }));
-        assert!(matches!(session.first_run, FirstRun::Pending(_)));
-
-        // A manifest arriving while the main window is visible must wait
-        // for the current generation before the offer can open.
-        session.first_run = FirstRun::Asking { _job: pending() };
-        session.window.set_visible(true);
+        assert!(!session.window.is_visible());
+        assert!(session.download_offer.is_none());
+        session.handle(Event::Window(WindowEvent::Launched(LaunchMode::Normal)));
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_some()
+        });
         assert!(session.window.is_visible());
-        let (ready, mut generation) = oneshot::channel();
-        session.handle(Event::ImportRefreshing(ready));
-        let current = generation.try_recv().unwrap().unwrap();
-        assert_eq!(session.indexes.known, Some(indexes));
-        session.handle(Event::FirstRunOffer(session.download_run, manifest));
-        assert!(matches!(session.first_run, FirstRun::Pending(_)));
-        let (ready, _) = oneshot::channel();
-        session.handle(Event::Imported(ImportCompletion {
-            generation: current,
-            indexes: Indexes::OPEN,
-            ready,
-        }));
-        assert!(matches!(session.first_run, FirstRun::Done));
-
-        // The initial decision also waits when there is a stale snapshot.
-        session.first_run = FirstRun::Unasked;
-        assert!(session.indexes.update(current, indexes));
-        let run = session.download_run;
-        let (ready, mut generation) = oneshot::channel();
-        session.handle(Event::ImportRefreshing(ready));
-        let current = generation.try_recv().unwrap().unwrap();
-        assert!(matches!(session.first_run, FirstRun::Unasked));
-        assert_eq!(session.download_run, run);
-        let (ready, _) = oneshot::channel();
-        session.handle(Event::Imported(ImportCompletion {
-            generation: current,
-            indexes: Indexes::OPEN,
-            ready,
-        }));
-        assert!(matches!(session.first_run, FirstRun::Done));
-        assert_eq!(session.download_run, run);
+        let (_, offer) = session.download_offer.as_ref().unwrap();
+        assert!(offer.window().is_visible());
+        assert_eq!(
+            offer.window().transient_for().as_ref(),
+            Some(session.window.upcast_ref())
+        );
         session.settings.window().destroy();
         session.window.destroy();
     }
@@ -5102,7 +3941,12 @@ mod tests {
 
         use super::*;
         use crate::stub::{Route, Stub};
-        use addict_dictionary::{import, pairs, release, sources};
+        use addict_dictionary::{
+            import, pairs,
+            release::{self, Manifest, Published},
+            sources,
+        };
+        use addict_engine::{dictionaries::Indexes, view::first_run};
 
         struct Temp(std::path::PathBuf);
         impl Drop for Temp {
@@ -5160,19 +4004,25 @@ mod tests {
                 .collect(),
         };
         assert_eq!(manifest.indexes.len(), 20);
-        let stub = Stub::start(HashMap::from([(
+        let mut routes = HashMap::from([(
             format!("/{}/{}", release::tag(), release::MANIFEST_3),
             Route::File(manifest.to_json().into_bytes()),
-        )]))
-        .unwrap();
+        )]);
+        for published in &manifest.indexes {
+            routes.insert(
+                format!("/{}/{}", release::tag(), published.asset()),
+                Route::Stall(published.name.as_bytes().to_vec()),
+            );
+        }
+        let stub = Stub::start(routes).unwrap();
 
         gtk::init().expect("a display");
         let (mut session, mut events, _work) =
             test_session("io.github.doqhu.Addict.LanguageChangeTest", dirs);
-        session.release = stub.base_url();
-        let controller = attach_controller(&mut session);
+        let controller = attach_controller_with_release(&mut session, stub.base_url());
         pump_until(&mut session, &mut events, |session| {
             session.view_state.settings.languages_read
+                && session.view_state.downloads.indexes.is_some()
         });
         assert!(
             controller.dispatch_settings_read(addict_controller::SettingsRead::My(Language::Ru))
@@ -5180,8 +4030,6 @@ mod tests {
         pump_until(&mut session, &mut events, |session| {
             session.view_state.settings.my_language == Language::Ru
         });
-        session.first_run = FirstRun::Done;
-        assert!(session.indexes.update(0, indexes));
         let choose = |session: &mut super::Session, events: &mut _, language| {
             let before = session.view_state.settings.my_chosen;
             session.handle(Event::Setting(addict_controller::Event::MyLanguageChosen(
@@ -5192,9 +4040,9 @@ mod tests {
             });
         };
         let lacks = |my: Language| -> Vec<String> {
-            first_run::missing(&indexes, my)
-                .into_iter()
-                .map(str::to_owned)
+            pairs::required_sources(my)
+                .filter(|source| !indexes.presence.contains(*source))
+                .map(|source| source.index_name().trim_end_matches(".index").to_owned())
                 .collect()
         };
         let sorted = |mut names: Vec<String>| -> Vec<String> {
@@ -5202,39 +4050,31 @@ mod tests {
             names
         };
         let shown = |session: &Session| -> Vec<String> {
-            let FirstRun::Shown {
-                offer,
-                recovery: true,
-                ..
-            } = &session.first_run
-            else {
-                panic!("the Settings offer");
-            };
+            assert!(
+                session
+                    .view_state
+                    .downloads
+                    .offer
+                    .as_ref()
+                    .unwrap()
+                    .recovery
+            );
+            let (_, offer) = session.download_offer.as_ref().expect("the Settings offer");
             offer.listed()
         };
 
         // The same language again, and Russian's set present: nothing.
         choose(&mut session, &mut events, Language::Ru);
-        assert!(matches!(session.first_run, FirstRun::Done));
-        // On a fresh install the first-run offer owns the decision while it
-        // is due (a `--background` start, the window not yet shown).
-        assert!(session.indexes.update(0, Indexes::MISSING));
-        session.first_run = FirstRun::Pending(manifest.clone());
-        choose(&mut session, &mut events, Language::Es);
-        assert!(matches!(session.first_run, FirstRun::Pending(_)));
-        assert!(session.indexes.update(0, indexes));
-        session.first_run = FirstRun::Done;
-        choose(&mut session, &mut events, Language::Ru);
-        assert!(matches!(session.first_run, FirstRun::Done));
+        assert!(session.view_state.downloads.offer.is_none());
         assert!(stub.seen().is_empty(), "no request: {:?}", stub.seen());
 
         // Download dictionaries with Russian's set readable: only other
         // languages' indexes are missing, so no dialog opens.
-        session.handle(Event::SettingsDownload);
+        session.handle(Event::Setting(controller::Event::DownloadPressed));
         pump_until(&mut session, &mut events, |session| {
-            !matches!(session.first_run, FirstRun::Preparing { .. })
+            session.view_state.downloads.settings_line == first_run::nothing_text(Language::Ru)
         });
-        assert!(matches!(session.first_run, FirstRun::Done));
+        assert!(session.view_state.downloads.offer.is_none());
         assert_eq!(
             session.settings.download_text(),
             first_run::nothing_text(Language::Ru)
@@ -5252,25 +4092,25 @@ mod tests {
                 "wikdict-ca-en"
             ]
         );
+        let (resume, _gate) = hold_controller_worker(&controller);
         choose(&mut session, &mut events, Language::En);
-        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
+        assert!(session.view_state.downloads.settings_busy);
         // A change while preparing keeps the preparation, which lists for
         // the language in use when it ends.
-        let run = session.download_run;
+        let requests = stub.seen();
         choose(&mut session, &mut events, Language::Es);
         choose(&mut session, &mut events, Language::En);
-        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
-        assert_eq!(session.download_run, run);
+        assert!(session.view_state.downloads.settings_busy);
+        assert_eq!(stub.seen(), requests);
+        drop(resume);
         pump_until(&mut session, &mut events, |session| {
-            matches!(session.first_run, FirstRun::Shown { .. })
+            session.download_offer.is_some()
         });
         assert_eq!(sorted(shown(&session)), sorted(lacks(Language::En)));
         // The waiting offer follows a change to Catalan, and closes on
         // Russian, whose set is whole.
         // Closed (it hides), it is shown again by a change.
-        let FirstRun::Shown { offer, .. } = &session.first_run else {
-            unreachable!();
-        };
+        let (_, offer) = session.download_offer.as_ref().unwrap();
         let window = offer.window().clone();
         window.close();
         assert!(!window.is_visible());
@@ -5278,24 +4118,23 @@ mod tests {
         assert_eq!(sorted(shown(&session)), sorted(lacks(Language::Ca)));
         assert!(window.is_visible(), "the waiting offer is shown again");
         choose(&mut session, &mut events, Language::Ru);
-        assert!(matches!(session.first_run, FirstRun::Done));
+        assert!(session.view_state.downloads.offer.is_none());
         assert!(!window.is_visible(), "the empty offer closes");
 
         // English again, accepted: the queue is what English lacks, in
         // manifest order.
         choose(&mut session, &mut events, Language::En);
         pump_until(&mut session, &mut events, |session| {
-            matches!(session.first_run, FirstRun::Shown { .. })
+            session.download_offer.is_some()
         });
-        let run = session.download_run;
-        session.handle(Event::FirstRunDownload(run));
-        let FirstRun::Installing {
-            queue, recovery, ..
-        } = &session.first_run
-        else {
-            panic!("installing");
+        let run = session.download_offer.as_ref().unwrap().0;
+        session.handle(Event::Setting(controller::Event::OfferDownloadPressed(run)));
+        pump_until(&mut session, &mut events, is_installing);
+        let offer = session.view_state.downloads.offer.as_ref().unwrap();
+        let OfferPhase::Installing(queue) = &offer.phase else {
+            unreachable!()
         };
-        assert!(*recovery);
+        assert!(offer.recovery);
         let queued: Vec<String> = queue
             .rows()
             .iter()
@@ -5304,42 +4143,56 @@ mod tests {
         assert_eq!(queued, lacks(Language::En));
         // A change while installing leaves the install as it is.
         choose(&mut session, &mut events, Language::Ca);
-        assert!(matches!(session.first_run, FirstRun::Installing { .. }));
-        session.handle(Event::FirstRunCancel(run, None));
+        assert!(is_installing(&session));
+        session.handle(Event::Setting(controller::Event::OfferCancelPressed(
+            run, None,
+        )));
+        pump_until(&mut session, &mut events, is_ended);
         // English's set present too, back to Russian: nothing is offered.
-        let english = pairs::required_sources(Language::En)
-            .fold(indexes.presence, |presence, source| presence.with(source));
-        assert!(session.indexes.update(
-            0,
-            Indexes {
-                presence: english,
-                ..indexes
+        for source in pairs::required_sources(Language::En) {
+            let path = import::index_path(&dir, source);
+            if !path.exists() {
+                std::fs::write(path, &index).unwrap();
             }
-        ));
-        let run = session.download_run;
+        }
         choose(&mut session, &mut events, Language::Ru);
-        assert!(matches!(session.first_run, FirstRun::Ended { .. }));
-        assert_eq!(session.download_run, run);
-
-        // A first-run offer waiting under `--background` for Russian, with
-        // one index of English's set on disk: English ends it (entry 4),
-        // and the Settings offer takes over for the rest.
-        assert!(
-            session.indexes.update(
-                0,
-                Indexes {
-                    presence: Indexes::MISSING
-                        .presence
-                        .with(addict_dictionary::import::Source::WikdictEnEs),
-                    ..Indexes::MISSING
-                }
-            )
+        assert!(is_ended(&session));
+        assert_eq!(session.download_offer.as_ref().unwrap().0, run);
+        // On a background launch the deferred Russian offer gives way to
+        // recovery if a choice makes a partially installed set current.
+        let background = KeyTestDir::new("addict-language-change-background");
+        let dir_before = background.0.join("data");
+        std::fs::create_dir(&dir_before).unwrap();
+        write_test_index(&dir_before, addict_dictionary::import::Source::WikdictEnEs);
+        let (mut hidden, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.BackgroundLanguageChangeTest",
+            Dirs {
+                data: Some(dir_before),
+                ..Dirs::default()
+            },
         );
-        session.first_run = FirstRun::Pending(manifest.clone());
-        choose(&mut session, &mut events, Language::En);
-        // The pending first-run offer ends and the Settings offer takes over;
-        // the controller's wait may already have carried preparation through.
-        assert!(!matches!(session.first_run, FirstRun::Pending(_)));
+        let _background_controller = attach_controller_with_release(&mut hidden, stub.base_url());
+        pump_until(&mut hidden, &mut events, |session| {
+            session.view_state.downloads.offer.is_some()
+        });
+        assert!(hidden.download_offer.is_none());
+        assert!(!hidden.view_state.downloads.offer.as_ref().unwrap().recovery);
+        choose(&mut hidden, &mut events, Language::En);
+        assert!(
+            hidden
+                .view_state
+                .downloads
+                .offer
+                .as_ref()
+                .is_none_or(|offer| offer.recovery)
+        );
+        pump_until(&mut hidden, &mut events, |session| {
+            session.download_offer.is_some()
+        });
+        assert!(hidden.view_state.downloads.offer.as_ref().unwrap().recovery);
+        hidden.settings.window().destroy();
+        hidden.window.destroy();
+
         for source in &russian {
             assert!(
                 import::index_path(&dir, *source).exists(),
@@ -5354,10 +4207,37 @@ mod tests {
     #[ignore = "needs a display; run alone"]
     fn settings_download_uses_the_shared_dialog_and_ignores_old_runs() {
         use super::*;
+        use crate::stub::Route;
         use addict_dictionary::release::Published;
         gtk::init().expect("a display");
-        let (mut session, mut events, work) =
-            test_session("io.github.doqhu.Addict.RecoveryTest", Dirs::default());
+        use addict_engine::view::first_run;
+        let data = KeyTestDir::new("addict-recovery-dialog");
+        write_test_index(&data.0, addict_dictionary::import::Source::Freedict);
+        let published = Published::of("oewn", b"asset!");
+        let stub = download_stub(
+            vec![published.clone()],
+            HashMap::from([(
+                format!(
+                    "/{}/{}",
+                    addict_dictionary::release::tag(),
+                    published.asset()
+                ),
+                Route::Stall(b"asset!".to_vec()),
+            )]),
+        );
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.RecoveryTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                config: Some(data.0.join("config")),
+                ..Dirs::default()
+            },
+        );
+        let controller = attach_controller_with_release(&mut session, stub.base_url());
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.settings.languages_read
+                && session.view_state.downloads.indexes.is_some()
+        });
 
         fn button(widget: &gtk::Widget, text: &str) -> Option<gtk::Button> {
             if let Some(button) = widget.downcast_ref::<gtk::Button>()
@@ -5390,45 +4270,44 @@ mod tests {
             }
             false
         }
-        let pending = || work.run(MANIFEST_LIMIT, std::future::pending::<()>(), |_| {});
-        session.download_run = 1;
-        session.first_run = FirstRun::Preparing { _job: pending() };
         let action = button(
             session.settings.window().upcast_ref(),
             "Download dictionaries",
         )
         .unwrap();
+        let (resume, _gate) = hold_controller_worker(&controller);
         action.emit_clicked();
+        let event = events.try_recv().unwrap();
         assert!(
-            matches!(events.try_recv().unwrap(), Event::SettingsDownload),
+            matches!(event, Event::Setting(controller::Event::DownloadPressed)),
             "actual Settings callback"
         );
-        session.handle(Event::SettingsDownload);
-        assert_eq!(session.download_run, 1, "repeat preserves preparation");
-        assert!(matches!(session.first_run, FirstRun::Preparing { .. }));
-        let manifest = Manifest {
-            format: addict_dictionary::format::VERSION,
-            indexes: vec![Published::of("oewn", b"asset")],
-        };
-        session.handle(Event::RecoveryPrepared(
-            0,
-            Outcome::Finished(Ok(manifest.clone())),
-        ));
+        session.handle(event);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.downloads.settings_busy
+        });
+        let requests = stub.seen();
+        session.handle(Event::Setting(controller::Event::DownloadPressed));
         assert!(
-            matches!(session.first_run, FirstRun::Preparing { .. }),
-            "stale preparation ignored"
+            session.view_state.downloads.settings_busy,
+            "repeat preserves preparation"
         );
-        session.handle(Event::RecoveryPrepared(
-            1,
-            Outcome::Finished(Ok(manifest.clone())),
-        ));
-        let FirstRun::Shown {
-            offer, recovery, ..
-        } = &session.first_run
-        else {
-            panic!("shared recovery offer");
-        };
-        assert!(*recovery);
+        assert_eq!(stub.seen(), requests);
+        drop(resume);
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_some()
+        });
+        let (old, offer) = session.download_offer.as_ref().unwrap();
+        let old = *old;
+        assert!(
+            session
+                .view_state
+                .downloads
+                .offer
+                .as_ref()
+                .unwrap()
+                .recovery
+        );
         assert_eq!(
             offer.window().transient_for().as_ref(),
             Some(session.settings.window())
@@ -5441,71 +4320,69 @@ mod tests {
         button(offer.window().upcast_ref(), first_run::CLOSE)
             .unwrap()
             .emit_clicked();
-        assert!(matches!(
-            events.try_recv().unwrap(),
-            Event::FirstRunNotNow(1)
-        ));
-        session.handle(Event::FirstRunNotNow(1));
-        assert!(matches!(session.first_run, FirstRun::Done));
+        let event = events.try_recv().unwrap();
         assert!(
-            session.first_run_choice.is_none(),
+            matches!(event, Event::Setting(controller::Event::OfferNotNowPressed(id)) if id == old)
+        );
+        session.handle(event);
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_none()
+        });
+        assert!(
+            !data.0.join("config/first-run-download").exists(),
             "recovery Close keeps the first-run choice"
         );
-        session.download_run = 2;
-        session.show_download_offer(manifest, true);
-        let FirstRun::Shown {
-            offer,
-            manifest,
-            recovery,
-        } = std::mem::replace(&mut session.first_run, FirstRun::Done)
-        else {
-            unreachable!()
-        };
-        let mut queue = first_run::Queue::new(manifest.indexes);
-        queue.next();
-        offer.installing();
-        session.first_run = FirstRun::Installing {
-            offer,
-            queue,
-            dir: std::env::temp_dir(),
-            running: Some(("oewn".to_owned(), pending())),
-            recovery,
-        };
-        session.handle(Event::FirstRunProgress(1, "oewn".to_owned(), 100));
-        session.handle(Event::FirstRunInstalled(
-            1,
-            "oewn".to_owned(),
-            Outcome::Finished(Ok(std::path::PathBuf::new())),
-        ));
-        session.handle(Event::SettingsDownload);
-        session.handle(Event::FirstRunDownload(2));
-        let FirstRun::Installing {
-            queue,
-            running,
-            offer,
-            ..
-        } = &session.first_run
-        else {
-            panic!("repeat must preserve installation");
-        };
-        assert!(running.is_some());
-        assert!(
-            offer.window().is_visible(),
-            "active progress stays reachable"
-        );
-        assert_eq!(
-            queue.state("oewn"),
-            Some(&first_run::RowState::Running { received: 0 })
-        );
-        session.handle(Event::FirstRunProgress(2, "oewn".to_owned(), 3));
-        let FirstRun::Installing { queue, .. } = &session.first_run else {
-            unreachable!()
+        action.emit_clicked();
+        pump_until(&mut session, &mut events, |session| {
+            session.download_offer.is_some()
+        });
+        let (id, offer) = session.download_offer.as_ref().unwrap();
+        let id = *id;
+        assert_ne!(id, old);
+        let window = offer.window().clone();
+        let (resume, _gate) = hold_controller_worker(&controller);
+        session.handle(Event::Setting(controller::Event::OfferDownloadPressed(id)));
+        pump_until(&mut session, &mut events, is_installing);
+        window.close();
+        session.handle(Event::Setting(controller::Event::OfferDownloadPressed(old)));
+        session.handle(Event::Setting(controller::Event::OfferCancelPressed(
+            old, None,
+        )));
+        session.handle(Event::Setting(controller::Event::DownloadPressed));
+        let previous = session.view_state.downloads.present;
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.downloads.present > previous
+        });
+        assert!(is_installing(&session));
+        assert!(window.is_visible(), "active progress stays reachable");
+        let queue = |session: &Session| {
+            let OfferPhase::Installing(queue) =
+                &session.view_state.downloads.offer.as_ref().unwrap().phase
+            else {
+                panic!("installing")
+            };
+            queue
+                .rows()
+                .iter()
+                .find(|(entry, _)| entry.name == "oewn")
+                .map(|(_, state)| state.clone())
         };
         assert_eq!(
-            queue.state("oewn"),
-            Some(&first_run::RowState::Running { received: 3 })
+            queue(&session),
+            Some(first_run::RowState::Running { received: 0 })
         );
-        session.first_run = FirstRun::Done;
+        drop(resume);
+        pump_until(&mut session, &mut events, |session| {
+            queue(session) == Some(first_run::RowState::Running { received: 3 })
+        });
+        assert_eq!(
+            queue(&session),
+            Some(first_run::RowState::Running { received: 3 })
+        );
+        session.handle(Event::Setting(controller::Event::OfferCancelPressed(
+            id, None,
+        )));
+        pump_until(&mut session, &mut events, is_ended);
         session.settings.window().destroy();
         session.window.destroy();
     }
@@ -5564,6 +4441,7 @@ mod tests {
             Dirs::default(),
             super::controller_platform(),
             StartFacts {
+                release: String::new(),
                 key: Some(Err(KeyError::Missing)),
                 recording: false,
             },
@@ -6376,6 +5254,7 @@ mod tests {
             Dirs::default(),
             super::controller_platform(),
             StartFacts {
+                release: String::new(),
                 key: Some(Err(KeyError::Missing)),
                 recording: false,
             },

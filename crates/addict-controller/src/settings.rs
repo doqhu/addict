@@ -122,6 +122,11 @@ impl ReadGate {
     }
 
     #[cfg(test)]
+    pub(crate) fn is_waiting(&self) -> bool {
+        !self.state.lock().expect("read gate").waiting.is_empty()
+    }
+
+    #[cfg(test)]
     pub(crate) fn release(&self) {
         let mut state = self.state.lock().expect("read gate");
         state.open = true;

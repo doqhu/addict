@@ -710,6 +710,7 @@ fn gated_shell(dirs: Dirs) -> (FakeShell, Arc<crate::settings::ReadGate>) {
     // Consume the initial snapshot; the four reads are still waiting.
     let (view, effects) = shell.next();
     assert!(effects.is_empty() && !view.settings.languages_read);
+    shell.wait_for(|view| view.downloads.indexes.is_some());
     (shell, gate)
 }
 
@@ -764,10 +765,6 @@ fn a_gloss_writes_the_reading_language_file_in_a_real_directory() {
     };
 
     let (mut shell, gate) = gated_shell(dirs);
-    shell.quiet(Event::KnownIndexes {
-        generation: 0,
-        indexes: Some(super::SPANISH),
-    });
     step(&mut shell, Event::ReadingChosen(Language::Es));
     shell.edit("banco");
     // The answer's article: the edit's first snapshot may come before the
@@ -1090,10 +1087,10 @@ fn the_switch_state_stays_confirmed_while_a_change_runs() {
 
 #[test]
 fn a_start_read_asks_the_shown_word_again_only_where_0_5_0_did() {
-    let (mut shell, _gate) = gated_shell(Dirs::default());
-    shell.quiet(Event::KnownIndexes {
-        generation: 0,
-        indexes: Some(super::SPANISH),
+    let data = super::TestData::with_banco();
+    let (mut shell, _gate) = gated_shell(Dirs {
+        data: Some(data.0.clone()),
+        ..Dirs::default()
     });
     step(&mut shell, Event::ReadingChosen(Language::Es));
     shell.edit("banco");

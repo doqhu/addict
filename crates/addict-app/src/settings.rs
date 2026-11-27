@@ -15,12 +15,7 @@
 //! showing the window calls no portal. The texts are plain functions of the
 //! state, so that they can be tested without a display.
 
-use std::{
-    cell::Cell,
-    future::Future,
-    path::{Path, PathBuf},
-    rc::Rc,
-};
+use std::{cell::Cell, future::Future, path::Path, rc::Rc};
 
 use addict_controller::SettingsView;
 use addict_core::{
@@ -39,7 +34,10 @@ use gtk::{glib, prelude::*};
 // puts them on screen and reports what the user does.
 pub use addict_engine::view::settings::*;
 
-use crate::{file_import, view::Binding};
+use crate::{
+    file_import,
+    view::{Binding, settings::my_language_names},
+};
 
 /// The shell's login entry becomes the controller's state: the saved value
 /// wins, and with none only a legacy entry makes the switch on.
@@ -345,22 +343,7 @@ pub struct Settings {
     english_rendering: Rc<Cell<bool>>,
     download: gtk::Button,
     download_status: gtk::Label,
-}
-
-/// The name of a language in the my-language row. No wildcard arm: a new
-/// language does not compile until it is named.
-pub fn my_language_name(language: Source) -> &'static str {
-    match language {
-        Source::En => "English",
-        Source::Es => "Spanish",
-        Source::Ca => "Catalan",
-        Source::Ru => "Russian",
-    }
-}
-
-/// The names of the my-language row, in the order of its choices.
-pub fn my_language_names() -> Vec<&'static str> {
-    Source::ALL.into_iter().map(my_language_name).collect()
+    import_file: file_import::Row,
 }
 
 /// The name of a spelling of English in the English spelling row. No
@@ -461,12 +444,11 @@ impl Settings {
     /// `on_english` with the spelling the user chooses in English spelling;
     /// `on_at_once` with the state the user moves Translate sentence at once
     /// to.
-    /// `on_imported` refreshes resident dictionary states before success is shown.
+    /// `on_import` and `on_download` send the dictionary actions.
     #[allow(clippy::too_many_arguments)]
-    pub fn new<F: Future<Output = Result<(), String>> + 'static>(
+    pub fn new(
         parent: &impl IsA<gtk::Window>,
         key_file: Option<&Path>,
-        data_dir: Option<PathBuf>,
         owner: KeyOwner,
         on_change: impl Fn() + 'static,
         on_save: impl Fn(Result<Secret, WriteError>) + 'static,
@@ -475,7 +457,7 @@ impl Settings {
         on_my_language: impl Fn(Source) + 'static,
         on_english: impl Fn(English) + 'static,
         on_at_once: impl Fn(bool) + 'static,
-        on_imported: impl Fn() -> F + 'static,
+        on_import: impl Fn() + 'static,
         on_download: impl Fn() + 'static,
     ) -> Self {
         let clipboard = ShortcutRow::new("Selection or clipboard", SHORTCUT_ID, owner);
@@ -786,7 +768,7 @@ impl Settings {
             .child(&scroll)
             .css_classes(["addict", "settings"])
             .build();
-        import_file.connect(&window, data_dir, on_imported);
+        import_file.connect(on_import);
         let escape = gtk::EventControllerKey::new();
         let esc = window.downgrade();
         escape.connect_key_pressed(move |_, key, _, _| {
@@ -830,6 +812,7 @@ impl Settings {
             english_rendering,
             download,
             download_status,
+            import_file,
         };
         settings.render_binding(&Binding::Attempting, &Bindings::default());
         settings
@@ -843,6 +826,10 @@ impl Settings {
     pub fn render_download(&self, busy: bool, text: &str) {
         self.download.set_sensitive(!busy);
         say_in(&self.download_status, text);
+    }
+
+    pub fn render_import(&self, state: &addict_engine::view::file_choice::ImportState) {
+        self.import_file.render(state);
     }
 
     /// Puts the controller's Settings snapshot on screen. The widgets never
@@ -1093,7 +1080,6 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
-            None,
             super::KeyOwner::Portal,
             || {},
             |_| {},
@@ -1102,7 +1088,7 @@ mod tests {
             |_| {},
             |_| {},
             |_| {},
-            || async { Ok(()) },
+            || {},
             move || pressed.set(pressed.get() + 1),
         );
         settings.present();
@@ -1112,13 +1098,18 @@ mod tests {
         );
         settings.download.emit_clicked();
         assert_eq!(presses.get(), 1);
-        settings.render_download(true, crate::first_run::FETCHING);
+        settings.render_download(true, addict_engine::view::first_run::FETCHING);
         assert!(!settings.download.is_sensitive());
         assert!(settings.download_status.is_visible());
-        assert_eq!(settings.download_status.label(), crate::first_run::FETCHING);
+        assert_eq!(
+            settings.download_status.label(),
+            addict_engine::view::first_run::FETCHING
+        );
         for status in [
-            crate::first_run::nothing_text(super::Source::Ru),
-            crate::first_run::recovery_failed_text("cannot read the index manifest: malformed"),
+            addict_engine::view::first_run::nothing_text(super::Source::Ru),
+            addict_engine::view::first_run::recovery_failed_text(
+                "cannot read the index manifest: malformed",
+            ),
         ] {
             settings.render_download(false, &status);
             assert!(settings.download.is_sensitive());
@@ -1161,7 +1152,6 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
-            None,
             super::KeyOwner::Portal,
             || {},
             |_| {},
@@ -1170,7 +1160,7 @@ mod tests {
             move |chosen| told.borrow_mut().push(chosen),
             |_| {},
             |_| {},
-            || async { Ok(()) },
+            || {},
             || {},
         );
         assert_eq!(settings.my_language.selected(), 3, "Russian at first");
@@ -1198,7 +1188,6 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
-            None,
             super::KeyOwner::Portal,
             || {},
             |_| {},
@@ -1207,7 +1196,7 @@ mod tests {
             |_| {},
             move |chosen| told.borrow_mut().push(chosen),
             |_| {},
-            || async { Ok(()) },
+            || {},
             || {},
         );
         assert_eq!(settings.english.selected(), 0, "US at first");
@@ -1243,7 +1232,6 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
-            None,
             super::KeyOwner::Portal,
             || {},
             |_| {},
@@ -1252,7 +1240,7 @@ mod tests {
             |_| {},
             |_| {},
             |_| {},
-            || async { Ok(()) },
+            || {},
             || {},
         );
         assert!(!settings.startup.is_sensitive());
@@ -1286,7 +1274,6 @@ mod tests {
         let settings = super::Settings::new(
             &parent,
             None,
-            None,
             super::KeyOwner::Portal,
             || {},
             |_| {},
@@ -1295,7 +1282,7 @@ mod tests {
             |_| {},
             |_| {},
             |_| {},
-            || async { Ok(()) },
+            || {},
             || {},
         );
         let scroll = settings
