@@ -13,10 +13,6 @@ pub const BIND_ANSWER_LIMIT: Duration = Duration::from_secs(600);
 
 pub const CAPTURE_LIMIT: Duration = Duration::from_secs(300);
 pub const OCR_LIMIT: Duration = Duration::from_secs(15);
-pub const CAPTURE_JOB_LIMIT: Duration = CAPTURE_LIMIT
-    .saturating_add(OCR_LIMIT)
-    .saturating_add(Duration::from_secs(5));
-
 pub const MANIFEST_LIMIT: Duration = Duration::from_secs(60);
 pub const DOWNLOAD_LIMIT: Duration = Duration::from_secs(30 * 60);
 

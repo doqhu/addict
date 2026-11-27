@@ -21,13 +21,13 @@ use std::{
 };
 
 use addict_core::{
-    failure::{capture::CaptureFailure, recognize::OcrFailure},
+    failure::{Ended as EffectEnd, capture::CaptureFailure, recognize::OcrFailure},
     translation::{Refusal, Source as Language},
 };
 use serde_json::{Value, json};
 
 use crate::{
-    capture::{Failure, Timing},
+    capture::Timing,
     dictionaries::{Answer, Looked},
     online::Subject,
     view::Online,
@@ -466,24 +466,32 @@ impl Read {
         }
     }
 
-    /// What the evidence says of a capture that showed `failure`. The detail
-    /// of a failure is dropped here. No wildcard arm: a new failure does not
-    /// compile until it is given its label.
-    pub fn failed(failure: &Failure) -> Self {
+    /// The evidence label for a picker that returned no image.
+    pub fn capture_failed(failure: &EffectEnd<CaptureFailure>) -> Self {
         match failure {
-            Failure::Capture(CaptureFailure::Cancelled) => Self::Cancelled,
-            Failure::Capture(CaptureFailure::Ended) => Self::Ended,
-            Failure::Capture(CaptureFailure::Unavailable) => Self::Unavailable,
-            Failure::Capture(CaptureFailure::Failed(_)) => Self::CaptureFailed,
-            Failure::Capture(CaptureFailure::NoImage) => Self::NoImage,
-            Failure::CaptureTimedOut => Self::CaptureTimedOut,
-            Failure::Ocr(OcrFailure::NoImage) => Self::OcrNoImage,
-            Failure::Ocr(OcrFailure::TesseractMissing) => Self::TesseractMissing,
-            Failure::Ocr(OcrFailure::LanguageMissing) => Self::LanguageMissing,
-            Failure::Ocr(OcrFailure::Failed(_)) => Self::OcrFailed,
-            Failure::Ocr(OcrFailure::Empty) => Self::Empty,
-            Failure::Ocr(OcrFailure::TimedOut) => Self::OcrTimedOut,
-            Failure::Unfinished => Self::Unfinished,
+            EffectEnd::Shell(CaptureFailure::Cancelled) => Self::Cancelled,
+            EffectEnd::Shell(CaptureFailure::Ended) => Self::Ended,
+            EffectEnd::Shell(CaptureFailure::Unavailable) => Self::Unavailable,
+            EffectEnd::Shell(CaptureFailure::NoPermission | CaptureFailure::Failed(_)) => {
+                Self::CaptureFailed
+            }
+            EffectEnd::Shell(CaptureFailure::NoImage) => Self::NoImage,
+            EffectEnd::DeadlinePassed => Self::CaptureTimedOut,
+            EffectEnd::Unfinished => Self::Unfinished,
+        }
+    }
+
+    /// The evidence label for a recognizer that returned no text.
+    pub fn recognize_failed(failure: &EffectEnd<OcrFailure>) -> Self {
+        match failure {
+            EffectEnd::Shell(OcrFailure::NoImage) => Self::OcrNoImage,
+            EffectEnd::Shell(OcrFailure::EngineMissing) => Self::TesseractMissing,
+            EffectEnd::Shell(OcrFailure::LanguageMissing) => Self::LanguageMissing,
+            EffectEnd::Shell(OcrFailure::Failed(_) | OcrFailure::Unavailable) => Self::OcrFailed,
+            EffectEnd::Shell(OcrFailure::Cancelled) => Self::Cancelled,
+            EffectEnd::Shell(OcrFailure::Empty) => Self::Empty,
+            EffectEnd::DeadlinePassed => Self::OcrTimedOut,
+            EffectEnd::Unfinished => Self::Unfinished,
         }
     }
 }
@@ -991,7 +999,7 @@ mod tests {
                         Ended::Translated,
                         measured,
                     ));
-                    let read = Read::failed(&Failure::Capture(CaptureFailure::Ended));
+                    let read = Read::capture_failed(&EffectEnd::Shell(CaptureFailure::Ended));
                     writer.write(&ocr(read, &Timing::default(), MEMORY, Some(0)));
                 }
             };
@@ -1022,8 +1030,8 @@ mod tests {
 
     /// Every way a capture ends as the window shows it, with its label.
     fn reads() -> Vec<(Read, &'static str)> {
-        let capture = |failure| Read::failed(&Failure::Capture(failure));
-        let ocr = |failure| Read::failed(&Failure::Ocr(failure));
+        let capture = |failure| Read::capture_failed(&EffectEnd::Shell(failure));
+        let ocr = |failure| Read::recognize_failed(&EffectEnd::Shell(failure));
         vec![
             (Read::Recognized, "recognized"),
             (ocr(OcrFailure::Empty), "empty"),
@@ -1035,13 +1043,19 @@ mod tests {
                 "capture-failed",
             ),
             (capture(CaptureFailure::NoImage), "no-image"),
-            (Read::failed(&Failure::CaptureTimedOut), "capture-timed-out"),
+            (
+                Read::capture_failed(&EffectEnd::DeadlinePassed),
+                "capture-timed-out",
+            ),
             (ocr(OcrFailure::NoImage), "ocr-no-image"),
-            (ocr(OcrFailure::TesseractMissing), "tesseract-missing"),
+            (ocr(OcrFailure::EngineMissing), "tesseract-missing"),
             (ocr(OcrFailure::LanguageMissing), "language-missing"),
             (ocr(OcrFailure::Failed("exit 1".into())), "ocr-failed"),
-            (ocr(OcrFailure::TimedOut), "ocr-timed-out"),
-            (Read::failed(&Failure::Unfinished), "unfinished"),
+            (
+                Read::recognize_failed(&EffectEnd::DeadlinePassed),
+                "ocr-timed-out",
+            ),
+            (Read::capture_failed(&EffectEnd::Unfinished), "unfinished"),
         ]
     }
 
@@ -1071,17 +1085,17 @@ mod tests {
             ..Timing::default()
         };
         // Details that the record must not carry.
-        let failure = Failure::Ocr(OcrFailure::Failed("/tmp/secret-snapshot.png".into()));
+        let failure = EffectEnd::Shell(OcrFailure::Failed("/tmp/secret-snapshot.png".into()));
         let records = [
             (Read::Recognized, recognized, Some(0)),
             (
-                Read::failed(&Failure::Capture(CaptureFailure::Ended)),
+                Read::capture_failed(&EffectEnd::Shell(CaptureFailure::Ended)),
                 esc,
                 Some(0),
             ),
-            (Read::failed(&failure), recognized, None),
+            (Read::recognize_failed(&failure), recognized, None),
             (
-                Read::failed(&Failure::Unfinished),
+                Read::capture_failed(&EffectEnd::Unfinished),
                 Timing::default(),
                 Some(0),
             ),

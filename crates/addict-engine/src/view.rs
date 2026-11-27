@@ -15,18 +15,26 @@
 //! translated without a sentence; a dim line under them names DeepL.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
-//! [`binding_texts`], [`indexes_text`], [`failure_text`], [`NOTHING_SELECTED_TEXT`], [`too_long_text`],
+//! [`binding_texts`], [`indexes_text`], [`capture_failure_text`], [`recognize_failure_text`], [`NOTHING_SELECTED_TEXT`], [`too_long_text`],
 //! [`sentence_markup`],
 //! [`choice_texts`] and [`online_rows`] are pure, and
 //! so is [`Shown`], the result with the sense chosen in it; they are tested
 //! without a display. This module owns no
 //! widget: `View` puts the results into its own.
 
+mod capture;
+mod recognize;
+
+#[cfg(test)]
+use capture::CAPTURE_RETRY;
+pub use capture::capture_failure_text;
+pub use recognize::{install_language, install_tesseract, recognize_failure_text};
+
 use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 
 use addict_core::{
     dictionary::{Article, LexicalEntry, PartOfSpeech, Pos, Pronunciation, Sense},
-    failure::{capture::CaptureFailure, login_item::StartupFailure, recognize::OcrFailure},
+    failure::login_item::StartupFailure,
     input::{Source, WindowState},
     translation::{English, Refusal, Request, Source as Language, reading_languages},
 };
@@ -38,10 +46,7 @@ use addict_dictionary::{
     pairs,
 };
 
-use crate::{
-    capture::Failure,
-    dictionaries::{IndexFile, Indexes, State},
-};
+use crate::dictionaries::{IndexFile, Indexes, State};
 
 /// The two texts of one window state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,91 +231,6 @@ pub const BACK_TOOLTIP: &str = "Back (Alt+Left)";
 /// The tooltip of the button left of the field that puts the text after
 /// into it, naming its hotkey.
 pub const FORWARD_TOOLTIP: &str = "Forward (Alt+Right)";
-
-/// The package of the Tesseract data of `language`. No wildcard arm: a new
-/// language does not compile until it is given its package.
-pub(crate) fn ocr_package(language: Language) -> &'static str {
-    match language {
-        Language::En => "tesseract-langpack-eng",
-        Language::Es => "tesseract-langpack-spa",
-        Language::Ca => "tesseract-langpack-cat",
-        Language::Ru => "tesseract-langpack-rus",
-    }
-}
-
-/// The name of `language` before "OCR data" in the line of missing data.
-fn ocr_language(language: Language) -> &'static str {
-    match language {
-        Language::En => "English",
-        Language::Es => "Spanish",
-        Language::Ca => "Catalan",
-        Language::Ru => "Russian",
-    }
-}
-
-/// The command that installs Tesseract with the data of `language`.
-pub fn install_tesseract(language: Language) -> String {
-    format!("sudo dnf install tesseract {}", ocr_package(language))
-}
-
-/// The command that installs the Tesseract data of `language`.
-pub fn install_language(language: Language) -> String {
-    format!("sudo dnf install {}", ocr_package(language))
-}
-
-/// What the source line says when the snapshot file is not there, whether
-/// the capture or the recognition found it missing.
-const NO_SNAPSHOT_FILE: &str = "The snapshot file was not found.";
-
-/// What ends the line of a capture that left no snapshot: the way back to the
-/// region picker, on the button that has the keyboard focus then.
-const CAPTURE_RETRY: &str = "Press Capture to try again.";
-
-/// `line`, what happened to a capture that left no snapshot, and the way back.
-fn with_retry(line: &str) -> Cow<'static, str> {
-    format!("{line} {CAPTURE_RETRY}").into()
-}
-
-/// What the source line says for `failure`, a capture recognized in
-/// `language` that gave no text. A capture that left no snapshot names the
-/// retry; a recognition has its own line. The portal's code 2, which GNOME
-/// also gives for Esc, claims no cause; a missing Tesseract or missing data of
-/// the language names the command that installs it with the package of that
-/// language. No wildcard arm: a new failure does not compile until it is
-/// given its line.
-pub fn failure_text(failure: &Failure, language: Language) -> Cow<'static, str> {
-    match failure {
-        Failure::Capture(failure) => match failure {
-            CaptureFailure::Cancelled => with_retry("The capture was cancelled."),
-            CaptureFailure::Ended => with_retry("No snapshot was taken."),
-            CaptureFailure::Unavailable => with_retry("Screen capture is not available here."),
-            CaptureFailure::Failed(detail) => {
-                let detail = detail.trim_end_matches('.');
-                with_retry(&format!("The screen capture failed: {detail}."))
-            }
-            CaptureFailure::NoImage => with_retry(NO_SNAPSHOT_FILE),
-        },
-        Failure::CaptureTimedOut => with_retry("No area was chosen in time."),
-        Failure::Ocr(failure) => match failure {
-            OcrFailure::NoImage => with_retry(NO_SNAPSHOT_FILE),
-            OcrFailure::TesseractMissing => format!(
-                "Tesseract is not installed. Install it with: {}",
-                install_tesseract(language)
-            )
-            .into(),
-            OcrFailure::LanguageMissing => format!(
-                "{} OCR data is not installed. Install it with: {}",
-                ocr_language(language),
-                install_language(language)
-            )
-            .into(),
-            OcrFailure::Failed(detail) => format!("Text recognition failed: {detail}").into(),
-            OcrFailure::Empty => "No text was recognized.".into(),
-            OcrFailure::TimedOut => "Text recognition took too long.".into(),
-        },
-        Failure::Unfinished => with_retry("The capture did not finish."),
-    }
-}
 
 /// What the source line says when neither the primary selection nor the
 /// clipboard gave a line at a press: the cause, then the manual path.
@@ -2791,11 +2711,10 @@ mod tests {
         PENDING, ResultTexts, SYNONYMS_LABEL, Shown, SynonymTexts, Translating, UNFINISHED, Whole,
         binding_texts, indexes_text, online_rows, result_texts, sentence_markup, texts,
     };
-    use addict_core::failure::{capture::CaptureFailure, recognize::OcrFailure};
+    use addict_core::failure::{Ended, capture::CaptureFailure, recognize::OcrFailure};
 
     use super::{
-        Held, NOTHING_SELECTED_TEXT, command_in, failure_text, install_language, install_tesseract,
-        too_long_text,
+        Held, NOTHING_SELECTED_TEXT, command_in, install_language, install_tesseract, too_long_text,
     };
 
     /// The label of the Russian translations, as 0.3.0 shows it.
@@ -2804,12 +2723,9 @@ mod tests {
     /// The line of an article without Russian translations, as 0.3.0
     /// shows it.
     const NO_TRANSLATION: &str = "The dictionary has no Russian translation of this word.";
-    use crate::{
-        capture::Failure,
-        dictionaries::{
-            Indexes, State,
-            tests::{FREEDICT, OEWN},
-        },
+    use crate::dictionaries::{
+        Indexes, State,
+        tests::{FREEDICT, OEWN},
     };
     use addict_dictionary::lookup::{Grouped, VerbForm};
     use std::borrow::Cow;
@@ -3201,7 +3117,7 @@ mod tests {
     #[test]
     fn the_capture_texts_are_one_line_each_and_name_no_cause() {
         assert_eq!(CAPTURE_LABEL, "Capture");
-        let empty = failure_text(&Failure::Ocr(OcrFailure::Empty), Language::En);
+        let empty = failure_text(&FailureCase::Ocr(OcrFailure::Empty), Language::En);
         assert_eq!(empty, "No text was recognized.");
         for text in [CAPTURE_LABEL, &empty] {
             assert_eq!(text.lines().count(), 1, "{text}");
@@ -3217,24 +3133,50 @@ mod tests {
         assert_ne!(waiting.status, empty);
     }
 
+    /// Test cases that exercise both source-message families together.
+    #[derive(Debug, PartialEq, Eq)]
+    enum FailureCase {
+        Capture(CaptureFailure),
+        CaptureTimedOut,
+        Ocr(OcrFailure),
+        RecognitionDeadline,
+        Unfinished,
+    }
+
+    fn failure_text(failure: &FailureCase, language: Language) -> std::borrow::Cow<'static, str> {
+        match failure {
+            FailureCase::Capture(failure) => {
+                super::capture_failure_text(&Ended::Shell(failure.clone()))
+            }
+            FailureCase::CaptureTimedOut => super::capture_failure_text(&Ended::DeadlinePassed),
+            FailureCase::Ocr(failure) => {
+                super::recognize_failure_text(&Ended::Shell(failure.clone()), language)
+            }
+            FailureCase::RecognitionDeadline => {
+                super::recognize_failure_text(&Ended::DeadlinePassed, language)
+            }
+            FailureCase::Unfinished => super::capture_failure_text(&Ended::Unfinished),
+        }
+    }
+
     /// Every failure of a capture, each once.
-    fn every_failure() -> Vec<Failure> {
+    fn every_failure() -> Vec<FailureCase> {
         vec![
-            Failure::Capture(CaptureFailure::Cancelled),
-            Failure::Capture(CaptureFailure::Ended),
-            Failure::Capture(CaptureFailure::Unavailable),
-            Failure::Capture(CaptureFailure::Failed("no portal answer".to_owned())),
-            Failure::Capture(CaptureFailure::NoImage),
-            Failure::CaptureTimedOut,
-            Failure::Ocr(OcrFailure::NoImage),
-            Failure::Ocr(OcrFailure::TesseractMissing),
-            Failure::Ocr(OcrFailure::LanguageMissing),
-            Failure::Ocr(OcrFailure::Failed(
+            FailureCase::Capture(CaptureFailure::Cancelled),
+            FailureCase::Capture(CaptureFailure::Ended),
+            FailureCase::Capture(CaptureFailure::Unavailable),
+            FailureCase::Capture(CaptureFailure::Failed("no portal answer".to_owned())),
+            FailureCase::Capture(CaptureFailure::NoImage),
+            FailureCase::CaptureTimedOut,
+            FailureCase::Ocr(OcrFailure::NoImage),
+            FailureCase::Ocr(OcrFailure::EngineMissing),
+            FailureCase::Ocr(OcrFailure::LanguageMissing),
+            FailureCase::Ocr(OcrFailure::Failed(
                 "tesseract exit status 1: bad".to_owned(),
             )),
-            Failure::Ocr(OcrFailure::Empty),
-            Failure::Ocr(OcrFailure::TimedOut),
-            Failure::Unfinished,
+            FailureCase::Ocr(OcrFailure::Empty),
+            FailureCase::RecognitionDeadline,
+            FailureCase::Unfinished,
         ]
     }
 
@@ -3269,14 +3211,13 @@ mod tests {
         for failure in every_failure() {
             let left_no_snapshot = !matches!(
                 failure,
-                Failure::Ocr(
-                    OcrFailure::TesseractMissing
+                FailureCase::Ocr(
+                    OcrFailure::EngineMissing
                         | OcrFailure::LanguageMissing
                         | OcrFailure::Failed(_)
                         | OcrFailure::Empty
-                        | OcrFailure::TimedOut
                 )
-            );
+            ) && failure != FailureCase::RecognitionDeadline;
             let text = failure_text(&failure, Language::En);
             assert_eq!(
                 text.ends_with(super::CAPTURE_RETRY),
@@ -3295,8 +3236,8 @@ mod tests {
                 let same_file = matches!(
                     (a, b),
                     (
-                        Failure::Capture(CaptureFailure::NoImage),
-                        Failure::Ocr(OcrFailure::NoImage)
+                        FailureCase::Capture(CaptureFailure::NoImage),
+                        FailureCase::Ocr(OcrFailure::NoImage)
                     )
                 );
                 if !same_file {
@@ -3318,7 +3259,7 @@ mod tests {
     #[test]
     fn code_2_claims_no_cause() {
         let ended =
-            failure_text(&Failure::Capture(CaptureFailure::Ended), Language::En).to_lowercase();
+            failure_text(&FailureCase::Capture(CaptureFailure::Ended), Language::En).to_lowercase();
         assert!(!ended.contains("cancel"), "{ended}");
         assert!(!ended.contains("esc"), "{ended}");
     }
@@ -3330,12 +3271,12 @@ mod tests {
                 let text = failure_text(&failure, language);
                 assert_eq!(
                     text.contains(&install_tesseract(language)),
-                    failure == Failure::Ocr(OcrFailure::TesseractMissing),
+                    failure == FailureCase::Ocr(OcrFailure::EngineMissing),
                     "{text}"
                 );
                 assert_eq!(
                     text.contains(&install_language(language)),
-                    failure == Failure::Ocr(OcrFailure::LanguageMissing),
+                    failure == FailureCase::Ocr(OcrFailure::LanguageMissing),
                     "{text}"
                 );
             }
@@ -3344,7 +3285,7 @@ mod tests {
 
     #[test]
     fn missing_ocr_data_names_the_package_of_the_language() {
-        let missing = Failure::Ocr(OcrFailure::LanguageMissing);
+        let missing = FailureCase::Ocr(OcrFailure::LanguageMissing);
         assert_eq!(
             failure_text(&missing, Language::Es),
             "Spanish OCR data is not installed. Install it with: sudo dnf install tesseract-langpack-spa"
@@ -3354,14 +3295,14 @@ mod tests {
             "Catalan OCR data is not installed. Install it with: sudo dnf install tesseract-langpack-cat"
         );
         assert_eq!(
-            failure_text(&Failure::Ocr(OcrFailure::TesseractMissing), Language::Ca),
+            failure_text(&FailureCase::Ocr(OcrFailure::EngineMissing), Language::Ca),
             "Tesseract is not installed. Install it with: sudo dnf install tesseract tesseract-langpack-cat"
         );
         // Every other line is the same in every language.
         for failure in every_failure() {
             if !matches!(
                 failure,
-                Failure::Ocr(OcrFailure::TesseractMissing | OcrFailure::LanguageMissing)
+                FailureCase::Ocr(OcrFailure::EngineMissing | OcrFailure::LanguageMissing)
             ) {
                 for language in reading_languages(Language::Ru) {
                     assert_eq!(
@@ -3379,8 +3320,12 @@ mod tests {
             for failure in every_failure() {
                 let text = failure_text(&failure, language);
                 let expected = match failure {
-                    Failure::Ocr(OcrFailure::TesseractMissing) => Some(install_tesseract(language)),
-                    Failure::Ocr(OcrFailure::LanguageMissing) => Some(install_language(language)),
+                    FailureCase::Ocr(OcrFailure::EngineMissing) => {
+                        Some(install_tesseract(language))
+                    }
+                    FailureCase::Ocr(OcrFailure::LanguageMissing) => {
+                        Some(install_language(language))
+                    }
                     _ => None,
                 };
                 assert_eq!(command_in(&text), expected, "{text}");
@@ -3388,7 +3333,7 @@ mod tests {
         }
         assert_eq!(
             command_in(&failure_text(
-                &Failure::Ocr(OcrFailure::LanguageMissing),
+                &FailureCase::Ocr(OcrFailure::LanguageMissing),
                 Language::Ca
             ))
             .as_deref(),
@@ -3396,7 +3341,7 @@ mod tests {
         );
         assert_eq!(
             command_in(&failure_text(
-                &Failure::Ocr(OcrFailure::TesseractMissing),
+                &FailureCase::Ocr(OcrFailure::EngineMissing),
                 Language::En
             ))
             .as_deref(),

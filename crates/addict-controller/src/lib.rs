@@ -6,7 +6,10 @@
 //! A shell renders [`ViewState`], dispatches [`Event`]s and runs
 //! [`Effect`]s.
 
+mod capture;
 pub mod deadlines;
+
+pub use capture::ImageRef;
 mod online;
 
 use std::{
@@ -18,6 +21,7 @@ use std::{
 
 use addict_core::{
     dirs::Dirs,
+    failure::{Ended, capture::CaptureFailure, recognize::OcrFailure},
     input::{Input, Source, WindowState},
     translation::{English, Source as Language, Translator},
 };
@@ -27,6 +31,7 @@ use addict_deepl::{
 };
 use addict_engine::{
     cache,
+    capture::Timing,
     dictionaries::{Dictionaries, Indexes, Looked},
     evidence::{self, Answered},
     history::History,
@@ -50,7 +55,7 @@ pub struct StartFacts {
 }
 
 /// Identity of a controller request, issued in increasing order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RequestId(u64);
 
 /// The text and result that an article action belongs to.
@@ -64,7 +69,7 @@ pub struct ArticleId {
 ///
 /// The shell keeps its own text while typing; it replaces its text only
 /// when `revision` rises. The controller raises `revision` only when it
-/// sets the text itself: Back, Forward, a synonym, or clearing.
+/// sets the text itself: OCR, Back, Forward, a synonym, or clearing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Field {
     pub text: String,
@@ -85,6 +90,24 @@ pub enum Event {
         replaced: bool,
         source: Option<Source>,
     },
+    /// The user pressed Capture, or invoked the capture shortcut.
+    CapturePressed { activation_token: Option<String> },
+    /// The hide has settled and the shell is opening the area picker.
+    PickerStarted { id: RequestId },
+    /// The current picker returned its opaque image, or a failure.
+    AreaCaptured {
+        id: RequestId,
+        result: Result<ImageRef, Ended<CaptureFailure>>,
+        capture_ms: Option<u64>,
+    },
+    /// The recognizer finished and released its image and resources.
+    TextRecognized {
+        id: RequestId,
+        result: Result<String, Ended<OcrFailure>>,
+        timing: Timing,
+    },
+    /// Linux starts a clipboard read locally and clears the field.
+    ReadPressed { sequence: u64 },
     /// The field is cleared for a read; the controller sets it empty.
     FieldCleared,
     /// The text of the field was submitted, by Enter or by a paste.
@@ -136,6 +159,28 @@ pub enum Event {
 /// Commands for the shell. Lookup and translation use the shared runner.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// Hide the window and start the area picker once it has left the screen.
+    CaptureArea {
+        id: RequestId,
+        read_sequence: u64,
+        activation_token: Option<String>,
+    },
+    /// Recognize the image in the language selected when its picker started.
+    Recognize {
+        id: RequestId,
+        image: ImageRef,
+        language: Language,
+        read_sequence: u64,
+    },
+    /// Stop an effect if possible, and send its normal result event.
+    Cancel(RequestId),
+    /// Restore the capture window, with retry focus after a failure.
+    PresentCapture { read_sequence: u64, retry: bool },
+    /// Record an OCR outcome after the effect has cleaned up.
+    RecordCapture {
+        read: evidence::Read,
+        timing: Timing,
+    },
     /// The shell's `IndexCache` should check where the indexes stand and
     /// report back with [`Event::KnownIndexes`]. `index_generation` is the
     /// generation at emission; a shell refresh newer than this already owns
@@ -160,6 +205,12 @@ pub enum Effect {
 pub struct ViewState {
     pub revision: u64,
     pub field: Field,
+    /// The last observed Linux Read interaction.
+    pub read_sequence: u64,
+    /// A field revision set by asynchronous recognition.
+    pub ocr_field_revision: Option<u64>,
+    pub capture_sensitive: bool,
+    pub source_failure: Option<String>,
     pub shown: Shown,
     /// Changes on an explicit sense or gloss click, including a repeat click.
     pub choice_revision: u64,
@@ -193,6 +244,10 @@ impl Default for ViewState {
         Self {
             revision: 0,
             field: Field::default(),
+            read_sequence: 0,
+            ocr_field_revision: None,
+            capture_sensitive: true,
+            source_failure: None,
             shown: Shown::default(),
             choice_revision: 0,
             online: Vec::new(),
@@ -309,6 +364,24 @@ pub fn start_with_translator(
     recording: bool,
     renderer: impl Renderer,
 ) -> io::Result<Controller> {
+    start_with_capture(
+        dirs,
+        platform,
+        translator,
+        recording,
+        capture::Capture::default(),
+        renderer,
+    )
+}
+
+fn start_with_capture(
+    dirs: Dirs,
+    platform: Platform,
+    translator: impl Translator + 'static,
+    recording: bool,
+    capture: capture::Capture,
+    renderer: impl Renderer,
+) -> io::Result<Controller> {
     let work = Arc::new(Work::start()?);
     let worker = Arc::downgrade(&work);
     let dictionaries = Arc::new(Dictionaries::new(dirs.data.clone()));
@@ -328,6 +401,10 @@ pub fn start_with_translator(
         request: 0,
         revision: 0,
         field: Field::default(),
+        capture,
+        read_sequence: 0,
+        ocr_field_revision: None,
+        recording,
         manual: Manual::default(),
         history: History::default(),
         shown: Shown::default(),
@@ -356,6 +433,7 @@ enum Message {
     Event(Event),
     LookedUp(LookedUp),
     Translated(online::Translated),
+    CaptureDeadline(RequestId),
     Stop,
 }
 
@@ -383,6 +461,10 @@ struct Model {
     request: u64,
     revision: u64,
     field: Field,
+    capture: capture::Capture,
+    read_sequence: u64,
+    ocr_field_revision: Option<u64>,
+    recording: bool,
     manual: Manual,
     /// The texts the field held, for Back and Forward; kept for the life of
     /// the process, hidden window included.
@@ -412,7 +494,14 @@ impl Model {
                 Message::Event(event) => self.apply(event, &mut effects),
                 Message::LookedUp(looked) => self.looked_up(looked, &mut effects),
                 Message::Translated(translated) => self.translated(translated, &mut effects),
-                Message::Stop => break,
+                Message::CaptureDeadline(id) => self.capture_deadline(id, &mut effects),
+                Message::Stop => {
+                    self.cancel_capture(&mut effects);
+                    if !effects.is_empty() {
+                        self.render(&renderer, effects);
+                    }
+                    break;
+                }
             };
             if changed || !effects.is_empty() {
                 self.render(&renderer, effects);
@@ -430,6 +519,10 @@ impl Model {
         ViewState {
             revision: self.revision,
             field: self.field.clone(),
+            read_sequence: self.read_sequence,
+            ocr_field_revision: self.ocr_field_revision,
+            capture_sensitive: !self.capture.picker_open(),
+            source_failure: self.capture.source_failure.clone(),
             shown: self.shown.clone(),
             choice_revision: self.choice_revision,
             online: self.online.rows(manual.chosen(), self.my_language),
@@ -469,6 +562,25 @@ impl Model {
                 replaced,
                 source,
             } => self.field_edited(text, replaced, source, effects),
+            Event::CapturePressed { activation_token } => {
+                self.capture_pressed(activation_token, effects)
+            }
+            Event::PickerStarted { id } => {
+                self.picker_started(id);
+                false
+            }
+            Event::AreaCaptured {
+                id,
+                result,
+                capture_ms,
+            } => self.area_captured(id, result, capture_ms, effects),
+            Event::TextRecognized { id, result, timing } => {
+                self.text_recognized(id, result, timing, effects)
+            }
+            Event::ReadPressed { sequence } => {
+                self.read_sequence = sequence;
+                self.field_cleared(effects)
+            }
             Event::FieldCleared => self.field_cleared(effects),
             Event::FieldSubmitted => self.submitted(effects),
             Event::WordChosen { text, index } => {
@@ -481,7 +593,11 @@ impl Model {
                 article == self.article_id() && self.choose(index, true, effects)
             }
             Event::SynonymChosen { article, word } => {
-                article == self.article_id() && self.put(word, effects)
+                if article != self.article_id() {
+                    return false;
+                }
+                self.clear_capture_source(effects);
+                self.put(word, effects)
             }
             Event::LookUpEnglish {
                 article,
@@ -502,10 +618,17 @@ impl Model {
                     language: reading,
                     language_choice,
                 });
+                self.clear_capture_source(effects);
                 self.put(word, effects)
             }
-            Event::Back => self.back(effects),
-            Event::Forward => self.forward(effects),
+            Event::Back => {
+                let changed = self.clear_capture_source(effects);
+                self.back(effects) || changed
+            }
+            Event::Forward => {
+                let changed = self.clear_capture_source(effects);
+                self.forward(effects) || changed
+            }
             Event::SetReading(language) => self.set_reading(language, effects),
             Event::SetMyLanguage(language) => self.set_my_language(language, effects),
             Event::SetPressed(language) => {
@@ -513,6 +636,9 @@ impl Model {
                 true
             }
             Event::SetReadingSource(source) => {
+                if self.capture.recognizing() {
+                    return false;
+                }
                 self.manual.set_reading(source);
                 true
             }
@@ -558,6 +684,7 @@ impl Model {
         source: Option<Source>,
         effects: &mut Vec<Effect>,
     ) -> bool {
+        self.clear_capture_source(effects);
         let edit = match source {
             Some(Source::Ocr) => self.manual.recognized(text),
             Some(Source::Clipboard) => self.manual.copied(&text),
@@ -580,6 +707,8 @@ impl Model {
 
     /// The field is cleared for a read: the controller sets it empty.
     fn field_cleared(&mut self, effects: &mut Vec<Effect>) -> bool {
+        self.cancel_capture(effects);
+        self.capture.source_failure = None;
         let edit = self.manual.edit(String::new());
         self.set_field(String::new());
         self.text_replaced(edit, effects);
@@ -685,6 +814,7 @@ impl Model {
     fn set_field(&mut self, text: String) {
         self.field.text = text;
         self.field.revision += 1;
+        self.ocr_field_revision = None;
     }
 
     fn set_reading(&mut self, language: Language, effects: &mut Vec<Effect>) -> bool {
@@ -992,9 +1122,18 @@ mod tests {
             translator: impl Translator + 'static,
             recording: bool,
         ) -> Self {
+            Self::with_capture(data, translator, recording, capture::Capture::default())
+        }
+
+        fn with_capture(
+            data: Option<PathBuf>,
+            translator: impl Translator + 'static,
+            recording: bool,
+            capture: capture::Capture,
+        ) -> Self {
             let caller = thread::current().id();
             let (send, renders) = mpsc::channel();
-            let controller = start_with_translator(
+            let controller = start_with_capture(
                 Dirs {
                     data,
                     ..Dirs::default()
@@ -1005,6 +1144,7 @@ mod tests {
                 },
                 translator,
                 recording,
+                capture,
                 move |view, effects| {
                     assert_ne!(thread::current().id(), caller);
                     send.send((view, effects)).unwrap();
@@ -1092,6 +1232,319 @@ mod tests {
             );
             waiting.recv_timeout(WAIT).unwrap();
             (release, gate)
+        }
+    }
+
+    fn press_capture(shell: &mut FakeShell) -> RequestId {
+        shell.dispatch(Event::CapturePressed {
+            activation_token: Some("picker-token".into()),
+        });
+        let (view, effects) = shell.next();
+        assert!(!view.capture_sensitive);
+        assert!(view.source_failure.is_none());
+        let [
+            ..,
+            Effect::CaptureArea {
+                id,
+                read_sequence,
+                activation_token,
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("picker effect: {effects:?}");
+        };
+        assert_eq!(*read_sequence, view.read_sequence);
+        assert_eq!(activation_token.as_deref(), Some("picker-token"));
+        *id
+    }
+
+    fn accept_image(shell: &mut FakeShell, picker: RequestId, language: Language) -> RequestId {
+        shell.dispatch(Event::PickerStarted { id: picker });
+        deliver_image(shell, picker, language)
+    }
+
+    fn deliver_image(shell: &mut FakeShell, picker: RequestId, language: Language) -> RequestId {
+        shell.dispatch(Event::AreaCaptured {
+            id: picker,
+            result: Ok(ImageRef::new(())),
+            capture_ms: Some(23),
+        });
+        let (view, effects) = shell.next();
+        assert!(view.capture_sensitive);
+        assert_eq!(view.reading_source, Some(Source::Ocr));
+        let [
+            Effect::PresentCapture { retry: false, .. },
+            Effect::Recognize {
+                id,
+                language: selected,
+                ..
+            },
+        ] = effects.as_slice()
+        else {
+            panic!("recognition effect: {effects:?}");
+        };
+        assert!(id.0 > picker.0);
+        assert_eq!(*selected, language);
+        *id
+    }
+
+    fn finish_recognition(shell: &FakeShell, id: RequestId, text: &str) {
+        shell.dispatch(Event::TextRecognized {
+            id,
+            result: Ok(text.to_owned()),
+            timing: Timing {
+                recognition_ms: Some(8),
+                child_peak_rss_bytes: Some(1024),
+                ..Timing::default()
+            },
+        });
+    }
+
+    fn marker(shell: &mut FakeShell) -> ViewState {
+        shell.dispatch(Event::SetPressed(Language::Ca));
+        let (view, effects) = shell.next();
+        assert!(effects.is_empty(), "{effects:?}");
+        view
+    }
+
+    #[test]
+    fn a_press_while_a_picker_waits_starts_nothing() {
+        let mut shell = FakeShell::start(None);
+        let picker = press_capture(&mut shell);
+        shell.dispatch(Event::CapturePressed {
+            activation_token: Some("ignored-token".into()),
+        });
+        assert!(!marker(&mut shell).capture_sensitive);
+        accept_image(&mut shell, picker, Language::En);
+    }
+
+    #[test]
+    fn a_retry_has_a_new_number_and_an_old_job_is_ignored() {
+        let mut shell = FakeShell::start(None);
+        let picker = press_capture(&mut shell);
+        let recognition = accept_image(&mut shell, picker, Language::En);
+        shell.dispatch(Event::CapturePressed {
+            activation_token: None,
+        });
+        let (_, effects) = shell.next();
+        let [Effect::Cancel(cancelled), Effect::CaptureArea { id, .. }] = effects.as_slice() else {
+            panic!("retry effects: {effects:?}");
+        };
+        assert_eq!(*cancelled, recognition);
+        assert!(id.0 > recognition.0);
+        finish_recognition(&shell, recognition, "obsolete OCR");
+        let view = marker(&mut shell);
+        assert!(view.field.text.is_empty());
+        assert!(!view.capture_sensitive);
+        assert!(view.source_failure.is_none());
+    }
+
+    #[test]
+    fn capture_restores_the_window_and_records_normalized_ocr_in_history() {
+        let (mut shell, asked) = FakeShell::scripted(None, true);
+        shell.submit("previous sentence");
+        shell.dispatch(Event::SetReading(Language::Es));
+        shell.next();
+        let picker = press_capture(&mut shell);
+        // A change while the window is hiding counts, a change after the
+        // picker starts does not.
+        shell.dispatch(Event::SetReading(Language::Ca));
+        shell.next();
+        shell.dispatch(Event::PickerStarted { id: picker });
+        shell.dispatch(Event::SetReading(Language::En));
+        shell.next();
+        let recognized = deliver_image(&mut shell, picker, Language::Ca);
+        finish_recognition(&shell, recognized, "  Recognized words\n on two lines.  ");
+        let (view, effects) = shell.next();
+        assert_eq!(view.field.text, "Recognized words on two lines.");
+        assert_eq!(view.field.revision, 1);
+        assert_eq!(view.ocr_field_revision, Some(view.field.revision));
+        assert_eq!(view.source, Source::Ocr);
+        assert!(view.can_back);
+        assert_eq!(view.reading_source, None);
+        assert!(effects.contains(&Effect::RecordCapture {
+            read: evidence::Read::Recognized,
+            timing: Timing {
+                capture_ms: Some(23),
+                recognition_ms: Some(8),
+                child_peak_rss_bytes: Some(1024),
+            },
+        }));
+        assert!(asked.try_recv().is_err());
+        shell.dispatch(Event::Back);
+        assert_eq!(shell.next().0.field.text, "previous sentence");
+        shell.dispatch(Event::Forward);
+        assert_eq!(shell.next().0.field.text, "Recognized words on two lines.");
+    }
+
+    #[test]
+    fn capture_failures_preserve_the_field_and_article_and_clear_on_edit() {
+        let data = TestData::with_bank();
+        let (mut shell, asked) = FakeShell::scripted(Some(data.0.clone()), true);
+        shell.edit("bank");
+        let (original, _) = shell.settled();
+        for (failure, message) in [
+            (CaptureFailure::Cancelled, "The capture was cancelled."),
+            (CaptureFailure::Ended, "No snapshot was taken."),
+            (
+                CaptureFailure::Unavailable,
+                "Screen capture is not available here.",
+            ),
+        ] {
+            let id = press_capture(&mut shell);
+            shell.dispatch(Event::AreaCaptured {
+                id,
+                result: Err(Ended::Shell(failure)),
+                capture_ms: Some(10),
+            });
+            let (view, effects) = shell.next();
+            assert_eq!(view.field, original.field);
+            assert_eq!(view.shown, original.shown);
+            assert!(view.capture_sensitive);
+            assert!(view.source_failure.unwrap().starts_with(message));
+            assert!(matches!(
+                effects.as_slice(),
+                [
+                    Effect::PresentCapture { retry: true, .. },
+                    Effect::RecordCapture { .. }
+                ]
+            ));
+        }
+        let picker = press_capture(&mut shell);
+        let id = accept_image(&mut shell, picker, Language::En);
+        finish_recognition(&shell, id, "  — ?!\n  ");
+        let (view, effects) = shell.next();
+        assert_eq!(view.field, original.field);
+        assert_eq!(view.shown, original.shown);
+        assert!(!view.looking_up);
+        assert_eq!(
+            view.source_failure.as_deref(),
+            Some("No text was recognized.")
+        );
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                Effect::PresentCapture { retry: true, .. },
+                Effect::RecordCapture {
+                    read: evidence::Read::Empty,
+                    ..
+                }
+            ]
+        ));
+        assert!(asked.try_recv().is_err());
+        assert_eq!(marker(&mut shell).source_failure, view.source_failure);
+        shell.edit("new words");
+        assert!(shell.next().0.source_failure.is_none());
+    }
+
+    #[test]
+    fn editing_during_recognition_cancels_the_effect_and_keeps_the_edit() {
+        let mut shell = FakeShell::start(None);
+        let picker = press_capture(&mut shell);
+        let id = accept_image(&mut shell, picker, Language::En);
+        shell.edit("your edit");
+        let (view, effects) = shell.next();
+        assert_eq!(effects, [Effect::Cancel(id)]);
+        assert_eq!(view.reading_source, None);
+        finish_recognition(&shell, id, "obsolete OCR");
+        let view = marker(&mut shell);
+        assert_eq!(view.field.text, "your edit");
+        assert_eq!(view.field.revision, 0);
+    }
+
+    #[test]
+    fn read_retires_either_stage_and_releases_a_late_image() {
+        struct ImageDrop(mpsc::Sender<()>);
+        impl Drop for ImageDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let mut shell = FakeShell::start(None);
+        let picker = press_capture(&mut shell);
+        shell.dispatch(Event::ReadPressed { sequence: 1 });
+        let (view, effects) = shell.next();
+        assert_eq!(view.read_sequence, 1);
+        assert_eq!(effects, [Effect::Cancel(picker)]);
+        let (dropped, release) = mpsc::channel();
+        shell.dispatch(Event::AreaCaptured {
+            id: picker,
+            result: Ok(ImageRef::new(ImageDrop(dropped))),
+            capture_ms: None,
+        });
+        release.recv_timeout(WAIT).expect("retired image released");
+        assert!(marker(&mut shell).field.text.is_empty());
+
+        let picker = press_capture(&mut shell);
+        let id = accept_image(&mut shell, picker, Language::En);
+        shell.dispatch(Event::ReadPressed { sequence: 2 });
+        let (view, effects) = shell.next();
+        assert_eq!(effects, [Effect::Cancel(id)]);
+        assert_eq!(view.read_sequence, 2);
+        finish_recognition(&shell, id, "obsolete OCR");
+        assert!(marker(&mut shell).field.text.is_empty());
+    }
+
+    #[test]
+    fn each_capture_deadline_cancels_then_records_after_acknowledgement() {
+        for recognition in [false, true] {
+            let short = Duration::from_millis(15);
+            let (picker_limit, recognition_limit) = if recognition {
+                (deadlines::CAPTURE_LIMIT, short)
+            } else {
+                (short, deadlines::OCR_LIMIT)
+            };
+            let capture = capture::Capture::with_limits(picker_limit, recognition_limit);
+            let mut shell = FakeShell::with_capture(None, Silent, true, capture);
+            let picker = press_capture(&mut shell);
+            let id = if recognition {
+                accept_image(&mut shell, picker, Language::En)
+            } else {
+                picker
+            };
+            let (view, effects) = shell.next();
+            assert!(view.capture_sensitive);
+            assert_eq!(view.reading_source, None);
+            let message = if recognition {
+                "Text recognition took too long."
+            } else {
+                "No area was chosen in time. Press Capture to try again."
+            };
+            assert_eq!(view.source_failure.as_deref(), Some(message));
+            assert_eq!(
+                effects,
+                [
+                    Effect::Cancel(id),
+                    Effect::PresentCapture {
+                        read_sequence: 0,
+                        retry: true
+                    }
+                ]
+            );
+            if recognition {
+                finish_recognition(&shell, id, "obsolete OCR");
+            } else {
+                shell.dispatch(Event::AreaCaptured {
+                    id,
+                    result: Err(Ended::Shell(CaptureFailure::Cancelled)),
+                    capture_ms: Some(500),
+                });
+            }
+            let (after, effects) = shell.next();
+            assert_eq!(after.field, view.field);
+            assert_eq!(after.source_failure, view.source_failure);
+            let [Effect::RecordCapture { read, timing }] = effects.as_slice() else {
+                panic!("deadline evidence: {effects:?}");
+            };
+            if recognition {
+                assert_eq!(*read, evidence::Read::OcrTimedOut);
+                assert_eq!(timing.capture_ms, Some(23));
+                assert_eq!(timing.recognition_ms, Some(8));
+            } else {
+                assert_eq!(*read, evidence::Read::CaptureTimedOut);
+                assert_eq!(timing.capture_ms, Some(500));
+            }
         }
     }
 

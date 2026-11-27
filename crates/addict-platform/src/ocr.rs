@@ -33,7 +33,7 @@
 //! executable's directory, else Tesseract's own default, which honours
 //! `TESSDATA_PREFIX`. A data directory is given to both children as
 //! `--tessdata-dir`. A configured program that is not there is
-//! [`OcrFailure::TesseractMissing`], as one missing from `PATH` is.
+//! [`OcrFailure::EngineMissing`], as one missing from `PATH` is.
 
 use std::{
     fs,
@@ -283,7 +283,7 @@ async fn attempt(
     let mut child = match spawn(&mut command) {
         Ok(child) => child,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return failed(OcrFailure::TesseractMissing);
+            return failed(OcrFailure::EngineMissing);
         }
         Err(e) => return failed(OcrFailure::Failed(format!("spawn tesseract: {e}"))),
     };
@@ -295,7 +295,7 @@ async fn attempt(
         Err(_) => {
             // Killed and reaped before the outcome is given.
             drop(child);
-            return failed(OcrFailure::TimedOut);
+            return failed(OcrFailure::Cancelled);
         }
     };
     let peak = Some(exit.peak_rss_bytes);
@@ -863,7 +863,7 @@ mod tests {
             Params::ENGLISH,
             Duration::from_millis(1),
         );
-        assert_eq!(recognition.result, Err(OcrFailure::TimedOut));
+        assert_eq!(recognition.result, Err(OcrFailure::Cancelled));
         assert!(!exists(pid.expect("pid")));
         assert!(scratch.leftovers().is_empty());
     }
@@ -939,7 +939,7 @@ mod tests {
             &scratch.0,
             &mut |_| {},
         ));
-        assert_eq!(recognition.result, Err(OcrFailure::TesseractMissing));
+        assert_eq!(recognition.result, Err(OcrFailure::EngineMissing));
         assert_eq!(recognition.peak_rss_bytes, None);
         assert!(scratch.leftovers().is_empty());
     }
@@ -1146,7 +1146,7 @@ mod tests {
         let tesseract = Tesseract::locate(Some(&absent), None, None);
         assert_eq!(tesseract.program(), absent);
         let recognition = faked_with(&scratch, &tesseract, LIMIT);
-        assert_eq!(recognition.result, Err(OcrFailure::TesseractMissing));
+        assert_eq!(recognition.result, Err(OcrFailure::EngineMissing));
         assert!(scratch.leftovers().is_empty());
     }
 

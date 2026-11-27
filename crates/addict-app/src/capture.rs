@@ -1,40 +1,25 @@
-//! The capture path without its widgets: one job on the work runner takes
-//! an interactive screenshot through the portal, recognizes its text with
-//! Tesseract and deletes the snapshot.
-//!
-//! [`start`] starts the job; it tells when the snapshot was taken and ends
-//! with one [`Capture`]: what was [`Captured`] and its [`Timing`], measured
-//! on the worker. A portal answer without a snapshot ends the job there, with
-//! no recognition. [`captured_result`] says what an outcome of the job is for
-//! the window. The snapshot is deleted after every capture that
-//! produced a file, whatever the recognition gave, and also when the job is
-//! cancelled, stopped at its deadline or dropped: the guard that deletes it
-//! lives inside the job. What the window does with the text is
-//! `resident`'s.
-//!
-//! Which Tesseract runs is decided in the job, before each recognition, by
-//! [`tesseract`]: the files `tesseract`, a program path, and `tessdata`, a
-//! data directory, of the configuration directory, and the directory of the running
-//! executable go to [`Tesseract::locate`]. Each file is its first nonblank
-//! line, trimmed; a file that is missing, cannot be read, is not a regular
-//! file, holds no nonblank line or a relative path is unset, and nothing is
-//! said about it.
+//! Linux effect adapters for the interactive screenshot portal and Tesseract.
 
 use std::{
     fs::{self, File},
+    future::Future,
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
-use addict_controller::deadlines::{CAPTURE_JOB_LIMIT, CAPTURE_LIMIT, OCR_LIMIT};
+use addict_controller::{
+    ImageRef,
+    deadlines::{CAPTURE_LIMIT, OCR_LIMIT},
+};
 use addict_core::{
     APP_ID,
-    failure::{capture::CaptureFailure, recognize::OcrFailure},
+    failure::{Ended, capture::CaptureFailure, recognize::OcrFailure},
     translation::Source as Language,
 };
 use addict_engine::{
-    capture::{Captured, Failure, Timing},
+    capture::Timing,
     work::{Job, Outcome, Work},
 };
 use addict_platform::{
@@ -42,22 +27,9 @@ use addict_platform::{
     screenshot,
 };
 
-/// What a capture job ended with, and what it took.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Capture {
-    pub captured: Captured,
-    pub timing: Timing,
-}
-
-impl Capture {
-    /// A capture that never started or did not finish: nothing was measured.
-    fn unfinished() -> Self {
-        Self {
-            captured: Captured::Failed(Failure::Unfinished),
-            timing: Timing::default(),
-        }
-    }
-}
+/// These worker bounds are a fallback if the controller or shell stops.
+const PICKER_SAFETY_LIMIT: Duration = CAPTURE_LIMIT.saturating_add(Duration::from_secs(5));
+const OCR_SAFETY_LIMIT: Duration = OCR_LIMIT.saturating_add(Duration::from_secs(5));
 
 /// The file of the configuration directory that names the Tesseract program.
 const PROGRAM_FILE: &str = "tesseract";
@@ -129,113 +101,116 @@ pub fn ocr_language(language: Language) -> &'static str {
     }
 }
 
-/// Starts the capture job on `work`, which recognizes the text in
-/// `language`. `on_captured` runs on the worker once the snapshot is there,
-/// before its recognition; `on_outcome` runs once on the worker when the job
-/// has ended. Without a runner nothing starts and the capture's end is given
-/// back, with nothing measured.
-pub fn start(
-    work: Option<&Work>,
-    config: Option<PathBuf>,
-    language: Language,
-    on_captured: impl FnOnce() + Send + 'static,
-    on_outcome: impl FnOnce(Outcome<Capture>) + Send + 'static,
-) -> Result<Job, Capture> {
-    let work = work.ok_or_else(Capture::unfinished)?;
-    let job = async move {
-        let started = Instant::now();
-        let answer = portal_answer(CAPTURE_LIMIT, screenshot::capture(APP_ID)).await;
-        let capture_ms = Some(millis(started.elapsed()));
-        after_answer(
-            answer,
-            capture_ms,
-            language,
-            || tesseract(config.as_deref()),
-            on_captured,
-        )
-        .await
-    };
-    Ok(work.run(CAPTURE_JOB_LIMIT, job, on_outcome))
+/// A portal file becomes an owned image before it can cross threads.
+fn area_image(answer: Result<PathBuf, CaptureFailure>) -> Result<ImageRef, Ended<CaptureFailure>> {
+    answer
+        .map(|path| ImageRef::new(Snapshot(path)))
+        .map_err(Ended::Shell)
 }
 
-/// What the portal's `shot` answered within `limit`.
-async fn portal_answer(
-    limit: Duration,
-    shot: impl Future<Output = Result<PathBuf, CaptureFailure>>,
-) -> Result<PathBuf, Failure> {
-    match tokio::time::timeout(limit, shot).await {
-        Ok(answer) => answer.map_err(Failure::Capture),
-        Err(_) => Err(Failure::CaptureTimedOut),
+pub fn start_picker(
+    work: Option<&Work>,
+    cancelled: impl Future<Output = ()> + Send + 'static,
+    complete: impl FnOnce(Result<ImageRef, Ended<CaptureFailure>>, Option<u64>) + Send + 'static,
+) -> Option<Job> {
+    run_stage(
+        work,
+        PICKER_SAFETY_LIMIT,
+        async move {
+            let started = Instant::now();
+            let result = area_image(screenshot::capture_until(APP_ID, cancelled).await);
+            (result, Some(millis(started.elapsed())))
+        },
+        move |outcome| {
+            let (result, elapsed) = stage_result(outcome, CaptureFailure::Cancelled);
+            complete(result, elapsed);
+        },
+    )
+}
+
+pub fn start_recognition(
+    work: Option<&Work>,
+    config: Option<PathBuf>,
+    image: ImageRef,
+    language: Language,
+    complete: impl FnOnce(Result<String, Ended<OcrFailure>>, Timing) + Send + 'static,
+) -> Option<Job> {
+    let started = Arc::new(OnceLock::new());
+    let clock = started.clone();
+    run_stage(
+        work,
+        OCR_SAFETY_LIMIT,
+        async move {
+            let tesseract = tesseract(config.as_deref());
+            let params = Params::in_language(ocr_language(language));
+            clock.get_or_init(Instant::now);
+            recognize_snapshot(&tesseract, image, &params).await
+        },
+        move |outcome| {
+            let interrupted = matches!(outcome, Outcome::Cancelled | Outcome::TimedOut);
+            let (result, mut timing) = stage_result(outcome, OcrFailure::Cancelled);
+            if interrupted {
+                timing.recognition_ms = started.get().map(|clock| millis(clock.elapsed()));
+            }
+            complete(result, timing);
+        },
+    )
+}
+
+fn run_stage<T: Send + 'static>(
+    work: Option<&Work>,
+    safety_limit: Duration,
+    stage: impl Future<Output = T> + Send + 'static,
+    complete: impl FnOnce(Outcome<T>) + Send + 'static,
+) -> Option<Job> {
+    match work {
+        Some(work) => Some(work.run(safety_limit, stage, complete)),
+        None => {
+            drop(stage);
+            complete(Outcome::Panicked);
+            None
+        }
     }
 }
 
-/// The rest of the job once the portal's `answer` is there, `capture_ms` after
-/// its start. A failed answer is reported as it is: no Tesseract is looked for
-/// and nothing is recognized. `locate` gives the Tesseract of a snapshot.
-async fn after_answer(
-    answer: Result<PathBuf, Failure>,
-    capture_ms: Option<u64>,
-    language: Language,
-    locate: impl FnOnce() -> Tesseract,
-    on_captured: impl FnOnce(),
-) -> Capture {
-    let path = match answer {
-        Ok(path) => path,
-        Err(failure) => {
-            return Capture {
-                captured: Captured::Failed(failure),
-                timing: Timing {
-                    capture_ms,
-                    ..Timing::default()
-                },
-            };
-        }
-    };
-    let params = Params::in_language(ocr_language(language));
-    let mut capture = recognize_snapshot(&locate(), path, &params, on_captured).await;
-    capture.timing.capture_ms = capture_ms;
-    capture
+fn stage_result<T, F, M: Default>(
+    outcome: Outcome<(Result<T, Ended<F>>, M)>,
+    cancelled: F,
+) -> (Result<T, Ended<F>>, M) {
+    match outcome {
+        Outcome::Finished(result) => result,
+        Outcome::Cancelled => (Err(Ended::Shell(cancelled)), M::default()),
+        Outcome::TimedOut | Outcome::Panicked => (Err(Ended::Unfinished), M::default()),
+    }
 }
 
-/// Recognizes the snapshot at `path` with `tesseract` and `params` and
-/// deletes it, however this ends. The timing holds the recognition alone.
 async fn recognize_snapshot(
     tesseract: &Tesseract,
-    path: PathBuf,
+    image: ImageRef,
     params: &Params,
-    on_captured: impl FnOnce(),
-) -> Capture {
-    let snapshot = Snapshot(path);
-    on_captured();
-    let recognition = ocr::recognize(tesseract, snapshot.path(), params, OCR_LIMIT).await;
-    drop(snapshot);
+) -> (Result<String, Ended<OcrFailure>>, Timing) {
+    let Some(snapshot) = image.downcast_ref::<Snapshot>() else {
+        return (Err(Ended::Shell(OcrFailure::NoImage)), Timing::default());
+    };
+    let recognition = ocr::recognize(tesseract, &snapshot.0, params, OCR_SAFETY_LIMIT).await;
+    drop(image);
     // Without an image nothing was recognized, so nothing was measured.
     let recognition_ms = match &recognition.result {
         Err(OcrFailure::NoImage) => None,
         _ => Some(millis(recognition.elapsed)),
     };
-    let captured = match recognition.result {
-        Ok(text) => Captured::Text(text),
-        Err(failure) => Captured::Failed(Failure::Ocr(failure)),
-    };
-    Capture {
-        captured,
-        timing: Timing {
+    (
+        recognition.result.map_err(Ended::Shell),
+        Timing {
             capture_ms: None,
             recognition_ms,
             child_peak_rss_bytes: recognition.peak_rss_bytes,
         },
-    }
+    )
 }
 
-/// The snapshot file, deleted on drop.
+/// The snapshot file, deleted when the last image reference is dropped.
 struct Snapshot(PathBuf);
-
-impl Snapshot {
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
 
 impl Drop for Snapshot {
     fn drop(&mut self) {
@@ -243,46 +218,32 @@ impl Drop for Snapshot {
     }
 }
 
-/// What the window is given for the `outcome` of the job, with what it
-/// took, or `None` when it was cancelled: then it was dropped on purpose and
-/// shows nothing. A job that did not finish has nothing measured. No
-/// wildcard arm: a new outcome does not compile until it is given its end.
-pub fn captured_result(outcome: Outcome<Capture>) -> Option<(Captured, Timing)> {
-    let capture = match outcome {
-        Outcome::Finished(capture) => capture,
-        Outcome::TimedOut | Outcome::Panicked => Capture::unfinished(),
-        Outcome::Cancelled => return None,
-    };
-    Some((capture.captured, capture.timing))
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use std::{
         path::{Path, PathBuf},
-        sync::{
-            Arc, Mutex, MutexGuard,
-            atomic::{AtomicBool, Ordering},
-            mpsc,
-        },
+        sync::{Mutex, MutexGuard, mpsc},
         time::Duration,
     };
 
-    use addict_controller::deadlines::{CAPTURE_JOB_LIMIT as JOB_LIMIT, CAPTURE_LIMIT, OCR_LIMIT};
+    use addict_controller::{
+        ImageRef,
+        deadlines::{CAPTURE_LIMIT, OCR_LIMIT},
+    };
     use addict_core::{
-        failure::{capture::CaptureFailure, recognize::OcrFailure},
+        failure::{Ended, capture::CaptureFailure, recognize::OcrFailure},
         translation::Source as Language,
     };
     use addict_engine::{
-        capture::{Captured, Failure, Timing},
+        capture::Timing,
         evidence::{Read, child_processes, ocr_record},
         work::{Outcome, Work},
     };
     use addict_platform::ocr::{self, Params};
 
     use super::{
-        Capture, after_answer, captured_result, ocr_language, portal_answer, recognize_snapshot,
-        setting, start, tesseract,
+        OCR_SAFETY_LIMIT, PICKER_SAFETY_LIMIT, area_image, ocr_language, recognize_snapshot,
+        setting, stage_result, start_picker, start_recognition, tesseract,
     };
 
     /// Limit for each wait of the test thread.
@@ -324,34 +285,31 @@ pub(crate) mod tests {
         path
     }
 
+    fn image(path: &Path) -> ImageRef {
+        area_image(Ok(path.to_owned())).expect("image")
+    }
+
+    fn read(path: &Path, language: Language) -> (Result<String, Ended<OcrFailure>>, Timing) {
+        let work = Work::start().expect("runner");
+        let (send, receive) = mpsc::channel();
+        let _job = start_recognition(
+            Some(&work),
+            None,
+            image(path),
+            language,
+            move |result, timing| {
+                send.send((result, timing)).expect("result receiver");
+            },
+        );
+        receive.recv_timeout(WAIT).expect("recognition result")
+    }
+
     #[test]
     fn the_snapshot_is_recognized_and_deleted() {
         let _children = children();
         let path = snapshot("recognized");
-        let work = Work::start().expect("runner");
-        let (sender, receiver) = mpsc::channel();
-        let told = Arc::new(AtomicBool::new(false));
-        let on_captured = {
-            let told = told.clone();
-            move || told.store(true, Ordering::SeqCst)
-        };
-        let shot = path.clone();
-        let _job = work.run(
-            JOB_LIMIT,
-            async move {
-                recognize_snapshot(&tesseract(None), shot, &Params::ENGLISH, on_captured).await
-            },
-            move |outcome| {
-                let _ = sender.send(outcome);
-            },
-        );
-        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
-        let (captured, timing) = captured_result(outcome).expect("shown");
-        assert_eq!(
-            captured,
-            Captured::Text("The bank is beside the river.".to_owned())
-        );
-        // The recognition alone: the capture's own time is the job's.
+        let (result, timing) = read(&path, Language::En);
+        assert_eq!(result, Ok("The bank is beside the river.".to_owned()));
         assert_eq!(timing.capture_ms, None);
         assert!(
             timing
@@ -359,7 +317,6 @@ pub(crate) mod tests {
                 .is_some_and(|ms| ms < WAIT.as_millis() as u64)
         );
         assert!(timing.child_peak_rss_bytes.is_some_and(|bytes| bytes > 0));
-        assert!(told.load(Ordering::SeqCst));
         assert!(!path.exists());
     }
 
@@ -369,67 +326,42 @@ pub(crate) mod tests {
         let path = snapshot("cancelled");
         let work = Work::start().expect("runner");
         let (sender, receiver) = mpsc::channel();
-        let (captured, recognizing) = mpsc::channel();
-        let shot = path.clone();
+        let (started, recognizing) = mpsc::channel();
+        let image = image(&path);
         let job = work.run(
-            JOB_LIMIT,
+            OCR_SAFETY_LIMIT,
             async move {
-                recognize_snapshot(&tesseract(None), shot, &Params::ENGLISH, move || {
-                    let _ = captured.send(());
-                })
-                .await
+                started.send(()).expect("started receiver");
+                std::future::pending::<()>().await;
+                recognize_snapshot(&tesseract(None), image, &Params::ENGLISH).await
             },
             move |outcome| {
-                let _ = sender.send(outcome);
+                sender.send(outcome).expect("result receiver");
             },
         );
-        recognizing.recv_timeout(WAIT).expect("captured");
+        recognizing.recv_timeout(WAIT).expect("started");
         job.cancel();
-        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
-        assert_eq!(outcome, Outcome::Cancelled);
-        assert_eq!(captured_result(outcome), None);
+        let result = stage_result(
+            receiver.recv_timeout(WAIT).expect("outcome"),
+            OcrFailure::Cancelled,
+        );
+        assert_eq!(
+            result,
+            (Err(Ended::Shell(OcrFailure::Cancelled)), Timing::default())
+        );
         assert!(!path.exists());
-    }
-
-    /// What `job` ends with on a runner of its own.
-    fn run_job<T: Send + 'static>(job: impl Future<Output = T> + Send + 'static) -> Outcome<T> {
-        let work = Work::start().expect("runner");
-        let (sender, receiver) = mpsc::channel();
-        let _job = work.run(JOB_LIMIT, job, move |outcome| {
-            let _ = sender.send(outcome);
-        });
-        receiver.recv_timeout(WAIT).expect("outcome")
     }
 
     #[test]
     fn a_failed_answer_is_reported_and_never_recognized() {
         for failure in [
-            Failure::Capture(CaptureFailure::Cancelled),
-            Failure::Capture(CaptureFailure::Ended),
-            Failure::Capture(CaptureFailure::Unavailable),
-            Failure::Capture(CaptureFailure::Failed("screenshot: refused".to_owned())),
-            Failure::Capture(CaptureFailure::NoImage),
-            Failure::CaptureTimedOut,
+            CaptureFailure::Cancelled,
+            CaptureFailure::Ended,
+            CaptureFailure::Unavailable,
+            CaptureFailure::Failed("screenshot: refused".to_owned()),
+            CaptureFailure::NoImage,
         ] {
-            let answer = Err(failure.clone());
-            // A panic here would end the job as unfinished, not as `failure`.
-            let outcome = run_job(after_answer(
-                answer,
-                Some(1200),
-                Language::En,
-                || panic!("Tesseract was looked for"),
-                || panic!("the snapshot was announced"),
-            ));
-            assert_eq!(
-                captured_result(outcome),
-                Some((
-                    Captured::Failed(failure),
-                    Timing {
-                        capture_ms: Some(1200),
-                        ..Timing::default()
-                    }
-                ))
-            );
+            assert_eq!(area_image(Err(failure.clone())), Err(Ended::Shell(failure)));
         }
     }
 
@@ -438,22 +370,8 @@ pub(crate) mod tests {
         let _children = children();
         let path = snapshot("answered");
         let other = snapshot("answered-other");
-        let told = Arc::new(AtomicBool::new(false));
-        let announced = told.clone();
-        let outcome = run_job(after_answer(
-            Ok(path.clone()),
-            Some(1200),
-            Language::En,
-            || tesseract(None),
-            move || announced.store(true, Ordering::SeqCst),
-        ));
-        let (captured, timing) = captured_result(outcome).expect("shown");
-        assert_eq!(
-            captured,
-            Captured::Text("The bank is beside the river.".to_owned())
-        );
-        assert_eq!(timing.capture_ms, Some(1200));
-        assert!(told.load(Ordering::SeqCst));
+        let (recognized, _) = read(&path, Language::En);
+        assert_eq!(recognized, Ok("The bank is beside the river.".to_owned()));
         assert!(!path.exists());
         assert!(other.exists());
         std::fs::remove_file(other).expect("remove");
@@ -461,47 +379,43 @@ pub(crate) mod tests {
 
     #[test]
     fn a_portal_that_stays_silent_is_out_of_time() {
-        let answer = run_job(portal_answer(
+        let work = Work::start().expect("runner");
+        let (send, receive) = mpsc::channel();
+        let _job = work.run(
             Duration::from_millis(10),
-            std::future::pending(),
-        ));
-        assert_eq!(answer, Outcome::Finished(Err(Failure::CaptureTimedOut)));
+            std::future::pending::<()>(),
+            move |outcome| {
+                send.send(outcome).expect("result receiver");
+            },
+        );
+        assert_eq!(
+            receive.recv_timeout(WAIT).expect("outcome"),
+            Outcome::TimedOut
+        );
     }
 
     #[test]
     fn a_portal_answer_in_time_is_kept() {
-        let failed = run_job(portal_answer(WAIT, async { Err(CaptureFailure::Ended) }));
         assert_eq!(
-            failed,
-            Outcome::Finished(Err(Failure::Capture(CaptureFailure::Ended)))
+            area_image(Err(CaptureFailure::Ended)),
+            Err(Ended::Shell(CaptureFailure::Ended))
         );
-        let path = PathBuf::from("/shot.png");
-        let shot = path.clone();
-        let taken = run_job(portal_answer(WAIT, async move { Ok(shot) }));
-        assert_eq!(taken, Outcome::Finished(Ok(path)));
+        let path = snapshot("in-time");
+        let taken = image(&path);
+        let retained = taken.clone();
+        drop(taken);
+        assert!(path.exists());
+        drop(retained);
+        assert!(!path.exists());
     }
 
     #[test]
     fn a_missing_snapshot_is_no_image() {
         let _children = children();
         let path = std::env::temp_dir().join("addict-capture-test-absent.png");
-        let work = Work::start().expect("runner");
-        let (sender, receiver) = mpsc::channel();
-        let _job = work.run(
-            JOB_LIMIT,
-            async move { recognize_snapshot(&tesseract(None), path, &Params::ENGLISH, || {}).await },
-            move |outcome| {
-                let _ = sender.send(outcome);
-            },
-        );
-        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
-        // Nothing was recognized, so nothing of a recognition is measured.
         assert_eq!(
-            captured_result(outcome),
-            Some((
-                Captured::Failed(Failure::Ocr(OcrFailure::NoImage)),
-                Timing::default()
-            ))
+            read(&path, Language::En),
+            (Err(Ended::Shell(OcrFailure::NoImage)), Timing::default())
         );
     }
 
@@ -534,26 +448,12 @@ pub(crate) mod tests {
         );
     }
 
-    /// With Ru pressed, the Russian data reads Russian text. Not skipped
-    /// without the data: CI and the README install `rus`.
     #[test]
     fn a_russian_snapshot_is_recognized_with_the_russian_data() {
         let _children = children();
         let path = snapshot_of(RUSSIAN_FIXTURE, "russian");
-        let work = Work::start().expect("runner");
-        let (sender, receiver) = mpsc::channel();
-        let params = Params::in_language(ocr_language(Language::Ru));
-        let shot = path.clone();
-        let _job = work.run(
-            JOB_LIMIT,
-            async move { recognize_snapshot(&tesseract(None), shot, &params, || {}).await },
-            move |outcome| {
-                let _ = sender.send(outcome);
-            },
-        );
-        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
-        let (captured, _) = captured_result(outcome).expect("shown");
-        assert_eq!(captured, Captured::Text(RUSSIAN_SENTENCE.to_owned()));
+        let (result, _) = read(&path, Language::Ru);
+        assert_eq!(result, Ok(RUSSIAN_SENTENCE.to_owned()));
         assert!(!path.exists());
     }
 
@@ -575,76 +475,55 @@ pub(crate) mod tests {
     #[test]
     fn a_catalan_snapshot_without_catalan_data_is_language_missing() {
         let _children = children();
-        // Only where Tesseract runs and the Catalan data is not there.
         if !installed("eng") || installed("cat") {
             return;
         }
         let path = snapshot("catalan");
-        let work = Work::start().expect("runner");
-        let (sender, receiver) = mpsc::channel();
-        let params = Params::in_language(ocr_language(Language::Ca));
-        let _job = work.run(
-            JOB_LIMIT,
-            async move { recognize_snapshot(&tesseract(None), path, &params, || {}).await },
-            move |outcome| {
-                let _ = sender.send(outcome);
-            },
-        );
-        let outcome = receiver.recv_timeout(WAIT).expect("outcome");
-        let (captured, _) = captured_result(outcome).expect("shown");
-        assert_eq!(
-            captured,
-            Captured::Failed(Failure::Ocr(OcrFailure::LanguageMissing))
-        );
+        let (result, _) = read(&path, Language::Ca);
+        assert_eq!(result, Err(Ended::Shell(OcrFailure::LanguageMissing)));
     }
 
     #[test]
     fn without_a_runner_nothing_starts() {
-        let started = start(
-            None,
-            None,
-            Language::Ca,
-            || panic!("captured"),
-            |_| panic!("ended"),
-        );
+        let (send, receive) = mpsc::channel();
+        let started = start_picker(None, std::future::pending(), move |result, elapsed| {
+            send.send((result, elapsed)).expect("result receiver");
+        });
+        assert!(started.is_none());
         assert_eq!(
-            started.err(),
-            Some(Capture {
-                captured: Captured::Failed(Failure::Unfinished),
-                timing: Timing::default(),
-            })
+            receive.recv_timeout(WAIT).expect("outcome"),
+            (Err(Ended::Unfinished), None)
         );
     }
 
     #[test]
     fn every_end_but_a_cancel_is_shown() {
-        let failed = Captured::Failed(Failure::Capture(CaptureFailure::Ended));
-        let timing = Timing {
-            capture_ms: Some(1200),
-            ..Timing::default()
-        };
+        let failed = Err(Ended::Shell(CaptureFailure::Ended));
         assert_eq!(
-            captured_result(Outcome::Finished(Capture {
-                captured: failed.clone(),
-                timing,
-            })),
-            Some((failed, timing))
+            stage_result::<ImageRef, _, _>(
+                Outcome::Finished((failed.clone(), Some(1200))),
+                CaptureFailure::Cancelled
+            ),
+            (failed, Some(1200))
         );
-        // A job that did not finish has nothing measured.
         for outcome in [Outcome::TimedOut, Outcome::Panicked] {
             assert_eq!(
-                captured_result(outcome),
-                Some((Captured::Failed(Failure::Unfinished), Timing::default()))
+                stage_result::<ImageRef, _, Option<u64>>(outcome, CaptureFailure::Cancelled),
+                (Err(Ended::Unfinished), None)
             );
         }
-        assert_eq!(captured_result(Outcome::Cancelled), None);
+        assert_eq!(
+            stage_result::<ImageRef, _, Option<u64>>(Outcome::Cancelled, CaptureFailure::Cancelled),
+            (Err(Ended::Shell(CaptureFailure::Cancelled)), None)
+        );
     }
 
     #[test]
     fn the_limits_are_finite_and_the_job_outlives_both() {
         assert_eq!(CAPTURE_LIMIT.as_secs(), 300);
         assert_eq!(OCR_LIMIT.as_secs(), 15);
-        assert!(JOB_LIMIT > CAPTURE_LIMIT + OCR_LIMIT);
+        assert!(PICKER_SAFETY_LIMIT > CAPTURE_LIMIT);
+        assert!(OCR_SAFETY_LIMIT > OCR_LIMIT);
     }
 
     #[test]

@@ -33,7 +33,7 @@
 //! Capture hides the window and starts one job on the runner, which takes
 //! the screenshot, recognizes its text and deletes the snapshot; the window
 //! comes back in the reading state once the snapshot is there, and the
-//! recognized text, its lines joined by [`sentence::recognized`], then
+//! recognized text, its lines joined by [`addict_core::sentence::recognized`], then
 //! replaces the field as a new text with the source OCR, which follows the
 //! manual path from there. A capture without text leaves the field as it
 //! was, starts no lookup and no online request, and says why in the source
@@ -47,10 +47,8 @@
 //! it. No permission is granted anywhere on this path: the portal asks for
 //! none for an interactive screenshot. Capture cannot be pressed while the area is being chosen;
 //! once the snapshot is there it can, and it is the retry: pressing it, or
-//! editing the field, gives up the recognition that runs. Giving up is
-//! dropping the job, which kills the Tesseract child and deletes the
-//! snapshot, and shows nothing. Each capture job has a number, so what a
-//! given-up job had already sent is ignored. Every capture end that is
+//! editing the field, gives up the recognition that runs. The controller cancels the current request,
+//! which stops the adapter and releases its snapshot, and ignores late results. Every capture end that is
 //! shown, also one that could not start, is recorded with `--evidence` as it
 //! is shown; a given-up one is not. The job is [`capture`]'s.
 //!
@@ -142,7 +140,7 @@
 
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs::File,
     future::Future,
     io::{self, Write},
@@ -155,7 +153,8 @@ use std::{
 };
 
 use addict_controller::{
-    self as controller, ArticleId, Controller, Dispatcher, Effect, Platform, StartFacts, ViewState,
+    self as controller, ArticleId, Controller, Dispatcher, Effect, Platform, RequestId, StartFacts,
+    ViewState,
     deadlines::{
         AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CACHE_LIMIT, CLIPBOARD_LIMIT,
         CREDIT_LIMIT, DOWNLOAD_LIMIT, FIRST_RUN_FILE_LIMIT, KEY_SAVE_LIMIT, LANGUAGE_FILE_LIMIT,
@@ -165,15 +164,13 @@ use addict_controller::{
 use addict_core::{
     APP_ID,
     dirs::Dirs,
-    failure::recognize::OcrFailure,
+    failure::{Ended, capture::CaptureFailure, recognize::OcrFailure},
     input::{Source, window_state},
-    sentence,
     translation::{English, Source as Language, reading_languages},
 };
 use addict_deepl::key::{self, KeyError, KeySource, Secret, WriteError};
 use addict_dictionary::release::{Manifest, Published};
 use addict_engine::{
-    capture::{Captured, Failure, Timing},
     recording::{AudioFailure, fetch_audio},
     work::{Job, Outcome, Work},
 };
@@ -191,8 +188,7 @@ use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     about::About,
-    at_once, cache,
-    capture::{self, Capture},
+    at_once, cache, capture,
     dictionaries::{Articles, Dictionaries, Indexes},
     download::{self, Downloader},
     english, entries, evidence,
@@ -203,7 +199,7 @@ use crate::{
     recording::Recording,
     settings::{self, CacheState, KeyState, Settings, StartupEnd, StartupShown},
     style,
-    view::{Binding, Choice, Held, NOTHING_SELECTED_TEXT, command_in, failure_text, too_long_text},
+    view::{Binding, Choice, Held, NOTHING_SELECTED_TEXT, command_in, too_long_text},
     widgets::{FieldEdit, KEY_LOCATION_HINT, PlaybackMedia, View},
 };
 
@@ -316,12 +312,9 @@ enum Event {
     /// Capture was pressed.
     Capture,
     /// The window hidden for a capture is off the screen.
-    Hidden,
-    /// The capture job with this number has its snapshot and recognizes it
-    /// now.
-    Captured(u64),
-    /// The capture job with this number ended.
-    Recognized(u64, Outcome<Capture>),
+    Hidden(RequestId),
+    /// A shell capture effect finished and can release its cancellation handle.
+    CaptureFinished(RequestId, controller::Event),
     /// The window became active.
     Active,
     /// A choice of the tray's menu, or its end.
@@ -515,9 +508,9 @@ struct Session {
     /// (Back, Forward, a synonym, clearing) was sent last. A controller text
     /// applies only while no edit followed it: a newer one is on its way.
     edits_at_set: u64,
-    /// The applied `field.revision` when the field was cleared for a read,
-    /// until a snapshot of the clear comes: an older one is not rendered.
-    cleared_at: Option<u64>,
+    /// Advances when the shell handles Read, so older snapshots and capture
+    /// presentation cannot overwrite the locally cleared field or its focus.
+    read_sequence: u64,
     /// Weak: the runner must go when the resident state is dropped. Never
     /// upgrades when the runner could not be started.
     work: WorkRef<Work>,
@@ -701,59 +694,24 @@ enum FirstRun {
     Done,
 }
 
-/// Where the capture of a [`Session`] stands; at first no capture runs.
+/// GTK presentation state and cancellation handles for controller effects.
 #[derive(Default)]
 struct Capturing {
-    /// The capture job, from Capture to its end; dropping it cancels the
-    /// job, which kills its Tesseract child and deletes its snapshot.
-    job: Option<Job>,
-    /// The number of the last started capture job. An event that carries
-    /// another number, or comes when no job runs, is from a job that was
-    /// given up.
-    number: u64,
-    /// Between Capture and the start of its job, while the window leaves
-    /// the screen.
-    hiding: bool,
-    /// The language the last started capture job recognizes, which its
-    /// line of missing data names.
-    language: Language,
-    /// Kept through the picker until the capture's window is presented again.
+    pending: HashMap<RequestId, CaptureEffect>,
     activation_token: Option<String>,
+    edits_at_recognition: u64,
 }
 
-/// What a press of Capture or of the screenshot shortcut does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CapturePress {
-    /// A capture is on its way or its area is being chosen: nothing new.
-    Ignored,
-    /// A new capture starts.
-    Start,
-    /// The recognition that runs is given up and a new capture starts.
-    Restart,
-}
-
-impl Capturing {
-    /// What a press does now; `recognizing` says that the job has its snapshot.
-    /// Dropping a job that waits for the area could leave an open picker whose
-    /// snapshot nobody deletes, so that one is left alone.
-    fn press(&self, recognizing: bool) -> CapturePress {
-        match (self.hiding, self.job.is_some(), recognizing) {
-            (true, _, _) | (false, true, false) => CapturePress::Ignored,
-            (false, true, true) => CapturePress::Restart,
-            (false, false, _) => CapturePress::Start,
-        }
-    }
-
-    /// The number of the job that starts now.
-    fn next_number(&mut self) -> u64 {
-        self.number += 1;
-        self.number
-    }
-
-    /// Whether the job with `number` is the one that runs.
-    fn is_running(&self, number: u64) -> bool {
-        self.job.is_some() && number == self.number
-    }
+enum CaptureEffect {
+    Settling {
+        read_sequence: u64,
+        hidden: bool,
+    },
+    Picker {
+        cancel: Option<tokio::sync::oneshot::Sender<()>>,
+        _job: Job,
+    },
+    Recognition(Job),
 }
 
 /// Where the read of the clipboard of a [`Session`] stands; at first none
@@ -935,9 +893,19 @@ impl Session {
             | Event::FirstRunCancel(..)
             | Event::FirstRunInstalled(..) => {}
             Event::Capture => self.capture(None),
-            Event::Hidden => self.start_capture(),
-            Event::Captured(number) => self.snapshot_taken(number),
-            Event::Recognized(number, outcome) => self.recognized(number, outcome),
+            Event::Hidden(id) => self.capture_hidden(id),
+            Event::CaptureFinished(id, result) => {
+                let finished = self.capturing.pending.remove(&id);
+                self.dispatch_controller(result);
+                if matches!(finished, Some(CaptureEffect::Picker { .. })) {
+                    let ready = self.capturing.pending.iter().find_map(|(&id, effect)| {
+                        matches!(effect, CaptureEffect::Settling { hidden: true, .. }).then_some(id)
+                    });
+                    if let Some(id) = ready {
+                        self.start_capture(id);
+                    }
+                }
+            }
             Event::Active => self.window_active(),
             Event::Clipboard(number, line) => self.copied(number, line),
         }
@@ -1454,161 +1422,197 @@ impl Session {
         self.first_run = FirstRun::Done;
     }
 
-    /// Capture was pressed: the window hides, so it is not in the capture,
-    /// and Capture cannot be pressed again until the snapshot is there. The
-    /// job starts once the hide has reached the screen. A press while a
-    /// snapshot is being recognized gives that recognition up and starts a
-    /// new capture; a press queued behind one whose area is being chosen
-    /// starts nothing. The source line goes.
     fn capture(&mut self, activation_token: Option<&str>) {
-        match self
-            .capturing
-            .press(self.view_state.reading_source == Some(Source::Ocr))
-        {
-            CapturePress::Ignored => return,
-            CapturePress::Restart => self.give_up_capture(),
-            CapturePress::Start => {}
-        }
-        // The capture's text is the one to come: a read that runs is given up.
+        // The Read adapter can still have a callback queued while the
+        // controller handles the Capture press. Retire that local read now.
         self.give_up_read();
+        if self.controller.is_none() {
+            let failure = Ended::Unfinished;
+            self.capturing.activation_token = activation_token.map(str::to_owned);
+            self.view
+                .render_source_failure(&crate::view::capture_failure_text(&failure));
+            self.reveal_capture(self.read_sequence, true);
+            self.record_capture(evidence::Read::capture_failed(&failure), Default::default());
+            return;
+        }
+        self.dispatch_controller(controller::Event::CapturePressed {
+            activation_token: activation_token.map(str::to_owned),
+        });
+    }
+
+    fn hide_for_capture(
+        &mut self,
+        id: RequestId,
+        read_sequence: u64,
+        activation_token: Option<String>,
+    ) {
+        if read_sequence != self.read_sequence {
+            self.picker_cancelled(id);
+            return;
+        }
         self.view.clear_source_failure();
-        self.capturing.hiding = true;
-        self.capturing.activation_token = activation_token.map(str::to_owned);
+        self.capturing.activation_token = activation_token;
         let settle = if self.window.is_visible() {
             HIDE_SETTLE
         } else {
             Duration::ZERO
         };
-        // Hidden, so on Wayland the compositor places the window anew when it
-        // comes back. The opacity of a GTK 4 toplevel is ignored, and making
-        // its children transparent left the window in GNOME's capture.
+        // GNOME's picker freezes the screen when it opens. Give the
+        // compositor time to finish animating the hidden window first.
         self.window.set_visible(false);
-        self.view.set_capture_sensitive(false);
+        self.capturing.pending.insert(
+            id,
+            CaptureEffect::Settling {
+                read_sequence,
+                hidden: false,
+            },
+        );
         let hidden = self.sender.clone();
-        // GNOME's capture interface freezes the screen as it opens, and the
-        // shell animates a window that goes away: started at once, the
-        // capture shows the window still there. A window that was closed
-        // already has nothing to wait for.
         glib::timeout_add_local_once(settle, move || {
-            let _ = hidden.unbounded_send(Event::Hidden);
+            let _ = hidden.unbounded_send(Event::Hidden(id));
         });
     }
 
-    /// The window is off the screen: the capture job starts.
-    fn start_capture(&mut self) {
-        if !self.capturing.hiding {
+    fn capture_hidden(&mut self, id: RequestId) {
+        if let Some(CaptureEffect::Settling { hidden, .. }) = self.capturing.pending.get_mut(&id) {
+            *hidden = true;
+            self.start_capture(id);
+        }
+    }
+
+    fn start_capture(&mut self, id: RequestId) {
+        let Some(&CaptureEffect::Settling {
+            read_sequence,
+            hidden: true,
+        }) = self.capturing.pending.get(&id)
+        else {
+            return;
+        };
+        if read_sequence != self.read_sequence {
+            self.capturing.pending.remove(&id);
+            self.picker_cancelled(id);
             return;
         }
-        self.capturing.hiding = false;
-        let number = self.capturing.next_number();
-        self.capturing.language = self.language;
-        let captured = self.sender.clone();
-        let ended = self.sender.clone();
-        let started = capture::start(
-            self.work.upgrade().as_deref(),
+        if self
+            .capturing
+            .pending
+            .values()
+            .any(|effect| matches!(effect, CaptureEffect::Picker { .. }))
+        {
+            return;
+        }
+        self.capturing.pending.remove(&id);
+        self.dispatch_controller(controller::Event::PickerStarted { id });
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        let sender = self.sender.clone();
+        let work = self.work.upgrade();
+        if let Some(job) = capture::start_picker(
+            work.as_deref(),
+            async move {
+                let _ = cancelled.await;
+            },
+            move |result, capture_ms| {
+                let _ = sender.unbounded_send(Event::CaptureFinished(
+                    id,
+                    controller::Event::AreaCaptured {
+                        id,
+                        result,
+                        capture_ms,
+                    },
+                ));
+            },
+        ) {
+            self.capturing.pending.insert(
+                id,
+                CaptureEffect::Picker {
+                    cancel: Some(cancel),
+                    _job: job,
+                },
+            );
+        }
+    }
+
+    fn picker_cancelled(&self, id: RequestId) {
+        self.dispatch_controller(controller::Event::AreaCaptured {
+            id,
+            result: Err(Ended::Shell(CaptureFailure::Cancelled)),
+            capture_ms: None,
+        });
+    }
+
+    fn recognize_capture(
+        &mut self,
+        id: RequestId,
+        image: controller::ImageRef,
+        language: Language,
+        read_sequence: u64,
+    ) {
+        if read_sequence != self.read_sequence {
+            drop(image);
+            self.dispatch_controller(controller::Event::TextRecognized {
+                id,
+                result: Err(Ended::Shell(OcrFailure::Cancelled)),
+                timing: Default::default(),
+            });
+            return;
+        }
+        self.capturing.edits_at_recognition = self.edits_sent;
+        let sender = self.sender.clone();
+        let work = self.work.upgrade();
+        if let Some(job) = capture::start_recognition(
+            work.as_deref(),
             self.dirs.config.clone(),
-            self.capturing.language,
-            move || {
-                // On the worker: the UI thread wakes for the event.
-                let _ = captured.unbounded_send(Event::Captured(number));
+            image,
+            language,
+            move |result, timing| {
+                let _ = sender.unbounded_send(Event::CaptureFinished(
+                    id,
+                    controller::Event::TextRecognized { id, result, timing },
+                ));
             },
-            move |outcome| {
-                let _ = ended.unbounded_send(Event::Recognized(number, outcome));
-            },
-        );
-        match started {
-            Ok(job) => self.capturing.job = Some(job),
-            Err(capture) => self.capture_ended(capture.captured, &capture.timing),
+        ) {
+            self.capturing
+                .pending
+                .insert(id, CaptureEffect::Recognition(job));
         }
     }
 
-    /// Whether the capture job with `number` is the one that runs.
-    fn is_capturing(&self, number: u64) -> bool {
-        self.capturing.is_running(number)
+    fn cancel_capture_effect(&mut self, id: RequestId) {
+        match self.capturing.pending.get_mut(&id) {
+            Some(CaptureEffect::Settling { .. }) => {
+                self.capturing.pending.remove(&id);
+                self.picker_cancelled(id);
+            }
+            Some(CaptureEffect::Picker { cancel, .. }) => {
+                if let Some(cancel) = cancel.take() {
+                    let _ = cancel.send(());
+                }
+            }
+            Some(CaptureEffect::Recognition(job)) => job.cancel(),
+            None => {}
+        }
     }
 
-    /// Gives up the capture job: dropping it kills its Tesseract child and
-    /// deletes its snapshot; it shows nothing.
-    fn give_up_capture(&mut self) {
-        self.capturing.job = None;
-        self.capturing.activation_token = None;
-        self.set_reading_source(None);
-    }
-
-    /// The snapshot of the job with `number` is there and is being
-    /// recognized: the window comes back and says so while there is no
-    /// input, and Capture can be pressed again, as the retry.
-    fn snapshot_taken(&mut self, number: u64) {
-        if !self.is_capturing(number) {
+    fn reveal_capture(&mut self, read_sequence: u64, retry: bool) {
+        if read_sequence != self.read_sequence {
             return;
         }
-        self.set_reading_source(Some(Source::Ocr));
-        self.view.set_capture_sensitive(true);
-        self.reveal_capture();
-    }
-
-    fn reveal_capture(&mut self) {
         if let Some(token) = self.capturing.activation_token.take() {
             self.window.set_startup_id(&token);
         }
         self.reveal();
-    }
-
-    /// The capture job with `number` ended; one that was given up shows
-    /// nothing.
-    fn recognized(&mut self, number: u64, outcome: Outcome<Capture>) {
-        if !self.is_capturing(number) {
-            return;
-        }
-        // A cancelled job was dropped here on purpose and shows nothing.
-        let Some((captured, timing)) = capture::captured_result(outcome) else {
-            return;
-        };
-        self.capture_ended(captured, &timing);
-    }
-
-    /// The capture is over with `captured`: Capture can be pressed again. A
-    /// text replaces the field as a new text from the capture and the
-    /// source line goes; anything else, a text without a word among it,
-    /// leaves the field as it was, starts nothing and says why in the
-    /// source line. The window is shown either way, with the field focused
-    /// after a text and, after anything else, Capture for the retry, or Retry
-    /// when it is offered. With `--evidence` the end is recorded as shown,
-    /// with `timing`.
-    fn capture_ended(&mut self, captured: Captured, timing: &Timing) {
-        self.capturing.job = None;
-        self.view.set_capture_sensitive(true);
-        self.set_reading_source(None);
-        let line = match captured {
-            Captured::Text(text) => {
-                sentence::recognized(&text).ok_or(Failure::Ocr(OcrFailure::Empty))
+        if retry {
+            match failed_end_focus(&self.binding) {
+                FailedEndFocus::Capture => self.view.focus_capture(),
+                FailedEndFocus::Retry => self.view.focus_retry(),
             }
-            Captured::Failed(failure) => Err(failure),
-        };
+        }
+    }
+
+    fn record_capture(&self, read: evidence::Read, timing: addict_engine::capture::Timing) {
         if let Some(recording) = &self.recording {
-            let read = match &line {
-                Ok(_) => evidence::Read::Recognized,
-                Err(failure) => evidence::Read::failed(failure),
-            };
-            recording.ocr_ended(&evidence::ocr_record(read, timing));
+            recording.ocr_ended(&evidence::ocr_record(read, &timing));
         }
-        let line = match line {
-            Ok(line) => line,
-            Err(failure) => {
-                eprintln!("addict: no text from the capture: {failure:?}");
-                self.reveal_capture();
-                self.view
-                    .render_source_failure(&failure_text(&failure, self.capturing.language));
-                match failed_end_focus(&self.binding) {
-                    FailedEndFocus::Capture => self.view.focus_capture(),
-                    FailedEndFocus::Retry => self.view.focus_retry(),
-                }
-                return;
-            }
-        };
-        self.view.clear_source_failure();
-        self.replace_field(line, Source::Ocr);
-        self.reveal_capture();
     }
 
     /// Gives up the read of the selection and the clipboard: it is
@@ -1630,11 +1634,14 @@ impl Session {
         // The controller clears the field (`field.revision` rises); the
         // window shows it cleared at once, before its snapshot comes, and
         // the snapshots queued before it are not rendered.
-        self.cleared_at = Some(self.applied_field_revision);
-        self.dispatch_setting_field(controller::Event::FieldCleared);
+        self.read_sequence += 1;
+        self.dispatch_setting_field(controller::Event::ReadPressed {
+            sequence: self.read_sequence,
+        });
         self.view.set_field_text("");
         self.sent_text.clear();
         let view = &mut self.view_state;
+        view.source_failure = None;
         view.sentence.clear();
         view.words.clear();
         view.chosen = None;
@@ -1797,11 +1804,6 @@ impl Session {
     /// the selection and the clipboard.
     fn give_up_for_new_text(&mut self) {
         self.view.clear_source_failure();
-        let gave_up_capture =
-            self.capturing.job.is_some() && self.view_state.reading_source == Some(Source::Ocr);
-        if gave_up_capture {
-            self.give_up_capture();
-        }
         self.give_up_read();
     }
 
@@ -1883,15 +1885,9 @@ impl Session {
     /// Applies the newest snapshot and handles every effect, even when the
     /// visual state of that snapshot has already been superseded.
     fn render_controller(&mut self, state: ViewState, effects: Vec<Effect>) {
-        let before_clear = self
-            .cleared_at
-            .is_some_and(|cleared_at| state.field.revision <= cleared_at);
-        if !before_clear {
-            self.cleared_at = None;
-            if state.revision > self.view_state.revision {
-                let previous = std::mem::replace(&mut self.view_state, state);
-                self.apply_snapshot(&previous);
-            }
+        if state.read_sequence == self.read_sequence && state.revision > self.view_state.revision {
+            let previous = std::mem::replace(&mut self.view_state, state);
+            self.apply_snapshot(&previous);
         }
         for effect in effects {
             self.run_effect(effect);
@@ -1904,9 +1900,23 @@ impl Session {
         // Apply a controller-set field only while no newer edit is on its way.
         if field.revision > self.applied_field_revision {
             self.applied_field_revision = field.revision;
-            if self.edits_sent == self.edits_at_set {
+            let edits_at_set = if current.ocr_field_revision == Some(field.revision) {
+                self.capturing.edits_at_recognition
+            } else {
+                self.edits_at_set
+            };
+            if self.edits_sent == edits_at_set && !self.field_is_newer() {
                 self.view.set_field_text(&field.text);
                 self.sent_text.clone_from(&field.text);
+            }
+        }
+        if previous.capture_sensitive != current.capture_sensitive {
+            self.view.set_capture_sensitive(current.capture_sensitive);
+        }
+        if previous.source_failure != current.source_failure {
+            match &current.source_failure {
+                Some(message) => self.view.render_source_failure(message),
+                None => self.view.clear_source_failure(),
             }
         }
         self.view_actions.set(ViewActions {
@@ -1941,6 +1951,27 @@ impl Session {
     /// Runs a controller effect.
     fn run_effect(&mut self, effect: Effect) {
         match effect {
+            Effect::CaptureArea {
+                id,
+                read_sequence,
+                activation_token,
+            } => {
+                self.hide_for_capture(id, read_sequence, activation_token);
+            }
+            Effect::Recognize {
+                id,
+                image,
+                language,
+                read_sequence,
+            } => {
+                self.recognize_capture(id, image, language, read_sequence);
+            }
+            Effect::Cancel(id) => self.cancel_capture_effect(id),
+            Effect::PresentCapture {
+                read_sequence,
+                retry,
+            } => self.reveal_capture(read_sequence, retry),
+            Effect::RecordCapture { read, timing } => self.record_capture(read, timing),
             Effect::CheckIndexes { index_generation } => {
                 self.check_lookup_indexes(index_generation);
             }
@@ -2329,12 +2360,8 @@ impl Session {
     /// Gives up what a press of the shortcut replaces: a running capture,
     /// also one that is still hiding the window, and the previous read.
     fn give_up_press(&mut self) {
-        self.capturing.job = None;
         self.capturing.activation_token = None;
-        if self.capturing.hiding {
-            // The hide of the window ends in an event that starts nothing.
-            self.capturing.hiding = false;
-        }
+        self.view_state.capture_sensitive = true;
         self.view.set_capture_sensitive(true);
         self.give_up_read();
     }
@@ -3387,7 +3414,7 @@ fn start(
         sent_text: String::new(),
         edits_sent: 0,
         edits_at_set: 0,
-        cleared_at: None,
+        read_sequence: 0,
         work,
         controller: controller.as_ref().map(Controller::dispatcher),
         articles,
@@ -3681,10 +3708,10 @@ mod tests {
     use gtk::{gio, prelude::*};
 
     use super::{
-        CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, CapturePress, Capturing, Copying, Event,
-        FailedEndFocus, LOOKUP_LIMIT, LaunchMode, WindowActions, WindowEvent, connect_launches,
-        connect_menu_actions, connect_settings_action, dispatch_window, failed_end_focus,
-        is_offered_command, missed_line,
+        CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, Copying, Event, FailedEndFocus, LOOKUP_LIMIT,
+        LaunchMode, WindowActions, WindowEvent, connect_launches, connect_menu_actions,
+        connect_settings_action, dispatch_window, failed_end_focus, is_offered_command,
+        missed_line,
     };
     use crate::view::{
         Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
@@ -4046,7 +4073,7 @@ mod tests {
             sent_text: String::new(),
             edits_sent: 0,
             edits_at_set: 0,
-            cleared_at: None,
+            read_sequence: 0,
             work: Arc::downgrade(&work),
             controller: None,
             articles: articles.clone(),
@@ -4835,6 +4862,173 @@ mod tests {
         );
         // The shell is in step: a word click of the typed text is taken.
         assert!(!session.field_is_newer());
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_delayed_ocr_snapshot_respects_newer_edits_and_read_presentation() {
+        use super::{Effect, FieldEdit, ViewState};
+
+        gtk::init().expect("a display");
+        let (mut session, _, _work) = test_session(
+            "io.github.doqhu.Addict.CaptureSnapshotTest",
+            Dirs::default(),
+        );
+        let mut recognized = ViewState {
+            revision: 1,
+            ocr_field_revision: Some(1),
+            ..ViewState::default()
+        };
+        recognized.field.text = "recognized words".to_owned();
+        recognized.field.revision = 1;
+        session.capturing.edits_at_recognition = session.edits_sent;
+        session.view.set_field_text("new typing");
+        session.sentence_changed("new typing".to_owned(), FieldEdit::Typed);
+        session.render_controller(recognized.clone(), Vec::new());
+        assert_eq!(session.applied_field_revision, 1);
+        assert_eq!(session.view.field_text(), "new typing");
+
+        session.give_up_press();
+        session.clear_for_read();
+        recognized.revision += 1;
+        recognized.field.revision += 1;
+        recognized.ocr_field_revision = Some(recognized.field.revision);
+        session.render_controller(
+            recognized,
+            vec![Effect::PresentCapture {
+                read_sequence: 0,
+                retry: true,
+            }],
+        );
+        assert_eq!(session.applied_field_revision, 1);
+        assert!(session.view.field_text().is_empty());
+        assert!(!session.window.is_visible());
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_hidden_picker_waits_for_close_and_rechecks_read_before_starting() {
+        use super::*;
+
+        gtk::init().expect("a display");
+        let (send, renders) = std::sync::mpsc::channel();
+        let controller = controller::start(
+            Dirs::default(),
+            controller_platform(),
+            StartFacts {
+                key_source: KeySource::new(Err(KeyError::NoDirectory)),
+                recording: false,
+            },
+            move |_, effects| send.send(effects).unwrap(),
+        )
+        .unwrap();
+        let press = || {
+            controller.dispatch(controller::Event::CapturePressed {
+                activation_token: None,
+            })
+        };
+        assert!(press());
+        assert!(controller.dispatch(controller::Event::ReadPressed { sequence: 1 }));
+        assert!(press());
+        let ids: Vec<_> = (0..4)
+            .flat_map(|_| renders.recv_timeout(Duration::from_secs(5)).unwrap())
+            .filter_map(|effect| match effect {
+                Effect::CaptureArea { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        let &[closing, next] = ids.as_slice() else {
+            panic!("two picker IDs: {ids:?}");
+        };
+
+        let (mut session, mut events, work) =
+            test_session("io.github.doqhu.Addict.CaptureCloseTest", Dirs::default());
+        // Any actual start uses the missing-runner path instead of a real picker.
+        session.work = std::sync::Weak::new();
+        for read_wins in [false, true] {
+            let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
+            let job = work.run(Duration::from_secs(5), std::future::pending::<()>(), |_| {});
+            session.capturing.pending.insert(
+                closing,
+                CaptureEffect::Picker {
+                    cancel: Some(cancel),
+                    _job: job,
+                },
+            );
+            session.cancel_capture_effect(closing);
+            assert_eq!(cancelled.try_recv(), Ok(()));
+            session.capturing.pending.insert(
+                next,
+                CaptureEffect::Settling {
+                    read_sequence: session.read_sequence,
+                    hidden: false,
+                },
+            );
+            session.handle(Event::Hidden(next));
+            assert!(matches!(
+                session.capturing.pending.get(&next),
+                Some(CaptureEffect::Settling { hidden: true, .. })
+            ));
+            if read_wins {
+                session.clear_for_read();
+            }
+            session.handle(Event::CaptureFinished(
+                closing,
+                controller::Event::AreaCaptured {
+                    id: closing,
+                    result: Err(Ended::Shell(CaptureFailure::Cancelled)),
+                    capture_ms: None,
+                },
+            ));
+            assert!(!session.capturing.pending.contains_key(&next));
+            let mut started = false;
+            while let Ok(event) = events.try_recv() {
+                if matches!(event, Event::CaptureFinished(id, controller::Event::AreaCaptured {
+                    result: Err(Ended::Unfinished), ..
+                }) if id == next)
+                {
+                    started = true;
+                }
+            }
+            assert_eq!(started, !read_wins);
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn capture_without_a_controller_shows_retry_and_records_unfinished() {
+        use super::*;
+
+        gtk::init().expect("a display");
+        let data = std::env::temp_dir().join(format!(
+            "addict-capture-fallback-{}.jsonl",
+            std::process::id()
+        ));
+        let (mut session, _, _work) = test_session(
+            "io.github.doqhu.Addict.CaptureFallbackTest",
+            Dirs::default(),
+        );
+        let writer = evidence::Writer::open(&data, evidence::Origin::Local).unwrap();
+        let writer = Rc::new(RefCell::new(writer));
+        session.recording = Some(Recording::start(writer, &session.window));
+
+        session.capture(Some("test-startup-token"));
+        assert!(session.window.is_visible());
+        assert!(session.capturing.activation_token.is_none());
+        let focus = gtk::prelude::GtkWindowExt::focus(&session.window)
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+        assert_eq!(focus.label().as_deref(), Some(crate::view::CAPTURE_LABEL));
+        let recorded = std::fs::read_to_string(&data).unwrap();
+        let ocr = recorded
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| row["event"] == "ocr")
+            .expect("OCR evidence");
+        assert_eq!(ocr["details"]["outcome"], "unfinished");
+        session.window.destroy();
+        std::fs::remove_file(data).unwrap();
     }
 
     /// Back while the selection and the clipboard are being read gives the
@@ -5913,42 +6107,6 @@ mod tests {
             }),
             FailedEndFocus::Retry
         );
-    }
-
-    /// A job that stands for the one of a capture.
-    fn capture_job(work: &addict_engine::work::Work) -> addict_engine::work::Job {
-        work.run(std::time::Duration::from_secs(5), async {}, |_| {})
-    }
-
-    #[test]
-    fn a_press_while_a_picker_waits_starts_nothing() {
-        let work = addict_engine::work::Work::start().expect("runner");
-        let mut capturing = Capturing::default();
-        assert_eq!(capturing.press(false), CapturePress::Start);
-        capturing.hiding = true;
-        assert_eq!(capturing.press(false), CapturePress::Ignored);
-        capturing.hiding = false;
-        capturing.job = Some(capture_job(&work));
-        assert_eq!(capturing.press(false), CapturePress::Ignored);
-        assert_eq!(capturing.press(true), CapturePress::Restart);
-    }
-
-    #[test]
-    fn a_retry_has_a_new_number_and_an_old_job_is_ignored() {
-        let work = addict_engine::work::Work::start().expect("runner");
-        let mut capturing = Capturing::default();
-        let old = capturing.next_number();
-        capturing.job = Some(capture_job(&work));
-        assert!(capturing.is_running(old));
-        // The capture ended: even its own late event is ignored.
-        capturing.job = None;
-        assert!(!capturing.is_running(old));
-        assert_eq!(capturing.press(false), CapturePress::Start);
-        let new = capturing.next_number();
-        assert_ne!(new, old);
-        capturing.job = Some(capture_job(&work));
-        assert!(capturing.is_running(new));
-        assert!(!capturing.is_running(old));
     }
 
     #[test]

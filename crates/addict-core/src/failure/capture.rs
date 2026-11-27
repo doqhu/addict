@@ -3,7 +3,9 @@
 /// Why a capture gave no snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaptureFailure {
-    /// The portal answered with code 1: the user cancelled.
+    /// The application has no permission to capture the screen.
+    NoPermission,
+    /// The user dismissed the picker or the shell honored a cancellation.
     Cancelled,
     /// The portal answered with code 2: the request ended otherwise. On
     /// GNOME this is also what Esc gives; no cause is claimed.

@@ -4,3 +4,14 @@
 pub mod capture;
 pub mod login_item;
 pub mod recognize;
+
+/// A result that ended in the shell or was finished by the controller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ended<F> {
+    /// The shell reported a family-specific failure.
+    Shell(F),
+    /// No result arrived by the controller's deadline.
+    DeadlinePassed,
+    /// The shell could not start or complete the effect.
+    Unfinished,
+}
