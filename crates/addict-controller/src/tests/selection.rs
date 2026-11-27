@@ -6,11 +6,29 @@
 use addict_core::{failure::selection::SelectionFailure, translation::reading_languages};
 use addict_engine::{
     manual::CLIPBOARD_MAX_CHARS,
-    view::{Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text},
+    view::{Held, NOTHING_SELECTED_TEXT, too_long_text},
 };
 
-use super::*;
+use super::{contract::linux_platform, *};
 use crate::selection::{Selection, is_offered_command, missed_line};
+
+fn install_tesseract(language: Language) -> String {
+    linux_platform()
+        .install_hints
+        .get(language)
+        .engine
+        .clone()
+        .unwrap()
+}
+
+fn install_language(language: Language) -> String {
+    linux_platform()
+        .install_hints
+        .get(language)
+        .data
+        .clone()
+        .unwrap()
+}
 
 /// Presses Read with `sequence`; gives the read's id and the effects of
 /// the press, which end with the read and, unless the platform reads first,
@@ -335,18 +353,20 @@ fn a_too_long_selection_is_named_before_the_clipboard() {
 /// Moved from `addict-app`'s resident tests.
 #[test]
 fn a_line_that_is_an_offered_command_is_not_a_text() {
+    let hints = linux_platform().install_hints;
     for language in reading_languages(Language::Ru) {
-        assert!(is_offered_command(&install_tesseract(language)));
-        assert!(is_offered_command(&install_language(language)));
+        assert!(is_offered_command(&install_tesseract(language), &hints));
+        assert!(is_offered_command(&install_language(language), &hints));
     }
-    assert!(!is_offered_command("bank"));
-    assert!(!is_offered_command(&format!(
-        "run {}",
-        install_tesseract(Language::En)
-    )));
+    assert!(!is_offered_command("bank", &hints));
+    assert!(!is_offered_command(
+        &format!("run {}", install_tesseract(Language::En)),
+        &hints
+    ));
     assert!(!is_offered_command(
         "Catalan OCR data is not installed. Install it with: \
-         sudo dnf install tesseract-langpack-cat"
+         sudo dnf install tesseract-langpack-cat",
+        &hints
     ));
 }
 

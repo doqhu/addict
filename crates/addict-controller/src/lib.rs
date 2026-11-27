@@ -4,7 +4,7 @@
 //! revision; GTK-free and platform-free.
 //!
 //! A shell renders [`ViewState`], dispatches [`Event`]s and runs
-//! [`Effect`]s.
+//! [`Effect`]s. See the [controller contract](https://github.com/doqhu/addict/blob/main/docs/controller-contract.md).
 
 mod capture;
 pub mod deadlines;
@@ -41,8 +41,8 @@ use std::{
 use addict_core::{
     dirs::Dirs,
     failure::{
-        Ended, capture::CaptureFailure, file_choice::FileChoiceFailure, playback::PlaybackFailure,
-        recognize::OcrFailure, selection::SelectionFailure,
+        Ended, capture::CaptureFailure, file_choice::FileChoiceFailure, login_item::LoginItemShown,
+        playback::PlaybackFailure, recognize::OcrFailure, selection::SelectionFailure,
     },
     input::{Input, Source, WindowState},
     translation::{English, Source as Language, Translator},
@@ -68,11 +68,84 @@ use addict_engine::{
 pub struct Platform {
     pub name: String,
     /// Help for locating the DeepL key when there is no configuration directory.
-    pub key_location_hint: &'static str,
+    pub key_location_hint: String,
     /// Whether a Read press must read the selection before the window is
     /// shown. The Mac shell needs its panel key only after the read; Linux
     /// shows the window first (AD-22).
     pub read_before_show: bool,
+    /// Whether the shell supports screen capture.
+    pub has_capture: bool,
+    /// The reading languages the shell can recognize.
+    pub ocr_languages: Vec<Language>,
+    /// The platform's optional OCR install hints by language.
+    pub install_hints: InstallHints,
+    /// The platform's display names for the history shortcuts.
+    pub shortcut_names: ShortcutNames,
+}
+
+/// The commands a platform offers to install the OCR engine or data.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstallHint {
+    pub engine: Option<String>,
+    pub data: Option<String>,
+}
+
+/// Install hints for each reading language.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstallHints {
+    pub en: InstallHint,
+    pub es: InstallHint,
+    pub ca: InstallHint,
+    pub ru: InstallHint,
+}
+
+impl InstallHints {
+    pub fn get(&self, language: Language) -> &InstallHint {
+        match language {
+            Language::En => &self.en,
+            Language::Es => &self.es,
+            Language::Ca => &self.ca,
+            Language::Ru => &self.ru,
+        }
+    }
+}
+
+/// Display names of the history keys.
+pub struct ShortcutNames {
+    pub back: String,
+    pub forward: String,
+}
+
+/// The last authorization state the shell reported.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Permission {
+    Granted,
+    Denied,
+    #[default]
+    NotDetermined,
+}
+
+/// OS permissions displayed by the shell.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Permissions {
+    pub accessibility: Permission,
+    pub screen_recording: Permission,
+}
+
+/// Where the shell keeps the DeepL key, or how the user can locate it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyLocation {
+    File(PathBuf),
+    Hint(String),
+}
+
+impl KeyLocation {
+    pub fn as_view_location(&self) -> addict_engine::view::KeyLocation<'_> {
+        match self {
+            Self::File(path) => addict_engine::view::KeyLocation::File(path),
+            Self::Hint(hint) => addict_engine::view::KeyLocation::Hint(hint),
+        }
+    }
 }
 
 /// The key may still be loading when the controller starts: `None` means the
@@ -81,6 +154,9 @@ pub struct StartFacts {
     pub key: Option<Result<Secret, addict_deepl::key::KeyError>>,
     pub recording: bool,
     pub release: String,
+    pub permissions: Permissions,
+    pub login_item: Option<LoginItemShown>,
+    pub bindings: Option<Bindings>,
 }
 
 /// Identity of a controller request, issued in increasing order.
@@ -117,6 +193,18 @@ pub struct SelectionText {
 /// Facts sent to the controller by the shell or made by the user in Settings.
 #[derive(Debug)]
 pub enum Event {
+    /// The shell observed new permissions. The next snapshot reports them.
+    PermissionChanged(Permissions),
+    /// The shell resumed from sleep. A new revision acknowledges the fact.
+    Woke,
+    /// The user pressed Copy. The controller emits WriteClipboard if a hint is shown.
+    CopyPressed,
+    /// The user activated a link. The controller emits OpenUrl for HTTP(S) only.
+    OpenPressed {
+        url: String,
+    },
+    /// The user dismissed the panel. The controller emits HidePanel.
+    DismissPressed,
     /// A pronunciation of the shown article was requested.
     PlayPressed {
         article: ArticleId,
@@ -283,6 +371,13 @@ pub enum Event {
 /// Commands for the shell. Lookup and translation use the shared runner.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// The controller asks the shell to hide the panel. The shell reports
+    /// PanelClosed as a lifecycle event when the panel closes.
+    HidePanel,
+    /// The controller asks the shell to open a web URL. No result event follows.
+    OpenUrl { url: String },
+    /// The controller asks the shell to write text to the clipboard. No result event follows.
+    WriteClipboard { text: String },
     /// Hide the window and start the area picker once it has left the screen.
     CaptureArea {
         id: RequestId,
@@ -347,6 +442,12 @@ pub struct ViewState {
     pub ocr_field_revision: Option<u64>,
     pub capture_sensitive: bool,
     pub source_failure: Option<String>,
+    /// The exact text the Copy button offers for the current source line.
+    pub source_copy: Option<String>,
+    /// The most recent permissions reported by the shell.
+    pub permissions: Permissions,
+    /// The key file path or guidance to show when no key is available.
+    pub key_location: KeyLocation,
     pub shown: Shown,
     /// Changes on an explicit sense or gloss click, including a repeat click.
     pub choice_revision: u64,
@@ -359,6 +460,10 @@ pub struct ViewState {
     pub chosen: Option<usize>,
     pub can_back: bool,
     pub can_forward: bool,
+    /// The Back tooltip with the platform's shortcut name.
+    pub back_tooltip: String,
+    /// The Forward tooltip with the platform's shortcut name.
+    pub forward_tooltip: String,
     /// The number of the text; changes with every new text, not a click.
     pub text_number: u64,
     /// The source being read now, if any.
@@ -389,6 +494,9 @@ impl Default for ViewState {
             ocr_field_revision: None,
             capture_sensitive: true,
             source_failure: None,
+            source_copy: None,
+            permissions: Permissions::default(),
+            key_location: KeyLocation::Hint(String::new()),
             shown: Shown::default(),
             choice_revision: 0,
             online: Vec::new(),
@@ -399,6 +507,8 @@ impl Default for ViewState {
             chosen: None,
             can_back: false,
             can_forward: false,
+            back_tooltip: String::new(),
+            forward_tooltip: String::new(),
             text_number: 0,
             reading_source: None,
             input: None,
@@ -518,23 +628,15 @@ impl Drop for Controller {
 pub fn start(
     dirs: Dirs,
     platform: Platform,
-    start_facts: StartFacts,
+    mut start_facts: StartFacts,
     renderer: impl Renderer,
 ) -> io::Result<Controller> {
-    let source = match start_facts.key {
+    let source = match start_facts.key.take() {
         Some(result) => KeySource::new(result),
         None => KeySource::pending(),
     };
     let translator = DeepL::new(source.clone());
-    start_with_translator(
-        dirs,
-        platform,
-        translator,
-        start_facts.recording,
-        source,
-        start_facts.release,
-        renderer,
-    )
+    start_with_key_source(dirs, platform, start_facts, translator, source, renderer)
 }
 
 /// Starts the same controller with an alternate translation provider and the
@@ -548,17 +650,35 @@ pub fn start_with_translator(
     release: String,
     renderer: impl Renderer,
 ) -> io::Result<Controller> {
+    let facts = StartFacts {
+        key: None,
+        recording,
+        release,
+        permissions: Permissions::default(),
+        login_item: None,
+        bindings: None,
+    };
+    start_with_key_source(dirs, platform, facts, translator, source, renderer)
+}
+
+fn start_with_key_source(
+    dirs: Dirs,
+    platform: Platform,
+    facts: StartFacts,
+    translator: impl Translator + 'static,
+    source: KeySource,
+    renderer: impl Renderer,
+) -> io::Result<Controller> {
     start_with_capture(
         dirs,
         platform,
         translator,
-        recording,
+        facts,
         source,
         crate::settings::Limits::default(),
         capture::Capture::default(),
         selection::Selection::default(),
         None,
-        release,
         downloads::Limits::default(),
         #[cfg(test)]
         downloads::ReadGates::default(),
@@ -571,13 +691,12 @@ fn start_with_capture(
     dirs: Dirs,
     platform: Platform,
     translator: impl Translator + 'static,
-    recording: bool,
+    facts: StartFacts,
     source: KeySource,
     settings_limits: crate::settings::Limits,
     capture: capture::Capture,
     selection: selection::Selection,
     read_gate: Option<Arc<settings::ReadGate>>,
-    release: String,
     download_limits: downloads::Limits,
     #[cfg(test)] read_gates: downloads::ReadGates,
     renderer: impl Renderer,
@@ -590,13 +709,17 @@ fn start_with_capture(
     let translator = cache::Cached::new(translator, dirs.cache.clone());
     let cache = translator.store();
     let (send, receive) = mpsc::channel();
+    let key_location = key::key_path(dirs.config.as_deref()).map_or_else(
+        || KeyLocation::Hint(platform.key_location_hint.clone()),
+        KeyLocation::File,
+    );
     let mut model = Model {
-        online: online::Translations::new(
-            Arc::new(translator),
-            key::key_path(dirs.config.as_deref()),
-            platform.key_location_hint,
-            recording,
-        ),
+        online: online::Translations::new(Arc::new(translator), facts.recording),
+        key_location,
+        back_tooltip: addict_engine::view::back_tooltip(&platform.shortcut_names.back),
+        forward_tooltip: addict_engine::view::forward_tooltip(&platform.shortcut_names.forward),
+        platform,
+        permissions: facts.permissions,
         work,
         cache: cache.clone(),
         dictionaries,
@@ -607,15 +730,14 @@ fn start_with_capture(
         capture,
         selection,
         read_sequence: 0,
-        read_before_show: platform.read_before_show,
         ocr_field_revision: None,
-        recording,
+        recording: facts.recording,
         manual: Manual::default(),
         history: History::default(),
         shown: Shown::default(),
         choice_revision: 0,
         settings,
-        downloads: downloads::Downloads::new(dirs, release, download_limits),
+        downloads: downloads::Downloads::new(dirs, facts.release, download_limits),
         import: import::Import::default(),
         playback: None,
         lifecycle: lifecycle::Lifecycle::default(),
@@ -628,6 +750,7 @@ fn start_with_capture(
     {
         model.downloads.read_gates = read_gates;
     }
+    model.apply_start_os_state(facts.login_item, facts.bindings);
     model.start_index_check();
     model.start_settings_read();
     let thread = thread::Builder::new()
@@ -698,7 +821,11 @@ struct Model {
     capture: capture::Capture,
     selection: selection::Selection,
     read_sequence: u64,
-    read_before_show: bool,
+    platform: Platform,
+    permissions: Permissions,
+    key_location: KeyLocation,
+    back_tooltip: String,
+    forward_tooltip: String,
     ocr_field_revision: Option<u64>,
     recording: bool,
     manual: Manual,
@@ -807,15 +934,23 @@ impl Model {
             field: self.field.clone(),
             read_sequence: self.read_sequence,
             ocr_field_revision: self.ocr_field_revision,
-            capture_sensitive: !self.capture.picker_open(),
+            capture_sensitive: self.platform.has_capture && !self.capture.picker_open(),
             source_failure: self
                 .capture
                 .source_failure
-                .clone()
+                .as_ref()
+                .map(|failure| failure.line.clone())
                 .or_else(|| self.selection.source_failure.clone()),
+            source_copy: self.capture.copy_text().map(str::to_owned),
+            permissions: self.permissions,
+            key_location: self.key_location.clone(),
             shown: self.shown.clone(),
             choice_revision: self.choice_revision,
-            online: self.online.rows(manual.chosen(), self.settings.my_language),
+            online: self.online.rows(
+                manual.chosen(),
+                self.settings.my_language,
+                self.key_location.as_view_location(),
+            ),
             window_state: manual.state(),
             source: manual.source(),
             sentence: manual.sentence().to_owned(),
@@ -823,6 +958,8 @@ impl Model {
             chosen: manual.chosen(),
             can_back: self.history.can_back(manual.sentence()),
             can_forward: self.history.can_forward(),
+            back_tooltip: self.back_tooltip.clone(),
+            forward_tooltip: self.forward_tooltip.clone(),
             text_number: manual.text_number(),
             reading_source: manual.reading(),
             input: manual.input().cloned(),
@@ -851,6 +988,31 @@ impl Model {
     /// Applies `event`; says whether the view changed.
     fn apply(&mut self, event: Event, effects: &mut Vec<Effect>) -> bool {
         match event {
+            Event::PermissionChanged(permissions) => {
+                self.permissions = permissions;
+                true
+            }
+            Event::Woke => true,
+            Event::CopyPressed => {
+                if let Some(text) = self.capture.copy_text() {
+                    effects.push(Effect::WriteClipboard {
+                        text: text.to_owned(),
+                    });
+                }
+                false
+            }
+            Event::OpenPressed { url } => {
+                if url.split_once(':').is_some_and(|(scheme, _)| {
+                    scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")
+                }) {
+                    effects.push(Effect::OpenUrl { url });
+                }
+                false
+            }
+            Event::DismissPressed => {
+                effects.push(Effect::HidePanel);
+                false
+            }
             Event::PlayPressed { article, url } => self.play_pressed(article, url, effects),
             Event::Played { id, result } => self.played(id, result),
             Event::Reopened => {
@@ -870,10 +1032,11 @@ impl Model {
                 replaced,
                 source,
             } => self.field_edited(text, replaced, source, effects),
-            Event::CapturePressed { activation_token } => {
+            Event::CapturePressed { activation_token } if self.platform.has_capture => {
                 let cleared = self.clear_read_source(effects);
                 self.capture_pressed(activation_token, effects) || cleared
             }
+            Event::CapturePressed { .. } => false,
             Event::PickerStarted { id } => {
                 self.picker_started(id);
                 false
@@ -1249,6 +1412,7 @@ impl Model {
 
 #[cfg(test)]
 mod tests {
+    mod contract;
     mod downloads;
     mod import;
     mod lifecycle;
@@ -1537,17 +1701,21 @@ mod tests {
                 dirs,
                 Platform {
                     name: "test".to_owned(),
-                    key_location_hint: "No key directory.",
+                    key_location_hint: "No key directory.".to_owned(),
                     read_before_show,
+                    ..contract::linux_platform()
                 },
                 translator,
-                recording,
+                StartFacts {
+                    recording,
+                    release,
+                    ..contract::linux_facts()
+                },
                 source,
                 limits,
                 capture,
                 selection,
                 read_gate,
-                release,
                 download_limits,
                 read_gates,
                 move |view, effects| {

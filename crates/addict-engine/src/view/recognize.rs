@@ -9,17 +9,6 @@ use addict_core::{
 
 use super::capture::{NO_SNAPSHOT_FILE, with_retry};
 
-/// The package of the Tesseract data of `language`. No wildcard arm: a new
-/// language does not compile until it is given its package.
-pub(crate) fn ocr_package(language: Language) -> &'static str {
-    match language {
-        Language::En => "tesseract-langpack-eng",
-        Language::Es => "tesseract-langpack-spa",
-        Language::Ca => "tesseract-langpack-cat",
-        Language::Ru => "tesseract-langpack-rus",
-    }
-}
-
 /// The name of `language` before "OCR data" in the line of missing data.
 fn ocr_language(language: Language) -> &'static str {
     match language {
@@ -30,34 +19,22 @@ fn ocr_language(language: Language) -> &'static str {
     }
 }
 
-/// The command that installs Tesseract with the data of `language`.
-pub fn install_tesseract(language: Language) -> String {
-    format!("sudo dnf install tesseract {}", ocr_package(language))
-}
-
-/// The command that installs the Tesseract data of `language`.
-pub fn install_language(language: Language) -> String {
-    format!("sudo dnf install {}", ocr_package(language))
-}
-
-/// The source line when the recognizer gave no text.
+/// The source line when the recognizer gave no text. The platform supplies
+/// the matching install hint for an engine or language-data failure.
 pub fn recognize_failure_text(
     failure: &Ended<OcrFailure>,
     language: Language,
+    install_hint: Option<&str>,
 ) -> Cow<'static, str> {
     match failure {
         Ended::Shell(OcrFailure::NoImage) => with_retry(NO_SNAPSHOT_FILE),
-        Ended::Shell(OcrFailure::EngineMissing) => format!(
-            "Tesseract is not installed. Install it with: {}",
-            install_tesseract(language)
-        )
-        .into(),
-        Ended::Shell(OcrFailure::LanguageMissing) => format!(
-            "{} OCR data is not installed. Install it with: {}",
-            ocr_language(language),
-            install_language(language)
-        )
-        .into(),
+        Ended::Shell(OcrFailure::EngineMissing) => {
+            with_install_hint("Tesseract is not installed.".into(), install_hint)
+        }
+        Ended::Shell(OcrFailure::LanguageMissing) => with_install_hint(
+            format!("{} OCR data is not installed.", ocr_language(language)).into(),
+            install_hint,
+        ),
         Ended::Shell(OcrFailure::Failed(detail)) => {
             format!("Text recognition failed: {detail}").into()
         }
@@ -66,5 +43,12 @@ pub fn recognize_failure_text(
         Ended::Shell(OcrFailure::Cancelled) => "Text recognition was cancelled.".into(),
         Ended::DeadlinePassed => "Text recognition took too long.".into(),
         Ended::Unfinished => with_retry("The capture did not finish."),
+    }
+}
+
+fn with_install_hint(line: Cow<'static, str>, hint: Option<&str>) -> Cow<'static, str> {
+    match hint {
+        Some(hint) => format!("{line} Install it with: {hint}").into(),
+        None => line,
     }
 }

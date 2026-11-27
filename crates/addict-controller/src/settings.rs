@@ -872,6 +872,19 @@ impl Model {
         true
     }
 
+    pub(crate) fn apply_start_os_state(
+        &mut self,
+        login_item: Option<LoginItemShown>,
+        bindings: Option<Bindings>,
+    ) {
+        if let Some(shown) = login_item {
+            self.login_read(Some(shown), false);
+        }
+        if let Some(bindings) = bindings {
+            self.shortcut_changed(ShortcutState::Bound(bindings));
+        }
+    }
+
     pub(crate) fn login_read(
         &mut self,
         shown: Option<LoginItemShown>,

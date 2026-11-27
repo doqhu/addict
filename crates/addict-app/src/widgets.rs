@@ -34,7 +34,7 @@ use std::{
     rc::Rc,
 };
 
-use addict_controller::{FatalView, PlaybackState, PlaybackView};
+use addict_controller::{Dispatcher, Event, FatalView, PlaybackState, PlaybackView};
 use addict_core::{
     failure::playback::PlaybackFailure,
     input::{Source, WindowState},
@@ -48,24 +48,28 @@ use crate::{
     dictionaries::Indexes,
     view::{
         ADD_KEY_LABEL, ANALYSIS_DASH, ANALYSIS_SEPARATOR, Analysis, AnalysisGroup, Answer,
-        AnswerLine, BACK_TOOLTIP, Binding, Block, CAPTURE_LABEL, COMMONS_FILE_LABEL, COPIED_LABEL,
-        COPY_LABEL, ChosenGloss, Explained, FIELD_PLACEHOLDER, FORM_TAG, FORWARD_TOOLTIP, FormRow,
-        GLOSS_NO_KEY, GlossRow, GlossTexts, KeyLocation, LANGUAGE_TOOLTIP, LONE_WORD_TIP,
-        LOOK_UP_ENGLISH, Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE,
-        OnlineRow, OnlineState, PLAY_TOOLTIP, PRONUNCIATION_PREVIEW, PronunciationText,
-        RETRY_LABEL, ResultTexts, SENSES_LABEL, SHOW_LESS, SYNONYM_PREVIEW, SenseText, Shown,
-        SynonymTexts, WHOLE_WORD_LABEL, answer_texts, binding_texts, choice_texts, command_in,
-        definition_action_label, indexes_text, language_label, sentence_markup, show_more,
-        synonym_class, synonym_description, texts,
+        AnswerLine, Binding, Block, CAPTURE_LABEL, COMMONS_FILE_LABEL, COPIED_LABEL, COPY_LABEL,
+        ChosenGloss, Explained, FIELD_PLACEHOLDER, FORM_TAG, FormRow, GLOSS_NO_KEY, GlossRow,
+        GlossTexts, KeyLocation, LANGUAGE_TOOLTIP, LONE_WORD_TIP, LOOK_UP_ENGLISH, Listed,
+        MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE, OnlineRow, OnlineState,
+        PLAY_TOOLTIP, PRONUNCIATION_PREVIEW, PronunciationText, RETRY_LABEL, ResultTexts,
+        SENSES_LABEL, SHOW_LESS, SYNONYM_PREVIEW, SenseText, Shown, SynonymTexts, WHOLE_WORD_LABEL,
+        answer_texts, binding_texts, choice_texts, definition_action_label, indexes_text,
+        language_label, sentence_markup, show_more, synonym_class, synonym_description, texts,
     },
     wrap::Wrap,
 };
 
-pub(crate) const KEY_LOCATION_HINT: &str =
-    "Set an absolute XDG_CONFIG_HOME or HOME to locate addict/deepl.key.";
+#[derive(Clone, Default)]
+pub(crate) struct ControllerEvents(Rc<RefCell<Option<Dispatcher>>>);
 
-fn key_location(path: Option<&std::path::Path>) -> KeyLocation<'_> {
-    path.map_or(KeyLocation::Hint(KEY_LOCATION_HINT), KeyLocation::File)
+impl ControllerEvents {
+    pub(crate) fn dispatch(&self, event: Event) -> bool {
+        self.0
+            .borrow()
+            .as_ref()
+            .is_some_and(|controller| controller.dispatch(event))
+    }
 }
 
 /// How wide the wrapping texts ask to be, in characters.
@@ -307,13 +311,11 @@ fn language_switch() -> (gtk::Box, LanguageSlots, Vec<gtk::ToggleButton>) {
 /// the handlers of the buttons, so a change needs no new handler.
 type LanguageSlots = Rc<Cell<[Language; 3]>>;
 
-/// A button of the history left of the field, showing `icon`, with
-/// `tooltip`: it never takes the focus from the field, and it cannot be
-/// pressed until there is somewhere to go.
-fn history_button(icon: &str, tooltip: &str) -> gtk::Button {
+/// A button of the history left of the field. It never takes the focus
+/// from the field and cannot be pressed until there is somewhere to go.
+fn history_button(icon: &str) -> gtk::Button {
     gtk::Button::builder()
         .icon_name(icon)
-        .tooltip_text(tooltip)
         .focus_on_click(false)
         .can_focus(false)
         .sensitive(false)
@@ -347,8 +349,8 @@ fn field_row() -> FieldRow {
         .label(CAPTURE_LABEL)
         .css_classes(["capture"])
         .build();
-    let back = history_button("go-previous-symbolic", BACK_TOOLTIP);
-    let forward = history_button("go-next-symbolic", FORWARD_TOOLTIP);
+    let back = history_button("go-previous-symbolic");
+    let forward = history_button("go-next-symbolic");
     let history = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .css_classes(["linked", "history"])
@@ -417,7 +419,7 @@ struct SourceFailure {
 /// The source line, hidden until it has something to say. Neither the line
 /// nor Copy takes the focus from the field: the line is not selectable and
 /// the button is never focused.
-fn source_failure() -> SourceFailure {
+fn source_failure(controller: ControllerEvents) -> SourceFailure {
     let line = wrapping(gtk::Label::builder()).hexpand(true).build();
     let copy = gtk::Button::builder()
         .label(COPY_LABEL)
@@ -439,7 +441,9 @@ fn source_failure() -> SourceFailure {
     let held = command.clone();
     copy.connect_clicked(move |button| {
         if let Some(command) = held.borrow().as_deref() {
-            button.clipboard().set_text(command);
+            if !controller.dispatch(Event::CopyPressed) {
+                button.clipboard().set_text(command);
+            }
             button.set_label(COPIED_LABEL);
         }
     });
@@ -731,6 +735,7 @@ type PlayPressed = Rc<dyn Fn(String)>;
 
 #[derive(Default)]
 struct PlaybackControls {
+    controller: ControllerEvents,
     pressed: Rc<RefCell<Option<PlayPressed>>>,
     rows: RefCell<Vec<RecordingRow>>,
 }
@@ -749,7 +754,7 @@ impl PlaybackControls {
                 .map(|playback| &playback.state);
             let detail = match state {
                 Some(PlaybackState::Ended { credit }) => credit.as_deref(),
-                Some(PlaybackState::Failed(text)) => Some(*text),
+                Some(PlaybackState::Failed(text)) => Some(text.as_str()),
                 _ => None,
             };
             row.button
@@ -844,11 +849,11 @@ pub(crate) fn fatal_page(view: &FatalView, restart: impl Fn() + 'static) -> gtk:
         .margin_start(20)
         .margin_end(20)
         .build();
-    let heading = gtk::Label::new(Some(view.heading));
+    let heading = gtk::Label::new(Some(&view.heading));
     heading.add_css_class("title-1");
     page.append(&heading);
-    page.append(&gtk::Label::new(Some(view.text)));
-    let button = gtk::Button::with_label(view.restart);
+    page.append(&gtk::Label::new(Some(&view.text)));
+    let button = gtk::Button::with_label(&view.restart);
     button.set_halign(gtk::Align::Center);
     button.add_css_class("suggested-action");
     button.connect_clicked(move |_| restart());
@@ -911,12 +916,24 @@ fn pronunciation_row(
     };
     if let Some(url) = pronunciation.audio {
         let commons = CommonsFile::from_recording_url(url).map(|file| {
-            gtk::LinkButton::builder()
+            let link = gtk::LinkButton::builder()
                 .uri(file.page_url().as_str())
                 .label(COMMONS_FILE_LABEL)
                 .focusable(true)
                 .visible(false)
-                .build()
+                .build();
+            let controller = playback.controller.clone();
+            link.connect_activate_link(move |link| {
+                if controller.dispatch(Event::OpenPressed {
+                    url: link.uri().into(),
+                }) {
+                    link.set_visited(true);
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
+            link
         });
         let button = play_button(url, &playback.pressed);
         row.append(&button);
@@ -1828,6 +1845,7 @@ pub struct View {
     /// by both: they never run together. Hidden until one gave nothing, and
     /// again once something new happens in the window.
     source_failure: SourceFailure,
+    controller: ControllerEvents,
     binding: gtk::Box,
     binding_text: gtk::Label,
     binding_detail: gtk::Label,
@@ -1902,7 +1920,12 @@ impl View {
 
         // Wraps, so an install command fits. Not selectable, like the line
         // of the indexes: it must not take the focus from the field.
-        let source_failure = source_failure();
+        let controller = ControllerEvents::default();
+        let source_failure = source_failure(controller.clone());
+        let playback = PlaybackControls {
+            controller: controller.clone(),
+            ..PlaybackControls::default()
+        };
         root.append(&source_failure.row);
 
         let binding_row = binding_row();
@@ -1936,6 +1959,7 @@ impl View {
             source,
             status,
             source_failure,
+            controller,
             binding: binding_row.row,
             binding_text: binding_row.text,
             binding_detail: binding_row.detail,
@@ -1955,7 +1979,7 @@ impl View {
             sense_chosen: Rc::new(RefCell::new(None)),
             gloss_chosen: Rc::new(RefCell::new(None)),
             look_up_english: Rc::new(RefCell::new(None)),
-            playback: PlaybackControls::default(),
+            playback,
             pronounced: Cell::new(None),
             translations: RefCell::new(None),
             online: RefCell::new(Vec::new()),
@@ -2042,12 +2066,20 @@ impl View {
         self.retry.connect_clicked(move |_| retry());
     }
 
+    pub(crate) fn controller_events(&self) -> ControllerEvents {
+        self.controller.clone()
+    }
+
+    pub(crate) fn set_controller(&self, controller: Option<Dispatcher>) {
+        self.controller.0.replace(controller);
+    }
+
     /// Shows `line`, why a capture or a read of the selection and the
     /// clipboard gave no text, under the source and the status. [`View::render`] leaves it;
     /// [`View::clear_source_failure`] hides it.
     /// A line that names a runnable command shows Copy beside it.
-    pub fn render_source_failure(&self, line: &str) {
-        self.set_source_failure(line);
+    pub fn render_source_failure(&self, line: &str, command: Option<&str>) {
+        self.set_source_failure(line, command);
         self.source_failure.row.set_visible(true);
     }
 
@@ -2064,18 +2096,17 @@ impl View {
     /// Hides the source line.
     pub fn clear_source_failure(&self) {
         self.source_failure.row.set_visible(false);
-        self.set_source_failure("");
+        self.set_source_failure("", None);
     }
 
     /// Puts `line` into the source line and gives Copy the command it
     /// names, if any, with Copy's label back to its own.
-    fn set_source_failure(&self, line: &str) {
+    fn set_source_failure(&self, line: &str, command: Option<&str>) {
         let failure = &self.source_failure;
         failure.line.set_text(line);
-        let command = command_in(line);
         failure.copy.set_visible(command.is_some());
         failure.copy.set_label(COPY_LABEL);
-        failure.command.replace(command);
+        failure.command.replace(command.map(str::to_owned));
     }
 
     /// Reports the text and origin of each editable field change.
@@ -2173,6 +2204,12 @@ impl View {
     /// Runs `forward` each time Forward is pressed.
     pub fn connect_forward(&self, forward: impl Fn() + 'static) {
         self.forward.connect_clicked(move |_| forward());
+    }
+
+    /// Sets the tooltips for Back and Forward.
+    pub fn set_history_tooltips(&self, back: &str, forward: &str) {
+        self.back.set_tooltip_text(Some(back));
+        self.forward.set_tooltip_text(Some(forward));
     }
 
     /// Whether Back and Forward can be pressed.
@@ -2313,7 +2350,7 @@ impl View {
     /// Shows the result of `shown` with the sense chosen in it, or hides it
     /// when there is none. With no sense chosen the area is put at its top:
     /// that is how a result arrives. A choice leaves it where it is.
-    pub fn render_result(&self, shown: &Shown, key_file: Option<&std::path::Path>) {
+    pub fn render_result(&self, shown: &Shown, key_location: KeyLocation<'_>) {
         self.release_focus();
         let result = &self.result;
         let (visible, sensitive) = shown.definition_action();
@@ -2338,7 +2375,7 @@ impl View {
             lookup,
             shown.choice(),
             shown.definition(),
-            key_location(key_file),
+            key_location,
             shown.elsewhere(),
             shown.translating(),
         );
@@ -2451,7 +2488,7 @@ impl View {
     }
 
     /// Updates the definition row of the existing choice without replacing its links.
-    pub fn render_definition(&self, shown: &Shown, key_file: Option<&std::path::Path>) {
+    pub fn render_definition(&self, shown: &Shown, key_location: KeyLocation<'_>) {
         let definition = self.definition.borrow();
         let (Some(area), Some(lookup)) = (definition.as_ref(), shown.lookup()) else {
             return;
@@ -2460,7 +2497,7 @@ impl View {
             lookup,
             shown.choice(),
             shown.definition(),
-            key_location(key_file),
+            key_location,
             shown.elsewhere(),
             shown.translating(),
         );
@@ -2559,9 +2596,7 @@ mod tests {
         rc::Rc,
     };
 
-    use addict_controller::{
-        Effect, Event, Platform, PlaybackState, PlaybackView, RequestId, StartFacts, ViewState,
-    };
+    use addict_controller::{Effect, Event, PlaybackState, PlaybackView, RequestId, ViewState};
     use addict_core::dirs::Dirs;
     use addict_core::{
         dictionary::{
@@ -2575,10 +2610,10 @@ mod tests {
     use addict_engine::view::playback::playback_text;
     use gtk::{gio, glib, prelude::*};
 
-    use super::{Field, MediaPlayback, View, fill_listed};
+    use super::{Field, KeyLocation, MediaPlayback, View, fill_listed};
     use crate::view::{
-        BACK_TOOLTIP, COPIED_LABEL, COPY_LABEL, FORWARD_TOOLTIP, Listed, PLAY_TOOLTIP,
-        PLAYBACK_FAILED, RECORDING_NEEDS_NETWORK, SHOW_LESS,
+        COPIED_LABEL, COPY_LABEL, Listed, PLAY_TOOLTIP, PLAYBACK_FAILED, RECORDING_NEEDS_NETWORK,
+        SHOW_LESS,
     };
     use crate::{
         style,
@@ -2619,7 +2654,7 @@ mod tests {
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(pronounced_bank())));
         shown.choose(0);
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         let word = Online::Translated("берег".to_owned());
         let whole =
             crate::view::Whole::Asked(Online::Translated("Я сидел на берегу реки.".to_owned()));
@@ -2629,7 +2664,7 @@ mod tests {
                 sentence: Some(&whole),
                 lone: None,
             },
-            super::key_location(None),
+            test_key_location(),
             Language::Ru,
         );
         view.render_online_rows(
@@ -2752,20 +2787,16 @@ mod tests {
         children
     }
 
+    fn test_key_location() -> KeyLocation<'static> {
+        KeyLocation::Hint(crate::resident::KEY_LOCATION_HINT)
+    }
+
     fn request_id() -> RequestId {
         let (send, effects) = std::sync::mpsc::channel();
         let controller = addict_controller::start(
             Dirs::default(),
-            Platform {
-                name: "test".into(),
-                key_location_hint: "",
-                read_before_show: false,
-            },
-            StartFacts {
-                key: None,
-                recording: false,
-                release: String::new(),
-            },
+            crate::resident::controller_platform(),
+            crate::resident::linux_start_facts(),
             move |_: ViewState, batch: Vec<Effect>| {
                 for effect in batch {
                     if let Effect::ReadSelection { id, .. } = effect {
@@ -2793,7 +2824,7 @@ mod tests {
         let current = Rc::new(RefCell::new(None));
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(pronounced_bank())));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         // The first stands beside the headword, the second under it, behind
         // the toggle.
         let lead = view.result.lead.clone().upcast::<gtk::Widget>();
@@ -2834,14 +2865,14 @@ mod tests {
                     let playback = PlaybackView {
                         id,
                         url: pressed.clone(),
-                        state: PlaybackState::Failed(playback_text(&failure).unwrap()),
+                        state: PlaybackState::Failed(playback_text(&failure).unwrap().to_owned()),
                     };
                     view.render_playback(Some(&playback));
                 })));
             }
         });
         shown.show(Some(Lookup::Article(article)));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         let play = buttons(&lead, "play").remove(0);
         play.emit_clicked();
         assert!(current.borrow().is_some());
@@ -2854,12 +2885,12 @@ mod tests {
         assert_eq!(play.tooltip_text().as_deref(), Some(PLAYBACK_FAILED));
         // A choice keeps the rows.
         shown.choose(0);
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         assert!(play.parent().is_some());
         shown.show(Some(Lookup::Article(
             Sample.lookup("bank").expect("the sample article"),
         )));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         assert!(lead.first_child().is_none());
         assert!(rest.first_child().is_none());
         assert!(!rest.is_visible());
@@ -2872,7 +2903,7 @@ mod tests {
             })
             .collect();
         shown.show(Some(Lookup::Article(article)));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         let leading = children(&lead);
         assert_eq!(leading.len(), 2);
         assert_eq!(children(&rest).len(), 4);
@@ -2898,7 +2929,7 @@ mod tests {
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(article)));
         shown.choose(0);
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         let window = gtk::Window::builder()
             .default_width(480)
             .default_height(400)
@@ -2916,7 +2947,7 @@ mod tests {
 
         let answer = Online::Translated("берег".to_owned());
         let render = |texts: OnlineTexts<'_>| {
-            let rows: Vec<_> = online_rows(&texts, super::key_location(None), Language::Ru)
+            let rows: Vec<_> = online_rows(&texts, test_key_location(), Language::Ru)
                 .into_iter()
                 .map(super::OnlineRow::into_owned)
                 .collect();
@@ -2927,9 +2958,9 @@ mod tests {
             ..OnlineTexts::default()
         });
         let (number, _) = shown.request_definition().expect("definition action");
-        view.render_definition(&shown, None);
+        view.render_definition(&shown, test_key_location());
         shown.answer_definition(number, answer.clone());
-        view.render_definition(&shown, None);
+        view.render_definition(&shown, test_key_location());
         draw();
 
         assert_eq!(
@@ -3015,7 +3046,7 @@ mod tests {
         article.entries[0].pronunciations[0].audio[0].url = url.into();
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(article)));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         let row = view.result.lead.first_child().expect("pronunciation row");
         let play = buttons(&row, "play").remove(0);
         let link = children(&row)
@@ -3061,21 +3092,21 @@ mod tests {
             );
         };
 
-        render(PlaybackState::Failed(RECORDING_NEEDS_NETWORK));
+        render(PlaybackState::Failed(RECORDING_NEEDS_NETWORK.to_owned()));
         assert_failure(RECORDING_NEEDS_NETWORK);
         render(PlaybackState::Playing);
         assert_eq!(play.tooltip_text().as_deref(), Some(PLAY_TOOLTIP));
-        render(PlaybackState::Failed(RECORDING_NEEDS_NETWORK));
+        render(PlaybackState::Failed(RECORDING_NEEDS_NETWORK.to_owned()));
         assert_failure(RECORDING_NEEDS_NETWORK);
         render(PlaybackState::Fetching);
-        render(PlaybackState::Failed(RECORDING_NEEDS_NETWORK));
+        render(PlaybackState::Failed(RECORDING_NEEDS_NETWORK.to_owned()));
         assert_failure(RECORDING_NEEDS_NETWORK);
 
         render(PlaybackState::Playing);
         assert!(!link.is_visible());
         finish();
         render(PlaybackState::Fetching);
-        render(PlaybackState::Failed(PLAYBACK_FAILED));
+        render(PlaybackState::Failed(PLAYBACK_FAILED.to_owned()));
         assert_failure(PLAYBACK_FAILED);
 
         render(PlaybackState::Playing);
@@ -3099,7 +3130,7 @@ mod tests {
         shown.show(Some(Lookup::Article(
             Sample.lookup("bank").expect("a different article"),
         )));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         view.render_playback(None);
         assert_eq!(play.tooltip_text().as_deref(), Some(PLAY_TOOLTIP));
         assert!(view.result.lead.first_child().is_none());
@@ -3142,7 +3173,7 @@ mod tests {
                 })
                 .collect();
             shown.show(Some(Lookup::Article(article)));
-            view.render_result(shown, None);
+            view.render_result(shown, test_key_location());
         };
         let mut shown = Shown::default();
         settle();
@@ -3306,7 +3337,7 @@ mod tests {
         shown.show(Some(Lookup::Article(
             Sample.lookup("bank").expect("the sample article"),
         )));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         // Offline, the first translation is the answer and the others are
         // pills under it.
         let pills = view.result.answer.pills.first_child().expect("the pills");
@@ -3334,6 +3365,16 @@ mod tests {
     fn the_history_buttons_follow_the_history() {
         gtk::init().expect("a display");
         let view = View::new(WindowState::Empty, &Binding::Bound);
+        const BACK_TOOLTIP: &str = "Back (Alt+Left)";
+        const FORWARD_TOOLTIP: &str = "Forward (Alt+Right)";
+        view.set_history_tooltips(
+            &crate::view::back_tooltip(&crate::resident::controller_platform().shortcut_names.back),
+            &crate::view::forward_tooltip(
+                &crate::resident::controller_platform()
+                    .shortcut_names
+                    .forward,
+            ),
+        );
         for (button, tooltip) in [(&view.back, BACK_TOOLTIP), (&view.forward, FORWARD_TOOLTIP)] {
             assert!(!button.can_focus());
             assert!(!button.gets_focus_on_click());
@@ -3404,7 +3445,7 @@ mod tests {
         window.present();
         let mut shown = Shown::default();
         shown.show(Some(Lookup::Article(pronounced_bank())));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         let play = buttons(&view.result.lead.clone().upcast(), "play").remove(0);
         assert!(play.grab_focus());
         assert_eq!(
@@ -3414,7 +3455,7 @@ mod tests {
         shown.show(Some(Lookup::Article(
             Sample.lookup("bank").expect("the sample article"),
         )));
-        view.render_result(&shown, None);
+        view.render_result(&shown, test_key_location());
         assert!(play.parent().is_none());
         let focus = gtk::prelude::GtkWindowExt::focus(&window).expect("a focus");
         assert!(
@@ -3437,7 +3478,7 @@ mod tests {
         assert!(!copy.gets_focus_on_click());
         let missing = "Catalan OCR data is not installed. Install it with: \
                        sudo dnf install tesseract-langpack-cat";
-        view.render_source_failure(missing);
+        view.render_source_failure(missing, Some("sudo dnf install tesseract-langpack-cat"));
         assert!(copy.is_visible());
         assert_eq!(
             view.source_failure.command.borrow().as_deref(),
@@ -3446,11 +3487,11 @@ mod tests {
         copy.emit_clicked();
         assert_eq!(copy.label().as_deref(), Some(COPIED_LABEL));
 
-        view.render_source_failure("The capture was cancelled.");
+        view.render_source_failure("The capture was cancelled.", None);
         assert!(!copy.is_visible());
         assert_eq!(view.source_failure.command.borrow().as_deref(), None);
 
-        view.render_source_failure(missing);
+        view.render_source_failure(missing, Some("sudo dnf install tesseract-langpack-cat"));
         assert_eq!(copy.label().as_deref(), Some(COPY_LABEL));
         view.clear_source_failure();
         assert!(!view.source_failure.row.is_visible());

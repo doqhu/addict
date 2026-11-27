@@ -56,7 +56,7 @@ pub enum OfferPhase {
     Listing,
     Installing(view::Queue),
     Ended {
-        heading: &'static str,
+        heading: String,
         text: String,
         complete: bool,
     },
@@ -693,7 +693,7 @@ impl Model {
             (view::ended_heading(&queue), text, view::is_complete(&queue))
         };
         offer.phase = OfferPhase::Ended {
-            heading,
+            heading: heading.to_owned(),
             text: text.clone(),
             complete,
         };

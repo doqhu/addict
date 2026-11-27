@@ -122,7 +122,10 @@ fn a_local_recording_uses_its_path_and_another_scheme_fails() {
         }]
     );
     let (failed, effects) = press(&mut shell, article, "ftp://example.org/audio");
-    assert_eq!(failed.state, PlaybackState::Failed(PLAYBACK_FAILED));
+    assert_eq!(
+        failed.state,
+        PlaybackState::Failed(PLAYBACK_FAILED.to_owned())
+    );
     assert_eq!(effects, [Effect::Cancel(playing.id)]);
 }
 
@@ -136,7 +139,10 @@ fn remote_audio_without_a_cache_directory_fails_without_fetching() {
         article,
         &format!("{}/file.ogg", server.base_url()),
     );
-    assert_eq!(failed.state, PlaybackState::Failed(PLAYBACK_FAILED));
+    assert_eq!(
+        failed.state,
+        PlaybackState::Failed(PLAYBACK_FAILED.to_owned())
+    );
     assert!(effects.is_empty());
     assert!(server.seen().is_empty());
 }
@@ -152,7 +158,7 @@ fn network_and_deadline_failures_have_the_network_text_and_leave_no_cache_file()
     assert!(effects.is_empty());
     assert_eq!(
         failed.playback.unwrap().state,
-        PlaybackState::Failed(RECORDING_NEEDS_NETWORK)
+        PlaybackState::Failed(RECORDING_NEEDS_NETWORK.to_owned())
     );
 
     let stub = Stub::start(
@@ -178,7 +184,7 @@ fn network_and_deadline_failures_have_the_network_text_and_leave_no_cache_file()
         .unwrap();
     assert_eq!(
         shell.next().0.playback.unwrap().state,
-        PlaybackState::Failed(RECORDING_NEEDS_NETWORK)
+        PlaybackState::Failed(RECORDING_NEEDS_NETWORK.to_owned())
     );
     assert!(!temp.0.join("cache/recordings").exists());
 }
@@ -201,7 +207,7 @@ fn a_truncated_fetch_fails_without_leaving_a_partial_recording() {
     );
     assert_eq!(
         shell.next().0.playback.unwrap().state,
-        PlaybackState::Failed(PLAYBACK_FAILED)
+        PlaybackState::Failed(PLAYBACK_FAILED.to_owned())
     );
     assert!(!temp.0.join("cache/recordings").exists());
 }
@@ -268,7 +274,10 @@ fn failed_streams_have_the_correct_text_and_do_not_request_credit() {
         finish(&shell, id, Err(failure));
         let (failed, effects) = shell.next();
         assert!(effects.is_empty());
-        assert_eq!(failed.playback.unwrap().state, PlaybackState::Failed(text));
+        assert_eq!(
+            failed.playback.unwrap().state,
+            PlaybackState::Failed(text.to_owned())
+        );
         shell.quiet(Event::Played { id, result: Ok(()) });
     }
     assert!(server.seen().is_empty());

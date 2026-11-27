@@ -51,10 +51,24 @@ pub(crate) struct Capture {
     picker_limit: Duration,
     recognition_limit: Duration,
     active: Option<Active>,
-    pub(crate) source_failure: Option<String>,
+    pub(crate) source_failure: Option<SourceFailure>,
     /// A timeout is shown immediately. Its evidence waits until the shell
     /// acknowledges cancellation and its files and children have been reaped.
     timed_out: HashMap<RequestId, (Read, Option<u64>)>,
+}
+
+pub(crate) struct SourceFailure {
+    pub(crate) line: String,
+    command: Option<String>,
+}
+
+impl SourceFailure {
+    fn message(line: String) -> Self {
+        Self {
+            line,
+            command: None,
+        }
+    }
 }
 
 struct Active {
@@ -84,6 +98,10 @@ impl Capture {
             source_failure: None,
             timed_out: HashMap::new(),
         }
+    }
+
+    pub(crate) fn copy_text(&self) -> Option<&str> {
+        self.source_failure.as_ref()?.command.as_deref()
     }
 
     pub(crate) fn picker_open(&self) -> bool {
@@ -130,10 +148,16 @@ impl Model {
         self.cancel_capture(effects);
         self.capture.source_failure = None;
         self.manual.set_reading(None);
+        let language = self.settings.reading();
+        if !self.platform.ocr_languages.contains(&language) {
+            self.show_ocr_failure(&Ended::Shell(OcrFailure::LanguageMissing), language);
+            self.present_capture(true, effects);
+            return true;
+        }
         let id = self.next_request();
         self.capture.active = Some(Active {
             id,
-            language: self.settings.reading(),
+            language,
             stage: Stage::Picker,
             _deadline: self.capture_timer(id, self.capture.picker_limit),
         });
@@ -192,6 +216,19 @@ impl Model {
             return false;
         };
         match result {
+            Ok(_) if !self.platform.ocr_languages.contains(&active.language) => {
+                let failure = Ended::Shell(OcrFailure::LanguageMissing);
+                self.show_ocr_failure(&failure, active.language);
+                self.present_capture(true, effects);
+                self.record_capture(
+                    Read::recognize_failed(&failure),
+                    Timing {
+                        capture_ms,
+                        ..Timing::default()
+                    },
+                    effects,
+                );
+            }
             Ok(image) => {
                 self.manual.set_reading(Some(Source::Ocr));
                 self.present_capture(false, effects);
@@ -212,7 +249,9 @@ impl Model {
             }
             Err(failure) => {
                 eprintln!("addict: no text from the capture: {failure:?}");
-                self.capture.source_failure = Some(capture_failure_text(&failure).into_owned());
+                self.capture.source_failure = Some(SourceFailure::message(
+                    capture_failure_text(&failure).into_owned(),
+                ));
                 self.present_capture(true, effects);
                 self.record_capture(
                     Read::capture_failed(&failure),
@@ -259,8 +298,7 @@ impl Model {
             }
             Err(failure) => {
                 eprintln!("addict: no text from the capture: {failure:?}");
-                self.capture.source_failure =
-                    Some(recognize_failure_text(&failure, active.language).into_owned());
+                self.show_ocr_failure(&failure, active.language);
                 (Read::recognize_failed(&failure), true)
             }
         };
@@ -287,16 +325,29 @@ impl Model {
             Stage::Recognition { capture_ms } => (
                 Read::recognize_failed(&Ended::DeadlinePassed),
                 capture_ms,
-                recognize_failure_text(&Ended::DeadlinePassed, active.language),
+                recognize_failure_text(&Ended::DeadlinePassed, active.language, None),
             ),
         };
         self.cancel_capture(effects);
-        self.capture.source_failure = Some(message.into_owned());
+        self.capture.source_failure = Some(SourceFailure::message(message.into_owned()));
         self.present_capture(true, effects);
         if self.recording {
             self.capture.timed_out.insert(id, (read, capture_ms));
         }
         true
+    }
+
+    fn show_ocr_failure(&mut self, failure: &Ended<OcrFailure>, language: Language) {
+        let hints = self.platform.install_hints.get(language);
+        let command = match failure {
+            Ended::Shell(OcrFailure::EngineMissing) => hints.engine.clone(),
+            Ended::Shell(OcrFailure::LanguageMissing) => hints.data.clone(),
+            _ => None,
+        };
+        self.capture.source_failure = Some(SourceFailure {
+            line: recognize_failure_text(failure, language, command.as_deref()).into_owned(),
+            command,
+        });
     }
 
     fn present_capture(&self, retry: bool, effects: &mut Vec<Effect>) {

@@ -155,7 +155,8 @@ use std::{
 
 use addict_controller::{
     self as controller, ArticleId, Bindings as ControllerBindings, Controller, Dispatcher, Effect,
-    OfferId, OfferPhase, Platform, RequestId, ShortcutState, StartFacts, ViewState,
+    InstallHint, InstallHints, OfferId, OfferPhase, Permission, Permissions, Platform, RequestId,
+    ShortcutNames, ShortcutState, StartFacts, ViewState,
     deadlines::{
         BIND_ANSWER_LIMIT, BIND_START_LIMIT, KEY_SAVE_LIMIT, SHELL_QUIT_LIMIT, STARTUP_LIMIT,
         STARTUP_READ_LIMIT,
@@ -194,7 +195,7 @@ use crate::{
     settings::{self, Settings},
     style,
     view::{Binding, Choice, FailedEndFocus, Held, failed_end_focus},
-    widgets::{FieldEdit, KEY_LOCATION_HINT, MediaPlayback, View, fatal_page},
+    widgets::{FieldEdit, MediaPlayback, View, fatal_page},
 };
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
@@ -382,10 +383,14 @@ fn build_window(
     });
     // Bubble phase: a focused child that uses Esc itself keeps it.
     let key = gtk::EventControllerKey::new();
+    key.set_name(Some("dismiss-panel"));
     let key_window = window.downgrade();
+    let controller = view.controller_events();
     key.connect_key_pressed(move |_, key, _, _| {
         if key == gdk::Key::Escape {
-            if let Some(window) = key_window.upgrade() {
+            if !controller.dispatch(controller::Event::DismissPressed)
+                && let Some(window) = key_window.upgrade()
+            {
                 window.close();
             }
             glib::Propagation::Stop
@@ -560,7 +565,7 @@ impl Session {
             let failure = Ended::Unfinished;
             self.capturing.activation_token = activation_token.map(str::to_owned);
             self.view
-                .render_source_failure(&crate::view::capture_failure_text(&failure));
+                .render_source_failure(&crate::view::capture_failure_text(&failure), None);
             self.reveal_capture(self.read_sequence, true);
             self.record_capture(evidence::Read::capture_failed(&failure), Default::default());
             return;
@@ -1078,9 +1083,13 @@ impl Session {
         if previous.capture_sensitive != current.capture_sensitive {
             self.view.set_capture_sensitive(current.capture_sensitive);
         }
-        if previous.source_failure != current.source_failure {
+        if previous.source_failure != current.source_failure
+            || previous.source_copy != current.source_copy
+        {
             match &current.source_failure {
-                Some(message) => self.view.render_source_failure(message),
+                Some(message) => self
+                    .view
+                    .render_source_failure(message, current.source_copy.as_deref()),
                 None => self.view.clear_source_failure(),
             }
         }
@@ -1099,6 +1108,12 @@ impl Session {
         if previous.can_back != current.can_back || previous.can_forward != current.can_forward {
             self.render_history();
         }
+        if previous.back_tooltip != current.back_tooltip
+            || previous.forward_tooltip != current.forward_tooltip
+        {
+            self.view
+                .set_history_tooltips(&current.back_tooltip, &current.forward_tooltip);
+        }
         if previous.shown.generation() != current.shown.generation()
             || previous.shown.translating() != current.shown.translating()
             || previous.choice_revision != current.choice_revision
@@ -1106,7 +1121,7 @@ impl Session {
             self.render_shown();
         } else if previous.shown.definition() != current.shown.definition() {
             self.view
-                .render_definition(&current.shown, self.key_file.as_deref());
+                .render_definition(&current.shown, current.key_location.as_view_location());
         }
         if previous.online != current.online {
             self.render_online();
@@ -1295,6 +1310,19 @@ impl Session {
                 self.read_selection(id, read_sequence);
             }
             Effect::ShowPanel { read_sequence } => self.show_panel(read_sequence),
+            Effect::HidePanel => self.window.close(),
+            Effect::OpenUrl { url } => {
+                gtk::UriLauncher::new(&url).launch(
+                    Some(&self.window),
+                    gio::Cancellable::NONE,
+                    |result| {
+                        if let Err(error) = result {
+                            eprintln!("addict: cannot open link: {error}");
+                        }
+                    },
+                );
+            }
+            Effect::WriteClipboard { text } => self.window.clipboard().set_text(&text),
             Effect::Play { id, path } => {
                 self.stop_playback();
                 let controller = self.controller.clone();
@@ -1358,8 +1386,10 @@ impl Session {
 
     /// Shows the result and the sense chosen in it as they are now.
     fn render_shown(&self) {
-        self.view
-            .render_result(&self.view_state.shown, self.key_file.as_deref());
+        self.view.render_result(
+            &self.view_state.shown,
+            self.view_state.key_location.as_view_location(),
+        );
         self.view.render_playback(self.view_state.playback.as_ref());
     }
 
@@ -1450,8 +1480,10 @@ impl Session {
             // No controller issues the read or its deadline: the waiting
             // ends at once with the line of an unfinished read.
             self.set_reading_source(None);
-            self.view
-                .render_source_failure(&crate::view::selection_failure_text(&Ended::Unfinished));
+            self.view.render_source_failure(
+                &crate::view::selection_failure_text(&Ended::Unfinished),
+                None,
+            );
         }
         // Before `present()`: the first frame has the labels.
         self.render_window();
@@ -1996,17 +2028,53 @@ fn start_controller(
             key,
             recording,
             release,
+            ..linux_start_facts()
         },
         controller_renderer(sender),
     )
 }
 
-fn controller_platform() -> Platform {
+pub(crate) const KEY_LOCATION_HINT: &str =
+    "Set an absolute XDG_CONFIG_HOME or HOME to locate addict/deepl.key.";
+
+pub(crate) fn controller_platform() -> Platform {
+    let install_hint = |code| InstallHint {
+        engine: Some(format!(
+            "sudo dnf install tesseract tesseract-langpack-{code}"
+        )),
+        data: Some(format!("sudo dnf install tesseract-langpack-{code}")),
+    };
     Platform {
         name: "Linux".to_owned(),
-        key_location_hint: KEY_LOCATION_HINT,
+        key_location_hint: KEY_LOCATION_HINT.to_owned(),
         // Wayland gives the clipboard only to the focused window: show first.
         read_before_show: false,
+        has_capture: true,
+        ocr_languages: Language::ALL.to_vec(),
+        install_hints: InstallHints {
+            en: install_hint("eng"),
+            es: install_hint("spa"),
+            ca: install_hint("cat"),
+            ru: install_hint("rus"),
+        },
+        shortcut_names: ShortcutNames {
+            back: "Alt+Left".to_owned(),
+            forward: "Alt+Right".to_owned(),
+        },
+    }
+}
+
+pub(crate) fn linux_start_facts() -> StartFacts {
+    StartFacts {
+        key: None,
+        recording: false,
+        release: String::new(),
+        permissions: Permissions {
+            accessibility: Permission::Granted,
+            screen_recording: Permission::Granted,
+        },
+        login_item: None,
+        bindings: None,
     }
 }
 
@@ -2113,9 +2181,15 @@ fn start(
             Ok(controller) => Some(controller),
             Err(e) => {
                 eprintln!("addict: lookups cannot run: {e}");
+                let names = controller_platform().shortcut_names;
+                view.set_history_tooltips(
+                    &crate::view::back_tooltip(&names.back),
+                    &crate::view::forward_tooltip(&names.forward),
+                );
                 None
             }
         };
+    view.set_controller(controller.as_ref().map(Controller::dispatcher));
     // The key is read off GTK's thread; the controller publishes its result
     // as the first `KeyChanged` once this event is dispatched.
     start_key_load(key_file.clone(), &sender);
@@ -2584,9 +2658,9 @@ mod tests {
             Box::new(ViewState {
                 revision: 1,
                 fatal: Some(FatalView {
-                    heading: fatal::HEADING,
-                    text: fatal::TEXT,
-                    restart: fatal::RESTART,
+                    heading: fatal::HEADING.to_owned(),
+                    text: fatal::TEXT.to_owned(),
+                    restart: fatal::RESTART.to_owned(),
                 }),
                 ..ViewState::default()
             }),
@@ -2778,6 +2852,88 @@ mod tests {
             session.settings.window().destroy();
             session.window.destroy();
         }
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn escape_hides_the_panel_locally_or_through_the_controller() {
+        use super::*;
+        use glib::translate::IntoGlib;
+
+        gtk::init().expect("a display");
+        let (mut session, _events, _work) =
+            test_session("io.github.doqhu.Addict.DismissPanelTest", Dirs::default());
+        let controllers = session.window.observe_controllers();
+        let keys = (0..controllers.n_items())
+            .filter_map(|index| controllers.item(index))
+            .filter_map(|item| item.downcast::<gtk::EventControllerKey>().ok())
+            .find(|keys| keys.name().as_deref() == Some("dismiss-panel"))
+            .expect("the window's Escape handler");
+        let press_escape = || {
+            assert!(keys.emit_by_name::<bool>(
+                "key-pressed",
+                &[
+                    &gdk::Key::Escape.into_glib(),
+                    &0_u32,
+                    &gdk::ModifierType::empty()
+                ],
+            ));
+        };
+
+        assert!(session.controller.is_none());
+        session.window.present();
+        assert!(session.window.is_visible());
+        press_escape();
+        assert!(
+            !session.window.is_visible(),
+            "Escape closes without a controller"
+        );
+
+        // Receive the controller's renders without applying them to GTK yet.
+        let (send, renders) = std::sync::mpsc::channel();
+        let controller = controller::start(
+            Dirs::default(),
+            controller_platform(),
+            linux_start_facts(),
+            move |view, effects| send.send((view, effects)).unwrap(),
+        )
+        .unwrap();
+        connect_controller(&mut session, &controller);
+        session.window.present();
+        assert!(session.window.is_visible());
+        press_escape();
+
+        let (view, effects) = loop {
+            let (view, effects) = renders
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Escape render");
+            if !effects.is_empty() {
+                break (view, effects);
+            }
+        };
+        assert_eq!(effects, [Effect::HidePanel]);
+        assert!(session.window.is_visible(), "Escape waits for HidePanel");
+        session.render_controller(view, effects);
+        assert!(!session.window.is_visible(), "HidePanel closes the window");
+
+        drop(controller);
+        assert!(
+            !session
+                .controller
+                .as_ref()
+                .unwrap()
+                .dispatch(controller::Event::PanelClosed)
+        );
+        session.window.present();
+        assert!(session.window.is_visible());
+        press_escape();
+        assert!(
+            !session.window.is_visible(),
+            "Escape closes with a disconnected controller"
+        );
+
+        session.settings.window().destroy();
+        session.window.destroy();
     }
 
     /// A full session of the window for a test, its application registered
@@ -3024,6 +3180,7 @@ mod tests {
     fn connect_controller(session: &mut super::Session, controller: &super::Controller) {
         session.work = controller.work();
         session.controller = Some(controller.dispatcher());
+        session.view.set_controller(session.controller.clone());
     }
 
     #[derive(Clone)]
@@ -3437,6 +3594,7 @@ mod tests {
                 release: String::new(),
                 key: Some(Err(KeyError::NoDirectory)),
                 recording: false,
+                ..super::linux_start_facts()
             },
             move |_, effects| send.send(effects).unwrap(),
         )
@@ -4816,6 +4974,7 @@ mod tests {
                 release: String::new(),
                 key: Some(Err(KeyError::Missing)),
                 recording: false,
+                ..super::linux_start_facts()
             },
             move |state: addict_controller::ViewState, _effects| {
                 let _ = views.send(state.settings);
@@ -5629,6 +5788,7 @@ mod tests {
                 release: String::new(),
                 key: Some(Err(KeyError::Missing)),
                 recording: false,
+                ..super::linux_start_facts()
             },
             move |state: addict_controller::ViewState, _effects| {
                 let _ = views.send(state.settings.key);

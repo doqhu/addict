@@ -26,7 +26,7 @@ pub enum PlaybackState {
     Fetching,
     Playing,
     Ended { credit: Option<String> },
-    Failed(&'static str),
+    Failed(String),
 }
 
 pub(crate) struct Playback {
@@ -193,7 +193,7 @@ impl Playback {
 
     fn fail(&mut self, failure: PlaybackFailure) {
         if let Some(text) = playback_text(&failure) {
-            self.view.state = PlaybackState::Failed(text);
+            self.view.state = PlaybackState::Failed(text.to_owned());
         }
     }
 }

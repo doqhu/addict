@@ -34,7 +34,7 @@ pub mod settings;
 #[cfg(test)]
 use capture::CAPTURE_RETRY;
 pub use capture::capture_failure_text;
-pub use recognize::{install_language, install_tesseract, recognize_failure_text};
+pub use recognize::recognize_failure_text;
 pub use selection::selection_failure_text;
 pub use settings::*;
 
@@ -44,7 +44,7 @@ use addict_core::{
     dictionary::{Article, LexicalEntry, PartOfSpeech, Pos, Pronunciation, Sense},
     failure::login_item::StartupFailure,
     input::{Source, WindowState},
-    translation::{English, Refusal, Request, Source as Language, reading_languages},
+    translation::{English, Refusal, Request, Source as Language},
 };
 
 use addict_dictionary::{
@@ -234,11 +234,15 @@ pub const CAPTURE_LABEL: &str = "Capture";
 
 /// The tooltip of the button left of the field that puts the text before
 /// into it, naming its hotkey.
-pub const BACK_TOOLTIP: &str = "Back (Alt+Left)";
+pub fn back_tooltip(key: &str) -> String {
+    format!("Back ({key})")
+}
 
 /// The tooltip of the button left of the field that puts the text after
 /// into it, naming its hotkey.
-pub const FORWARD_TOOLTIP: &str = "Forward (Alt+Right)";
+pub fn forward_tooltip(key: &str) -> String {
+    format!("Forward ({key})")
+}
 
 /// What the source line says when neither the primary selection nor the
 /// clipboard gave a line at a press: the cause, then the manual path.
@@ -251,21 +255,6 @@ pub const COPY_LABEL: &str = "Copy";
 
 /// What that button says once pressed, until the line changes.
 pub const COPIED_LABEL: &str = "Copied";
-
-/// The runnable command `line` names, built by the same functions that
-/// wrote it into the line: the install of Tesseract for a language, then the
-/// install of a language's data. `None` for a line that names none.
-pub fn command_in(line: &str) -> Option<String> {
-    let tesseract = reading_languages(Language::Ru)
-        .into_iter()
-        .map(install_tesseract);
-    let data = reading_languages(Language::Ru)
-        .into_iter()
-        .map(install_language);
-    tesseract
-        .chain(data)
-        .find(|command| line.contains(command.as_str()))
-}
 
 /// Where a text too long to take was held at a press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2165,7 +2154,7 @@ pub enum OnlineState {
 /// line reads. The line is text, never markup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnlineRow<'a> {
-    pub label: &'static str,
+    pub label: Cow<'a, str>,
     pub line: Cow<'a, str>,
     pub state: OnlineState,
     /// The translation of the word, which stands out from the sentence.
@@ -2188,9 +2177,10 @@ pub enum OnlineKind {
 }
 
 impl OnlineRow<'_> {
-    /// The same row, holding its own line.
+    /// The same row, holding its own label and line.
     pub fn into_owned(self) -> OnlineRow<'static> {
         OnlineRow {
+            label: Cow::Owned(self.label.into_owned()),
             line: Cow::Owned(self.line.into_owned()),
             ..self
         }
@@ -2345,7 +2335,7 @@ pub fn online_rows<'a>(
                 OnlineKind::Sentence,
             ),
             Whole::TooLong => OnlineRow {
-                label: ONLINE_SENTENCE_LABEL,
+                label: Cow::Borrowed(ONLINE_SENTENCE_LABEL),
                 line: Cow::Borrowed(ONLINE_TOO_LONG),
                 state: OnlineState::Failed,
                 word: false,
@@ -2371,7 +2361,7 @@ fn online_row<'a>(
         Online::Refused(_) => OnlineState::Failed,
     };
     OnlineRow {
-        label,
+        label: Cow::Borrowed(label),
         line: online_line(online, key_location, my),
         state,
         word: kind != OnlineKind::Sentence,
@@ -2723,9 +2713,7 @@ mod tests {
         Ended, capture::CaptureFailure, recognize::OcrFailure, selection::SelectionFailure,
     };
 
-    use super::{
-        Held, NOTHING_SELECTED_TEXT, command_in, install_language, install_tesseract, too_long_text,
-    };
+    use super::{Held, NOTHING_SELECTED_TEXT, too_long_text};
 
     /// The label of the Russian translations, as 0.3.0 shows it.
     const RUSSIAN_LABEL: &str = "Russian, for the word as a whole:";
@@ -2884,10 +2872,17 @@ mod tests {
     }
 
     /// The labels and lines of the rows of `texts`, with no key file.
-    fn online(texts: &OnlineTexts<'_>) -> Vec<(&'static str, String, OnlineState, bool)> {
+    fn online(texts: &OnlineTexts<'_>) -> Vec<(String, String, OnlineState, bool)> {
         online_rows(texts, NO_KEY_LOCATION, Language::Ru)
             .into_iter()
-            .map(|row| (row.label, row.line.into_owned(), row.state, row.word))
+            .map(|row| {
+                (
+                    row.label.into_owned(),
+                    row.line.into_owned(),
+                    row.state,
+                    row.word,
+                )
+            })
             .collect()
     }
 
@@ -2908,13 +2903,13 @@ mod tests {
             }),
             [
                 (
-                    ONLINE_WORD_LABEL,
+                    ONLINE_WORD_LABEL.to_owned(),
                     "берег".to_owned(),
                     OnlineState::Translated,
                     true
                 ),
                 (
-                    ONLINE_SENTENCE_LABEL,
+                    ONLINE_SENTENCE_LABEL.to_owned(),
                     "Я сидел на берегу реки.".to_owned(),
                     OnlineState::Translated,
                     false
@@ -2933,7 +2928,7 @@ mod tests {
                 lone: Some(&lone),
             }),
             [(
-                ONLINE_LONE_LABEL,
+                ONLINE_LONE_LABEL.to_owned(),
                 "банк".to_owned(),
                 OnlineState::Translated,
                 true
@@ -2951,7 +2946,7 @@ mod tests {
                 lone: None,
             }),
             [(
-                ONLINE_SENTENCE_LABEL,
+                ONLINE_SENTENCE_LABEL.to_owned(),
                 "Я сидел.".to_owned(),
                 OnlineState::Translated,
                 false
@@ -3002,13 +2997,13 @@ mod tests {
             }),
             [
                 (
-                    ONLINE_WORD_LABEL,
+                    ONLINE_WORD_LABEL.to_owned(),
                     ONLINE_PENDING.to_owned(),
                     OnlineState::Pending,
                     true
                 ),
                 (
-                    ONLINE_SENTENCE_LABEL,
+                    ONLINE_SENTENCE_LABEL.to_owned(),
                     ONLINE_PENDING.to_owned(),
                     OnlineState::Pending,
                     false
@@ -3022,7 +3017,7 @@ mod tests {
                 lone: Some(&Online::Pending),
             }),
             [(
-                ONLINE_LONE_LABEL,
+                ONLINE_LONE_LABEL.to_owned(),
                 ONLINE_PENDING.to_owned(),
                 OnlineState::Pending,
                 true
@@ -3056,9 +3051,14 @@ mod tests {
                     lone: None,
                 }),
                 [
-                    (ONLINE_WORD_LABEL, line.clone(), OnlineState::Failed, true),
                     (
-                        ONLINE_SENTENCE_LABEL,
+                        ONLINE_WORD_LABEL.to_owned(),
+                        line.clone(),
+                        OnlineState::Failed,
+                        true
+                    ),
+                    (
+                        ONLINE_SENTENCE_LABEL.to_owned(),
                         line.clone(),
                         OnlineState::Failed,
                         false
@@ -3072,7 +3072,12 @@ mod tests {
                     sentence: None,
                     lone: Some(&refused),
                 }),
-                [(ONLINE_LONE_LABEL, line.clone(), OnlineState::Failed, true)],
+                [(
+                    ONLINE_LONE_LABEL.to_owned(),
+                    line.clone(),
+                    OnlineState::Failed,
+                    true
+                )],
                 "{refusal:?}"
             );
         }
@@ -3091,13 +3096,13 @@ mod tests {
             }),
             [
                 (
-                    ONLINE_WORD_LABEL,
+                    ONLINE_WORD_LABEL.to_owned(),
                     "берег".to_owned(),
                     OnlineState::Translated,
                     true
                 ),
                 (
-                    ONLINE_SENTENCE_LABEL,
+                    ONLINE_SENTENCE_LABEL.to_owned(),
                     ONLINE_TOO_LONG.to_owned(),
                     OnlineState::Failed,
                     false
@@ -3153,6 +3158,35 @@ mod tests {
         Unfinished,
     }
 
+    fn ocr_package(language: Language) -> &'static str {
+        match language {
+            Language::En => "tesseract-langpack-eng",
+            Language::Es => "tesseract-langpack-spa",
+            Language::Ca => "tesseract-langpack-cat",
+            Language::Ru => "tesseract-langpack-rus",
+        }
+    }
+
+    fn install_tesseract(language: Language) -> String {
+        format!("sudo dnf install tesseract {}", ocr_package(language))
+    }
+
+    fn install_language(language: Language) -> String {
+        format!("sudo dnf install {}", ocr_package(language))
+    }
+
+    fn command_in(line: &str) -> Option<String> {
+        reading_languages(Language::Ru)
+            .into_iter()
+            .map(install_tesseract)
+            .chain(
+                reading_languages(Language::Ru)
+                    .into_iter()
+                    .map(install_language),
+            )
+            .find(|command| line.contains(command.as_str()))
+    }
+
     fn failure_text(failure: &FailureCase, language: Language) -> std::borrow::Cow<'static, str> {
         match failure {
             FailureCase::Capture(failure) => {
@@ -3160,10 +3194,19 @@ mod tests {
             }
             FailureCase::CaptureTimedOut => super::capture_failure_text(&Ended::DeadlinePassed),
             FailureCase::Ocr(failure) => {
-                super::recognize_failure_text(&Ended::Shell(failure.clone()), language)
+                let hint = match failure {
+                    OcrFailure::EngineMissing => Some(install_tesseract(language)),
+                    OcrFailure::LanguageMissing => Some(install_language(language)),
+                    _ => None,
+                };
+                super::recognize_failure_text(
+                    &Ended::Shell(failure.clone()),
+                    language,
+                    hint.as_deref(),
+                )
             }
             FailureCase::RecognitionDeadline => {
-                super::recognize_failure_text(&Ended::DeadlinePassed, language)
+                super::recognize_failure_text(&Ended::DeadlinePassed, language, None)
             }
             FailureCase::Unfinished => super::capture_failure_text(&Ended::Unfinished),
         }
@@ -5057,7 +5100,7 @@ mod tests {
 
     fn row(kind: super::OnlineKind, line: &str, state: OnlineState) -> super::OnlineRow<'static> {
         super::OnlineRow {
-            label: "",
+            label: Cow::Borrowed(""),
             line: Cow::Owned(line.to_owned()),
             state,
             word: kind != super::OnlineKind::Sentence,
@@ -6759,7 +6802,7 @@ mod tests {
         );
         // The answer without the dictionary's label is still Russian's.
         let rows = [super::OnlineRow {
-            label: ONLINE_SENTENCE_LABEL,
+            label: Cow::Borrowed(ONLINE_SENTENCE_LABEL),
             line: Cow::Borrowed("Я сидел на берегу."),
             state: OnlineState::Translated,
             word: false,

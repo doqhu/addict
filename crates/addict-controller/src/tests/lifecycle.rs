@@ -170,9 +170,9 @@ fn a_panic_renders_one_fatal_snapshot_and_disconnects_dispatch() {
         ViewState {
             revision: previous.revision + 1,
             fatal: Some(FatalView {
-                heading: fatal::HEADING,
-                text: fatal::TEXT,
-                restart: fatal::RESTART
+                heading: fatal::HEADING.to_owned(),
+                text: fatal::TEXT.to_owned(),
+                restart: fatal::RESTART.to_owned()
             }),
             ..ViewState::default()
         },

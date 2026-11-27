@@ -8,9 +8,9 @@ use crate::{Effect, Model, RequestId, ViewState};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FatalView {
-    pub heading: &'static str,
-    pub text: &'static str,
-    pub restart: &'static str,
+    pub heading: String,
+    pub text: String,
+    pub restart: String,
 }
 
 #[derive(Default)]
@@ -65,9 +65,9 @@ impl Model {
         ViewState {
             revision: self.revision + 1,
             fatal: Some(FatalView {
-                heading: fatal::HEADING,
-                text: fatal::TEXT,
-                restart: fatal::RESTART,
+                heading: fatal::HEADING.to_owned(),
+                text: fatal::TEXT.to_owned(),
+                restart: fatal::RESTART.to_owned(),
             }),
             ..ViewState::default()
         }

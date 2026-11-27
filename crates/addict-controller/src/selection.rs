@@ -13,14 +13,17 @@ use std::{future, time::Duration};
 use addict_core::{
     failure::{Ended, selection::SelectionFailure},
     input::Source,
+    translation::Source as Language,
 };
 use addict_engine::{
     manual::{CLIPBOARD_MAX_CHARS, Edit, NoLine, clipboard_line},
-    view::{Held, NOTHING_SELECTED_TEXT, command_in, selection_failure_text, too_long_text},
+    view::{Held, NOTHING_SELECTED_TEXT, selection_failure_text, too_long_text},
     work::{Job, Outcome},
 };
 
-use crate::{Effect, Message, Model, RequestId, SelectionText, deadlines::CLIPBOARD_LIMIT};
+use crate::{
+    Effect, InstallHints, Message, Model, RequestId, SelectionText, deadlines::CLIPBOARD_LIMIT,
+};
 
 /// The read at a press of Read: none runs at first.
 pub(crate) struct Selection {
@@ -86,7 +89,7 @@ impl Model {
             _deadline: self.selection_timer(id),
         });
         let read_sequence = self.read_sequence;
-        if self.read_before_show {
+        if self.platform.read_before_show {
             effects.push(Effect::ReadSelection { id, read_sequence });
         } else {
             effects.push(Effect::ShowPanel {
@@ -137,7 +140,7 @@ impl Model {
         // Dropping the job ends the deadline.
         self.manual.set_reading(None);
         let line = match result {
-            Ok(text) => rule(&text),
+            Ok(text) => rule(&text, &self.platform.install_hints),
             Err(failure) => {
                 eprintln!("addict: no text from the selection or the clipboard: {failure:?}");
                 Err(selection_failure_text(&failure))
@@ -159,7 +162,7 @@ impl Model {
             }
             Err(message) => self.selection.source_failure = Some(message),
         }
-        if self.read_before_show {
+        if self.platform.read_before_show {
             effects.push(Effect::ShowPanel {
                 read_sequence: Some(self.read_sequence),
             });
@@ -184,7 +187,7 @@ impl Model {
         effects.push(Effect::Cancel(active.id));
         self.manual.set_reading(None);
         self.selection.source_failure = Some(NOTHING_SELECTED_TEXT.to_owned());
-        if self.read_before_show {
+        if self.platform.read_before_show {
             effects.push(Effect::ShowPanel {
                 read_sequence: Some(self.read_sequence),
             });
@@ -195,9 +198,9 @@ impl Model {
 
 /// The field's text from the raw texts: the selection's line, else the
 /// clipboard's, else why neither gave one.
-fn rule(text: &SelectionText) -> Result<String, String> {
-    let selection = line(Held::Selection, text.selection.as_deref());
-    let clipboard = line(Held::Clipboard, text.clipboard.as_deref());
+fn rule(text: &SelectionText, hints: &InstallHints) -> Result<String, String> {
+    let selection = line(Held::Selection, text.selection.as_deref(), hints);
+    let clipboard = line(Held::Clipboard, text.clipboard.as_deref(), hints);
     match (selection, clipboard) {
         (Line::Text(line), _) => Ok(line),
         (Line::NoLine(_), Line::Text(line)) => Ok(line),
@@ -210,12 +213,12 @@ fn rule(text: &SelectionText) -> Result<String, String> {
 /// `raw`, the text `held`, as the field would take it: its line of at most
 /// [`CLIPBOARD_MAX_CHARS`] characters, unless that is a command the window
 /// offered to copy.
-fn line(held: Held, raw: Option<&str>) -> Line {
+fn line(held: Held, raw: Option<&str>, hints: &InstallHints) -> Line {
     let Some(raw) = raw else {
         return Line::NoLine(None);
     };
     match clipboard_line(raw) {
-        Ok(line) if !is_offered_command(&line) => Line::Text(line),
+        Ok(line) if !is_offered_command(&line, hints) => Line::Text(line),
         Ok(_) | Err(NoLine::Blank) => Line::NoLine(None),
         Err(NoLine::TooLong(chars)) => Line::NoLine(Some((held, chars))),
     }
@@ -223,8 +226,11 @@ fn line(held: Held, raw: Option<&str>) -> Line {
 
 /// Whether `line` is exactly a command the window offers to copy: such a
 /// line is the user's Copy, not a text to look up.
-pub(crate) fn is_offered_command(line: &str) -> bool {
-    command_in(line).as_deref() == Some(line)
+pub(crate) fn is_offered_command(line: &str, hints: &InstallHints) -> bool {
+    Language::ALL.into_iter().any(|lang| {
+        let hint = hints.get(lang);
+        hint.engine.as_deref() == Some(line) || hint.data.as_deref() == Some(line)
+    })
 }
 
 /// The source line when neither source gave a line: that the selection was

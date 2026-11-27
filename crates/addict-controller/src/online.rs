@@ -1,6 +1,6 @@
 //! Online translation slots on the controller's runner.
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use addict_core::translation::{English, Request, Source as Language, Translator, is_russian};
 use addict_engine::{
@@ -68,8 +68,6 @@ pub(super) fn finished_word(
 
 pub(super) struct Translations {
     translator: Arc<dyn Translator>,
-    key_file: Option<PathBuf>,
-    key_location_hint: &'static str,
     recording: bool,
     kept: Kept,
     deferred: Option<Subject>,
@@ -81,16 +79,9 @@ pub(super) struct Translations {
 }
 
 impl Translations {
-    pub(super) fn new(
-        translator: Arc<dyn Translator>,
-        key_file: Option<PathBuf>,
-        key_location_hint: &'static str,
-        recording: bool,
-    ) -> Self {
+    pub(super) fn new(translator: Arc<dyn Translator>, recording: bool) -> Self {
         Self {
             translator,
-            key_file,
-            key_location_hint,
             recording,
             kept: Kept::default(),
             deferred: None,
@@ -102,11 +93,12 @@ impl Translations {
         }
     }
 
-    pub(super) fn rows(&self, chosen: Option<usize>, my: Language) -> Vec<OnlineRow<'static>> {
-        let key_location = self
-            .key_file
-            .as_deref()
-            .map_or(KeyLocation::Hint(self.key_location_hint), KeyLocation::File);
+    pub(super) fn rows(
+        &self,
+        chosen: Option<usize>,
+        my: Language,
+        key_location: KeyLocation<'_>,
+    ) -> Vec<OnlineRow<'static>> {
         online_rows(&self.kept.shown(chosen), key_location, my)
             .into_iter()
             .map(OnlineRow::into_owned)
