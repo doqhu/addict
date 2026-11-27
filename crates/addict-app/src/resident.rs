@@ -155,11 +155,11 @@ use std::{
 };
 
 use addict_controller::{
-    self as controller, Ask, Controller, Dispatcher, Effect, Platform, StartFacts, ViewState,
+    self as controller, ArticleId, Controller, Dispatcher, Effect, Platform, StartFacts, ViewState,
     deadlines::{
         AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CACHE_LIMIT, CLIPBOARD_LIMIT,
         CREDIT_LIMIT, DOWNLOAD_LIMIT, FIRST_RUN_FILE_LIMIT, KEY_SAVE_LIMIT, LANGUAGE_FILE_LIMIT,
-        LOOKUP_LIMIT, MANIFEST_LIMIT, STARTUP_LIMIT, STARTUP_READ_LIMIT, TRANSLATE_LIMIT,
+        LOOKUP_LIMIT, MANIFEST_LIMIT, STARTUP_LIMIT, STARTUP_READ_LIMIT,
     },
 };
 use addict_core::{
@@ -168,14 +168,9 @@ use addict_core::{
     failure::recognize::OcrFailure,
     input::{Source, window_state},
     sentence,
-    translation::{
-        English, Request, Source as Language, Translator, is_russian, reading_languages,
-    },
+    translation::{English, Source as Language, reading_languages},
 };
-use addict_deepl::{
-    DeepL,
-    key::{self, KeyError, KeySource, Secret, WriteError},
-};
+use addict_deepl::key::{self, KeyError, KeySource, Secret, WriteError};
 use addict_dictionary::release::{Manifest, Published};
 use addict_engine::{
     capture::{Captured, Failure, Timing},
@@ -196,8 +191,7 @@ use gtk::{gdk, gio, glib, prelude::*};
 
 use crate::{
     about::About,
-    at_once,
-    cache::{self, Cached},
+    at_once, cache,
     capture::{self, Capture},
     dictionaries::{Articles, Dictionaries, Indexes},
     download::{self, Downloader},
@@ -206,13 +200,11 @@ use crate::{
     language,
     manual::{self, CLIPBOARD_MAX_CHARS, NoLine},
     my_language,
-    online::{self, Kept, Kind, Subject},
     recording::Recording,
     settings::{self, CacheState, KeyState, Settings, StartupEnd, StartupShown},
     style,
-    translate::{self, Translated},
-    view::{Binding, Held, NOTHING_SELECTED_TEXT, Online, command_in, failure_text, too_long_text},
-    widgets::{FieldEdit, PlaybackMedia, View},
+    view::{Binding, Choice, Held, NOTHING_SELECTED_TEXT, command_in, failure_text, too_long_text},
+    widgets::{FieldEdit, KEY_LOCATION_HINT, PlaybackMedia, View},
 };
 
 /// Preferred trigger in the XDG shortcuts syntax; the user may change it.
@@ -239,6 +231,14 @@ struct Resident {
     _tray: TrayHandle,
 }
 
+/// Identity of the text and article under the rendered GTK links.
+#[derive(Clone, Copy, Default)]
+struct ViewActions {
+    text: u64,
+    article: ArticleId,
+    choice: Option<Choice>,
+}
+
 /// Everything the worker threads tell the UI thread, over one channel.
 enum Event {
     /// Presentation and input actions shared by the main window and launchers.
@@ -248,13 +248,13 @@ enum Event {
     /// The text of the field changed; this is the new text.
     Sentence(String, FieldEdit),
     /// The word with this index in the shown sentence was clicked.
-    Word(usize),
+    Word(u64, usize),
     /// A synonym word was clicked: it goes into the field.
-    Synonym(String),
+    Synonym(ArticleId, String),
     /// The sense with this index in the shown list was clicked.
-    Sense(usize),
+    Sense(ArticleId, usize),
     /// The English gloss with this index in the shown article was clicked.
-    Gloss(usize),
+    Gloss(ArticleId, usize),
     /// The text of the field was submitted, by Enter or by a paste.
     Submitted,
     /// Back was pressed, or Alt+Left.
@@ -262,30 +262,11 @@ enum Event {
     /// Forward was pressed, or Alt+Right.
     Forward,
     /// The user explicitly requested the selected dictionary definition.
-    DefinitionAction,
+    DefinitionAction(ArticleId, Choice),
     /// The English word of a gloss was clicked: it is looked up in English.
-    LookUpEnglish(String),
-    /// The separate definition job ended with its individual request number;
-    /// it was sent from `source`. `elapsed` is the time the request took, as
-    /// the worker saw it; taken only when evidence is recorded.
-    DefinitionTranslated {
-        number: u64,
-        source: Language,
-        outcome: Outcome<Translated>,
-        elapsed: Option<evidence::Elapsed>,
-    },
+    LookUpEnglish(ArticleId, usize, String),
     /// The shared controller's complete snapshot and effects.
     Controller(Box<ViewState>, Vec<Effect>),
-    /// The online request about `subject`, sent from `source` for the text
-    /// with the number `text`, ended. `elapsed` is as for a definition.
-    Translated {
-        text: u64,
-        subject: Subject,
-        source: Language,
-        number: u64,
-        outcome: Outcome<Translated>,
-        elapsed: Option<evidence::Elapsed>,
-    },
     /// The language file, read on the runner after the start, holds this
     /// reading language.
     LanguageRead(Language),
@@ -522,8 +503,8 @@ struct Session {
     current: Weak<RefCell<Option<ShortcutHandle>>>,
     /// The controller's snapshot rendered last: the field's text and words,
     /// what was chosen in it, the shown result and the history buttons.
-    /// The online texts are asked from it.
     view_state: ViewState,
+    view_actions: Rc<Cell<ViewActions>>,
     /// The last applied `field.revision`; controller text applies on a rise.
     applied_field_revision: u64,
     /// The text of the field the controller was last told of, or set.
@@ -537,15 +518,11 @@ struct Session {
     /// The applied `field.revision` when the field was cleared for a read,
     /// until a snapshot of the clear comes: an older one is not rendered.
     cleared_at: Option<u64>,
-    /// Online requests of the word asked while its offline lookup runs.
-    deferred: Vec<Subject>,
     /// Weak: the runner must go when the resident state is dropped. Never
     /// upgrades when the runner could not be started.
     work: WorkRef<Work>,
     controller: Option<Dispatcher>,
     articles: Arc<dyn Articles>,
-    /// What a word or a sentence is translated by online.
-    translator: Arc<dyn Translator>,
     key_file: Option<PathBuf>,
     key_source: KeySource,
     /// The on-disk cache of the translator, for its size and its clear.
@@ -571,15 +548,6 @@ struct Session {
     save_generation: u64,
     /// The write of the key file; a newer save replaces it.
     save_job: Option<Job>,
-    /// The online request of a word, in its sentence or alone, whose outcome
-    /// is awaited; dropping it cancels the request.
-    translating_word: Option<Job>,
-    /// The same for the request of the sentence.
-    translating_sentence: Option<Job>,
-    /// Dropping this separate job cancels the selected definition request.
-    translating_definition: Option<Job>,
-    /// The online texts of the text the field holds.
-    online: Kept,
     /// The check of the indexes at the start, or the last one a Spanish or
     /// Catalan word without its indexes asked for, which replaces any still running;
     /// dropping it cancels the check.
@@ -606,6 +574,8 @@ struct Session {
     /// Whether the user chose the language in this session: the read of the
     /// file, should it come later, changes nothing then.
     language_chosen: bool,
+    /// Counts explicit switch presses. They override older gloss acknowledgements.
+    language_choice: u64,
     /// The read or the write of the language file on the runner.
     language_job: Option<Job>,
     /// The language the online translations are made into.
@@ -629,9 +599,6 @@ struct Session {
     english_chosen: bool,
     /// The read or the write of the English-spelling file on the runner.
     english_job: Option<Job>,
-    /// Whether a sentence read at a press of the clipboard shortcut is
-    /// translated online at once, before a click on a word.
-    at_once: bool,
     /// Where that choice is kept across restarts; `None` when the
     /// environment names no configuration directory.
     at_once_file: Option<std::path::PathBuf>,
@@ -862,30 +829,25 @@ impl Session {
             Event::StartupChanged(outcome) => self.startup_changed(outcome),
             Event::Retry => self.retry(),
             Event::Sentence(text, origin) => self.sentence_changed(text, origin),
-            Event::Word(index) => self.word_chosen(index),
-            Event::Synonym(word) => self.synonym_chosen(word),
-            Event::Sense(index) => self.sense_chosen(index),
-            Event::Gloss(index) => self.gloss_chosen(index),
+            Event::Word(text, index) => self.word_chosen(text, index),
+            Event::Synonym(article, word) => self.synonym_chosen(article, word),
+            Event::Sense(article, index) => {
+                self.article_action(article, controller::Event::SenseChosen { article, index });
+            }
+            Event::Gloss(article, index) => {
+                self.article_action(article, controller::Event::GlossChosen { article, index });
+            }
             Event::Submitted => self.submitted(),
             Event::Back => self.back(),
             Event::Forward => self.forward(),
-            Event::DefinitionAction => self.definition_action(),
-            Event::LookUpEnglish(word) => self.look_up_english(&word),
-            Event::DefinitionTranslated {
-                number,
-                source,
-                outcome,
-                elapsed,
-            } => self.definition_translated(number, source, outcome, elapsed),
+            Event::DefinitionAction(article, choice) => self.article_action(
+                article,
+                controller::Event::DefinitionAction { article, choice },
+            ),
+            Event::LookUpEnglish(article, index, word) => {
+                self.look_up_english(article, index, word)
+            }
             Event::Controller(state, effects) => self.render_controller(*state, effects),
-            Event::Translated {
-                text,
-                subject,
-                source,
-                number,
-                outcome,
-                elapsed,
-            } => self.translated(text, subject, source, number, outcome, elapsed),
             Event::LanguageRead(language) => {
                 // After a choice the job is its write, which must not be
                 // dropped (and so cancelled) by the read.
@@ -921,7 +883,7 @@ impl Session {
                 // dropped (and so cancelled) by the read.
                 if !self.at_once_chosen {
                     self.at_once_job = None;
-                    self.at_once = at_once;
+                    self.dispatch_controller(controller::Event::SetAtOnce(at_once));
                     self.settings.render_at_once(at_once);
                 }
             }
@@ -1672,14 +1634,6 @@ impl Session {
         self.dispatch_setting_field(controller::Event::FieldCleared);
         self.view.set_field_text("");
         self.sent_text.clear();
-        // Whatever the online requests of the old text still report is not
-        // rendered.
-        self.translating_word = None;
-        self.translating_sentence = None;
-        self.translating_definition = None;
-        self.deferred.clear();
-        // Text 0 is carried by no sent request: no old answer is kept.
-        self.online = Kept::default();
         let view = &mut self.view_state;
         view.sentence.clear();
         view.words.clear();
@@ -1688,6 +1642,8 @@ impl Session {
         view.context = None;
         view.looking_up = false;
         view.shown.show(None);
+        view.online.clear();
+        self.view_actions.set(ViewActions::default());
         view.window_state = window_state(view.reading_source, None);
         self.render_manual();
         self.render_history();
@@ -1896,76 +1852,18 @@ impl Session {
             .set_history(self.view_state.can_back, self.view_state.can_forward);
     }
 
-    /// A word was clicked: the controller makes it the input, with its
-    /// sentence when it has one, and looks it up; then it asks for the
-    /// word's online texts ([`Session::word_asked`]).
-    fn word_chosen(&mut self, index: usize) {
-        // A click that came before the field's newer text was handled, or
-        // before the controller rendered it, names a word of a sentence
-        // that is no longer shown.
-        if self.field_is_newer() || self.sent_text != self.view_state.sentence {
+    /// A word link belongs to the text it was drawn for.
+    fn word_chosen(&mut self, text: u64, index: usize) {
+        if self.field_is_newer() || self.snapshot_is_old() || text != self.view_state.text_number {
             return;
         }
-        self.dispatch_controller(controller::Event::WordChosen { index });
+        self.dispatch_controller(controller::Event::WordChosen { text, index });
     }
 
-    /// The word with `index` was chosen in the snapshot just rendered: in a
-    /// sentence, what is not yet known online about the word and about its
-    /// sentence is asked for. The lookup queues ahead of the online jobs.
-    fn word_asked(&mut self, index: usize) {
-        // A word that is a sentence alone in a recognized text has no
-        // sentence: its article only, nothing sent online.
-        let Some((number, span)) = self.view_state.context.clone() else {
-            self.render_online();
-            return;
-        };
-        let long = online::is_long(&self.view_state.sentence[span]);
-        let click = self.online.click(index, number, long);
-        if click.gave_up {
-            self.translating_word = None;
-            self.deferred.clear();
-        }
-        if click.gave_up_sentence {
-            self.translating_sentence = None;
-        }
-        for subject in click.ask {
-            self.start_translation(subject);
-        }
-        self.render_online();
-    }
-
-    /// The whole text of the field, a sentence of more words, is asked for
-    /// online itself, with no word chosen, unless it is already pending,
-    /// answered or too long. A lone word or an empty field sends nothing.
-    fn ask_whole(&mut self) {
-        if self.snapshot_is_old() {
-            return;
-        }
-        let long = online::is_long(&self.view_state.sentence);
-        if let Some(subject) = self.online.ask_whole(long) {
-            self.start_translation(subject);
-        }
-        self.render_online();
-    }
-
-    /// The text of the field was submitted, by Enter or by a paste: the
-    /// controller records it and asks for its online texts
-    /// ([`Session::submit_asked`]).
+    /// Records and submits the current text.
     fn submitted(&mut self) {
-        // As for a click: the field may hold a newer text already.
-        if self.field_is_newer() {
-            return;
-        }
-        self.dispatch_controller(controller::Event::FieldSubmitted);
-    }
-
-    /// The text of the snapshot just rendered was submitted: a lone word is
-    /// asked for online, unless it was already. Nothing else changes, and
-    /// an empty field or a sentence sends nothing.
-    fn submit_asked(&mut self) {
-        if self.online.submit() {
-            self.start_translation(Subject::Lone);
-            self.render_online();
+        if !self.field_is_newer() {
+            self.dispatch_controller(controller::Event::FieldSubmitted);
         }
     }
 
@@ -1982,13 +1880,9 @@ impl Session {
         self.view.field_text() != self.view_state.sentence
     }
 
-    /// The controller rendered a snapshot: a controller-set text goes into
-    /// the field when `field.revision` rises, a new text gives up the
-    /// online texts of the old one, the effects run in order, the window
-    /// renders, and the online words waiting for the lookup go.
+    /// Applies the newest snapshot and handles every effect, even when the
+    /// visual state of that snapshot has already been superseded.
     fn render_controller(&mut self, state: ViewState, effects: Vec<Effect>) {
-        // A snapshot from before the field was cleared for a read is not
-        // rendered: the window shows the clear already.
         let before_clear = self
             .cleared_at
             .is_some_and(|cleared_at| state.field.revision <= cleared_at);
@@ -1999,62 +1893,49 @@ impl Session {
                 self.apply_snapshot(&previous);
             }
         }
-        // Every effect of every render runs, in order; what such an old
-        // snapshot asks online is about a text no longer shown.
         for effect in effects {
-            if before_clear
-                && matches!(
-                    effect,
-                    Effect::AskOnline(_) | Effect::RequestDefinition { .. }
-                )
-            {
-                continue;
-            }
             self.run_effect(effect);
-        }
-        if !self.view_state.looking_up {
-            // Offline done: what waited for it goes online from the
-            // answering language.
-            self.send_deferred();
         }
     }
 
     fn apply_snapshot(&mut self, previous: &ViewState) {
-        let field = &self.view_state.field;
-        // The shell keeps its own text while typing: the controller's
-        // applies only when it set it itself, and only while no edit was
-        // sent after the event that let it: then a newer text is on its way
-        // and the controller comes to it (AD-21).
+        let current = &self.view_state;
+        let field = &current.field;
+        // Apply a controller-set field only while no newer edit is on its way.
         if field.revision > self.applied_field_revision {
             self.applied_field_revision = field.revision;
             if self.edits_sent == self.edits_at_set {
-                let text = field.text.clone();
-                self.view.set_field_text(&text);
-                self.sent_text = text;
+                self.view.set_field_text(&field.text);
+                self.sent_text.clone_from(&field.text);
             }
         }
-        // A new result or another choice gives up the translation of the
-        // definition of the one before.
-        if previous.shown.generation() != self.view_state.shown.generation()
-            || previous.shown.choice() != self.view_state.shown.choice()
+        self.view_actions.set(ViewActions {
+            text: current.text_number,
+            article: current.article_id(),
+            choice: current.shown.choice(),
+        });
+        if previous.text_number != current.text_number
+            || previous.chosen != current.chosen
+            || previous.source != current.source
+            || previous.window_state != current.window_state
         {
-            self.translating_definition = None;
+            self.render_manual();
         }
-        // A new text cancels the online requests of the old one; whatever
-        // they still report has the number of an old text.
-        if self.view_state.text_number != previous.text_number {
-            self.translating_word = None;
-            self.deferred.clear();
-            self.translating_sentence = None;
-            self.online = Kept::of(
-                self.view_state.text_number,
-                Kind::of(self.view_state.words.len()),
-            );
+        if previous.can_back != current.can_back || previous.can_forward != current.can_forward {
+            self.render_history();
         }
-        self.render_manual();
-        self.render_history();
-        self.render_shown();
-        self.render_online();
+        if previous.shown.generation() != current.shown.generation()
+            || previous.shown.translating() != current.shown.translating()
+            || previous.choice_revision != current.choice_revision
+        {
+            self.render_shown();
+        } else if previous.shown.definition() != current.shown.definition() {
+            self.view
+                .render_definition(&current.shown, self.key_file.as_deref());
+        }
+        if previous.online != current.online {
+            self.render_online();
+        }
     }
 
     /// Runs a controller effect.
@@ -2063,38 +1944,34 @@ impl Session {
             Effect::CheckIndexes { index_generation } => {
                 self.check_lookup_indexes(index_generation);
             }
-            Effect::RequestDefinition { number, request } => {
-                self.request_definition(number, request);
-            }
             Effect::ObserveIndexes {
                 generation,
                 indexes,
-            } => self.observe_lookup_indexes(generation, indexes),
+            } => {
+                self.observe_lookup_indexes(generation, indexes);
+            }
             Effect::RecordLookup(answered) => {
                 if let Some(recording) = &self.recording {
                     recording.looked_up(answered);
                 }
             }
-            Effect::AskOnline(ask) => self.ask_online(ask),
-        }
-    }
-
-    /// What the snapshot just rendered asks of the online texts, unless the
-    /// field holds a newer text already, whose own snapshot comes next.
-    fn ask_online(&mut self, ask: Ask) {
-        if self.snapshot_is_old() {
-            return;
-        }
-        match ask {
-            Ask::Chosen { index } => self.word_asked(index),
-            Ask::Submitted => self.submit_asked(),
-            Ask::Replaced => {
-                // Translate sentence at once: a sentence read at a press.
-                if self.at_once && self.view_state.source == Source::Clipboard {
-                    self.ask_whole();
+            Effect::RecordOnline(record) => {
+                if let Some(recording) = &self.recording {
+                    recording.translated_online(&record);
                 }
             }
-            Ask::Again => self.ask_again(),
+            Effect::SaveReading {
+                language,
+                language_choice,
+            } => {
+                if language_choice == self.language_choice {
+                    self.language_chosen = true;
+                    self.saved_language = language;
+                    self.language = language::reading(language, self.my_language);
+                    self.view.set_language(self.language);
+                    self.save_language();
+                }
+            }
         }
     }
 
@@ -2129,183 +2006,9 @@ impl Session {
         });
     }
 
-    /// Sends the word's online requests held while its lookup ran, now that
-    /// no lookup runs, from the language that answered or the chosen one.
-    fn send_deferred(&mut self) {
-        let deferred = std::mem::take(&mut self.deferred);
-        if deferred.is_empty() {
-            return;
-        }
-        for subject in deferred {
-            self.start_translation(subject);
-        }
-        self.render_online();
-    }
-
-    /// Sends the online request about `subject` that [`Kept`] has just
-    /// asked for, as a job in the slot of its subject, into my language. A
-    /// request that could not start is a refusal at once. The sentence is
-    /// sent from the chosen language at once. The word, alone or in its
-    /// sentence, waits while its lookup runs, and is then sent from the
-    /// language that answered, or from the chosen one when none did. A
-    /// Russian word and its sentence are sent from Russian whatever is
-    /// chosen ([`translate::source_of`]); with Russian as my language nothing
-    /// is sent for it, neither the word nor its sentence
-    /// ([`translate::is_sent`]).
-    fn start_translation(&mut self, subject: Subject) {
-        let text = self.view_state.text_number;
-        let Some(number) = self.online.request_number(subject) else {
-            return;
-        };
-        // With Russian as my language a Russian word is read offline only:
-        // nothing is sent for it or its sentence, nothing is recorded, and
-        // its request is not awaited.
-        if let Some(input) = &self.view_state.input
-            && !translate::is_sent(input, subject, self.my_language)
-        {
-            self.online.withdraw(subject);
-            return;
-        }
-        let word = matches!(subject, Subject::Word(_) | Subject::Lone);
-        if word && self.view_state.looking_up {
-            if !self.deferred.contains(&subject) {
-                self.deferred.push(subject);
-            }
-            return;
-        }
-        // The whole sentence, asked for with no word chosen, is Russian when
-        // it has a Cyrillic letter.
-        let russian = match &self.view_state.input {
-            Some(input) => is_russian(input.word()),
-            None => is_russian(&self.view_state.sentence),
-        };
-        let source =
-            translate::source_of(subject, self.language, self.view_state.answered, russian);
-        let request = self.online_request(subject, source);
-        let started = self.send_online(request, subject.into(), move |outcome, elapsed| {
-            Event::Translated {
-                text,
-                subject,
-                source,
-                number,
-                outcome,
-                elapsed,
-            }
-        });
-        match started {
-            // Replaces, and so cancels, the request the slot held.
-            Ok(job) => *self.slot(subject) = Some(job),
-            Err(online) => {
-                self.online.answer(text, subject, number, online);
-            }
-        }
-    }
-
-    /// Starts the online `request` for `requested` as a job; every online
-    /// request of the session starts here. When it ends, `event` makes, on
-    /// the worker, what the UI thread is told from its outcome and the time
-    /// it took. A request that could not start is recorded at once and its
-    /// refusal is given back.
-    fn send_online(
-        &self,
-        request: Option<Request>,
-        requested: evidence::Requested,
-        event: impl FnOnce(Outcome<Translated>, Option<evidence::Elapsed>) -> Event + Send + 'static,
-    ) -> Result<Job, Online> {
-        let sender = self.sender.clone();
-        let probe = self.probe();
-        // A request that is not there is recorded with the language it would
-        // have been sent from.
-        let source = request
-            .as_ref()
-            .map_or(self.language, |request| request.source);
-        let started = translate::translate(
-            self.work.upgrade().as_deref(),
-            TRANSLATE_LIMIT,
-            self.translator.clone(),
-            request,
-            move |outcome| {
-                // On the worker: the UI thread wakes for the event, and the
-                // delay is the request's, not the redraw's.
-                let elapsed = probe.ended();
-                let _ = sender.unbounded_send(event(outcome, elapsed));
-            },
-        );
-        if let Err(online) = &started {
-            self.record(translate::translation_unstarted(
-                online, requested, source, probe,
-            ));
-        }
-        started
-    }
-
-    /// What an ended online request for `requested`, sent from `source`,
-    /// shows, after its record is written when there is one; `None` for a
-    /// request that was given up: it shows nothing and is not recorded.
-    fn online_ended(
-        &self,
-        outcome: Outcome<Translated>,
-        requested: evidence::Requested,
-        source: Language,
-        elapsed: Option<evidence::Elapsed>,
-    ) -> Option<Online> {
-        let (online, record) = translate::translation_ended(outcome, requested, source, elapsed)?;
-        self.record(record);
-        Some(online)
-    }
-
-    /// The measuring of an online request that starts now; it measures
-    /// nothing unless evidence is recorded.
-    fn probe(&self) -> evidence::Probe {
-        evidence::Probe::start(self.recording.is_some())
-    }
-
-    /// Writes the `record` of an online request, when there is one. Whether
-    /// there is one is [`translate`]'s to say.
-    fn record(&self, record: Option<evidence::Record>) {
-        if let Some((recording, record)) = self.recording.as_ref().zip(record) {
-            recording.translated_online(&record);
-        }
-    }
-
-    /// The slot of the job that asks about `subject`. No wildcard arm: a new
-    /// subject does not compile until it is given its slot.
-    fn slot(&mut self, subject: Subject) -> &mut Option<Job> {
-        match subject {
-            Subject::Word(_) | Subject::Lone => &mut self.translating_word,
-            Subject::Sentence(_) => &mut self.translating_sentence,
-        }
-    }
-
-    /// An online request ended. Its outcome is kept and shown only when it
-    /// belongs to the text the field holds and is still awaited; a cancelled
-    /// one was given up and shows nothing. Every one that was not given up
-    /// is recorded, shown or not.
-    fn translated(
-        &mut self,
-        text: u64,
-        subject: Subject,
-        source: Language,
-        number: u64,
-        outcome: Outcome<Translated>,
-        elapsed: Option<evidence::Elapsed>,
-    ) {
-        let Some(online) = self.online_ended(outcome, subject.into(), source, elapsed) else {
-            return;
-        };
-        if self.online.answer(text, subject, number, online) {
-            *self.slot(subject) = None;
-            self.render_online();
-        }
-    }
-
-    /// Shows the online texts as they are now, with those of the chosen
-    /// word.
+    /// Updates the word and sentence rows without rebuilding the article.
     fn render_online(&self) {
-        self.view.render_online(
-            &self.online.shown(self.view_state.chosen),
-            self.key_file.as_deref(),
-        );
+        self.view.render_online_rows(&self.view_state.online);
     }
 
     /// Shows the result and the sense chosen in it as they are now.
@@ -2314,94 +2017,38 @@ impl Session {
             .render_result(&self.view_state.shown, self.key_file.as_deref());
     }
 
-    /// A synonym was clicked: the controller puts it into the field,
-    /// records it, looks it up and submits it.
-    fn synonym_chosen(&mut self, word: String) {
+    fn accepts_article(&self, article: ArticleId) -> bool {
+        !self.field_is_newer() && !self.snapshot_is_old() && article == self.view_state.article_id()
+    }
+
+    fn article_action(&self, article: ArticleId, event: controller::Event) {
+        if self.accepts_article(article) {
+            self.dispatch_controller(event);
+        }
+    }
+
+    /// A synonym submits a replacement field in the current reading language.
+    fn synonym_chosen(&mut self, article: ArticleId, word: String) {
+        if self.accepts_article(article) {
+            self.give_up_for_new_text();
+            self.dispatch_setting_field(controller::Event::SynonymChosen { article, word });
+        }
+    }
+
+    /// The English link submits the gloss's word and chooses its reading
+    /// language in the same controller event.
+    fn look_up_english(&mut self, article: ArticleId, index: usize, word: String) {
+        if !self.accepts_article(article) {
+            return;
+        }
         self.give_up_for_new_text();
-        self.dispatch_setting_field(controller::Event::SynonymChosen(word));
-    }
-
-    /// A sense was clicked: the controller chooses it. Nothing is looked up
-    /// or read. A click on the chosen sense renders too: GTK keeps a
-    /// clicked link in the visited colour until the markup is set again.
-    fn sense_chosen(&mut self, index: usize) {
-        self.dispatch_controller(controller::Event::SenseChosen { index });
-    }
-
-    /// An English gloss was clicked: the controller chooses it, instead of
-    /// any sense, when the shown result is an article of a language beside
-    /// English that has it, and has it translated as it is chosen, with no
-    /// button: once, and again only after a refusal. Nothing is looked up
-    /// or read.
-    fn gloss_chosen(&mut self, index: usize) {
-        self.dispatch_controller(controller::Event::GlossChosen { index });
-    }
-
-    /// The English word of a gloss was clicked: it goes into the field as a
-    /// paste puts it, and English becomes the reading language, as the user
-    /// chose it, or the first reading language when English is mine. The
-    /// field is newer than the shown text then, so the language change asks
-    /// nothing for the old one; the field's own events look the word up.
-    fn look_up_english(&mut self, word: &str) {
-        self.view.put_into_field(word);
-        self.language_chosen(language::reading(Language::En, self.my_language));
-    }
-
-    /// "Translate definition into" my language was pressed: the definition
-    /// of the chosen sense or gloss is sent alone, from its own language
-    /// into my language, as a job of its own, unless the field holds a
-    /// newer text or the shown result offers no definition to send.
-    fn definition_action(&mut self) {
-        // As for a click: the field may hold a newer text already.
-        if self.field_is_newer() {
-            return;
-        }
-        // The controller owns `Shown`; it renders `definition` pending and
-        // emits a `RequestDefinition` effect.
-        self.dispatch_controller(controller::Event::DefinitionAction);
-    }
-
-    /// Sends the definition request online; a job that cannot start is
-    /// answered at once. The shell runs the online production.
-    fn request_definition(&mut self, number: u64, request: Request) {
-        // The field holds a newer text, whose snapshot forgets this one.
-        if self.snapshot_is_old() {
-            return;
-        }
-        let source = request.source;
-        let started = self.send_online(
-            Some(request),
-            evidence::Requested::Definition,
-            move |outcome, elapsed| Event::DefinitionTranslated {
-                number,
-                source,
-                outcome,
-                elapsed,
-            },
-        );
-        match started {
-            Ok(job) => self.translating_definition = Some(job),
-            Err(online) => {
-                self.dispatch_controller(controller::Event::DefinitionAnswered { number, online });
-            }
-        }
-    }
-
-    /// The definition request, sent from `source`, ended; it is recorded as
-    /// a word's is, with that source.
-    fn definition_translated(
-        &mut self,
-        number: u64,
-        source: Language,
-        outcome: Outcome<Translated>,
-        elapsed: Option<evidence::Elapsed>,
-    ) {
-        let Some(online) =
-            self.online_ended(outcome, evidence::Requested::Definition, source, elapsed)
-        else {
-            return;
-        };
-        self.dispatch_controller(controller::Event::DefinitionAnswered { number, online });
+        self.language_chosen = true;
+        self.dispatch_setting_field(controller::Event::LookUpEnglish {
+            article,
+            index,
+            word,
+            language_choice: self.language_choice,
+        });
     }
 
     /// The user chose `language`, by a press in the switch or a click on a
@@ -2411,6 +2058,7 @@ impl Session {
     /// in it. A change of the switch caused by my language writes nothing.
     fn language_chosen(&mut self, language: Language) {
         self.language_chosen = true;
+        self.language_choice += 1;
         self.saved_language = language;
         self.apply_reading_language();
         // Saved even when it equals the one in use: the file may still hold
@@ -2427,15 +2075,8 @@ impl Session {
     fn apply_reading_language(&mut self) {
         let language = language::reading(self.saved_language, self.my_language);
         self.view.set_language(language);
-        // The shown result names its pair by the pressed language.
-        self.dispatch_controller(controller::Event::SetPressed(language));
-        if language == self.language {
-            return;
-        }
         self.language = language;
-        // The controller redoes the offline result and asks the online
-        // texts again ([`Session::ask_again`]).
-        self.dispatch_controller(controller::Event::SetReading(language));
+        self.dispatch_controller(controller::Event::SetReading(self.saved_language));
     }
 
     /// The user chose `language` in Settings or in the first-run offer: my
@@ -2481,14 +2122,11 @@ impl Session {
         if let Some(indexes) = self.indexes.known {
             self.view.render_indexes(indexes, language);
         }
-        // A definition translated into the language before is forgotten,
-        // and its job cancelled.
-        self.translating_definition = None;
         let reading = language::reading(self.saved_language, language);
         // Rendered for the new pair: a result looked up for the language
         // before shows none of its translations. The controller redoes the
         // offline result and asks the online texts again.
-        self.dispatch_controller(controller::Event::SetMyLanguage { language, reading });
+        self.dispatch_controller(controller::Event::SetMyLanguage(language));
         self.view
             .set_reading_languages(reading_languages(language), reading);
         self.language = reading;
@@ -2504,72 +2142,10 @@ impl Session {
         self.save_english();
     }
 
-    /// Makes `english` the spelling of English. Only when it changed while
-    /// English is my language is anything redone: the translation of a
-    /// definition is forgotten, and its job cancelled, and the shown word
-    /// is asked again in the new spelling. With any other language mine the
-    /// requests do not change, so nothing is asked again.
+    /// Applies the spelling for English targets in controller event order.
     fn apply_english(&mut self, english: English) {
-        let changed = english != self.english;
         self.english = english;
         self.dispatch_controller(controller::Event::SetEnglish(english));
-        if changed && self.my_language == Language::En {
-            self.translating_definition = None;
-            self.dispatch_controller(controller::Event::AskAgain);
-        }
-    }
-
-    /// The online request about `subject` of the current input, read in
-    /// `source`, into my language in the spelling of English chosen.
-    /// With no word chosen, only the whole sentence has one.
-    fn online_request(&self, subject: Subject, source: Language) -> Option<Request> {
-        match (&self.view_state.input, subject) {
-            (Some(input), _) => {
-                translate::request(input, subject, source, self.my_language, self.english)
-            }
-            (None, Subject::Sentence(_)) => translate::whole_request(
-                &self.view_state.sentence,
-                source,
-                self.my_language,
-                self.english,
-            ),
-            (None, Subject::Word(_) | Subject::Lone) => None,
-        }
-    }
-
-    /// The controller redid the offline result of the shown word, after the
-    /// reading language, my language or, with English mine, the spelling of
-    /// English changed: its online texts are forgotten and asked again, as
-    /// its click or its submit asked them: a word of a sentence with its
-    /// sentence, a lone word only when it was submitted, and the whole
-    /// sentence when it was asked. Without a word only the whole sentence
-    /// is.
-    fn ask_again(&mut self) {
-        // Cancels the online requests; whatever they still report has a
-        // number that is no longer awaited.
-        self.translating_word = None;
-        self.deferred.clear();
-        self.translating_sentence = None;
-        let whole = self.online.asks_whole();
-        let submitted = self.online.forget();
-        if whole {
-            let long = online::is_long(&self.view_state.sentence);
-            if let Some(subject) = self.online.ask_whole(long) {
-                self.start_translation(subject);
-            }
-        }
-        if self.view_state.input.is_some() {
-            let chosen = self.view_state.chosen.zip(self.view_state.context.clone());
-            if let Some((index, (number, span))) = chosen {
-                let long = online::is_long(&self.view_state.sentence[span]);
-                for subject in self.online.click(index, number, long).ask {
-                    self.start_translation(subject);
-                }
-            } else if submitted && self.online.submit() {
-                self.start_translation(Subject::Lone);
-            }
-        }
-        self.render_online();
     }
 
     /// Writes the reading language to its file on the runner. A write that
@@ -2658,7 +2234,7 @@ impl Session {
     /// field holds is not asked for again.
     fn at_once_chosen(&mut self, at_once: bool) {
         self.at_once_chosen = true;
-        self.at_once = at_once;
+        self.dispatch_controller(controller::Event::SetAtOnce(at_once));
         let path = self.at_once_file.clone();
         self.at_once_job = self.work.upgrade().map(|work| {
             work.run(
@@ -3115,7 +2691,7 @@ fn read_line(
 /// Sends what the user does in the `view` to `sender`: Retry, an edit of the
 /// field, a submit of its text, Back and Forward, Capture, a click on a word
 /// and a click on a sense.
-fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
+fn connect_view(view: &View, sender: &UnboundedSender<Event>, actions: &Rc<Cell<ViewActions>>) {
     let retry = sender.clone();
     view.connect_retry(move || {
         let _ = retry.unbounded_send(Event::Retry);
@@ -3137,36 +2713,52 @@ fn connect_view(view: &View, sender: &UnboundedSender<Event>) {
         let _ = forward.unbounded_send(Event::Forward);
     });
     let chosen = sender.clone();
+    let word_actions = actions.clone();
     view.connect_word_chosen(move |index| {
-        let _ = chosen.unbounded_send(Event::Word(index));
+        let _ = chosen.unbounded_send(Event::Word(word_actions.get().text, index));
     });
     let capture = sender.clone();
     view.connect_capture(move || {
         let _ = capture.unbounded_send(Event::Capture);
     });
     let definition = sender.clone();
+    let definition_actions = actions.clone();
     view.connect_definition_action(move || {
-        let _ = definition.unbounded_send(Event::DefinitionAction);
+        let action = definition_actions.get();
+        if let Some(choice) = action.choice {
+            let _ = definition.unbounded_send(Event::DefinitionAction(action.article, choice));
+        }
     });
     let english = sender.clone();
+    let english_actions = actions.clone();
     view.connect_look_up_english(move |word| {
-        let _ = english.unbounded_send(Event::LookUpEnglish(word.to_owned()));
+        let action = english_actions.get();
+        if let Some(Choice::Gloss(index)) = action.choice {
+            let _ = english.unbounded_send(Event::LookUpEnglish(
+                action.article,
+                index,
+                word.to_owned(),
+            ));
+        }
     });
     let add_key = sender.clone();
     view.connect_add_key(move || {
         let _ = add_key.unbounded_send(Event::Window(WindowEvent::Settings));
     });
     let synonym = sender.clone();
+    let synonym_actions = actions.clone();
     view.connect_synonym_chosen(move |word| {
-        let _ = synonym.unbounded_send(Event::Synonym(word));
+        let _ = synonym.unbounded_send(Event::Synonym(synonym_actions.get().article, word));
     });
     let sense = sender.clone();
+    let sense_actions = actions.clone();
     view.connect_sense_chosen(move |index| {
-        let _ = sense.unbounded_send(Event::Sense(index));
+        let _ = sense.unbounded_send(Event::Sense(sense_actions.get().article, index));
     });
     let gloss = sender.clone();
+    let gloss_actions = actions.clone();
     view.connect_gloss_chosen(move |index| {
-        let _ = gloss.unbounded_send(Event::Gloss(index));
+        let _ = gloss.unbounded_send(Event::Gloss(gloss_actions.get().article, index));
     });
     let language = sender.clone();
     view.connect_language_chosen(move |chosen| {
@@ -3181,10 +2773,11 @@ fn build_ui(
     application: &gtk::Application,
     binding: &Binding,
     sender: &UnboundedSender<Event>,
-) -> (View, gtk::ApplicationWindow) {
+) -> (View, gtk::ApplicationWindow, Rc<Cell<ViewActions>>) {
     style::install();
     let view = View::new(window_state(None, None), binding);
-    connect_view(&view, sender);
+    let actions = Rc::new(Cell::new(ViewActions::default()));
+    connect_view(&view, sender, &actions);
     let window = build_window(application, &view);
     // Capture phase: Alt+Left and Alt+Right are Back and Forward wherever
     // the focus is.
@@ -3195,7 +2788,7 @@ fn build_ui(
             let _ = active.unbounded_send(Event::Active);
         }
     });
-    (view, window)
+    (view, window, actions)
 }
 
 /// One change of the switch: the checks before the portal, then the flow of
@@ -3381,43 +2974,53 @@ fn start_tray(sender: &UnboundedSender<Event>) -> TrayHandle {
 fn start_controller(
     dirs: &Dirs,
     key_source: &KeySource,
+    recording: bool,
     sender: &UnboundedSender<Event>,
 ) -> io::Result<Controller> {
+    controller::start(
+        dirs.clone(),
+        controller_platform(),
+        StartFacts {
+            key_source: key_source.clone(),
+            recording,
+        },
+        controller_renderer(sender),
+    )
+}
+
+fn controller_platform() -> Platform {
+    Platform {
+        name: "Linux".to_owned(),
+        key_location_hint: KEY_LOCATION_HINT,
+    }
+}
+
+fn controller_renderer(sender: &UnboundedSender<Event>) -> impl controller::Renderer {
     let queue: ControllerQueue = Arc::new(Mutex::new(VecDeque::new()));
     let context = glib::MainContext::default();
     let sender = sender.clone();
-    controller::start(
-        dirs.clone(),
-        Platform {
-            name: "Linux".to_owned(),
-        },
-        StartFacts {
-            key_source: key_source.clone(),
-        },
-        move |state, effects| {
-            let first = {
-                let mut pending = queue.lock().expect("controller render queue");
-                let first = pending.is_empty();
-                pending.push_back((state, effects));
-                first
-            };
-            if first {
-                let queue = queue.clone();
-                let sender = sender.clone();
-                // GLib may invoke immediately when the context is unowned.
-                // Only the channel is touched here. `serve` owns the widgets.
-                context.invoke(move || {
-                    // The context forwards this batch before another invoke
-                    // can deliver the next one. Enqueueing can continue now.
-                    let pending =
-                        std::mem::take(&mut *queue.lock().expect("controller render queue"));
-                    for (state, effects) in pending {
-                        let _ = sender.unbounded_send(Event::Controller(Box::new(state), effects));
-                    }
-                });
-            }
-        },
-    )
+    move |state, effects| {
+        let first = {
+            let mut pending = queue.lock().expect("controller render queue");
+            let first = pending.is_empty();
+            pending.push_back((state, effects));
+            first
+        };
+        if first {
+            let queue = queue.clone();
+            let sender = sender.clone();
+            // GLib may invoke immediately when the context is unowned.
+            // Only the channel is touched here. `serve` owns the widgets.
+            context.invoke(move || {
+                // The context forwards this batch before another invoke
+                // can deliver the next one. Enqueueing can continue now.
+                let pending = std::mem::take(&mut *queue.lock().expect("controller render queue"));
+                for (state, effects) in pending {
+                    let _ = sender.unbounded_send(Event::Controller(Box::new(state), effects));
+                }
+            });
+        }
+    }
 }
 
 /// GTK 4.20's GStreamer backend needs a file URI even for buffered audio.
@@ -3646,13 +3249,6 @@ async fn persist_key(
     Ok(())
 }
 
-/// The online translator and its cache, for the Settings size and clear.
-fn online_translator(dirs: &Dirs, deepl: DeepL) -> (Arc<dyn Translator>, Arc<cache::Store>) {
-    let translator = Cached::new(deepl, dirs.cache.clone());
-    let store = translator.store();
-    (Arc::new(translator), store)
-}
-
 /// Hands each event of `receiver` to `session`, on the UI thread, for as
 /// long as the channel is open.
 fn serve(mut session: Session, mut receiver: UnboundedReceiver<Event>) {
@@ -3681,7 +3277,7 @@ fn start(
     connect_settings_action(application, &sender);
     connect_menu_actions(application, &sender);
     application.set_accels_for_action("app.settings", &["<Control>comma"]);
-    let (view, window) = build_ui(application, &binding, &sender);
+    let (view, window, view_actions) = build_ui(application, &binding, &sender);
 
     // Only the primary instance gets here, so a second launch records no
     // session.
@@ -3690,7 +3286,7 @@ fn start(
     let config = dirs.config.as_deref();
     let handle = Rc::new(RefCell::new(Some(start_shortcut(&sender, timed, config))));
     let events = sender.clone();
-    let controller = match start_controller(dirs, &key_source, &sender) {
+    let controller = match start_controller(dirs, &key_source, timed, &sender) {
         Ok(controller) => Some(controller),
         Err(e) => {
             eprintln!("addict: lookups cannot run: {e}");
@@ -3763,7 +3359,10 @@ fn start(
     let english_job = start_english(runner.as_deref(), english_file.clone(), &sender);
     let at_once_file = at_once::path(config);
     let at_once_job = start_at_once(runner.as_deref(), at_once_file.clone(), &sender);
-    let (translator, cache) = online_translator(dirs, DeepL::new(key_source.clone()));
+    let cache = controller.as_ref().map_or_else(
+        || Arc::new(cache::Store::new(dirs.cache.clone())),
+        Controller::cache,
+    );
     let settings = start_settings(
         &window,
         key_file.as_deref(),
@@ -3783,16 +3382,15 @@ fn start(
         sender,
         current: Rc::downgrade(&handle),
         view_state: ViewState::default(),
+        view_actions,
         applied_field_revision: 0,
         sent_text: String::new(),
         edits_sent: 0,
         edits_at_set: 0,
         cleared_at: None,
-        deferred: Vec::new(),
         work,
         controller: controller.as_ref().map(Controller::dispatcher),
         articles,
-        translator,
         key_file,
         key_source,
         cache,
@@ -3806,10 +3404,6 @@ fn start(
         startup_job: None,
         save_generation: 0,
         save_job: None,
-        translating_word: None,
-        translating_sentence: None,
-        translating_definition: None,
-        online: Kept::default(),
         check,
         indexes: IndexCache::default(),
         capturing: Capturing::default(),
@@ -3818,6 +3412,7 @@ fn start(
         saved_language: Language::default(),
         language_file,
         language_chosen: false,
+        language_choice: 0,
         language_job,
         my_language: Language::Ru,
         my_language_file,
@@ -3827,7 +3422,6 @@ fn start(
         english_file,
         english_chosen: false,
         english_job,
-        at_once: at_once::DEFAULT,
         at_once_file,
         at_once_chosen: false,
         at_once_job,
@@ -4088,9 +3682,9 @@ mod tests {
 
     use super::{
         CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, CapturePress, Capturing, Copying, Event,
-        FailedEndFocus, LOOKUP_LIMIT, LaunchMode, TRANSLATE_LIMIT, WindowActions, WindowEvent,
-        connect_launches, connect_menu_actions, connect_settings_action, dispatch_window,
-        failed_end_focus, is_offered_command, missed_line,
+        FailedEndFocus, LOOKUP_LIMIT, LaunchMode, WindowActions, WindowEvent, connect_launches,
+        connect_menu_actions, connect_settings_action, dispatch_window, failed_end_focus,
+        is_offered_command, missed_line,
     };
     use crate::view::{
         Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
@@ -4105,6 +3699,7 @@ mod tests {
 
     #[test]
     fn the_translate_limit_is_finite_and_its_own() {
+        use addict_controller::deadlines::TRANSLATE_LIMIT;
         assert!(!TRANSLATE_LIMIT.is_zero());
         assert_eq!(TRANSLATE_LIMIT.as_secs(), 10);
         assert!(TRANSLATE_LIMIT > LOOKUP_LIMIT);
@@ -4421,11 +4016,11 @@ mod tests {
         app.register(gio::Cancellable::NONE).unwrap();
         let (sender, events) = futures_channel::mpsc::unbounded();
         let binding = Binding::Attempting;
-        let (view, window) = build_ui(&app, &binding, &sender);
+        let (view, window, view_actions) = build_ui(&app, &binding, &sender);
         let work = Arc::new(Work::start().unwrap());
         let articles: Arc<dyn Articles> = Arc::new(Dictionaries::new(dirs.data.clone()));
         let key_file = key::key_path(dirs.config.as_deref());
-        let (translator, cache) = online_translator(&dirs, DeepL::new(key_source.clone()));
+        let cache = Arc::new(cache::Store::new(dirs.cache.clone()));
         // Not the desktop the tests run on: the portal's dialog, as on GNOME.
         let settings = start_settings(
             &window,
@@ -4446,16 +4041,15 @@ mod tests {
             sender,
             current: Weak::new(),
             view_state: ViewState::default(),
+            view_actions,
             applied_field_revision: 0,
             sent_text: String::new(),
             edits_sent: 0,
             edits_at_set: 0,
             cleared_at: None,
-            deferred: Vec::new(),
             work: Arc::downgrade(&work),
             controller: None,
             articles: articles.clone(),
-            translator,
             key_file,
             key_source,
             cache,
@@ -4469,10 +4063,6 @@ mod tests {
             startup_job: None,
             save_generation: 0,
             save_job: None,
-            translating_word: None,
-            translating_sentence: None,
-            translating_definition: None,
-            online: Kept::default(),
             check: None,
             indexes: IndexCache::default(),
             capturing: Capturing::default(),
@@ -4481,6 +4071,7 @@ mod tests {
             saved_language: Language::default(),
             language_file: None,
             language_chosen: false,
+            language_choice: 0,
             language_job: None,
             my_language: Language::Ru,
             my_language_file: None,
@@ -4490,7 +4081,6 @@ mod tests {
             english_file: None,
             english_chosen: false,
             english_job: None,
-            at_once: at_once::DEFAULT,
             at_once_file: None,
             at_once_chosen: false,
             at_once_job: None,
@@ -4541,11 +4131,57 @@ mod tests {
     /// lives as long as the returned owner.
     fn attach_controller(session: &mut super::Session) -> super::Controller {
         let controller =
-            super::start_controller(&session.dirs, &session.key_source, &session.sender).unwrap();
+            super::start_controller(&session.dirs, &session.key_source, false, &session.sender)
+                .unwrap();
+        connect_controller(session, &controller);
+        controller
+    }
+
+    fn attach_translator(
+        session: &mut super::Session,
+        translator: impl addict_core::translation::Translator + 'static,
+    ) -> super::Controller {
+        let controller = addict_controller::start_with_translator(
+            session.dirs.clone(),
+            super::controller_platform(),
+            translator,
+            false,
+            super::controller_renderer(&session.sender),
+        )
+        .unwrap();
+        connect_controller(session, &controller);
+        controller
+    }
+
+    fn connect_controller(session: &mut super::Session, controller: &super::Controller) {
         session.work = controller.work();
         session.controller = Some(controller.dispatcher());
         session.articles = controller.dictionaries();
-        controller
+        session.cache = controller.cache();
+    }
+
+    #[derive(Clone)]
+    struct SharedCanned(std::sync::Arc<addict_core::translation::Canned>);
+
+    impl SharedCanned {
+        fn new(answer: &str) -> Self {
+            Self(std::sync::Arc::new(addict_core::translation::Canned::new(
+                Ok(answer),
+            )))
+        }
+
+        fn asked(&self) -> Vec<addict_core::translation::Request> {
+            self.0.asked()
+        }
+    }
+
+    impl addict_core::translation::Translator for SharedCanned {
+        fn translate(
+            &self,
+            request: addict_core::translation::Request,
+        ) -> addict_core::translation::Translating<'_> {
+            self.0.translate(request)
+        }
     }
 
     /// Handles the session's events until `done` holds, for at most 5 s.
@@ -4586,7 +4222,6 @@ mod tests {
     #[ignore = "needs a display; run alone"]
     fn a_gtk_edit_renders_the_controller_article_and_enter_waits_for_its_language() {
         use super::*;
-        use addict_core::translation::Canned;
         use addict_dictionary::{
             format::{Contents, Headword, SenseRecord, encode},
             import::{self, Source as IndexSource},
@@ -4631,13 +4266,12 @@ mod tests {
             },
         );
         drop(work);
-        let _controller = attach_controller(&mut session);
-        let canned = Arc::new(Canned::new(Ok("берег")));
-        session.translator = canned.clone();
+        let canned = SharedCanned::new("берег");
+        let _controller = attach_translator(&mut session, canned.clone());
         // An earlier text in the history, submitted while the window was
         // empty: nothing of it is asked online.
         session.dispatch_controller(controller::Event::FieldEdited {
-            text: "earlier".to_owned(),
+            text: "earlier text".to_owned(),
             replaced: false,
             source: None,
         });
@@ -4668,9 +4302,9 @@ mod tests {
         assert!(canned.asked().is_empty(), "typing sends no online request");
         // Typing keeps no history: back at the earlier text, Back has
         // nowhere to go.
-        entry.set_text("earlier");
+        entry.set_text("earlier text");
         pump_until(&mut session, &mut events, |session| {
-            session.view_state.sentence == "earlier" && !session.view_state.looking_up
+            session.view_state.sentence == "earlier text" && !session.view_state.looking_up
         });
         assert!(!session.view_state.can_back, "typing keeps no history");
 
@@ -4683,19 +4317,17 @@ mod tests {
         entry.insert_text("bank", &mut 0);
         entry.emit_activate();
         pump_until(&mut session, &mut events, |session| {
-            !session.deferred.is_empty()
-        });
-        assert!(session.view_state.looking_up);
-        assert!(canned.asked().is_empty(), "Enter waits for the lookup");
-        pump_until(&mut session, &mut events, |session| {
             !session.view_state.looking_up
-                && session.deferred.is_empty()
-                && session.translating_word.is_none()
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.line == "берег")
         });
         // Enter records the word: from the earlier text Back goes to it.
-        entry.set_text("earlier");
+        entry.set_text("earlier text");
         pump_until(&mut session, &mut events, |session| {
-            session.view_state.sentence == "earlier" && !session.view_state.looking_up
+            session.view_state.sentence == "earlier text" && !session.view_state.looking_up
         });
         assert!(session.view_state.can_back, "Enter records the word");
         let requests = canned.asked();
@@ -4842,7 +4474,7 @@ mod tests {
             stub::{Reply, Stub},
         };
         use addict_engine::work::Outcome;
-        use futures_util::{FutureExt, StreamExt};
+        use futures_util::StreamExt;
         use gtk::glib;
         use std::fs;
 
@@ -4866,14 +4498,8 @@ mod tests {
             KeySource::pending(),
         );
         let stub = Stub::start(Reply::translation("translated")).expect("stub");
-        (session.translator, session.cache) = super::online_translator(
-            &session.dirs,
-            DeepL::with_base_url(session.key_source.clone(), stub.base_url()),
-        );
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let deepl = DeepL::with_base_url(session.key_source.clone(), stub.base_url());
+        let _controller = attach_translator(&mut session, deepl);
         let request = |text: &str| Request {
             text: text.to_owned(),
             context: None,
@@ -4890,15 +4516,25 @@ mod tests {
                 "unexpected authorization"
             );
         };
-        let translate = |session: &super::Session, text: &str, expected: &str| {
-            let count = stub.seen().len();
-            let answer = runtime.block_on(async {
-                tokio::time::timeout(TRANSLATE_LIMIT, session.translator.translate(request(text)))
-                    .await
-            });
-            assert_eq!(answer.unwrap(), Ok("translated".to_owned()));
-            assert_authorization(count, expected);
+        let submit = |session: &mut super::Session, text: &str| {
+            session.view.set_field_text(text);
+            session.sentence_changed(text.to_owned(), super::FieldEdit::Typed);
+            session.submitted();
         };
+        let translate =
+            |session: &mut super::Session, events: &mut _, text: &str, expected: &str| {
+                let count = stub.seen().len();
+                submit(session, text);
+                pump_until(session, events, |session| {
+                    session.view_state.sentence == text
+                        && session
+                            .view_state
+                            .online
+                            .iter()
+                            .any(|row| row.line == "translated")
+                });
+                assert_authorization(count, expected);
+            };
 
         session.show_settings();
         let window = session.settings.window().clone();
@@ -4919,16 +4555,25 @@ mod tests {
 
         assert_eq!(state.label(), "Checking…");
         assert!(!entry.is_sensitive());
-        let translator = session.translator.clone();
-        let mut first = translator.translate(request("first uncached request"));
-        let cached = request("a cached translation");
-        session.cache.put(&super::cache::key_of(&cached), "cached");
-        runtime.block_on(async {
-            assert!(first.as_mut().now_or_never().is_none());
-            assert_eq!(
-                translator.translate(cached).now_or_never(),
-                Some(Ok("cached".to_owned()))
-            );
+        session
+            .cache
+            .put(&super::cache::key_of(&request("cached")), "from cache");
+        submit(&mut session, "cached");
+        pump_until(&mut session, &mut events, |session| {
+            session
+                .view_state
+                .online
+                .iter()
+                .any(|row| row.line == "from cache")
+        });
+        submit(&mut session, "uncached");
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "uncached"
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.state == crate::view::OnlineState::Pending)
         });
         assert!(stub.seen().is_empty());
 
@@ -4947,18 +4592,25 @@ mod tests {
         }
         assert_eq!(state.label(), FREE);
         assert!(entry.is_sensitive());
-        let answer = runtime.block_on(async { tokio::time::timeout(TRANSLATE_LIMIT, first).await });
-        assert_eq!(answer.unwrap(), Ok("translated".to_owned()));
+        pump_until(&mut session, &mut events, |session| {
+            session
+                .view_state
+                .online
+                .iter()
+                .any(|row| row.line == "translated")
+        });
         assert_authorization(0, INITIAL);
 
         fs::remove_file(&path).expect("external removal");
-        translate(&session, "after removal", INITIAL);
+        translate(&mut session, &mut events, "removed", INITIAL);
         key::write(&path, Secret::new("external-file-edit").unwrap())
             .expect("external replacement");
-        translate(&session, "after external replacement", INITIAL);
+        translate(&mut session, &mut events, "replaced", INITIAL);
         assert_eq!(session.key_source.snapshot(), Some(Ok(initial)));
 
-        let mut press = |session: &mut super::Session, input: &str| {
+        let press = |session: &mut super::Session,
+                     events: &mut futures_channel::mpsc::UnboundedReceiver<Event>,
+                     input: &str| {
             entry.set_text(input);
             assert!(save.is_sensitive());
             save.emit_clicked();
@@ -4980,23 +4632,23 @@ mod tests {
         };
 
         assert_eq!(state.label(), FREE);
-        let finished = press(&mut session, &format!("  {SAVED}  "));
+        let finished = press(&mut session, &mut events, &format!("  {SAVED}  "));
         assert!(matches!(
             finished,
             Event::KeySaved(_, Outcome::Finished(Ok(())))
         ));
-        translate(&session, "before reporting the successful save", SAVED);
+        translate(&mut session, &mut events, "saved", SAVED);
         session.handle(finished);
         assert!(entry.text().is_empty());
         assert_eq!(state.label(), PRO);
         assert!(!error_shown());
 
-        let superseded = press(&mut session, SUPERSEDED);
+        let superseded = press(&mut session, &mut events, SUPERSEDED);
         assert!(matches!(
             superseded,
             Event::KeySaved(_, Outcome::Finished(Ok(())))
         ));
-        let failed = press(&mut session, "invalid input");
+        let failed = press(&mut session, &mut events, "invalid input");
         assert!(matches!(
             failed,
             Event::KeySaved(_, Outcome::Finished(Err(WriteError::Invalid)))
@@ -5011,16 +4663,12 @@ mod tests {
             persisted == format!("{SUPERSEDED}\n"),
             "unexpected persisted key"
         );
-        translate(
-            &session,
-            "after a superseded save and validation failure",
-            SUPERSEDED,
-        );
+        translate(&mut session, &mut events, "superseded", SUPERSEDED);
 
         let backup = path.with_extension("old");
         fs::rename(&path, &backup).expect("save old file");
         fs::create_dir(&path).expect("block atomic replacement");
-        let failed = press(&mut session, "synthetic-unwritten-deepl");
+        let failed = press(&mut session, &mut events, "synthetic-unwritten-deepl");
         assert!(matches!(
             failed,
             Event::KeySaved(_, Outcome::Finished(Err(WriteError::Io(_))))
@@ -5033,7 +4681,7 @@ mod tests {
             fs::read_to_string(backup).unwrap() == persisted,
             "old key changed"
         );
-        translate(&session, "after an I/O failure", SUPERSEDED);
+        translate(&mut session, &mut events, "unwritten", SUPERSEDED);
         window.destroy();
         session.window.destroy();
     }
@@ -5046,25 +4694,23 @@ mod tests {
     #[test]
     #[ignore = "needs a display; run alone"]
     fn a_copied_sentence_is_translated_at_once_only_while_the_switch_is_on() {
-        use std::sync::Arc;
-
-        use addict_core::translation::Canned;
-
-        use crate::view::{Online, Whole};
+        use crate::view::{OnlineKind, OnlineState};
         gtk::init().expect("a display");
         let (mut session, mut events, _work) =
             test_session("io.github.doqhu.Addict.AtOnceTest", Dirs::default());
-        let _controller = attach_controller(&mut session);
-        let canned = Arc::new(Canned::new(Ok("Я сидел на берегу реки.")));
-        session.translator = canned.clone();
-        session.language = Language::En;
+        let canned = SharedCanned::new("Я сидел на берегу реки.");
+        let _controller = attach_translator(&mut session, canned.clone());
         let line = "I sat on the bank of the river.";
 
-        assert!(session.at_once);
         let number = session.copying.begin();
         session.handle(Event::Clipboard(number, Ok(line.to_owned())));
         pump_until(&mut session, &mut events, |session| {
-            session.view_state.sentence == line && session.translating_sentence.is_none()
+            session.view_state.sentence == line
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.state == OnlineState::Translated)
         });
         assert_eq!(session.view_state.chosen, None);
         let asked = canned.asked();
@@ -5075,30 +4721,25 @@ mod tests {
             (asked[0].source, asked[0].target),
             (Language::En, Language::Ru)
         );
-        assert_eq!(
-            session.online.shown(None).sentence,
-            Some(&Whole::Asked(Online::Translated(
-                "Я сидел на берегу реки.".into()
-            )))
-        );
-        // A click on `bank` sends the word alone.
-        session.word_chosen(4);
+        assert_eq!(session.view_state.online[0].line, "Я сидел на берегу реки.");
+        // A click on bank adds the word and uses the existing sentence.
+        session.word_chosen(session.view_state.text_number, 4);
         pump_until(&mut session, &mut events, |session| {
             session.view_state.chosen == Some(4)
-                && !session.view_state.looking_up
-                && session.deferred.is_empty()
-                && session.translating_word.is_none()
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.kind == OnlineKind::Word && row.state == OnlineState::Translated)
         });
         let asked = canned.asked();
         assert_eq!(asked.len(), 2);
         assert_eq!(asked[1].text, "bank");
         assert_eq!(asked[1].context.as_deref(), Some(line));
 
-        // Off: a new press sends nothing, and the read of the file comes
-        // too late to change it.
+        // Off affects the next read. A late startup read cannot undo it.
         session.handle(Event::AtOnceChosen(false));
         session.handle(Event::AtOnceRead(true));
-        assert!(!session.at_once);
         let number = session.copying.begin();
         session.handle(Event::Clipboard(
             number,
@@ -5107,8 +4748,7 @@ mod tests {
         pump_until(&mut session, &mut events, |session| {
             session.view_state.sentence == "The bank was closed."
         });
-        assert!(session.translating_sentence.is_none());
-        assert_eq!(session.online.shown(None), Default::default());
+        assert!(session.view_state.online.is_empty());
         assert_eq!(canned.asked().len(), 2);
     }
 
@@ -5145,7 +4785,7 @@ mod tests {
         let (mut session, mut events, _work) =
             test_session("io.github.doqhu.Addict.ClearedLineTest", Dirs::default());
         let _controller = attach_controller(&mut session);
-        session.at_once = false;
+        session.dispatch_controller(addict_controller::Event::SetAtOnce(false));
         let line = "I sat on the bank of the river.";
 
         session.clear_for_read();
@@ -5159,7 +4799,7 @@ mod tests {
         assert_eq!(session.sent_text, line);
         assert_eq!(session.view_state.field.text, line);
 
-        session.word_chosen(4);
+        session.word_chosen(session.view_state.text_number, 4);
         pump_until(&mut session, &mut events, |session| {
             session.view_state.chosen == Some(4) && !session.view_state.looking_up
         });
@@ -5233,10 +4873,46 @@ mod tests {
     #[test]
     #[ignore = "needs a display; run alone"]
     fn the_reading_language_holds_in_either_read_order_and_on_a_gloss_click() {
-        use addict_core::translation::reading_languages;
+        use addict_dictionary::{
+            format::{Contents, Headword, SenseRecord, encode},
+            import::{self, Source as IndexSource},
+        };
+        use addict_engine::dictionaries::{Indexes, State};
         gtk::init().expect("a display");
-        let (mut session, _events, _work) =
-            test_session("io.github.doqhu.Addict.LanguageTest", Dirs::default());
+        let data = KeyTestDir::new("addict-gloss-reading");
+        for (index, source, definition) in [
+            (
+                IndexSource::KaikkiEs,
+                "kaikki-es",
+                "Empresa que ofrece servicios monetarios.",
+            ),
+            (IndexSource::KaikkiEnSpanish, "es-en", "bank"),
+        ] {
+            let index_bytes = encode(&Contents {
+                source: source.to_owned(),
+                senses: vec![SenseRecord {
+                    definition: definition.to_owned(),
+                    ..Default::default()
+                }],
+                headwords: vec![Headword {
+                    word: "banco".to_owned(),
+                    senses: vec![0],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            std::fs::write(import::index_path(&data.0, index), index_bytes).unwrap();
+        }
+        let (mut session, mut events, _work) = test_session(
+            "io.github.doqhu.Addict.LanguageTest",
+            Dirs {
+                data: Some(data.0.clone()),
+                ..Dirs::default()
+            },
+        );
+        let canned = SharedCanned::new("translated");
+        let _controller = attach_translator(&mut session, canned.clone());
         session.handle(Event::LanguageRead(Language::Ru));
         assert_eq!(session.language, Language::En);
         session.handle(Event::MyLanguageRead(Language::En));
@@ -5244,19 +4920,36 @@ mod tests {
         assert_eq!(session.saved_language, Language::Ru);
 
         // Back to the start: nothing read, Russian mine.
-        session.saved_language = Language::default();
-        session.language = Language::default();
-        session.my_language = Language::Ru;
-        session
-            .view
-            .set_reading_languages(reading_languages(Language::Ru), Language::default());
+        session.handle(Event::MyLanguageRead(Language::Ru));
+        session.handle(Event::LanguageRead(Language::default()));
         session.handle(Event::MyLanguageRead(Language::En));
         assert_eq!(session.language, Language::Es);
         session.handle(Event::LanguageRead(Language::Ru));
         assert_eq!(session.language, Language::Ru);
         assert_eq!(session.saved_language, Language::Ru);
 
-        session.look_up_english("bank");
+        session.handle(Event::Indexes {
+            generation: 0,
+            indexes: Indexes {
+                spanish: State::Open,
+                ..Indexes::MISSING
+            },
+        });
+        session.view.set_field_text("banco");
+        session.sentence_changed("banco".to_owned(), super::FieldEdit::Typed);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.answered == Some(Language::Es)
+        });
+        let article = session.view_state.article_id();
+        session.handle(Event::Gloss(article, 0));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.shown.choice() == Some(super::Choice::Gloss(0))
+        });
+        session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
+        session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "bank" && session.language == Language::Es
+        });
         assert_eq!(session.saved_language, Language::Es);
         assert_eq!(session.language, Language::Es);
         // A read handled after the choice neither undoes it nor drops (and
@@ -5264,6 +4957,73 @@ mod tests {
         session.handle(Event::LanguageRead(Language::Ru));
         assert_eq!(session.saved_language, Language::Es);
         assert!(session.language_job.is_some());
+
+        // A switch press before the gloss snapshot is delivered wins, even
+        // when it names the language the shell already showed.
+        session.handle(Event::LanguageChosen(Language::Ru));
+        session.view.set_field_text("banco");
+        session.sentence_changed("banco".to_owned(), super::FieldEdit::Typed);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "banco"
+                && session.view_state.answered == Some(Language::Es)
+        });
+        let article = session.view_state.article_id();
+        session.handle(Event::Gloss(article, 0));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.shown.choice() == Some(super::Choice::Gloss(0))
+        });
+        session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
+        session.handle(Event::LanguageChosen(Language::Ru));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "bank"
+                && session.view_state.shown.translating().pressed == Language::Ru
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.line == "translated")
+        });
+        assert_eq!(session.saved_language, Language::Ru);
+        assert_eq!(canned.asked().last().unwrap().source, Language::Ru);
+
+        // The controller sees the gloss choice before the target change,
+        // even while GTK still holds the previous saved reading language.
+        session.handle(Event::MyLanguageChosen(Language::Ru));
+        session.handle(Event::LanguageChosen(Language::Es));
+        session.view.set_field_text("banco");
+        session.sentence_changed("banco".to_owned(), super::FieldEdit::Typed);
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.sentence == "banco"
+                && session.view_state.answered == Some(Language::Es)
+        });
+        let article = session.view_state.article_id();
+        session.handle(Event::Gloss(article, 0));
+        pump_until(&mut session, &mut events, |session| {
+            session.view_state.shown.choice() == Some(super::Choice::Gloss(0))
+        });
+        let first = canned.asked().len();
+        session.handle(Event::LookUpEnglish(article, 0, "bank".to_owned()));
+        session.handle(Event::MyLanguageChosen(Language::Ca));
+        pump_until(&mut session, &mut events, |session| {
+            session.saved_language == Language::En
+                && session.view_state.shown.translating().my == Language::Ca
+                && session.view_state.sentence == "bank"
+                && session
+                    .view_state
+                    .online
+                    .iter()
+                    .any(|row| row.line == "translated")
+        });
+        let requests = canned.asked();
+        let mut for_catalan = requests[first..]
+            .iter()
+            .filter(|request| request.target == Language::Ca);
+        let request = for_catalan.next().expect("translation into Catalan");
+        assert_eq!(
+            (request.text.as_str(), request.source),
+            ("bank", Language::En)
+        );
+        assert!(for_catalan.next().is_none());
         session.settings.window().destroy();
         session.window.destroy();
     }
@@ -5278,73 +5038,57 @@ mod tests {
     #[test]
     #[ignore = "needs a display; run alone"]
     fn the_english_spelling_holds_in_either_read_order_and_shows_only_for_english() {
-        use addict_core::translation::{English, reading_languages};
+        use addict_core::translation::English;
         use addict_deepl::client::sent;
-        use addict_engine::online::Subject;
         gtk::init().expect("a display");
-        let (mut session, _events, _work) =
+        let (mut session, mut events, _work) =
             test_session("io.github.doqhu.Addict.EnglishTest", Dirs::default());
-        // A chosen word in the controller only: the field stays empty, so
-        // it is newer, and a change of language or spelling sends nothing.
-        let sentence = "Me gusta el color rojo.".to_owned();
-        let words = addict_core::sentence::words(&sentence);
-        let color = words
-            .iter()
-            .position(|word| &sentence[word.clone()] == "color")
-            .expect("color");
-        session.view_state.input = Some(
-            addict_core::input::Input::new(
-                "color",
-                Some(&sentence),
-                addict_core::input::Source::Manual,
-            )
-            .unwrap(),
-        );
-        session.view_state.sentence = sentence;
-        session.view_state.words = words;
-        session.view_state.chosen = Some(color);
-        session.view_state.source = addict_core::input::Source::Manual;
-        // What the session sends for the word, as `start_translation` asks.
-        let target_lang = |session: &super::Session| {
-            let request = session
-                .online_request(Subject::Word(color), Language::Es)
-                .expect("a request");
-            sent(&request).target_lang
+        let canned = SharedCanned::new("translated");
+        let _controller = attach_translator(&mut session, canned.clone());
+        let target_lang = |session: &mut super::Session, events: &mut _| {
+            let previous = canned.asked().len();
+            let text = format!("word{}", char::from(b'a' + previous as u8));
+            session.view.set_field_text(&text);
+            session.sentence_changed(text.clone(), super::FieldEdit::Typed);
+            session.submitted();
+            pump_until(session, events, |session| {
+                session.view_state.sentence == text
+                    && session
+                        .view_state
+                        .online
+                        .iter()
+                        .any(|row| row.line == "translated")
+            });
+            sent(canned.asked().last().unwrap()).target_lang
         };
         assert_eq!(session.settings.english_row(), (false, English::Us));
-        assert_eq!(target_lang(&session), "RU");
+        assert_eq!(target_lang(&mut session, &mut events), "RU");
 
         // The spelling read first, then English mine.
         session.handle(Event::EnglishRead(English::Gb));
         assert_eq!(session.english, English::Gb);
         assert_eq!(session.settings.english_row(), (false, English::Gb));
-        assert_eq!(target_lang(&session), "RU");
+        assert_eq!(target_lang(&mut session, &mut events), "RU");
         session.handle(Event::MyLanguageRead(Language::En));
         assert_eq!(session.settings.english_row(), (true, English::Gb));
-        assert_eq!(target_lang(&session), "EN-GB");
+        assert_eq!(target_lang(&mut session, &mut events), "EN-GB");
 
         // Back to the start: nothing read, Russian mine, US.
-        session.my_language = Language::Ru;
-        session.english = English::Us;
-        session.view_state.shown = Default::default();
-        session.settings.render_english(English::Us);
-        session.settings.show_english(false);
-        session
-            .view
-            .set_reading_languages(reading_languages(Language::Ru), Language::default());
+        session.handle(Event::MyLanguageRead(Language::Ru));
+        session.handle(Event::EnglishRead(English::Us));
         // English mine read first, then the spelling.
         session.handle(Event::MyLanguageRead(Language::En));
         assert_eq!(session.settings.english_row(), (true, English::Us));
-        assert_eq!(target_lang(&session), "EN-US");
+        assert_eq!(target_lang(&mut session, &mut events), "EN-US");
         session.handle(Event::EnglishRead(English::Gb));
         assert_eq!(session.settings.english_row(), (true, English::Gb));
-        assert_eq!(target_lang(&session), "EN-GB");
+        assert_eq!(target_lang(&mut session, &mut events), "EN-GB");
 
         // A choice holds against a later read.
         session.handle(Event::EnglishChosen(English::Us));
         session.handle(Event::EnglishRead(English::Gb));
         assert_eq!(session.english, English::Us);
-        assert_eq!(target_lang(&session), "EN-US");
+        assert_eq!(target_lang(&mut session, &mut events), "EN-US");
         // Nor does the read drop (and so cancel) the write of the choice.
         assert!(session.english_job.is_some());
 
@@ -5356,13 +5100,13 @@ mod tests {
         assert_eq!(session.my_language, Language::Es);
         assert!(session.my_language_job.is_some());
         assert!(!session.settings.english_row().0);
-        assert_eq!(target_lang(&session), "ES");
+        assert_eq!(target_lang(&mut session, &mut events), "ES");
         session.handle(Event::EnglishChosen(English::Gb));
-        assert_eq!(target_lang(&session), "ES");
+        assert_eq!(target_lang(&mut session, &mut events), "ES");
         // British, chosen while Spanish was mine, holds once English is.
         session.handle(Event::MyLanguageChosen(Language::En));
         assert!(session.settings.english_row().0);
-        assert_eq!(target_lang(&session), "EN-GB");
+        assert_eq!(target_lang(&mut session, &mut events), "EN-GB");
         session.settings.window().destroy();
         session.window.destroy();
     }

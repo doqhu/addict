@@ -234,8 +234,8 @@
 //! as a source of articles are [`dictionaries`]'s, the download of the
 //! published indexes is [`download`]'s and its first-run offer
 //! [`first_run`]'s, the online translator is
-//! `addict_deepl`'s, what is asked of it and kept is [`online`]'s, where every
-//! request to it starts is [`translate`]'s, the capture job is [`capture`]'s,
+//! `addict_deepl`'s, with requests and results owned by `addict_controller`.
+//! The capture job is [`capture`]'s,
 //! the Vulkan drivers the resident lets the loader list are [`gpu`]'s,
 //! and its portal and Tesseract adapters are `addict_platform`'s, the
 //! resident application is [`resident`]'s, the history of its field is
@@ -266,8 +266,7 @@ mod wrap;
 mod stub;
 
 use addict_engine::{
-    at_once, cache, dictionaries, download, english, evidence, language, manual, my_language,
-    online, translate, view,
+    at_once, cache, dictionaries, download, english, evidence, language, manual, my_language, view,
 };
 
 use std::{

@@ -36,6 +36,7 @@ dependencies = [
  "addict-deepl",
  "addict-dictionary",
  "addict-engine",
+ "futures-channel",
 ]
 
 [[package]]

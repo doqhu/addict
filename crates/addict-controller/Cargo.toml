@@ -13,3 +13,4 @@ addict-engine = { path = "../addict-engine" }
 
 [dev-dependencies]
 addict-dictionary = { path = "../addict-dictionary" }
+futures-channel = "0.3"

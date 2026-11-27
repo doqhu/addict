@@ -24,7 +24,7 @@
 //! that way, is put into the field without being reported as an edit of it,
 //! and is not submitted. Back and Forward only report their press; the text
 //! they lead to is put into the field as a paste puts it, by
-//! [`View::put_into_field`], and neither button takes the focus from the
+//! [`put_into_field`], and neither button takes the focus from the
 //! field.
 
 use std::{
@@ -52,17 +52,17 @@ use crate::{
         COPY_LABEL, ChosenGloss, Explained, FIELD_PLACEHOLDER, FORM_TAG, FORWARD_TOOLTIP, FormRow,
         GLOSS_NO_KEY, GlossRow, GlossTexts, KeyLocation, LANGUAGE_TOOLTIP, LONE_WORD_TIP,
         LOOK_UP_ENGLISH, Listed, MORE_PRONUNCIATIONS, NO_KEY_HINT, NO_KEY_LINE, OFFLINE_SOURCE,
-        OnlineRow, OnlineState, OnlineTexts, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
+        OnlineRow, OnlineState, PLAY_TOOLTIP, PLAYBACK_FAILED, PRONUNCIATION_PREVIEW,
         PronunciationText, RECORDING_NEEDS_NETWORK, RETRY_LABEL, ResultTexts, SENSES_LABEL,
         SHOW_LESS, SYNONYM_PREVIEW, SenseText, Shown, SynonymTexts, WHOLE_WORD_LABEL, answer_texts,
         binding_texts, choice_texts, command_in, definition_action_label, indexes_text,
-        language_label, online_rows, recording_credit_text, sentence_markup, show_more,
-        synonym_class, synonym_description, texts,
+        language_label, recording_credit_text, sentence_markup, show_more, synonym_class,
+        synonym_description, texts,
     },
     wrap::Wrap,
 };
 
-const KEY_LOCATION_HINT: &str =
+pub(crate) const KEY_LOCATION_HINT: &str =
     "Set an absolute XDG_CONFIG_HOME or HOME to locate addict/deepl.key.";
 
 fn key_location(path: Option<&std::path::Path>) -> KeyLocation<'_> {
@@ -533,10 +533,15 @@ fn synonym_pill(item: &str, classes: &[&str], field: Option<&Field>) -> gtk::Wid
         .focus_on_click(false)
         .build();
     link.set_cursor_from_name(Some("pointer"));
+    connect_replacement_link(&link, item, field);
+    link.upcast()
+}
+
+fn connect_replacement_link(link: &gtk::Button, word: &str, field: &Field) {
     let field = field.downgrade();
-    let word = item.to_owned();
+    let word = word.to_owned();
     link.connect_clicked(move |_| {
-        // A synonym is a controller choice; it sets the field and submits.
+        // In the resident the controller guards the action and submits.
         let handler = field.synonym_chosen.borrow().clone();
         if let Some(handler) = handler {
             handler(word.clone());
@@ -544,7 +549,6 @@ fn synonym_pill(item: &str, classes: &[&str], field: Option<&Field>) -> gtk::Wid
             put_into_field(&field, &word);
         }
     });
-    link.upcast()
 }
 
 /// Puts the synonym meanings `texts` into `container`: behind a disclosure
@@ -1093,13 +1097,7 @@ fn lemma_link(lemma: &str, field: &Field) -> gtk::Button {
         .focus_on_click(false)
         .build();
     link.set_cursor_from_name(Some("pointer"));
-    let held = field.downgrade();
-    let word = lemma.to_owned();
-    link.connect_clicked(move |_| {
-        if let Some(field) = held.upgrade() {
-            put_into_field(&field, &word);
-        }
-    });
+    connect_replacement_link(&link, lemma, field);
     link
 }
 
@@ -1143,6 +1141,7 @@ fn fill_glosses(
     clicked: &SenseChosen,
     look_up: &LookUp,
     field: &Field,
+    definition: &RefCell<Option<gtk::Box>>,
 ) {
     clear(container);
     let glosses = match texts {
@@ -1184,7 +1183,9 @@ fn fill_glosses(
                 continue;
             };
             button.add_css_class("chosen");
-            rows.append(&gloss_explained(chosen, row.lookup, look_up));
+            let online = definition_area(chosen.definition.as_ref(), chosen.no_key);
+            rows.append(&gloss_explained(row.lookup, look_up, &online));
+            definition.replace(Some(online));
         }
         container.append(&gloss_group(group.pos, &rows));
     }
@@ -1262,15 +1263,8 @@ fn gloss_row(row: &GlossRow<'_>) -> gtk::Button {
 /// What stands under the chosen gloss: its online translation, or the line
 /// that a key is needed for it, and its English word as a pill that
 /// `look_up` looks up.
-fn gloss_explained(chosen: &ChosenGloss<'_>, lookup: Option<&str>, look_up: &LookUp) -> gtk::Box {
-    let below = explained_tail(None, chosen.definition.as_ref());
-    if chosen.no_key {
-        below.append(
-            &wrapping(gtk::Label::builder().label(GLOSS_NO_KEY))
-                .css_classes(["hint"])
-                .build(),
-        );
-    }
+fn gloss_explained(lookup: Option<&str>, look_up: &LookUp, definition: &gtk::Box) -> gtk::Box {
+    let below = explained_tail(None, definition);
     if let Some(word) = lookup {
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         line.append(
@@ -1396,8 +1390,9 @@ fn explained_box(
     explained: &Explained<'_>,
     action: Option<&gtk::Button>,
     field: &Field,
+    definition: &gtk::Box,
 ) -> gtk::Box {
-    let below = explained_tail(action, explained.definition.as_ref());
+    let below = explained_tail(action, definition);
     let synonyms = gtk::Box::new(gtk::Orientation::Vertical, 6);
     fill_listed(
         &synonyms,
@@ -1413,7 +1408,7 @@ fn explained_box(
 /// What stands under a chosen sense or gloss without its synonyms: the
 /// button that translates it when `action` is shown, and the online
 /// translation `definition` once asked for.
-fn explained_tail(action: Option<&gtk::Button>, definition: Option<&Block<'_>>) -> gtk::Box {
+fn explained_tail(action: Option<&gtk::Button>, definition: &gtk::Box) -> gtk::Box {
     let below = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(10)
@@ -1422,10 +1417,29 @@ fn explained_tail(action: Option<&gtk::Button>, definition: Option<&Block<'_>>) 
     if let Some(action) = action {
         below.append(action);
     }
-    if let Some(block) = definition {
-        below.append(&definition_block(block));
-    }
+    below.append(definition);
     below
+}
+
+fn definition_area(block: Option<&Block<'_>>, no_key: bool) -> gtk::Box {
+    let area = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    fill_definition(&area, block, no_key);
+    area
+}
+
+fn fill_definition(area: &gtk::Box, block: Option<&Block<'_>>, no_key: bool) {
+    clear(area);
+    if let Some(block) = block {
+        area.append(&definition_block(block));
+    }
+    if no_key {
+        area.append(
+            &wrapping(gtk::Label::builder().label(GLOSS_NO_KEY))
+                .css_classes(["hint"])
+                .build(),
+        );
+    }
+    area.set_visible(block.is_some() || no_key);
 }
 
 /// The online translation of a definition or a gloss: its label and, under
@@ -1784,8 +1798,26 @@ fn result_area() -> ResultArea {
 /// Puts `answer` into the answer of `result`, the note without a key and
 /// the row of the word as a whole; hides them for `None`. Each translation
 /// is a link that puts it into `field`.
-fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &Field) {
+fn fill_answer(
+    result: &ResultArea,
+    answer: Option<&Answer<'_>>,
+    previous: Option<&Answer<'_>>,
+    field: &Field,
+) {
     let widgets = &result.answer;
+    let comparison = answer.zip(previous);
+    let keep_pills = comparison.is_some_and(|(new, old)| new.pills == old.pills);
+    let keep_whole = comparison.is_some_and(|(new, old)| new.whole == old.whole);
+    let focus = field.root().and_then(|root| root.focus());
+    if focus.is_some_and(|focus| {
+        focus.is_ancestor(&result.no_key)
+            || (focus.is_ancestor(&widgets.root)
+                && !(keep_pills && focus.is_ancestor(&widgets.pills)))
+            || (focus.is_ancestor(&result.whole)
+                && !(keep_whole && focus.is_ancestor(&result.whole_pills)))
+    }) {
+        field.grab_focus_without_selecting();
+    }
     let shown = answer.is_some_and(|answer| {
         answer.word.is_some() || answer.sentence.is_some() || answer.missing.is_some()
     });
@@ -1793,8 +1825,12 @@ fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &Field) 
     result
         .no_key
         .set_visible(answer.is_some_and(|answer| answer.no_key));
-    clear(&widgets.pills);
-    clear(&result.whole_pills);
+    if !keep_pills {
+        clear(&widgets.pills);
+    }
+    if !keep_whole {
+        clear(&result.whole_pills);
+    }
     let Some(answer) = answer else {
         result.whole.set_visible(false);
         return;
@@ -1806,7 +1842,7 @@ fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &Field) 
         &widgets.sentence_spinner,
         answer.sentence.as_ref(),
     );
-    if !answer.pills.is_empty() {
+    if !keep_pills && !answer.pills.is_empty() {
         widgets.pills.append(&pills(
             answer.pills,
             &["pill", "small"],
@@ -1826,6 +1862,9 @@ fn fill_answer(result: &ResultArea, answer: Option<&Answer<'_>>, field: &Field) 
         } else {
             "web-browser-symbolic"
         }));
+    if keep_whole {
+        return;
+    }
     match &answer.whole {
         Some(Listed::Items { items, .. }) => {
             result.whole_pills.append(&pills(
@@ -1893,6 +1932,8 @@ pub struct View {
     capture: gtk::Button,
     sentence: gtk::Label,
     result: ResultArea,
+    /// The online row under the chosen sense or gloss, when there is one.
+    definition: RefCell<Option<gtk::Box>>,
     /// Runs with the index of a sense when its row is clicked; the rows are
     /// built anew for each result and each choice.
     sense_chosen: Rc<RefCell<Option<SenseChosen>>>,
@@ -1916,9 +1957,6 @@ pub struct View {
     /// translations do not: the shown result's
     /// [`Translating::answer_language`](crate::view::Translating::answer_language).
     answer_language: Cell<Language>,
-    /// My language for the shown result: the online rows are sent into it,
-    /// and a refusal about the language names it.
-    my_language: Cell<Language>,
     /// Whether the synonyms of the word that no sense took are shown; a new
     /// result closes them, a choice in the same one keeps them.
     synonyms_open: Rc<Cell<bool>>,
@@ -1991,6 +2029,7 @@ impl View {
             capture,
             sentence,
             result,
+            definition: RefCell::new(None),
             sense_chosen: Rc::new(RefCell::new(None)),
             gloss_chosen: Rc::new(RefCell::new(None)),
             look_up_english: Rc::new(RefCell::new(None)),
@@ -1999,7 +2038,6 @@ impl View {
             translations: RefCell::new(None),
             online: RefCell::new(Vec::new()),
             answer_language: Cell::new(Language::Ru),
-            my_language: Cell::new(Language::Ru),
             synonyms_open: Rc::new(Cell::new(false)),
             lone_word: Cell::new(false),
         };
@@ -2234,6 +2272,7 @@ impl View {
     /// Puts `text` into the field as a paste does: it replaces the text,
     /// the handler of [`View::connect_sentence_changed`] runs, and then the
     /// field is submitted.
+    #[cfg(test)]
     pub fn put_into_field(&self, text: &str) {
         put_into_field(&self.field, text);
     }
@@ -2346,12 +2385,12 @@ impl View {
         result
             .definition_action
             .set_label(definition_action_label(shown.translating().my));
-        self.my_language.set(shown.translating().my);
         // Out of the old rows before they go: it is put under the chosen
         // one again below.
         if let Some(parent) = result.definition_action.parent().and_downcast::<gtk::Box>() {
             parent.remove(&result.definition_action);
         }
+        self.definition.replace(None);
         clear(&result.rows);
         self.answer_language
             .set(shown.translating().answer_language(shown.lookup()));
@@ -2420,12 +2459,13 @@ impl View {
                 }) as LookUp
             },
             &self.field,
+            &self.definition,
         );
         result.glosses.set_visible(texts.glosses.is_some());
         if shown.choice().is_none() {
             result.area.vadjustment().set_value(0.0);
         }
-        self.show_area();
+        self.show_area(None);
     }
 
     /// Hides what [`render_result`](Self::render_result) shows when there
@@ -2447,7 +2487,7 @@ impl View {
         result.word_synonyms.set_visible(false);
         clear(&result.glosses);
         result.glosses.set_visible(false);
-        self.show_area();
+        self.show_area(None);
     }
 
     /// Shows the senses of `texts`: their caption, the hint, and a row per
@@ -2463,9 +2503,11 @@ impl View {
             result.rows.append(&sense_row(sense, &chosen));
             if let Some(explained) = &sense.explained {
                 let action = visible.then_some(&result.definition_action);
+                let online = definition_area(explained.definition.as_ref(), false);
                 result
                     .rows
-                    .append(&explained_box(explained, action, &self.field));
+                    .append(&explained_box(explained, action, &self.field, &online));
+                self.definition.replace(Some(online));
             }
         }
         result
@@ -2473,30 +2515,66 @@ impl View {
             .set_visible(!texts.senses.is_empty() || texts.hint.is_some());
     }
 
-    /// Shows the online texts `online` in the answer, with the
-    /// dictionary's translations of the shown result.
-    pub fn render_online(&self, online: &OnlineTexts<'_>, key_file: Option<&std::path::Path>) {
-        self.release_focus();
-        self.online.replace(
-            online_rows(online, key_location(key_file), self.my_language.get())
-                .into_iter()
-                .map(OnlineRow::into_owned)
-                .collect(),
+    /// Updates the definition row of the existing choice without replacing its links.
+    pub fn render_definition(&self, shown: &Shown, key_file: Option<&std::path::Path>) {
+        let definition = self.definition.borrow();
+        let (Some(area), Some(lookup)) = (definition.as_ref(), shown.lookup()) else {
+            return;
+        };
+        let texts = choice_texts(
+            lookup,
+            shown.choice(),
+            shown.definition(),
+            key_location(key_file),
+            shown.elsewhere(),
+            shown.translating(),
         );
-        self.show_area();
+        let (block, no_key) = if let Some(gloss) = &texts.gloss {
+            (gloss.definition.as_ref(), gloss.no_key)
+        } else {
+            (
+                texts
+                    .senses
+                    .iter()
+                    .find_map(|sense| sense.explained.as_ref()?.definition.as_ref()),
+                false,
+            )
+        };
+        self.release_focus_in(&[area]);
+        fill_definition(area, block, no_key);
+        self.result
+            .definition_action
+            .set_sensitive(shown.definition_action().1);
+    }
+
+    /// Updates the answer while leaving the article's links and focus in place.
+    pub fn render_online_rows(&self, rows: &[OnlineRow<'static>]) {
+        let previous = self.online.replace(rows.to_vec());
+        self.show_area(Some(&previous));
+    }
+
+    fn release_focus_in(&self, sections: &[&gtk::Box]) {
+        let focus = self.root.root().and_then(|root| root.focus());
+        if focus.is_some_and(|focus| sections.iter().any(|section| focus.is_ancestor(*section))) {
+            self.focus_field();
+        }
     }
 
     /// Fills the answer from what is kept of the result and the online
     /// texts, then shows the card and the result area while they have
     /// something in them.
-    fn show_area(&self) {
+    fn show_area(&self, previous_rows: Option<&[OnlineRow<'static>]>) {
         let result = &self.result;
         {
             let translations = self.translations.borrow();
             let online = self.online.borrow();
+            let language = self.answer_language.get();
+            let previous =
+                previous_rows.and_then(|rows| answer_texts(translations.as_ref(), rows, language));
             fill_answer(
                 result,
-                answer_texts(translations.as_ref(), &online, self.answer_language.get()).as_ref(),
+                answer_texts(translations.as_ref(), &online, language).as_ref(),
+                previous.as_ref(),
                 &self.field,
             );
         }
@@ -2565,7 +2643,7 @@ mod tests {
     };
     use crate::{
         style,
-        view::{Binding, Lookup, Online, OnlineTexts, Shown},
+        view::{Binding, Lookup, Online, OnlineTexts, Shown, online_rows},
     };
 
     /// Draws the window with the sample article of "bank" in a sentence,
@@ -2606,13 +2684,20 @@ mod tests {
         let word = Online::Translated("берег".to_owned());
         let whole =
             crate::view::Whole::Asked(Online::Translated("Я сидел на берегу реки.".to_owned()));
-        view.render_online(
+        let rows = online_rows(
             &OnlineTexts {
                 word: Some(&word),
                 sentence: Some(&whole),
                 lone: None,
             },
-            None,
+            super::key_location(None),
+            Language::Ru,
+        );
+        view.render_online_rows(
+            &rows
+                .into_iter()
+                .map(super::OnlineRow::into_owned)
+                .collect::<Vec<_>>(),
         );
         let window = gtk::Window::builder()
             .title("Addict")
@@ -2814,6 +2899,123 @@ mod tests {
         toggle.set_active(true);
         assert!(rest.is_visible());
         assert_eq!(toggle_text(&toggle), SHOW_LESS);
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn online_rows_and_definition_leave_the_article_focus_and_scroll_in_place() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let mut article = pronounced_bank();
+        article.senses = article.senses.iter().cloned().cycle().take(36).collect();
+        article.translations = vec!["берег".into(), "набережная".into()];
+        let mut shown = Shown::default();
+        shown.show(Some(Lookup::Article(article)));
+        shown.choose(0);
+        view.render_result(&shown, None);
+        let window = gtk::Window::builder()
+            .default_width(480)
+            .default_height(400)
+            .child(view.root())
+            .build();
+        window.present();
+        let context = glib::MainContext::default();
+        let draw = || context.block_on(glib::timeout_future(std::time::Duration::from_millis(100)));
+        draw();
+        let sense = buttons(view.result.rows.upcast_ref(), "sense").remove(0);
+        assert!(sense.grab_focus());
+        let scroll = view.result.area.vadjustment();
+        scroll.set_value(25.0);
+        assert_eq!(scroll.value(), 25.0);
+
+        let answer = Online::Translated("берег".to_owned());
+        let render = |texts: OnlineTexts<'_>| {
+            let rows: Vec<_> = online_rows(&texts, super::key_location(None), Language::Ru)
+                .into_iter()
+                .map(super::OnlineRow::into_owned)
+                .collect();
+            view.render_online_rows(&rows);
+        };
+        render(OnlineTexts {
+            lone: Some(&answer),
+            ..OnlineTexts::default()
+        });
+        let (number, _) = shown.request_definition().expect("definition action");
+        view.render_definition(&shown, None);
+        shown.answer_definition(number, answer.clone());
+        view.render_definition(&shown, None);
+        draw();
+
+        assert_eq!(
+            gtk::prelude::RootExt::focus(&window).as_ref(),
+            Some(sense.upcast_ref())
+        );
+        assert_eq!(scroll.value(), 25.0);
+
+        // In the answer and in the word-as-a-whole section, a dictionary
+        // pill survives the corresponding online row settling.
+        let pending = Online::Pending;
+        let pending_sentence = crate::view::Whole::Asked(pending.clone());
+        let answered_sentence = crate::view::Whole::Asked(answer.clone());
+        for (before, after, container) in [
+            (
+                OnlineTexts {
+                    sentence: Some(&pending_sentence),
+                    ..OnlineTexts::default()
+                },
+                OnlineTexts {
+                    sentence: Some(&answered_sentence),
+                    ..OnlineTexts::default()
+                },
+                &view.result.answer.pills,
+            ),
+            (
+                OnlineTexts {
+                    word: Some(&pending),
+                    ..OnlineTexts::default()
+                },
+                OnlineTexts {
+                    word: Some(&answer),
+                    ..OnlineTexts::default()
+                },
+                &view.result.whole_pills,
+            ),
+        ] {
+            render(before);
+            draw();
+            let pill = buttons(container.upcast_ref(), "pill-link").remove(0);
+            assert!(pill.grab_focus());
+            render(after);
+            draw();
+            assert_eq!(
+                gtk::prelude::RootExt::focus(&window).as_ref(),
+                Some(pill.upcast_ref())
+            );
+            assert_eq!(buttons(container.upcast_ref(), "pill-link")[0], pill);
+        }
+        window.destroy();
+    }
+
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn a_lemma_link_uses_the_guarded_replacement_callback() {
+        gtk::init().expect("a display");
+        let view = View::new(WindowState::Empty, &Binding::Bound);
+        let lemma = super::lemma_link("walk", &view.field);
+        lemma.emit_clicked();
+        assert_eq!(view.field_text(), "walk");
+
+        view.set_field_text("walked");
+        let submitted = Rc::new(RefCell::new(None));
+        view.connect_synonym_chosen({
+            let submitted = submitted.clone();
+            move |word| {
+                submitted.replace(Some(word));
+            }
+        });
+        lemma.emit_clicked();
+        assert_eq!(submitted.borrow().as_deref(), Some("walk"));
+        assert_eq!(view.field_text(), "walked");
     }
 
     #[test]

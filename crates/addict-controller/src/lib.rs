@@ -1,14 +1,13 @@
 //! Shared product state and its event loop: the field, the manual input,
-//! offline lookups, the shown result with its chosen sense or gloss, and
-//! history. One thread, ordered full snapshots, rising revision; GTK-free
-//! and platform-free.
+//! offline lookups, online translations, the shown result with its chosen
+//! sense or gloss, and history. One thread, ordered full snapshots, rising
+//! revision; GTK-free and platform-free.
 //!
 //! A shell renders [`ViewState`], dispatches [`Event`]s and runs
-//! [`Effect`]s. Product state lives here, not in the shell; online
-//! translation is still produced by the shell, which [`Effect::AskOnline`]
-//! tells when to ask.
+//! [`Effect`]s.
 
 pub mod deadlines;
+mod online;
 
 use std::{
     io,
@@ -20,31 +19,46 @@ use std::{
 use addict_core::{
     dirs::Dirs,
     input::{Input, Source, WindowState},
-    translation::{English, Request, Source as Language},
+    translation::{English, Source as Language, Translator},
 };
-use addict_deepl::key::KeySource;
+use addict_deepl::{
+    DeepL,
+    key::{self, KeySource},
+};
 use addict_engine::{
+    cache,
     dictionaries::{Dictionaries, Indexes, Looked},
     evidence::{self, Answered},
     history::History,
+    language,
     manual::{self, Edit, Manual},
-    view::{Lookup, Online, Shown},
+    view::{Choice, Lookup, OnlineRow, Shown},
     work::{Job, Outcome, Work},
 };
 
 /// Platform facts supplied by the shell.
 pub struct Platform {
     pub name: String,
+    /// Help for locating the DeepL key when there is no configuration directory.
+    pub key_location_hint: &'static str,
 }
 
 /// The existing key source may still be loading when the controller starts.
 pub struct StartFacts {
     pub key_source: KeySource,
+    pub recording: bool,
 }
 
 /// Identity of a controller request, issued in increasing order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestId(u64);
+
+/// The text and result that an article action belongs to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArticleId {
+    text: u64,
+    generation: u64,
+}
 
 /// The text field: what it holds and how often the controller set it.
 ///
@@ -76,30 +90,37 @@ pub enum Event {
     /// The text of the field was submitted, by Enter or by a paste.
     FieldSubmitted,
     /// The word with this index in the shown sentence was chosen.
-    WordChosen { index: usize },
+    WordChosen { text: u64, index: usize },
     /// The sense with this index in the shown list was chosen.
-    SenseChosen { index: usize },
+    SenseChosen { article: ArticleId, index: usize },
     /// The English gloss with this index in the shown article was chosen.
-    GlossChosen { index: usize },
+    GlossChosen { article: ArticleId, index: usize },
     /// A synonym was chosen: its word goes into the field and is submitted.
-    SynonymChosen(String),
+    SynonymChosen { article: ArticleId, word: String },
+    /// The English link of the chosen gloss was clicked, submitting its word
+    /// with the effective reading language.
+    LookUpEnglish {
+        article: ArticleId,
+        index: usize,
+        word: String,
+        language_choice: u64,
+    },
     /// Back was pressed.
     Back,
     /// Forward was pressed.
     Forward,
-    /// The reading language changed.
+    /// The saved reading language changed, before applying the target fallback.
     SetReading(Language),
-    /// My language changed, and with it the reading language to `reading`.
-    SetMyLanguage {
-        language: Language,
-        reading: Language,
-    },
+    /// My language changed. The latest saved reading language may fall back.
+    SetMyLanguage(Language),
     /// The reading language pressed in the switch changed (rendering only).
     SetPressed(Language),
     /// A source is being read now (capture, clipboard), or no longer.
     SetReadingSource(Option<Source>),
     /// The spelling of English changed.
     SetEnglish(English),
+    /// Translate eligible sentences read from the clipboard from now on.
+    SetAtOnce(bool),
     /// The shell's `IndexCache` stands at `generation`, knowing `indexes`.
     KnownIndexes {
         generation: u64,
@@ -109,46 +130,29 @@ pub enum Event {
     /// again.
     AskAgain,
     /// The user explicitly requested the selected dictionary definition.
-    DefinitionAction,
-    /// A definition translation ended with this `online` for `number`.
-    DefinitionAnswered { number: u64, online: Online },
+    DefinitionAction { article: ArticleId, choice: Choice },
 }
 
-/// What the shell's online translation is to ask now, read from the
-/// snapshot the effect comes with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ask {
-    /// The word with this index in a sentence was chosen: what is not yet
-    /// known online about it and its sentence.
-    Chosen { index: usize },
-    /// The field's text was submitted: Enter, a paste, Back, Forward or a
-    /// synonym.
-    Submitted,
-    /// A read text (selection, clipboard, capture) replaced the field.
-    Replaced,
-    /// The offline result was redone after the reading language, my
-    /// language or the spelling of English changed: forget and ask again.
-    Again,
-}
-
-/// Commands for the shell. Offline lookup uses only the Rust runner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Commands for the shell. Lookup and translation use the shared runner.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// The shell's `IndexCache` should check where the indexes stand and
     /// report back with [`Event::KnownIndexes`]. `index_generation` is the
     /// generation at emission; a shell refresh newer than this already owns
     /// it.
     CheckIndexes { index_generation: u64 },
-    /// The controller asks online for a definition; the shell sends it and
-    /// reports back with [`Event::DefinitionAnswered`] carrying `number`.
-    RequestDefinition { number: u64, request: Request },
     /// A lookup started at `generation` read where the dictionary indexes
     /// stand; the shell updates its `IndexCache`.
     ObserveIndexes { generation: u64, indexes: Indexes },
     /// A lookup ended; the shell records its evidence.
     RecordLookup(Answered),
-    /// The shell's online translation asks what `Ask` says.
-    AskOnline(Ask),
+    /// An online attempt ended and the shell records its evidence.
+    RecordOnline(evidence::Record),
+    /// An English gloss link chose a reading language and submitted its word.
+    SaveReading {
+        language: Language,
+        language_choice: u64,
+    },
 }
 
 /// The entire controller-owned view state at one revision.
@@ -157,6 +161,10 @@ pub struct ViewState {
     pub revision: u64,
     pub field: Field,
     pub shown: Shown,
+    /// Changes on an explicit sense or gloss click, including a repeat click.
+    pub choice_revision: u64,
+    /// Word and sentence rows for the current text and choice.
+    pub online: Vec<OnlineRow<'static>>,
     pub window_state: WindowState,
     pub source: Source,
     pub sentence: String,
@@ -186,6 +194,8 @@ impl Default for ViewState {
             revision: 0,
             field: Field::default(),
             shown: Shown::default(),
+            choice_revision: 0,
+            online: Vec::new(),
             window_state: WindowState::Empty,
             source: Source::Manual,
             sentence: String::new(),
@@ -199,6 +209,15 @@ impl Default for ViewState {
             context: None,
             looking_up: false,
             answered: None,
+        }
+    }
+}
+
+impl ViewState {
+    pub fn article_id(&self) -> ArticleId {
+        ArticleId {
+            text: self.text_number,
+            generation: self.shown.generation(),
         }
     }
 }
@@ -232,6 +251,7 @@ pub struct Controller {
     thread: Option<JoinHandle<()>>,
     work: Weak<Work>,
     dictionaries: Arc<Dictionaries>,
+    cache: Arc<cache::Store>,
 }
 
 impl Controller {
@@ -253,6 +273,11 @@ impl Controller {
     pub fn dictionaries(&self) -> Arc<Dictionaries> {
         self.dictionaries.clone()
     }
+
+    /// The translation cache used by requests, exposed for Settings.
+    pub fn cache(&self) -> Arc<cache::Store> {
+        self.cache.clone()
+    }
 }
 
 impl Drop for Controller {
@@ -272,14 +297,31 @@ pub fn start(
     start_facts: StartFacts,
     renderer: impl Renderer,
 ) -> io::Result<Controller> {
+    let translator = DeepL::new(start_facts.key_source);
+    start_with_translator(dirs, platform, translator, start_facts.recording, renderer)
+}
+
+/// Starts the same controller with an alternate translation provider.
+pub fn start_with_translator(
+    dirs: Dirs,
+    platform: Platform,
+    translator: impl Translator + 'static,
+    recording: bool,
+    renderer: impl Renderer,
+) -> io::Result<Controller> {
     let work = Arc::new(Work::start()?);
     let worker = Arc::downgrade(&work);
     let dictionaries = Arc::new(Dictionaries::new(dirs.data.clone()));
+    let translator = cache::Cached::new(translator, dirs.cache);
+    let cache = translator.store();
     let (send, receive) = mpsc::channel();
     let model = Model {
-        _dirs: dirs,
-        _platform: platform,
-        _start_facts: start_facts,
+        online: online::Translations::new(
+            Arc::new(translator),
+            key::key_path(dirs.config.as_deref()),
+            platform.key_location_hint,
+            recording,
+        ),
         work,
         dictionaries: dictionaries.clone(),
         send: send.clone(),
@@ -289,6 +331,8 @@ pub fn start(
         manual: Manual::default(),
         history: History::default(),
         shown: Shown::default(),
+        choice_revision: 0,
+        saved_reading: Language::En,
         reading: Language::En,
         my_language: Language::Ru,
         known: None,
@@ -304,12 +348,14 @@ pub fn start(
         thread: Some(thread),
         work: worker,
         dictionaries,
+        cache,
     })
 }
 
 enum Message {
     Event(Event),
     LookedUp(LookedUp),
+    Translated(online::Translated),
     Stop,
 }
 
@@ -330,9 +376,7 @@ struct Active {
 }
 
 struct Model {
-    _dirs: Dirs,
-    _platform: Platform,
-    _start_facts: StartFacts,
+    online: online::Translations,
     work: Arc<Work>,
     dictionaries: Arc<Dictionaries>,
     send: mpsc::Sender<Message>,
@@ -344,6 +388,8 @@ struct Model {
     /// the process, hidden window included.
     history: History,
     shown: Shown,
+    choice_revision: u64,
+    saved_reading: Language,
     reading: Language,
     my_language: Language,
     /// What the shell's `IndexCache` knows of the indexes, and its
@@ -365,6 +411,7 @@ impl Model {
             let changed = match message {
                 Message::Event(event) => self.apply(event, &mut effects),
                 Message::LookedUp(looked) => self.looked_up(looked, &mut effects),
+                Message::Translated(translated) => self.translated(translated, &mut effects),
                 Message::Stop => break,
             };
             if changed || !effects.is_empty() {
@@ -384,6 +431,8 @@ impl Model {
             revision: self.revision,
             field: self.field.clone(),
             shown: self.shown.clone(),
+            choice_revision: self.choice_revision,
+            online: self.online.rows(manual.chosen(), self.my_language),
             window_state: manual.state(),
             source: manual.source(),
             sentence: manual.sentence().to_owned(),
@@ -400,6 +449,18 @@ impl Model {
         }
     }
 
+    fn article_id(&self) -> ArticleId {
+        ArticleId {
+            text: self.manual.text_number(),
+            generation: self.shown.generation(),
+        }
+    }
+
+    fn next_request(&mut self) -> RequestId {
+        self.request += 1;
+        RequestId(self.request)
+    }
+
     /// Applies `event`; says whether the view changed.
     fn apply(&mut self, event: Event, effects: &mut Vec<Effect>) -> bool {
         match event {
@@ -410,16 +471,43 @@ impl Model {
             } => self.field_edited(text, replaced, source, effects),
             Event::FieldCleared => self.field_cleared(effects),
             Event::FieldSubmitted => self.submitted(effects),
-            Event::WordChosen { index } => self.word_chosen(index, effects),
-            Event::SenseChosen { index } => self.shown.choose(index),
-            Event::GlossChosen { index } => self.gloss_chosen(index, effects),
-            Event::SynonymChosen(word) => self.put(word, effects),
+            Event::WordChosen { text, index } => {
+                text == self.manual.text_number() && self.word_chosen(index, effects)
+            }
+            Event::SenseChosen { article, index } => {
+                article == self.article_id() && self.choose(index, false, effects)
+            }
+            Event::GlossChosen { article, index } => {
+                article == self.article_id() && self.choose(index, true, effects)
+            }
+            Event::SynonymChosen { article, word } => {
+                article == self.article_id() && self.put(word, effects)
+            }
+            Event::LookUpEnglish {
+                article,
+                index,
+                word,
+                language_choice,
+            } => {
+                if article != self.article_id() || self.shown.choice() != Some(Choice::Gloss(index))
+                {
+                    return false;
+                }
+                // Apply the choice and put the replacement together, so
+                // changing the language cannot send the previous input.
+                let reading = language::reading(Language::En, self.my_language);
+                self.saved_reading = reading;
+                self.update_reading();
+                effects.push(Effect::SaveReading {
+                    language: reading,
+                    language_choice,
+                });
+                self.put(word, effects)
+            }
             Event::Back => self.back(effects),
             Event::Forward => self.forward(effects),
             Event::SetReading(language) => self.set_reading(language, effects),
-            Event::SetMyLanguage { language, reading } => {
-                self.set_my_language(language, reading, effects)
-            }
+            Event::SetMyLanguage(language) => self.set_my_language(language, effects),
             Event::SetPressed(language) => {
                 self.shown.set_pressed(language);
                 true
@@ -430,7 +518,17 @@ impl Model {
             }
             Event::SetEnglish(english) => {
                 self.shown.set_english(english);
+                let changed = english != self.online.english;
+                self.online.english = english;
+                if changed && self.my_language == Language::En {
+                    self.cancel_definition();
+                    return self.ask_again(effects);
+                }
                 true
+            }
+            Event::SetAtOnce(at_once) => {
+                self.online.at_once = at_once;
+                false
             }
             Event::KnownIndexes {
                 generation,
@@ -441,9 +539,10 @@ impl Model {
                 false
             }
             Event::AskAgain => self.ask_again(effects),
-            Event::DefinitionAction => self.definition_action(effects),
-            Event::DefinitionAnswered { number, online } => {
-                self.shown.answer_definition(number, online)
+            Event::DefinitionAction { article, choice } => {
+                article == self.article_id()
+                    && self.shown.choice() == Some(choice)
+                    && self.definition_action(effects)
             }
         }
     }
@@ -471,8 +570,8 @@ impl Model {
             self.history.record(self.manual.sentence());
         }
         self.text_replaced(edit, effects);
-        if replaced && source.is_some() {
-            effects.push(Effect::AskOnline(Ask::Replaced));
+        if replaced && source == Some(Source::Clipboard) && self.online.at_once {
+            self.ask_whole(effects);
         }
         // An edit ends the reading of a source even when the text is the
         // same: the window state may have changed.
@@ -491,6 +590,9 @@ impl Model {
     /// once; a new text with no word chosen hides the result, and the
     /// lookup of the old one is given up.
     fn text_replaced(&mut self, edit: Edit, effects: &mut Vec<Effect>) {
+        if edit != Edit::Same {
+            self.reset_online();
+        }
         match edit {
             Edit::Same => {}
             Edit::Cleared => {
@@ -511,25 +613,36 @@ impl Model {
             return false;
         };
         self.start_lookup(run, effects);
-        effects.push(Effect::AskOnline(Ask::Chosen { index }));
+        self.ask_word(index, effects);
         true
     }
 
-    /// An English gloss was chosen: it is translated as it is chosen, with
-    /// no button, once and again only after a refusal. Out of range or an
-    /// English article is ignored.
-    fn gloss_chosen(&mut self, index: usize, effects: &mut Vec<Effect>) -> bool {
-        if !self.shown.choose_gloss(index) {
+    /// A changed choice gives up the previous definition. A gloss asks
+    /// immediately and retries after a refusal.
+    fn choose(&mut self, index: usize, gloss: bool, effects: &mut Vec<Effect>) -> bool {
+        let previous = self.shown.choice();
+        let chosen = if gloss {
+            self.shown.choose_gloss(index)
+        } else {
+            self.shown.choose(index)
+        };
+        if !chosen {
             return false;
         }
-        self.definition_action(effects);
+        if previous != self.shown.choice() {
+            self.cancel_definition();
+        }
+        self.choice_revision += 1;
+        if gloss {
+            self.definition_action(effects);
+        }
         true
     }
 
-    /// Records the current text; the shell asks its online texts.
+    /// Records the current text and asks its online texts.
     fn submitted(&mut self, effects: &mut Vec<Effect>) -> bool {
         self.history.record(self.manual.sentence());
-        effects.push(Effect::AskOnline(Ask::Submitted));
+        self.ask_lone(effects);
         true
     }
 
@@ -575,41 +688,35 @@ impl Model {
     }
 
     fn set_reading(&mut self, language: Language, effects: &mut Vec<Effect>) -> bool {
-        self.reading = language;
-        self.shown.set_pressed(language);
+        let previous = self.reading;
+        self.saved_reading = language;
+        self.update_reading();
+        if self.reading == previous {
+            return true;
+        }
         self.ask_again(effects)
     }
 
-    fn set_my_language(
-        &mut self,
-        language: Language,
-        reading: Language,
-        effects: &mut Vec<Effect>,
-    ) -> bool {
+    fn set_my_language(&mut self, language: Language, effects: &mut Vec<Effect>) -> bool {
         self.my_language = language;
         self.shown.set_my_language(language);
         // Rendered for the new pair: a result looked up for the language
         // before shows none of its translations.
-        self.reading = reading;
-        self.shown.set_pressed(reading);
+        self.update_reading();
         self.ask_again(effects)
     }
 
-    /// Redoes the offline result of the shown word, if there is one; the
-    /// shell forgets and asks again its online texts.
+    fn update_reading(&mut self) {
+        self.reading = language::reading(self.saved_reading, self.my_language);
+        self.shown.set_pressed(self.reading);
+    }
+
+    /// Redoes the offline result of the shown word and its online texts.
     fn ask_again(&mut self, effects: &mut Vec<Effect>) -> bool {
         if let Some(run) = self.manual.again() {
             self.start_lookup(run, effects);
         }
-        effects.push(Effect::AskOnline(Ask::Again));
-        true
-    }
-
-    fn definition_action(&mut self, effects: &mut Vec<Effect>) -> bool {
-        let Some((number, request)) = self.shown.request_definition() else {
-            return false;
-        };
-        effects.push(Effect::RequestDefinition { number, request });
+        self.ask_online_again(effects);
         true
     }
 
@@ -622,12 +729,12 @@ impl Model {
         // carries its old request id and run.
         self.lookup = None;
         self.answered = None;
+        self.cancel_definition();
         let Some(word) = self.manual.input().map(|input| input.word().to_owned()) else {
             self.shown.show(None);
             return;
         };
-        self.request += 1;
-        let id = RequestId(self.request);
+        let id = self.next_request();
         let send = self.send.clone();
         let language = self.reading;
         let generation = self.index_generation;
@@ -703,12 +810,15 @@ impl Model {
         }
         // A lookup that did not finish names no language: the chosen one.
         self.answered = finished.then_some(language);
+        self.send_deferred(effects);
         true
     }
 }
 
 #[cfg(test)]
 mod tests {
+    mod online;
+
     use std::{
         fs,
         path::PathBuf,
@@ -717,13 +827,13 @@ mod tests {
         time::Duration,
     };
 
-    use addict_core::translation::Source as Language;
-    use addict_deepl::key::KeySource;
+    use addict_core::translation::{Refusal, Request, Source as Language, Translating};
     use addict_dictionary::{
         format::{Contents, Headword, SenseRecord, encode},
         import::{self, Source as IndexSource},
     };
-    use addict_engine::view::Choice;
+    use addict_engine::view::{Online, OnlineKind, OnlineState};
+    use futures_channel::oneshot;
 
     use super::*;
 
@@ -764,11 +874,16 @@ mod tests {
                             members: vec!["river".to_owned()],
                             ..Default::default()
                         },
+                        SenseRecord {
+                            definition: "a financial institution".to_owned(),
+                            members: vec!["bank".to_owned()],
+                            ..Default::default()
+                        },
                     ],
                     headwords: vec![
                         Headword {
                             word: "bank".to_owned(),
-                            senses: vec![0],
+                            senses: vec![0, 2],
                             ..Default::default()
                         },
                         Headword {
@@ -861,19 +976,35 @@ mod tests {
 
     impl FakeShell {
         fn start(data: Option<PathBuf>) -> Self {
+            Self::with_translator(data, Silent, false)
+        }
+
+        fn scripted(data: Option<PathBuf>, recording: bool) -> (Self, mpsc::Receiver<Asked>) {
+            let (requests, asked) = mpsc::channel();
+            (
+                Self::with_translator(data, Scripted(requests), recording),
+                asked,
+            )
+        }
+
+        fn with_translator(
+            data: Option<PathBuf>,
+            translator: impl Translator + 'static,
+            recording: bool,
+        ) -> Self {
             let caller = thread::current().id();
             let (send, renders) = mpsc::channel();
-            let controller = start(
+            let controller = start_with_translator(
                 Dirs {
                     data,
                     ..Dirs::default()
                 },
                 Platform {
                     name: "test".to_owned(),
+                    key_location_hint: "No key directory.",
                 },
-                StartFacts {
-                    key_source: KeySource::pending(),
-                },
+                translator,
+                recording,
                 move |view, effects| {
                     assert_ne!(thread::current().id(), caller);
                     send.send((view, effects)).unwrap();
@@ -893,7 +1024,11 @@ mod tests {
 
         /// The next render; its revision is newer than the last one.
         fn next(&mut self) -> (ViewState, Vec<Effect>) {
-            let (view, effects) = self.renders.recv_timeout(WAIT).expect("controller render");
+            self.next_within(WAIT)
+        }
+
+        fn next_within(&mut self, wait: Duration) -> (ViewState, Vec<Effect>) {
+            let (view, effects) = self.renders.recv_timeout(wait).expect("controller render");
             assert!(view.revision > self.revision);
             self.revision = view.revision;
             (view, effects)
@@ -967,14 +1102,39 @@ mod tests {
         &article.senses[0].definition
     }
 
-    fn asks(effects: &[Effect]) -> Vec<Ask> {
-        effects
-            .iter()
-            .filter_map(|effect| match effect {
-                Effect::AskOnline(ask) => Some(*ask),
-                _ => None,
+    struct Silent;
+
+    impl Translator for Silent {
+        fn translate(&self, _: Request) -> Translating<'_> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    type Answer = Result<String, Refusal>;
+
+    struct Asked {
+        request: Request,
+        answer: oneshot::Sender<Answer>,
+    }
+
+    struct Scripted(mpsc::Sender<Asked>);
+
+    impl Translator for Scripted {
+        fn translate(&self, request: Request) -> Translating<'_> {
+            Box::pin(async move {
+                let (answer, received) = oneshot::channel();
+                if self.0.send(Asked { request, answer }).is_err() {
+                    return Err(Refusal::Other);
+                }
+                received.await.unwrap_or(Err(Refusal::Other))
             })
-            .collect()
+        }
+    }
+
+    fn pending(view: &ViewState, kind: OnlineKind) -> bool {
+        view.online
+            .iter()
+            .any(|row| row.kind == kind && row.state == OnlineState::Pending)
     }
 
     #[test]
@@ -982,12 +1142,12 @@ mod tests {
         let data = TestData::with_bank();
         let mut shell = FakeShell::start(Some(data.0.clone()));
         shell.edit("bank");
-        let (pending, effects) = shell.next();
+        let (pending, _) = shell.next();
         assert_eq!(pending.field.text, "bank");
         assert_eq!(pending.shown.lookup(), Some(&Lookup::Pending));
         assert!(pending.looking_up);
         // Typing asks nothing online.
-        assert!(asks(&effects).is_empty());
+        assert!(pending.online.is_empty());
         let (completed, effects) = shell.next();
         // No revision rise for typing; no history.
         assert_eq!(completed.field.text, "bank");
@@ -1002,7 +1162,7 @@ mod tests {
                 .iter()
                 .any(|effect| matches!(effect, Effect::ObserveIndexes { generation: 0, .. }))
         );
-        assert!(asks(&effects).is_empty(), "no DeepL");
+        assert!(completed.online.is_empty(), "no DeepL");
 
         let dispatcher = shell.controller.dispatcher();
         let work = shell.controller.work();
@@ -1097,11 +1257,15 @@ mod tests {
         let mut shell = FakeShell::start(Some(data.0.clone()));
         shell.edit("the bank of the river");
         let (typed, _) = shell.next();
-        shell.dispatch(Event::WordChosen { index: 1 });
-        let (view, effects) = shell.next();
+        shell.dispatch(Event::WordChosen {
+            text: typed.text_number,
+            index: 1,
+        });
+        let (view, _) = shell.next();
         assert_eq!(view.chosen, Some(1));
         assert_eq!(view.shown.lookup(), Some(&Lookup::Pending));
-        assert_eq!(asks(&effects), [Ask::Chosen { index: 1 }]);
+        assert!(pending(&view, OnlineKind::Word));
+        assert!(pending(&view, OnlineKind::Sentence));
         let input = view.input.clone().expect("an input");
         assert_eq!(input.word(), "bank");
         assert_eq!(input.sentence(), Some("the bank of the river"));
@@ -1111,10 +1275,14 @@ mod tests {
         let (view, _) = shell.settled();
         assert_eq!(article_definition(&view), DEFINITION);
 
-        shell.dispatch(Event::WordChosen { index: 4 });
-        let (view, effects) = shell.next();
+        shell.dispatch(Event::WordChosen {
+            text: typed.text_number,
+            index: 4,
+        });
+        let (view, _) = shell.next();
         assert_eq!(view.chosen, Some(4));
-        assert_eq!(asks(&effects), [Ask::Chosen { index: 4 }]);
+        assert!(pending(&view, OnlineKind::Word));
+        assert!(pending(&view, OnlineKind::Sentence));
         let (view, _) = shell.settled();
         assert_eq!(view.chosen, Some(4));
         assert_eq!(view.sentence, "the bank of the river");
@@ -1123,7 +1291,10 @@ mod tests {
         assert!(!view.can_back && !view.can_forward, "nothing recorded");
 
         // An invalid index is ignored.
-        shell.quiet(Event::WordChosen { index: 99 });
+        shell.quiet(Event::WordChosen {
+            text: typed.text_number,
+            index: 99,
+        });
     }
 
     #[test]
@@ -1131,12 +1302,18 @@ mod tests {
         let data = TestData::with_bank();
         let mut shell = FakeShell::start(Some(data.0.clone()));
         shell.edit("the bank of the river");
-        shell.next();
+        let (typed, _) = shell.next();
         let (release, _gate) = shell.hold_worker();
-        shell.dispatch(Event::WordChosen { index: 1 });
+        shell.dispatch(Event::WordChosen {
+            text: typed.text_number,
+            index: 1,
+        });
         let (first, _) = shell.next();
         assert!(first.looking_up);
-        shell.dispatch(Event::WordChosen { index: 4 });
+        shell.dispatch(Event::WordChosen {
+            text: typed.text_number,
+            index: 4,
+        });
         let (second, _) = shell.next();
         assert!(second.looking_up);
         // The outcome of the first click, enqueued before it was dropped.
@@ -1190,7 +1367,10 @@ mod tests {
         let data = TestData::with_bank();
         let mut shell = FakeShell::start(Some(data.0.clone()));
         let (before, _) = shell.submit("bank");
-        shell.dispatch(Event::SenseChosen { index: 0 });
+        shell.dispatch(Event::SenseChosen {
+            article: before.article_id(),
+            index: 0,
+        });
         let (view, effects) = shell.next();
         assert_eq!(view.shown.choice(), Some(Choice::Sense(0)));
         assert_eq!(view.field, before.field);
@@ -1200,19 +1380,29 @@ mod tests {
         );
         assert!(effects.is_empty(), "nothing is looked up or asked");
         // Again: GTK keeps a clicked link visited until it renders again.
-        shell.dispatch(Event::SenseChosen { index: 0 });
+        shell.dispatch(Event::SenseChosen {
+            article: before.article_id(),
+            index: 0,
+        });
         let (again, _) = shell.next();
         assert_eq!(again.shown.choice(), Some(Choice::Sense(0)));
         assert_eq!(again.field, before.field);
+        assert!(again.choice_revision > view.choice_revision);
         // Out of range is ignored, and so is a gloss of an English article.
-        shell.quiet(Event::SenseChosen { index: 999 });
-        shell.quiet(Event::GlossChosen { index: 0 });
+        shell.quiet(Event::SenseChosen {
+            article: before.article_id(),
+            index: 999,
+        });
+        shell.quiet(Event::GlossChosen {
+            article: before.article_id(),
+            index: 0,
+        });
     }
 
     #[test]
     fn picking_a_gloss_requests_its_definition_and_records_nothing() {
         let data = TestData::with_banco();
-        let mut shell = FakeShell::start(Some(data.0.clone()));
+        let (mut shell, asked) = FakeShell::scripted(Some(data.0.clone()), false);
         shell.quiet(Event::KnownIndexes {
             generation: 0,
             indexes: Some(SPANISH),
@@ -1228,68 +1418,71 @@ mod tests {
             );
         };
         assert_eq!(*language, Language::Es);
-        shell.dispatch(Event::GlossChosen { index: 0 });
+        shell.dispatch(Event::GlossChosen {
+            article: before.article_id(),
+            index: 0,
+        });
         let (view, effects) = shell.next();
         assert_eq!(view.shown.choice(), Some(Choice::Gloss(0)));
-        let [Effect::RequestDefinition { number, request }] = effects.as_slice() else {
-            panic!("the gloss is translated as it is chosen: {effects:?}");
-        };
+        assert!(effects.is_empty());
+        let Asked { request, answer } = asked.recv_timeout(WAIT).unwrap();
         assert_eq!(request.text, "bank");
+        assert_eq!(request.context, None);
         assert_eq!(request.source, Language::En);
+        assert_eq!(request.target, Language::Ru);
         assert_eq!(view.shown.definition(), Some(&Online::Pending));
         assert_eq!(view.field, before.field);
         assert!(!view.can_back && !view.can_forward, "nothing recorded");
         // Again: no second request while one is pending.
-        shell.dispatch(Event::GlossChosen { index: 0 });
+        shell.dispatch(Event::GlossChosen {
+            article: before.article_id(),
+            index: 0,
+        });
         let (_, effects) = shell.next();
         assert!(effects.is_empty());
-        // An answer for another number is dropped; the awaited one shows.
-        shell.quiet(Event::DefinitionAnswered {
-            number: number + 1,
-            online: Online::Translated("банк".into()),
-        });
-        shell.dispatch(Event::DefinitionAnswered {
-            number: *number,
-            online: Online::Translated("банк".into()),
-        });
+        assert!(asked.try_recv().is_err());
+        answer.send(Ok("банк".into())).unwrap();
         let (answered, _) = shell.next();
         assert_eq!(
             answered.shown.definition(),
             Some(&Online::Translated("банк".into()))
         );
         // Out of range is ignored.
-        shell.quiet(Event::GlossChosen { index: 9 });
+        shell.quiet(Event::GlossChosen {
+            article: before.article_id(),
+            index: 9,
+        });
     }
 
     #[test]
     fn back_and_forward_restore_the_field_and_look_it_up_again() {
         let data = TestData::with_bank();
         let mut shell = FakeShell::start(Some(data.0.clone()));
-        let (bank, effects) = shell.submit("bank");
-        assert_eq!(asks(&effects), [Ask::Submitted]);
+        let (bank, _) = shell.submit("bank");
+        assert!(pending(&bank, OnlineKind::Lone));
         assert!(!bank.can_back);
         let (river, _) = shell.submit("river");
         assert!(river.can_back && !river.can_forward);
         assert_eq!(river.field.revision, 0);
 
         shell.dispatch(Event::Back);
-        let (back, effects) = shell.next();
+        let (back, _) = shell.next();
         assert_eq!(back.field.text, "bank");
         assert_eq!(back.field.revision, 1);
         assert_eq!(back.sentence, "bank");
         assert_eq!(back.shown.lookup(), Some(&Lookup::Pending));
         assert!(!back.can_back && back.can_forward);
-        assert_eq!(asks(&effects), [Ask::Submitted]);
+        assert!(pending(&back, OnlineKind::Lone));
         assert!(back.text_number > river.text_number);
         let (back, _) = shell.settled();
         assert_eq!(article_definition(&back), DEFINITION);
 
         shell.dispatch(Event::Forward);
-        let (forward, effects) = shell.next();
+        let (forward, _) = shell.next();
         assert_eq!(forward.field.text, "river");
         assert_eq!(forward.field.revision, 2);
         assert!(forward.can_back && !forward.can_forward);
-        assert_eq!(asks(&effects), [Ask::Submitted]);
+        assert!(pending(&forward, OnlineKind::Lone));
         let (forward, _) = shell.settled();
         assert_eq!(article_definition(&forward), RIVER);
 
@@ -1334,14 +1527,17 @@ mod tests {
     fn a_synonym_is_set_recorded_looked_up_and_submitted() {
         let data = TestData::with_bank();
         let mut shell = FakeShell::start(Some(data.0.clone()));
-        shell.submit("bank");
-        shell.dispatch(Event::SynonymChosen("shore".to_owned()));
-        let (view, effects) = shell.next();
+        let (bank, _) = shell.submit("bank");
+        shell.dispatch(Event::SynonymChosen {
+            article: bank.article_id(),
+            word: "shore".to_owned(),
+        });
+        let (view, _) = shell.next();
         assert_eq!(view.field.text, "shore");
         assert_eq!(view.field.revision, 1);
         assert_eq!(view.sentence, "shore");
         assert_eq!(view.shown.lookup(), Some(&Lookup::Pending));
-        assert_eq!(asks(&effects), [Ask::Submitted]);
+        assert!(pending(&view, OnlineKind::Lone));
         assert!(view.can_back && !view.can_forward, "recorded");
         let (view, _) = shell.settled();
         assert_eq!(article_definition(&view), DEFINITION);
@@ -1364,12 +1560,12 @@ mod tests {
             replaced: true,
             source: Some(Source::Clipboard),
         });
-        let (view, effects) = shell.next();
+        let (view, _) = shell.next();
         assert_eq!(view.field.text, "the bank");
         assert_eq!(view.field.revision, 0, "the shell set its own text");
         assert_eq!(view.source, Source::Clipboard);
         assert_eq!(view.reading_source, None);
-        assert_eq!(asks(&effects), [Ask::Replaced]);
+        assert!(pending(&view, OnlineKind::Sentence));
         // Recorded: Back from a typed text goes to it.
         shell.edit("river");
         let (typed, _) = shell.settled();
@@ -1388,9 +1584,12 @@ mod tests {
         let (english, _) = shell.settled();
         assert_eq!(english.answered, Some(Language::Es), "found elsewhere");
         shell.dispatch(Event::SetReading(Language::Es));
-        let (view, effects) = shell.next();
+        let (view, _) = shell.next();
         assert!(view.looking_up);
-        assert_eq!(asks(&effects), [Ask::Again]);
+        assert!(
+            view.online.is_empty(),
+            "typing did not submit the lone word"
+        );
         let (view, _) = shell.settled();
         assert!(matches!(
             view.shown.lookup(),
@@ -1401,13 +1600,10 @@ mod tests {
         ));
         assert_eq!(view.field, english.field);
 
-        shell.dispatch(Event::SetMyLanguage {
-            language: Language::En,
-            reading: Language::Es,
-        });
-        let (view, effects) = shell.next();
+        shell.dispatch(Event::SetMyLanguage(Language::En));
+        let (view, _) = shell.next();
         assert_eq!(view.shown.translating().my, Language::En);
-        assert_eq!(asks(&effects), [Ask::Again]);
+        assert!(view.online.is_empty());
         shell.settled();
     }
 }
