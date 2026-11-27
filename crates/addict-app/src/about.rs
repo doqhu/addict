@@ -5,10 +5,10 @@
 //! version, its license and its repository; and Credits, with every row of
 //! the table of sources, the dictionary indexes first and then OCR, each with
 //! its credit line and license. The credits are read from
-//! `addict_dictionary::sources` and never typed here. A credit is plain text,
-//! never markup, and an address in it stays text: a label makes no links of
-//! its own. The texts are plain functions, so that they can be tested without
-//! a display.
+//! `addict_dictionary::sources` and never typed here. A credit is plain text
+//! in the table, and [`credit_markup`] wraps any `http://` or `https://`
+//! address in it as a link. The texts are plain functions, so that they can
+//! be tested without a display.
 
 use addict_core::APP_ID;
 use addict_dictionary::sources::{self, Row};
@@ -160,10 +160,55 @@ fn fact(name: &str, value: &gtk::Widget) -> gtk::Box {
     row(&[line.upcast_ref()])
 }
 
+/// Turns plain credit text into Pango markup with clickable links for any
+/// `http://` or `https://` addresses.
+pub fn credit_markup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = find_url_start(rest) {
+        let (before, after_start) = rest.split_at(pos);
+        out.push_str(&glib::markup_escape_text(before));
+        let end = after_start
+            .find(char::is_whitespace)
+            .unwrap_or(after_start.len());
+        let candidate = &after_start[..end];
+        let url = candidate.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '}']);
+        let scheme_len = if url.starts_with("https://") {
+            "https://".len()
+        } else {
+            "http://".len()
+        };
+        if url.len() > scheme_len {
+            let escaped = glib::markup_escape_text(url);
+            out.push_str("<a href=\"");
+            out.push_str(&escaped);
+            out.push_str("\">");
+            out.push_str(&escaped);
+            out.push_str("</a>");
+            out.push_str(&glib::markup_escape_text(&candidate[url.len()..]));
+        } else {
+            out.push_str(&glib::markup_escape_text(candidate));
+        }
+        rest = &after_start[end..];
+    }
+    out.push_str(&glib::markup_escape_text(rest));
+    out
+}
+
+fn find_url_start(text: &str) -> Option<usize> {
+    match (text.find("https://"), text.find("http://")) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 /// The row of one source: its index, its credit line, its license.
 fn credit(source: &Row) -> gtk::Box {
     let name = label(source.index, &["credit-name"]);
-    let line = label(source.credit, &[]);
+    let line = label("", &["credit-line"]);
+    line.set_markup(&credit_markup(source.credit));
     let license = label(source.license, &["hint"]);
     row(&[name.upcast_ref(), line.upcast_ref(), license.upcast_ref()])
 }
@@ -195,7 +240,7 @@ fn credits_page() -> gtk::ScrolledWindow {
 mod tests {
     use gtk::{glib, prelude::*};
 
-    use super::{About, license_text, repository_text, version_text};
+    use super::{About, credit_markup, license_text, repository_text, version_text};
     use crate::style;
 
     #[test]
@@ -212,6 +257,37 @@ mod tests {
     #[test]
     fn the_repository_is_shown_without_its_scheme() {
         assert_eq!(repository_text(), "github.com/doqhu/addict");
+    }
+
+    #[test]
+    fn credit_markup_escapes_plain_text_and_links_urls() {
+        assert_eq!(credit_markup("A & B <test>"), "A &amp; B &lt;test&gt;");
+        assert_eq!(
+            credit_markup(
+                "Wiktionary contributors (https://www.wiktionary.org/); extracted by kaikki.org"
+            ),
+            "Wiktionary contributors (<a href=\"https://www.wiktionary.org/\">https://www.wiktionary.org/</a>); extracted by kaikki.org"
+        );
+        assert_eq!(
+            credit_markup("DBnary, Gilles Sérasset; https://kaiko.getalp.org/about-dbnary/"),
+            "DBnary, Gilles Sérasset; <a href=\"https://kaiko.getalp.org/about-dbnary/\">https://kaiko.getalp.org/about-dbnary/</a>"
+        );
+    }
+
+    #[test]
+    fn every_source_credit_with_a_url_gets_a_link() {
+        for (_, rows) in addict_dictionary::sources::SECTIONS {
+            for row in rows {
+                let markup = credit_markup(row.credit);
+                if row.credit.contains("https://") || row.credit.contains("http://") {
+                    assert!(
+                        markup.contains("<a href=\"http"),
+                        "expected link in {}: {markup}",
+                        row.index
+                    );
+                }
+            }
+        }
     }
 
     /// Draws the About window on its Credits page into the PNG file

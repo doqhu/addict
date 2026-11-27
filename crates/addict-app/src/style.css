@@ -798,6 +798,17 @@ window.addict label.credit-name {
   font-weight: 600;
 }
 
+window.addict label.credit-line > link,
+window.addict label.credit-line > link:link,
+window.addict label.credit-line > link:visited {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+window.addict label.credit-line > link:hover {
+  text-decoration: underline;
+}
+
 /* The repository: a link in the accent, not the theme's blue. */
 window.addict button.repository,
 window.addict button.repository:link,
@@ -901,11 +912,29 @@ window.addict popover.main-menu modelbutton {
   min-height: 36px;
   padding: 0 10px;
   border-radius: 10px;
+  background: transparent;
+  color: var(--fg);
+  box-shadow: none;
+  outline: none;
+}
+
+window.addict popover.main-menu modelbutton:focus,
+window.addict popover.main-menu modelbutton:selected {
+  background: transparent;
+  color: var(--fg);
+  box-shadow: none;
+  outline: none;
 }
 
 window.addict popover.main-menu modelbutton:hover,
+window.addict popover.main-menu modelbutton:active,
 window.addict popover.main-menu modelbutton:focus-visible {
   background: var(--chip);
+  color: var(--fg);
+}
+
+window.addict popover.main-menu modelbutton label {
+  color: inherit;
 }
 
 /* Wide enough that a row's shortcut stands apart from its label. */
