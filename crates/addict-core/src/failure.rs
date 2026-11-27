@@ -4,6 +4,7 @@
 pub mod capture;
 pub mod login_item;
 pub mod recognize;
+pub mod selection;
 
 /// A result that ended in the shell or was finished by the controller.
 #[derive(Debug, Clone, PartialEq, Eq)]

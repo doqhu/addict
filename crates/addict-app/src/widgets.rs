@@ -2117,6 +2117,16 @@ impl View {
         self.source_failure.row.set_visible(true);
     }
 
+    /// The source line while it is shown.
+    #[cfg(test)]
+    pub fn source_failure_text(&self) -> Option<String> {
+        let failure = &self.source_failure;
+        failure
+            .row
+            .is_visible()
+            .then(|| failure.line.text().to_string())
+    }
+
     /// Hides the source line.
     pub fn clear_source_failure(&self) {
         self.source_failure.row.set_visible(false);

@@ -59,29 +59,32 @@
 //! waiting state with the source "selection or clipboard", and nothing
 //! waits for the read before the window is presented. Wayland gives a
 //! client the clipboard only with its keyboard focus, so the read starts
-//! once the window is active, at once when it is already. The primary
-//! selection of the window's display, the text selected without a copy, is
-//! read first, and GTK's clipboard only when the selection gives no line.
-//! Waiting for the activity and both reads together end
-//! [`CLIPBOARD_LIMIT`] after the press, which cancels the read. A text of
-//! either as one line, of at most [`CLIPBOARD_MAX_CHARS`] characters,
-//! replaces the field as a new text with the source clipboard, without a
-//! word chosen unless it is one word, and nothing is asked online. A line
-//! that is exactly a command the window offered to copy, such as the
-//! install of Tesseract, is the user's Copy and counts as no line. When
-//! neither gives a line (empty, blank, not text, too long, a command,
-//! unreadable or late), why is written to stderr, the waiting ends, the
-//! empty state stays with its focused field, and the source line says that
-//! nothing is selected or copied, with the manual path; when one of them was
-//! too long, the line says that instead, the selection's before the
-//! clipboard's. The capture shares the line: they never run together. The
-//! line goes, like the capture's, when the field is edited, Capture or the
-//! shortcut is pressed.
+//! once the window is active, at once when it is already. The read is the
+//! controller's `ReadSelection` effect, issued after its `ShowPanel` (Linux
+//! shows first, `read_before_show` false; the window is already up, so
+//! `ShowPanel` changes nothing here). The shell reads the primary selection
+//! of the window's display, the text selected without a copy, and GTK's
+//! clipboard, raw, and sends both back in one result; a failed GTK read is
+//! written to stderr, never the text. The controller applies 0.5.0's rule
+//! and owns the deadline: [`addict_controller::deadlines::CLIPBOARD_LIMIT`]
+//! after the press it cancels the read. A text of either as one line, of
+//! at most `CLIPBOARD_MAX_CHARS` characters, replaces the field as a new
+//! text with the source clipboard, the selection's first, without a word
+//! chosen unless it is one word, and nothing is asked online. A line that
+//! is exactly a command the window offered to copy, such as the install of
+//! Tesseract, is the user's Copy and counts as no line. When neither gives
+//! a line, the waiting ends, the empty state stays with its focused field,
+//! and the source line says that nothing is selected or copied, with the
+//! manual path; when one of them was too long, the line says that instead,
+//! the selection's before the clipboard's. The capture shares the line:
+//! they never run together. The line goes, like the capture's, when the
+//! field is edited, Capture or the shortcut is pressed.
 //!
-//! Each read has a number; a new press, an edit of the field and a capture
-//! give up the read that runs, and whatever it reports later is ignored and
-//! shows no line. Retry, a launch, Show of the tray and a capture read no
-//! clipboard.
+//! Each read has the controller's request id; a new press, an edit of the
+//! field, Back, Forward and a capture give up the read that runs (the
+//! controller's `Cancel` stops the GTK reads), and whatever it reports
+//! later is ignored and shows no line. Retry, a launch, Show of the tray and
+//! a capture read no clipboard.
 //!
 //! The user reads in one language, chosen with the switch beside the
 //! field, whose three buttons are the reading languages of my language
@@ -156,15 +159,15 @@ use addict_controller::{
     self as controller, ArticleId, Controller, Dispatcher, Effect, Platform, RequestId, StartFacts,
     ViewState,
     deadlines::{
-        AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CACHE_LIMIT, CLIPBOARD_LIMIT,
-        CREDIT_LIMIT, DOWNLOAD_LIMIT, FIRST_RUN_FILE_LIMIT, KEY_SAVE_LIMIT, LANGUAGE_FILE_LIMIT,
-        LOOKUP_LIMIT, MANIFEST_LIMIT, STARTUP_LIMIT, STARTUP_READ_LIMIT,
+        AUDIO_LIMIT, BIND_ANSWER_LIMIT, BIND_START_LIMIT, CACHE_LIMIT, CREDIT_LIMIT,
+        DOWNLOAD_LIMIT, FIRST_RUN_FILE_LIMIT, KEY_SAVE_LIMIT, LANGUAGE_FILE_LIMIT, LOOKUP_LIMIT,
+        MANIFEST_LIMIT, STARTUP_LIMIT, STARTUP_READ_LIMIT,
     },
 };
 use addict_core::{
     APP_ID,
     dirs::Dirs,
-    failure::{Ended, capture::CaptureFailure, recognize::OcrFailure},
+    failure::{Ended, capture::CaptureFailure, recognize::OcrFailure, selection::SelectionFailure},
     input::{Source, window_state},
     translation::{English, Source as Language, reading_languages},
 };
@@ -193,13 +196,11 @@ use crate::{
     download::{self, Downloader},
     english, entries, evidence,
     first_run::{self, Offer},
-    language,
-    manual::{self, CLIPBOARD_MAX_CHARS, NoLine},
-    my_language,
+    language, manual, my_language,
     recording::Recording,
     settings::{self, CacheState, KeyState, Settings, StartupEnd, StartupShown},
     style,
-    view::{Binding, Choice, Held, NOTHING_SELECTED_TEXT, command_in, too_long_text},
+    view::{Binding, Choice, Held},
     widgets::{FieldEdit, KEY_LOCATION_HINT, PlaybackMedia, View},
 };
 
@@ -341,9 +342,9 @@ enum Event {
     ToggleStartup(bool),
     /// The change of the startup state on the runner ended.
     StartupChanged(Outcome<StartupEnd>),
-    /// The read of the clipboard with this number ended: the line of its
-    /// text, or why there is none.
-    Clipboard(u64, Result<String, Missed>),
+    /// The selection read with this id ended: the raw texts of the primary
+    /// selection and the clipboard. The controller applies its rule.
+    SelectionRead(RequestId, controller::SelectionText),
 }
 
 /// A queued controller render batch.
@@ -714,54 +715,21 @@ enum CaptureEffect {
     Recognition(Job),
 }
 
-/// Where the read of the clipboard of a [`Session`] stands; at first none
-/// runs.
+/// Where the read of the selection and the clipboard of a [`Session`] stands;
+/// at first none runs.
 #[derive(Default)]
 struct Copying {
-    /// The read, from the press to its end.
+    /// The read, from its effect to its one result.
     read: Option<ClipboardRead>,
-    /// The number of the last started read. An event that carries another
-    /// number, or comes when none runs, is from a read that was given up.
-    number: u64,
 }
 
-/// One read of the primary selection, then of the clipboard.
+/// One read of the primary selection and the clipboard.
 struct ClipboardRead {
-    /// Cancels the read of the clipboard; `None` while the window is not yet
-    /// active and nothing is read.
+    /// The controller's request; its result event carries it back.
+    id: RequestId,
+    /// Cancels both reads; `None` while the window is not yet active and
+    /// nothing is read.
     cancellable: Option<gio::Cancellable>,
-    /// Set when the selection was too long, with its length, so that a read
-    /// of the clipboard that runs out of time still says so.
-    selection: Rc<Cell<Option<(Held, usize)>>>,
-}
-
-impl Copying {
-    /// A new read starts, and the one before ends; the number of the new
-    /// one is given back.
-    fn begin(&mut self) -> u64 {
-        self.end();
-        self.number += 1;
-        self.read = Some(ClipboardRead {
-            cancellable: None,
-            selection: Rc::default(),
-        });
-        self.number
-    }
-
-    /// Whether the read with `number` is the one that runs.
-    fn is_running(&self, number: u64) -> bool {
-        self.read.is_some() && number == self.number
-    }
-
-    /// The read ends: one that reads is cancelled. The read that ran, if one
-    /// did.
-    fn end(&mut self) -> Option<ClipboardRead> {
-        let read = self.read.take()?;
-        if let Some(cancellable) = &read.cancellable {
-            cancellable.cancel();
-        }
-        Some(read)
-    }
 }
 
 impl Session {
@@ -907,7 +875,7 @@ impl Session {
                 }
             }
             Event::Active => self.window_active(),
-            Event::Clipboard(number, line) => self.copied(number, line),
+            Event::SelectionRead(id, text) => self.selection_read(id, text),
         }
     }
 
@@ -1423,8 +1391,8 @@ impl Session {
     }
 
     fn capture(&mut self, activation_token: Option<&str>) {
-        // The Read adapter can still have a callback queued while the
-        // controller handles the Capture press. Retire that local read now.
+        // The window stops waiting for a read; the controller cancels the
+        // read itself, before any result still queued in the Read adapter.
         self.give_up_read();
         if self.controller.is_none() {
             let failure = Ended::Unfinished;
@@ -1615,20 +1583,22 @@ impl Session {
         }
     }
 
-    /// Gives up the read of the selection and the clipboard: it is
-    /// cancelled, and whatever it reports later is ignored. Whether a read
-    /// ran.
+    /// The window stops waiting for the read of the selection and the
+    /// clipboard. The controller gives the read up on the actions that
+    /// replace it, and its `Cancel` effect stops the GTK reads; this only
+    /// ends what the window shows now. Whether a read ran.
     fn give_up_read(&mut self) -> bool {
-        let copied = self.copying.end().is_some();
+        let read = self.copying.read.is_some();
         if self.view_state.reading_source == Some(Source::Clipboard) {
             self.set_reading_source(None);
         }
-        copied
+        read
     }
 
     /// Clears the field for the read that starts now: a new empty text, so
     /// the lookup and the online requests of the old one are given up, and
-    /// the source line goes.
+    /// the source line goes. The window waits with the source clipboard
+    /// until the controller's snapshot comes.
     fn clear_for_read(&mut self) {
         self.view.clear_source_failure();
         // The controller clears the field (`field.revision` rises); the
@@ -1642,6 +1612,7 @@ impl Session {
         self.sent_text.clear();
         let view = &mut self.view_state;
         view.source_failure = None;
+        view.reading_source = Some(Source::Clipboard);
         view.sentence.clear();
         view.words.clear();
         view.chosen = None;
@@ -1658,41 +1629,38 @@ impl Session {
         self.render_online();
     }
 
-    /// Starts the read of the primary selection and the clipboard as the
-    /// next number: the window waits with the source clipboard, the read
-    /// starts once the window is active, and after [`CLIPBOARD_LIMIT`] it
-    /// ends without text.
-    fn start_copy(&mut self) {
-        let number = self.copying.begin();
-        self.set_reading_source(Some(Source::Clipboard));
-        self.render_window();
-        let late = self.sender.clone();
-        glib::timeout_add_local_once(CLIPBOARD_LIMIT, move || {
-            let _ = late.unbounded_send(Event::Clipboard(
-                number,
-                Err(Missed::because(format!(
-                    "no answer within {CLIPBOARD_LIMIT:?}"
-                ))),
-            ));
+    /// The read of the primary selection and the clipboard starts for `id`:
+    /// the window waits with the source clipboard, and the GTK reads start
+    /// once the window is active, at once when it is. A press that a newer
+    /// one has replaced is given up.
+    fn read_selection(&mut self, id: RequestId, read_sequence: u64) {
+        if read_sequence != self.read_sequence {
+            self.send_selection(id, Err(Ended::Shell(SelectionFailure::Cancelled)));
+            return;
+        }
+        self.copying.read = Some(ClipboardRead {
+            id,
+            cancellable: None,
         });
+        self.render_window();
         if self.window.is_active() {
             self.read_clipboard();
         }
     }
 
-    /// The window became active: the read of the clipboard that waits for
-    /// it starts.
+    /// The window became active: the read of the selection and the clipboard
+    /// that waits for it starts.
     fn window_active(&mut self) {
         if self.window.is_active() {
             self.read_clipboard();
         }
     }
 
-    /// Reads the primary selection of the window's display for the read that
-    /// runs and still waits, and the clipboard when the selection gives no
-    /// line; nothing else does. Both reads share its cancellable.
+    /// Reads both the primary selection of the window's display and the
+    /// clipboard for the read that runs and still waits, raw, and sends them
+    /// in one result. A source with no text or a failed read gives `None`;
+    /// the error goes to stderr. Both reads share its cancellable.
     fn read_clipboard(&mut self) {
-        let number = self.copying.number;
         let Some(read) = self.copying.read.as_mut() else {
             return;
         };
@@ -1701,67 +1669,87 @@ impl Session {
         }
         let cancellable = gio::Cancellable::new();
         read.cancellable = Some(cancellable.clone());
-        let too_long = read.selection.clone();
+        let id = read.id;
         let sender = self.sender.clone();
         let display = WidgetExt::display(&self.window);
+        let selection_clipboard = display.primary_clipboard();
         let clipboard = display.clipboard();
-        read_line(
-            &display.primary_clipboard(),
+        read_text(
+            &selection_clipboard,
             Held::Selection,
             &cancellable.clone(),
-            move |primary| {
-                let Err(selection) = primary else {
-                    let _ = sender.unbounded_send(Event::Clipboard(number, primary));
-                    return;
-                };
-                too_long.set(selection.too_long);
-                read_line(&clipboard, Held::Clipboard, &cancellable, move |copied| {
-                    let line = copied.map_err(|copied| Missed {
-                        reason: format!(
-                            "selection: {}; clipboard: {}",
-                            selection.reason, copied.reason
-                        ),
-                        too_long: copied.too_long,
-                    });
-                    let _ = sender.unbounded_send(Event::Clipboard(number, line));
-                });
+            move |selection| {
+                read_text(
+                    &clipboard,
+                    Held::Clipboard,
+                    &cancellable,
+                    move |clipboard| {
+                        let _ = sender.unbounded_send(Event::SelectionRead(
+                            id,
+                            controller::SelectionText {
+                                selection,
+                                clipboard,
+                            },
+                        ));
+                    },
+                );
             },
         );
     }
 
-    /// The read of the primary selection and the clipboard with `number`
-    /// ended; one that was given up shows nothing. A `line` replaces the
-    /// field as a new text with the source clipboard; with Translate
-    /// sentence at once on, a text of more words is asked for online as a
-    /// whole sentence, and nothing else is asked. Without one, the reason is logged, the waiting ends and the
-    /// source line says that a text was too long, when one was, or else that
-    /// nothing is selected or copied.
-    fn copied(&mut self, number: u64, line: Result<String, Missed>) {
-        if !self.copying.is_running(number) {
+    /// The raw texts of the read with `id` came back; one given up since is
+    /// ignored. The controller applies the line rule, the length limit and
+    /// the source line.
+    fn selection_read(&mut self, id: RequestId, text: controller::SelectionText) {
+        if !self.copying.read.as_ref().is_some_and(|read| read.id == id) {
             return;
         }
-        let Some(read) = self.copying.end() else {
-            return;
+        self.copying.read = None;
+        self.send_selection(id, Ok(text));
+    }
+
+    /// Gives up a read whose `Cancel` came: both GTK reads are cancelled and
+    /// the one cancelled result is sent. Whether `id` was the read.
+    fn cancel_read_effect(&mut self, id: RequestId) -> bool {
+        let Some(read) = self.copying.read.take() else {
+            return false;
         };
-        match line {
-            Ok(line) => {
-                // With Translate sentence at once on, the controller's
-                // snapshot asks for the whole sentence ([`Ask::Replaced`]).
-                self.replace_field(line, Source::Clipboard);
-            }
-            Err(missed) => {
-                eprintln!(
-                    "addict: no text from the selection or the clipboard: {}",
-                    missed.reason
-                );
-                if self.view_state.reading_source == Some(Source::Clipboard) {
-                    self.set_reading_source(None);
-                }
-                self.render_window();
-                let line = missed_line(read.selection.get(), missed.too_long);
-                self.view.render_source_failure(&line);
-            }
+        if read.id != id {
+            self.copying.read = Some(read);
+            return false;
         }
+        if let Some(cancellable) = &read.cancellable {
+            cancellable.cancel();
+        }
+        self.send_selection(id, Err(Ended::Shell(SelectionFailure::Cancelled)));
+        true
+    }
+
+    /// A controller effect is given up: the read when it is that request,
+    /// else the capture.
+    fn cancel_effect(&mut self, id: RequestId) {
+        if !self.cancel_read_effect(id) {
+            self.cancel_capture_effect(id);
+        }
+    }
+
+    /// Shows the window for the press when it is not shown for it yet: Linux
+    /// presents at the press, so this does nothing there, and the order of
+    /// a read-before-show platform is the controller's to decide.
+    fn show_panel(&mut self, read_sequence: u64) {
+        if read_sequence != self.read_sequence || self.window.is_visible() {
+            return;
+        }
+        self.reveal();
+    }
+
+    /// Sends the one result of the read with `id` to the controller.
+    fn send_selection(
+        &mut self,
+        id: RequestId,
+        result: Result<controller::SelectionText, Ended<SelectionFailure>>,
+    ) {
+        self.dispatch_controller(controller::Event::SelectionRead { id, result });
     }
 
     /// Shows the window with the state as it is now, the field focused, with
@@ -1824,14 +1812,6 @@ impl Session {
     fn dispatch_setting_field(&mut self, event: controller::Event) {
         self.edits_at_set = self.edits_sent;
         self.dispatch_controller(event);
-    }
-
-    /// A text that did not come from the field, recognized, selected or
-    /// copied, replaced the manual input: the field shows it, the
-    /// controller records it, and what follows a new text follows.
-    fn replace_field(&mut self, text: String, source: Source) {
-        self.view.set_field_text(&text);
-        self.send_edit(text, true, Some(source));
     }
 
     /// Back or Alt+Left: the text before in the history is put into the
@@ -1966,7 +1946,11 @@ impl Session {
             } => {
                 self.recognize_capture(id, image, language, read_sequence);
             }
-            Effect::Cancel(id) => self.cancel_capture_effect(id),
+            Effect::Cancel(id) => self.cancel_effect(id),
+            Effect::ReadSelection { id, read_sequence } => {
+                self.read_selection(id, read_sequence);
+            }
+            Effect::ShowPanel { read_sequence } => self.show_panel(read_sequence),
             Effect::PresentCapture {
                 read_sequence,
                 retry,
@@ -2324,7 +2308,9 @@ impl Session {
     /// the field is cleared, the read of the selection and the clipboard
     /// starts and the window is shown at once in the waiting state with the
     /// source clipboard; the window does not wait for the read, which ends
-    /// at most [`CLIPBOARD_LIMIT`] after the press.
+    /// at most `CLIPBOARD_LIMIT` after the press. The controller issues
+    /// the read and its own `ShowPanel`, which changes nothing once the
+    /// window is up.
     fn activated(
         &mut self,
         activation_token: Option<&str>,
@@ -2333,8 +2319,13 @@ impl Session {
     ) {
         self.give_up_press();
         self.clear_for_read();
-        // Started, not awaited: the window is presented below.
-        self.start_copy();
+        if self.controller.is_none() {
+            // No controller issues the read or its deadline: the waiting
+            // ends at once with the line of an unfinished read.
+            self.set_reading_source(None);
+            self.view
+                .render_source_failure(&crate::view::selection_failure_text(&Ended::Unfinished));
+        }
         // Before `present()`: the first frame has the labels.
         self.render_window();
         self.focus();
@@ -2646,71 +2637,30 @@ impl Session {
     }
 }
 
-/// Why the selection and the clipboard gave no line: the reason for stderr,
-/// and where a text too long to take was held, with its length.
-#[derive(Debug)]
-struct Missed {
-    reason: String,
-    too_long: Option<(Held, usize)>,
-}
-
-impl Missed {
-    /// Missed for `reason`, with no text too long.
-    fn because(reason: String) -> Self {
-        Self {
-            reason,
-            too_long: None,
-        }
-    }
-}
-
-/// Whether `line` is exactly a command the window offers to copy: such a
-/// line is the user's Copy, not a text to look up.
-fn is_offered_command(line: &str) -> bool {
-    command_in(line).as_deref() == Some(line)
-}
-
-/// The source line when neither the selection nor the clipboard gave a
-/// line: that the selection was too long, when it was, else that the
-/// clipboard was, else that nothing is selected or copied.
-fn missed_line(selection: Option<(Held, usize)>, clipboard: Option<(Held, usize)>) -> String {
-    selection
-        .or(clipboard)
-        .map_or(NOTHING_SELECTED_TEXT.to_owned(), |(held, chars)| {
-            too_long_text(held, chars, CLIPBOARD_MAX_CHARS)
-        })
-}
-
-/// Reads the text of `clipboard`, which holds what is `held`, once and
-/// gives `done` its line, of at most [`CLIPBOARD_MAX_CHARS`] characters, or
-/// why there is none.
-fn read_line(
+/// Reads the raw text of `clipboard` once, for `held`, and gives `done` its
+/// text when it has one: a blank text and a failed read give `None`, and
+/// the error goes to stderr. The controller applies the line rule and the
+/// length limit. Nothing of the text is logged.
+fn read_text(
     clipboard: &gdk::Clipboard,
     held: Held,
     cancellable: &gio::Cancellable,
-    done: impl FnOnce(Result<String, Missed>) + 'static,
+    done: impl FnOnce(Option<String>) + 'static,
 ) {
     clipboard.read_text_async(Some(cancellable), move |read| {
         done(match read {
-            Ok(Some(text)) => manual::clipboard_line(&text)
-                .map_err(|no_line| match no_line {
-                    NoLine::Blank => Missed::because("blank".to_owned()),
-                    NoLine::TooLong(chars) => Missed {
-                        reason: format!("{chars} characters, over {CLIPBOARD_MAX_CHARS}"),
-                        too_long: Some((held, chars)),
-                    },
-                })
-                .and_then(|line| {
-                    if is_offered_command(&line) {
-                        Err(Missed::because(
-                            "a command the window offered to copy".to_owned(),
-                        ))
-                    } else {
-                        Ok(line)
-                    }
-                }),
-            Ok(None) => Err(Missed::because("no text".to_owned())),
-            Err(e) => Err(Missed::because(e.to_string())),
+            Ok(Some(text)) if !text.trim().is_empty() => Some(text.to_string()),
+            Ok(Some(_) | None) => None,
+            // A read given up says nothing.
+            Err(e) if e.matches(gio::IOErrorEnum::Cancelled) => None,
+            Err(e) => {
+                let what = match held {
+                    Held::Selection => "selection",
+                    Held::Clipboard => "clipboard",
+                };
+                eprintln!("addict: no text from the {what}: {e}");
+                None
+            }
         });
     });
 }
@@ -3019,6 +2969,8 @@ fn controller_platform() -> Platform {
     Platform {
         name: "Linux".to_owned(),
         key_location_hint: KEY_LOCATION_HINT,
+        // Wayland gives the clipboard only to the focused window: show first.
+        read_before_show: false,
     }
 }
 
@@ -3708,13 +3660,9 @@ mod tests {
     use gtk::{gio, prelude::*};
 
     use super::{
-        CLIPBOARD_LIMIT, CLIPBOARD_MAX_CHARS, Copying, Event, FailedEndFocus, LOOKUP_LIMIT,
-        LaunchMode, WindowActions, WindowEvent, connect_launches, connect_menu_actions,
-        connect_settings_action, dispatch_window, failed_end_focus, is_offered_command,
-        missed_line,
-    };
-    use crate::view::{
-        Held, NOTHING_SELECTED_TEXT, install_language, install_tesseract, too_long_text,
+        Event, FailedEndFocus, LOOKUP_LIMIT, LaunchMode, WindowActions, WindowEvent,
+        connect_launches, connect_menu_actions, connect_settings_action, dispatch_window,
+        failed_end_focus,
     };
     use addict_core::{dirs::Dirs, translation::Source as Language};
 
@@ -4729,8 +4677,8 @@ mod tests {
         let _controller = attach_translator(&mut session, canned.clone());
         let line = "I sat on the bank of the river.";
 
-        let number = session.copying.begin();
-        session.handle(Event::Clipboard(number, Ok(line.to_owned())));
+        let id = start_read(&mut session, &mut events);
+        session.handle(selected(id, line));
         pump_until(&mut session, &mut events, |session| {
             session.view_state.sentence == line
                 && session
@@ -4767,16 +4715,36 @@ mod tests {
         // Off affects the next read. A late startup read cannot undo it.
         session.handle(Event::AtOnceChosen(false));
         session.handle(Event::AtOnceRead(true));
-        let number = session.copying.begin();
-        session.handle(Event::Clipboard(
-            number,
-            Ok("The bank was closed.".to_owned()),
-        ));
+        let id = start_read(&mut session, &mut events);
+        session.handle(selected(id, "The bank was closed."));
         pump_until(&mut session, &mut events, |session| {
             session.view_state.sentence == "The bank was closed."
         });
         assert!(session.view_state.online.is_empty());
         assert_eq!(canned.asked().len(), 2);
+    }
+
+    /// Presses Read as the shortcut does, up to the controller's read effect
+    /// in the shell; gives the read's id. The window is not active, so
+    /// nothing is read from GTK.
+    fn start_read(
+        session: &mut super::Session,
+        events: &mut futures_channel::mpsc::UnboundedReceiver<Event>,
+    ) -> addict_controller::RequestId {
+        session.clear_for_read();
+        pump_until(session, events, |session| session.copying.read.is_some());
+        session.copying.read.as_ref().expect("a read").id
+    }
+
+    /// The raw texts of a read whose selection is `line`.
+    fn selected(id: addict_controller::RequestId, line: &str) -> Event {
+        Event::SelectionRead(
+            id,
+            addict_controller::SelectionText {
+                selection: Some(line.to_owned()),
+                clipboard: None,
+            },
+        )
     }
 
     /// Puts `texts` into the field one after another as the user would
@@ -4801,10 +4769,11 @@ mod tests {
         });
     }
 
-    /// A line read after the field was cleared for the read, but handled
-    /// before the controller's snapshot of the clear, stays in the field,
-    /// and its words can be clicked: the older snapshot never overwrites
-    /// it (AD-21). Run alone: GTK starts once per process, on one thread.
+    /// A line read after the field was cleared for the read reaches the
+    /// field through the controller's snapshot, and its words can be
+    /// clicked: the snapshot of the clear never overwrites it (AD-21). The
+    /// read starts with that snapshot's effects, so the line cannot come
+    /// before it. Run alone: GTK starts once per process, on one thread.
     #[test]
     #[ignore = "needs a display; run alone"]
     fn a_read_line_handled_before_the_cleared_snapshot_keeps_the_line() {
@@ -4815,10 +4784,8 @@ mod tests {
         session.dispatch_controller(addict_controller::Event::SetAtOnce(false));
         let line = "I sat on the bank of the river.";
 
-        session.clear_for_read();
-        let number = session.copying.begin();
-        // Before any snapshot of the clear is handled.
-        session.handle(Event::Clipboard(number, Ok(line.to_owned())));
+        let id = start_read(&mut session, &mut events);
+        session.handle(selected(id, line));
         pump_until(&mut session, &mut events, |session| {
             session.view_state.sentence == line && !session.view_state.looking_up
         });
@@ -4994,6 +4961,26 @@ mod tests {
         }
     }
 
+    /// Without a controller, a Read press does not wait forever: the window
+    /// shows at once with the field empty and says nothing is selected or
+    /// copied. Run alone.
+    #[test]
+    #[ignore = "needs a display; run alone"]
+    fn read_without_a_controller_ends_the_wait_and_says_nothing_is_selected() {
+        gtk::init().expect("a display");
+        let (mut session, _, _work) =
+            test_session("io.github.doqhu.Addict.ReadFallbackTest", Dirs::default());
+        assert!(session.controller.is_none());
+        session.activated(None, 0, None);
+        assert!(session.window.is_visible());
+        assert_eq!(session.view_state.reading_source, None);
+        assert_eq!(
+            session.view.source_failure_text().as_deref(),
+            Some(crate::view::NOTHING_SELECTED_TEXT)
+        );
+        session.window.destroy();
+    }
+
     #[test]
     #[ignore = "needs a display; run alone"]
     fn capture_without_a_controller_shows_retry_and_records_unfinished() {
@@ -5043,16 +5030,16 @@ mod tests {
         let _controller = attach_controller(&mut session);
         submit_texts(&mut session, &mut events, &["river", "bank"]);
 
-        let number = session.copying.begin();
+        let id = start_read(&mut session, &mut events);
         session.back();
-        assert!(!session.copying.is_running(number), "the read is given up");
         pump_until(&mut session, &mut events, |session| {
-            session.view_state.sentence == "river" && !session.view_state.looking_up
+            session.view_state.sentence == "river"
+                && !session.view_state.looking_up
+                && session.copying.read.is_none()
         });
-        session.handle(Event::Clipboard(
-            number,
-            Ok("The bank was closed.".to_owned()),
-        ));
+        // The controller's `Cancel` ended the read: what it reports later
+        // is ignored.
+        session.handle(selected(id, "The bank was closed."));
         assert_eq!(session.view.field_text(), "river");
         assert_eq!(session.sent_text, "river");
     }
@@ -6421,78 +6408,6 @@ mod tests {
             let output = child.wait_with_output().unwrap();
             assert!(output.status.success(), "{role}: {output:?}");
         }
-    }
-
-    #[test]
-    fn a_line_that_is_an_offered_command_is_not_a_text() {
-        for language in addict_core::translation::reading_languages(Language::Ru) {
-            assert!(is_offered_command(&install_tesseract(language)));
-            assert!(is_offered_command(&install_language(language)));
-        }
-        assert!(!is_offered_command("bank"));
-        assert!(!is_offered_command(&format!(
-            "run {}",
-            install_tesseract(Language::En)
-        )));
-        assert!(!is_offered_command(
-            "Catalan OCR data is not installed. Install it with: \
-             sudo dnf install tesseract-langpack-cat"
-        ));
-    }
-
-    #[test]
-    fn only_the_last_clipboard_read_is_the_one_that_runs() {
-        let mut copying = Copying::default();
-        assert!(!copying.is_running(0));
-        assert!(copying.end().is_none());
-
-        let first = copying.begin();
-        assert!(copying.is_running(first));
-        let cancellable = gio::Cancellable::new();
-        copying.read.as_mut().expect("read").cancellable = Some(cancellable.clone());
-
-        // A new read, after a new press, cancels the one that reads.
-        let second = copying.begin();
-        assert!(cancellable.is_cancelled());
-        assert_ne!(first, second);
-        assert!(!copying.is_running(first));
-        assert!(copying.is_running(second));
-
-        // Ended by an edit or a capture: what it reports later is ignored.
-        assert!(copying.end().is_some());
-        assert!(!copying.is_running(second));
-        assert!(copying.end().is_none());
-    }
-
-    #[test]
-    fn a_read_that_waits_for_the_window_is_ended_without_a_cancellable() {
-        let mut copying = Copying::default();
-        let number = copying.begin();
-        // The window is not active yet: nothing is read, nothing to cancel.
-        let read = copying.end().expect("read");
-        assert!(read.cancellable.is_none());
-        assert!(!copying.is_running(number));
-    }
-
-    #[test]
-    fn a_too_long_selection_is_named_before_the_clipboard() {
-        let selection = Some((Held::Selection, 1200));
-        let clipboard = Some((Held::Clipboard, 54828));
-        let selected = too_long_text(Held::Selection, 1200, CLIPBOARD_MAX_CHARS);
-        let copied = too_long_text(Held::Clipboard, 54828, CLIPBOARD_MAX_CHARS);
-        assert_eq!(missed_line(selection, clipboard), selected);
-        // The clipboard ran out of time: the selection still says so.
-        assert_eq!(missed_line(selection, None), selected);
-        // The selection was blank.
-        assert_eq!(missed_line(None, clipboard), copied);
-        // Neither was too long: nothing is selected or copied.
-        assert_eq!(missed_line(None, None), NOTHING_SELECTED_TEXT);
-    }
-
-    #[test]
-    fn the_clipboard_limit_is_finite_and_short() {
-        assert!(!CLIPBOARD_LIMIT.is_zero());
-        assert!(CLIPBOARD_LIMIT.as_secs() <= 1);
     }
 
     /// The switch's whole job against a mock Background portal, which alone

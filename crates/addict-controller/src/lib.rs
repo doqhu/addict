@@ -11,6 +11,7 @@ pub mod deadlines;
 
 pub use capture::ImageRef;
 mod online;
+mod selection;
 
 use std::{
     io,
@@ -21,7 +22,7 @@ use std::{
 
 use addict_core::{
     dirs::Dirs,
-    failure::{Ended, capture::CaptureFailure, recognize::OcrFailure},
+    failure::{Ended, capture::CaptureFailure, recognize::OcrFailure, selection::SelectionFailure},
     input::{Input, Source, WindowState},
     translation::{English, Source as Language, Translator},
 };
@@ -46,6 +47,10 @@ pub struct Platform {
     pub name: String,
     /// Help for locating the DeepL key when there is no configuration directory.
     pub key_location_hint: &'static str,
+    /// Whether a Read press must read the selection before the window is
+    /// shown. The Mac shell needs its panel key only after the read; Linux
+    /// shows the window first (AD-22).
+    pub read_before_show: bool,
 }
 
 /// The existing key source may still be loading when the controller starts.
@@ -74,6 +79,15 @@ pub struct ArticleId {
 pub struct Field {
     pub text: String,
     pub revision: u64,
+}
+
+/// What a read of the primary selection and the clipboard returned: the raw
+/// text of each, or `None` when there is none or it could not be read. The
+/// controller applies the line rule and the length limit to both.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SelectionText {
+    pub selection: Option<String>,
+    pub clipboard: Option<String>,
 }
 
 /// Facts sent to the controller by the shell.
@@ -106,8 +120,15 @@ pub enum Event {
         result: Result<String, Ended<OcrFailure>>,
         timing: Timing,
     },
-    /// Linux starts a clipboard read locally and clears the field.
+    /// Read was pressed: the field is cleared and the selection and the
+    /// clipboard are read. `sequence` numbers the press for presentation.
     ReadPressed { sequence: u64 },
+    /// The read of the selection and the clipboard with this id ended, or
+    /// was cancelled: the raw texts, or why there is none.
+    SelectionRead {
+        id: RequestId,
+        result: Result<SelectionText, Ended<SelectionFailure>>,
+    },
     /// The field is cleared for a read; the controller sets it empty.
     FieldCleared,
     /// The text of the field was submitted, by Enter or by a paste.
@@ -174,6 +195,12 @@ pub enum Effect {
     },
     /// Stop an effect if possible, and send its normal result event.
     Cancel(RequestId),
+    /// Read the primary selection and the clipboard; one
+    /// [`Event::SelectionRead`] follows.
+    ReadSelection { id: RequestId, read_sequence: u64 },
+    /// Show the window, before the read or after it. Does nothing when the
+    /// press has already shown it.
+    ShowPanel { read_sequence: u64 },
     /// Restore the capture window, with retry focus after a failure.
     PresentCapture { read_sequence: u64, retry: bool },
     /// Record an OCR outcome after the effect has cleaned up.
@@ -370,6 +397,7 @@ pub fn start_with_translator(
         translator,
         recording,
         capture::Capture::default(),
+        selection::Selection::default(),
         renderer,
     )
 }
@@ -380,6 +408,7 @@ fn start_with_capture(
     translator: impl Translator + 'static,
     recording: bool,
     capture: capture::Capture,
+    selection: selection::Selection,
     renderer: impl Renderer,
 ) -> io::Result<Controller> {
     let work = Arc::new(Work::start()?);
@@ -402,7 +431,9 @@ fn start_with_capture(
         revision: 0,
         field: Field::default(),
         capture,
+        selection,
         read_sequence: 0,
+        read_before_show: platform.read_before_show,
         ocr_field_revision: None,
         recording,
         manual: Manual::default(),
@@ -434,6 +465,7 @@ enum Message {
     LookedUp(LookedUp),
     Translated(online::Translated),
     CaptureDeadline(RequestId),
+    SelectionDeadline(RequestId),
     Stop,
 }
 
@@ -462,7 +494,9 @@ struct Model {
     revision: u64,
     field: Field,
     capture: capture::Capture,
+    selection: selection::Selection,
     read_sequence: u64,
+    read_before_show: bool,
     ocr_field_revision: Option<u64>,
     recording: bool,
     manual: Manual,
@@ -495,7 +529,9 @@ impl Model {
                 Message::LookedUp(looked) => self.looked_up(looked, &mut effects),
                 Message::Translated(translated) => self.translated(translated, &mut effects),
                 Message::CaptureDeadline(id) => self.capture_deadline(id, &mut effects),
+                Message::SelectionDeadline(id) => self.selection_deadline(id, &mut effects),
                 Message::Stop => {
+                    self.cancel_read(&mut effects);
                     self.cancel_capture(&mut effects);
                     if !effects.is_empty() {
                         self.render(&renderer, effects);
@@ -522,7 +558,11 @@ impl Model {
             read_sequence: self.read_sequence,
             ocr_field_revision: self.ocr_field_revision,
             capture_sensitive: !self.capture.picker_open(),
-            source_failure: self.capture.source_failure.clone(),
+            source_failure: self
+                .capture
+                .source_failure
+                .clone()
+                .or_else(|| self.selection.source_failure.clone()),
             shown: self.shown.clone(),
             choice_revision: self.choice_revision,
             online: self.online.rows(manual.chosen(), self.my_language),
@@ -563,7 +603,8 @@ impl Model {
                 source,
             } => self.field_edited(text, replaced, source, effects),
             Event::CapturePressed { activation_token } => {
-                self.capture_pressed(activation_token, effects)
+                let cleared = self.clear_read_source(effects);
+                self.capture_pressed(activation_token, effects) || cleared
             }
             Event::PickerStarted { id } => {
                 self.picker_started(id);
@@ -577,10 +618,8 @@ impl Model {
             Event::TextRecognized { id, result, timing } => {
                 self.text_recognized(id, result, timing, effects)
             }
-            Event::ReadPressed { sequence } => {
-                self.read_sequence = sequence;
-                self.field_cleared(effects)
-            }
+            Event::ReadPressed { sequence } => self.read_pressed(sequence, effects),
+            Event::SelectionRead { id, result } => self.selection_read(id, result, effects),
             Event::FieldCleared => self.field_cleared(effects),
             Event::FieldSubmitted => self.submitted(effects),
             Event::WordChosen { text, index } => {
@@ -596,8 +635,9 @@ impl Model {
                 if article != self.article_id() {
                     return false;
                 }
-                self.clear_capture_source(effects);
-                self.put(word, effects)
+                let changed = self.clear_capture_source(effects);
+                let changed = self.clear_read_source(effects) || changed;
+                self.put(word, effects) || changed
             }
             Event::LookUpEnglish {
                 article,
@@ -619,14 +659,17 @@ impl Model {
                     language_choice,
                 });
                 self.clear_capture_source(effects);
-                self.put(word, effects)
+                let changed = self.clear_read_source(effects);
+                self.put(word, effects) || changed
             }
             Event::Back => {
                 let changed = self.clear_capture_source(effects);
+                let changed = self.clear_read_source(effects) || changed;
                 self.back(effects) || changed
             }
             Event::Forward => {
                 let changed = self.clear_capture_source(effects);
+                let changed = self.clear_read_source(effects) || changed;
                 self.forward(effects) || changed
             }
             Event::SetReading(language) => self.set_reading(language, effects),
@@ -685,6 +728,7 @@ impl Model {
         effects: &mut Vec<Effect>,
     ) -> bool {
         self.clear_capture_source(effects);
+        self.clear_read_source(effects);
         let edit = match source {
             Some(Source::Ocr) => self.manual.recognized(text),
             Some(Source::Clipboard) => self.manual.copied(&text),
@@ -707,8 +751,10 @@ impl Model {
 
     /// The field is cleared for a read: the controller sets it empty.
     fn field_cleared(&mut self, effects: &mut Vec<Effect>) -> bool {
+        self.cancel_read(effects);
         self.cancel_capture(effects);
         self.capture.source_failure = None;
+        self.selection.source_failure = None;
         let edit = self.manual.edit(String::new());
         self.set_field(String::new());
         self.text_replaced(edit, effects);
@@ -948,6 +994,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     mod online;
+    mod selection;
 
     use std::{
         fs,
@@ -1131,6 +1178,37 @@ mod tests {
             recording: bool,
             capture: capture::Capture,
         ) -> Self {
+            Self::with_parts(
+                data,
+                translator,
+                recording,
+                capture,
+                crate::selection::Selection::default(),
+                false,
+            )
+        }
+
+        /// A shell on a platform that reads before it shows, or not, with
+        /// `selection`'s deadline.
+        fn with_selection(selection: crate::selection::Selection, read_before_show: bool) -> Self {
+            Self::with_parts(
+                None,
+                Silent,
+                false,
+                capture::Capture::default(),
+                selection,
+                read_before_show,
+            )
+        }
+
+        fn with_parts(
+            data: Option<PathBuf>,
+            translator: impl Translator + 'static,
+            recording: bool,
+            capture: capture::Capture,
+            selection: crate::selection::Selection,
+            read_before_show: bool,
+        ) -> Self {
             let caller = thread::current().id();
             let (send, renders) = mpsc::channel();
             let controller = start_with_capture(
@@ -1141,10 +1219,12 @@ mod tests {
                 Platform {
                     name: "test".to_owned(),
                     key_location_hint: "No key directory.",
+                    read_before_show,
                 },
                 translator,
                 recording,
                 capture,
+                selection,
                 move |view, effects| {
                     assert_ne!(thread::current().id(), caller);
                     send.send((view, effects)).unwrap();
@@ -1466,7 +1546,15 @@ mod tests {
         shell.dispatch(Event::ReadPressed { sequence: 1 });
         let (view, effects) = shell.next();
         assert_eq!(view.read_sequence, 1);
-        assert_eq!(effects, [Effect::Cancel(picker)]);
+        let [
+            Effect::Cancel(cancelled),
+            Effect::ShowPanel { read_sequence: 1 },
+            Effect::ReadSelection { .. },
+        ] = effects.as_slice()
+        else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(*cancelled, picker);
         let (dropped, release) = mpsc::channel();
         shell.dispatch(Event::AreaCaptured {
             id: picker,
@@ -1480,7 +1568,8 @@ mod tests {
         let id = accept_image(&mut shell, picker, Language::En);
         shell.dispatch(Event::ReadPressed { sequence: 2 });
         let (view, effects) = shell.next();
-        assert_eq!(effects, [Effect::Cancel(id)]);
+        assert_eq!(effects[0], Effect::Cancel(id));
+        assert!(matches!(effects.last(), Some(Effect::ReadSelection { .. })));
         assert_eq!(view.read_sequence, 2);
         finish_recognition(&shell, id, "obsolete OCR");
         assert!(marker(&mut shell).field.text.is_empty());

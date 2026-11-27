@@ -15,7 +15,7 @@
 //! translated without a sentence; a dim line under them names DeepL.
 //!
 //! The texts live here and nowhere else; `addict-core` has none. [`texts`],
-//! [`binding_texts`], [`indexes_text`], [`capture_failure_text`], [`recognize_failure_text`], [`NOTHING_SELECTED_TEXT`], [`too_long_text`],
+//! [`binding_texts`], [`indexes_text`], [`capture_failure_text`], [`recognize_failure_text`], [`selection_failure_text`], [`NOTHING_SELECTED_TEXT`], [`too_long_text`],
 //! [`sentence_markup`],
 //! [`choice_texts`] and [`online_rows`] are pure, and
 //! so is [`Shown`], the result with the sense chosen in it; they are tested
@@ -24,11 +24,13 @@
 
 mod capture;
 mod recognize;
+mod selection;
 
 #[cfg(test)]
 use capture::CAPTURE_RETRY;
 pub use capture::capture_failure_text;
 pub use recognize::{install_language, install_tesseract, recognize_failure_text};
+pub use selection::selection_failure_text;
 
 use std::{borrow::Cow, fmt::Write as _, ops::Range, path::Path};
 
@@ -2711,7 +2713,9 @@ mod tests {
         PENDING, ResultTexts, SYNONYMS_LABEL, Shown, SynonymTexts, Translating, UNFINISHED, Whole,
         binding_texts, indexes_text, online_rows, result_texts, sentence_markup, texts,
     };
-    use addict_core::failure::{Ended, capture::CaptureFailure, recognize::OcrFailure};
+    use addict_core::failure::{
+        Ended, capture::CaptureFailure, recognize::OcrFailure, selection::SelectionFailure,
+    };
 
     use super::{
         Held, NOTHING_SELECTED_TEXT, command_in, install_language, install_tesseract, too_long_text,
@@ -5889,6 +5893,23 @@ mod tests {
                 assert!(!without_path.contains(hint));
             }
             assert!(lines.insert(without_path.clone()), "{without_path}");
+        }
+    }
+
+    #[test]
+    fn every_selection_failure_says_that_nothing_is_selected() {
+        for failure in [
+            Ended::Shell(SelectionFailure::NoPermission),
+            Ended::Shell(SelectionFailure::WrongApp),
+            Ended::Shell(SelectionFailure::Unavailable),
+            Ended::Shell(SelectionFailure::Cancelled),
+            Ended::DeadlinePassed,
+            Ended::Unfinished,
+        ] {
+            assert_eq!(
+                super::selection_failure_text(&failure),
+                NOTHING_SELECTED_TEXT
+            );
         }
     }
 
